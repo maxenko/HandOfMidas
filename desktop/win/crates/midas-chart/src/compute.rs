@@ -75,6 +75,13 @@ fn compute_normal_scene(
     let wick_width = (1.0_f32 / input.dpi_scale).max(1.0 / input.dpi_scale);
 
     let candle_count = vis_end.saturating_sub(vis_start);
+
+    // Normal mode: X from timestamp via camera mapping.
+    let x_from_ts = |i: usize| -> f32 {
+        let ts = data.timestamp(i) as f64;
+        camera.snap_to_pixel(camera.time_to_x(ts))
+    };
+
     let candles = build_candle_instances(
         data,
         camera,
@@ -84,6 +91,7 @@ fn compute_normal_scene(
         wick_width,
         &input.bull_color,
         &input.bear_color,
+        &x_from_ts,
     );
 
     let volumes = build_volume_instances(
@@ -96,6 +104,7 @@ fn compute_normal_scene(
         &input.volume_bull_color,
         &input.volume_bear_color,
         input.volume_scale,
+        &x_from_ts,
     );
     let volume_count = volumes.as_ref().map_or(0, |v| v.len());
 
@@ -104,6 +113,8 @@ fn compute_normal_scene(
     let x_labels = compute_x_labels(camera, candle_duration);
     let levels = compute_levels(input.levels, camera);
     let crosshair = compute_crosshair(input.crosshair, data, camera, candle_duration, input.symbol);
+    let date_labels = crate::date_labels::for_normal_mode(camera, candle_duration);
+    let separator_y = input.viewport_height as f32 * (1.0 - VOLUME_AREA_FRACTION);
     let projection = camera.projection_matrix();
 
     ChartScene {
@@ -121,9 +132,12 @@ fn compute_normal_scene(
         levels,
         crosshair,
         session_boundaries: Vec::new(),
+        separator_y,
+        date_labels,
         generations: SceneGenerations {
             candles: input.dirty.candles,
             camera: input.dirty.camera,
+            grid: input.dirty.grid,
             levels: input.dirty.levels,
             crosshair: input.dirty.crosshair,
             theme: input.dirty.theme,
@@ -159,15 +173,17 @@ fn compute_collapsed_scene(
     let body_width = (slot_width * BODY_WIDTH_FRACTION).max(MIN_BODY_WIDTH);
     let wick_width = (1.0_f32 / input.dpi_scale).max(1.0 / input.dpi_scale);
 
-    // Helper: convert a candle's global index to its X pixel position (centre
-    // of the candle slot) using the camera's linear index→pixel mapping.
-    let index_to_x = |local_idx: usize| -> f32 {
-        let global_idx = vis_start + local_idx;
-        camera.snap_to_pixel(camera.time_to_x(global_idx as f64 + 0.5))
+    // Collapsed mode: X from sequential candle index via camera mapping.
+    let x_from_idx = |i: usize| -> f32 {
+        camera.snap_to_pixel(camera.time_to_x(i as f64 + 0.5))
     };
 
-    // Build candle instances with index-based X.
-    let candles = build_collapsed_candle_instances(
+    // Helper for functions that still take local-index closures (grid, labels, boundaries).
+    let index_to_x = |local_idx: usize| -> f32 {
+        x_from_idx(vis_start + local_idx)
+    };
+
+    let candles = build_candle_instances(
         data,
         camera,
         vis_start,
@@ -176,12 +192,11 @@ fn compute_collapsed_scene(
         wick_width,
         &input.bull_color,
         &input.bear_color,
-        &index_to_x,
+        &x_from_idx,
     );
     let candle_count = visible_count;
 
-    // Build volume instances with index-based X.
-    let volumes = build_collapsed_volume_instances(
+    let volumes = build_volume_instances(
         data,
         camera,
         vis_start,
@@ -190,8 +205,8 @@ fn compute_collapsed_scene(
         input.viewport_height,
         &input.volume_bull_color,
         &input.volume_bear_color,
-        &index_to_x,
         input.volume_scale,
+        &x_from_idx,
     );
     let volume_count = volumes.as_ref().map_or(0, |v| v.len());
 
@@ -238,6 +253,15 @@ fn compute_collapsed_scene(
         &index_to_x,
     );
 
+    let date_labels = crate::date_labels::for_collapsed_mode(
+        camera,
+        data,
+        vis_start,
+        vis_end,
+        candle_duration,
+        &index_to_x,
+    );
+    let separator_y = input.viewport_height as f32 * (1.0 - VOLUME_AREA_FRACTION);
     let projection = camera.projection_matrix();
 
     ChartScene {
@@ -255,9 +279,12 @@ fn compute_collapsed_scene(
         levels,
         crosshair,
         session_boundaries,
+        separator_y,
+        date_labels,
         generations: SceneGenerations {
             candles: input.dirty.candles,
             camera: input.dirty.camera,
+            grid: input.dirty.grid,
             levels: input.dirty.levels,
             crosshair: input.dirty.crosshair,
             theme: input.dirty.theme,
@@ -297,7 +324,7 @@ fn visible_candle_range_collapsed(data: &dyn CandleData, camera: &Camera2D) -> (
 ///
 /// Uses the time difference between the first two candles if available.
 /// Falls back to 60_000 ms (1-minute candles) if there are fewer than 2 candles.
-fn estimate_candle_duration(data: &dyn CandleData) -> f64 {
+pub fn estimate_candle_duration(data: &dyn CandleData) -> f64 {
     if data.len() < 2 {
         return 60_000.0;
     }
@@ -311,8 +338,8 @@ fn estimate_candle_duration(data: &dyn CandleData) -> f64 {
 
 /// Build CandleInstance array for visible candles.
 ///
-/// Returns `None` if there are no visible candles. All pixel coordinates are
-/// snapped to physical pixel boundaries via `camera.snap_to_pixel()`.
+/// `x_for_candle(data_index)` returns the pixel X position for each candle.
+/// In normal mode this maps timestamps; in collapsed mode it maps indices.
 #[allow(clippy::too_many_arguments)]
 fn build_candle_instances(
     data: &dyn CandleData,
@@ -323,6 +350,7 @@ fn build_candle_instances(
     wick_width: f32,
     bull_color: &[f32; 4],
     bear_color: &[f32; 4],
+    x_for_candle: &dyn Fn(usize) -> f32,
 ) -> Option<Vec<CandleInstance>> {
     if vis_start >= vis_end {
         return None;
@@ -331,13 +359,12 @@ fn build_candle_instances(
     let mut instances = Vec::with_capacity(vis_end - vis_start);
 
     for i in vis_start..vis_end {
-        let ts = data.timestamp(i) as f64;
         let open = data.open(i) as f64;
         let close = data.close(i) as f64;
         let high = data.high(i) as f64;
         let low = data.low(i) as f64;
 
-        let x = camera.snap_to_pixel(camera.time_to_x(ts));
+        let x = x_for_candle(i);
         let body_top_price = open.max(close);
         let body_bottom_price = open.min(close);
 
@@ -374,8 +401,8 @@ fn build_candle_instances(
 
 /// Build VolumeInstance array for visible candles.
 ///
+/// `x_for_candle(data_index)` returns the pixel X position for each bar.
 /// Volume bars occupy the bottom `VOLUME_AREA_FRACTION` of the viewport.
-/// Returns `None` if there are no visible candles.
 #[allow(clippy::too_many_arguments)]
 fn build_volume_instances(
     data: &dyn CandleData,
@@ -387,6 +414,7 @@ fn build_volume_instances(
     volume_bull_color: &[f32; 4],
     volume_bear_color: &[f32; 4],
     volume_scale: f32,
+    x_for_candle: &dyn Fn(usize) -> f32,
 ) -> Option<Vec<VolumeInstance>> {
     if vis_start >= vis_end {
         return None;
@@ -410,137 +438,9 @@ fn build_volume_instances(
     let mut instances = Vec::with_capacity(vis_end - vis_start);
 
     for i in vis_start..vis_end {
-        let ts = data.timestamp(i) as f64;
-        let x = camera.snap_to_pixel(camera.time_to_x(ts));
+        let x = x_for_candle(i);
         let vol_fraction = data.volume(i) as f32 / max_volume as f32;
-        let bar_height = (vol_fraction * volume_area_height * volume_scale)
-            .min(volume_area_height);
-        let y_top = camera.snap_to_pixel(volume_area_bottom - bar_height);
-        let y_bottom = volume_area_bottom;
-
-        let is_bull = data.close(i) >= data.open(i);
-        let color = if is_bull {
-            *volume_bull_color
-        } else {
-            *volume_bear_color
-        };
-
-        instances.push(VolumeInstance {
-            x,
-            y_top,
-            y_bottom,
-            width: bar_width,
-            color,
-        });
-    }
-
-    Some(instances)
-}
-
-// ── Gap-collapsed builders ──────────────────────────────────────────
-
-/// Build CandleInstance array with index-based X positioning (gap-collapsed).
-#[allow(clippy::too_many_arguments)]
-fn build_collapsed_candle_instances(
-    data: &dyn CandleData,
-    camera: &Camera2D,
-    vis_start: usize,
-    vis_end: usize,
-    body_width: f32,
-    wick_width: f32,
-    bull_color: &[f32; 4],
-    bear_color: &[f32; 4],
-    index_to_x: &dyn Fn(usize) -> f32,
-) -> Option<Vec<CandleInstance>> {
-    if vis_start >= vis_end {
-        return None;
-    }
-
-    let mut instances = Vec::with_capacity(vis_end - vis_start);
-
-    for i in vis_start..vis_end {
-        let open = data.open(i) as f64;
-        let close = data.close(i) as f64;
-        let high = data.high(i) as f64;
-        let low = data.low(i) as f64;
-
-        let local_idx = i - vis_start;
-        let x = index_to_x(local_idx);
-        let body_top_price = open.max(close);
-        let body_bottom_price = open.min(close);
-
-        let body_top = camera.snap_to_pixel(camera.price_to_y(body_top_price));
-        let body_bottom = camera.snap_to_pixel(camera.price_to_y(body_bottom_price));
-        let wick_top = camera.snap_to_pixel(camera.price_to_y(high));
-        let wick_bottom = camera.snap_to_pixel(camera.price_to_y(low));
-
-        // Ensure body has at least 1 physical pixel height for doji candles.
-        let body_bottom = if (body_bottom - body_top).abs() < 1.0 / camera.dpi_scale {
-            body_top + (1.0 / camera.dpi_scale)
-        } else {
-            body_bottom
-        };
-
-        let is_bull = close >= open;
-        let color = if is_bull { *bull_color } else { *bear_color };
-
-        instances.push(CandleInstance {
-            x,
-            body_top,
-            body_bottom,
-            wick_top,
-            wick_bottom,
-            width: body_width,
-            wick_width,
-            _pad0: 0.0,
-            color,
-        });
-    }
-
-    Some(instances)
-}
-
-/// Build VolumeInstance array with index-based X positioning (gap-collapsed).
-#[allow(clippy::too_many_arguments)]
-fn build_collapsed_volume_instances(
-    data: &dyn CandleData,
-    camera: &Camera2D,
-    vis_start: usize,
-    vis_end: usize,
-    bar_width: f32,
-    viewport_height: u32,
-    volume_bull_color: &[f32; 4],
-    volume_bear_color: &[f32; 4],
-    index_to_x: &dyn Fn(usize) -> f32,
-    volume_scale: f32,
-) -> Option<Vec<VolumeInstance>> {
-    if vis_start >= vis_end {
-        return None;
-    }
-
-    // Find max volume in visible range for normalization.
-    let mut max_volume: u32 = 0;
-    for i in vis_start..vis_end {
-        max_volume = max_volume.max(data.volume(i));
-    }
-
-    if max_volume == 0 {
-        return None;
-    }
-
-    let vh = viewport_height as f32;
-    let volume_area_top = vh * (1.0 - VOLUME_AREA_FRACTION);
-    let volume_area_bottom = vh;
-    let volume_area_height = volume_area_bottom - volume_area_top;
-
-    let mut instances = Vec::with_capacity(vis_end - vis_start);
-
-    for i in vis_start..vis_end {
-        let local_idx = i - vis_start;
-        let x = index_to_x(local_idx);
-        let vol_fraction = data.volume(i) as f32 / max_volume as f32;
-        let bar_height = (vol_fraction * volume_area_height * volume_scale)
-            .min(volume_area_height);
+        let bar_height = vol_fraction * volume_area_height * volume_scale;
         let y_top = camera.snap_to_pixel(volume_area_bottom - bar_height);
         let y_bottom = volume_area_bottom;
 
@@ -605,17 +505,20 @@ fn detect_session_boundaries(
 /// Horizontal (price) grid lines work identically to normal mode.
 /// Vertical (time) grid lines are placed at collapsed X coordinates
 /// for evenly-spaced candle indices, with labels showing actual timestamps.
+/// Compute horizontal price grid lines for collapsed mode.
+///
+/// Produces ONLY horizontal (price) grid lines. Vertical time lines
+/// are handled by the `date_labels` module.
 fn compute_collapsed_grid_lines(
     camera: &Camera2D,
-    data: &dyn CandleData,
-    vis_start: usize,
-    vis_end: usize,
+    _data: &dyn CandleData,
+    _vis_start: usize,
+    _vis_end: usize,
     _candle_duration: f64,
-    index_to_x: &dyn Fn(usize) -> f32,
+    _index_to_x: &dyn Fn(usize) -> f32,
 ) -> Vec<GridLine> {
     let mut lines = Vec::new();
 
-    // --- Horizontal (price) grid lines (same as normal mode) ---
     let price_range = camera.price_high - camera.price_low;
     if price_range > 0.0 {
         let price_step = nice_step(price_range, camera.viewport_height as f64 / 80.0);
@@ -634,30 +537,6 @@ fn compute_collapsed_grid_lines(
                 price += price_step;
                 count += 1;
             }
-        }
-    }
-
-    // --- Vertical (time) grid lines at evenly-spaced indices ---
-    let visible_count = vis_end.saturating_sub(vis_start);
-    if visible_count > 0 {
-        // Target ~1 time label per 150 pixels.
-        let desired_labels = (camera.viewport_width as f64 / 150.0).max(1.0) as usize;
-        let step = (visible_count / desired_labels).max(1);
-
-        let mut idx = 0;
-        let mut count = 0;
-        while idx < visible_count && count < MAX_GRID_LINES {
-            let x = index_to_x(idx);
-            let data_idx = vis_start + idx;
-            let ts = data.timestamp(data_idx);
-            let is_major = idx == 0 || (step > 1 && idx % (step * 5) == 0);
-            lines.push(GridLine {
-                position: x,
-                label: format_time_ms(ts),
-                is_major,
-            });
-            idx += step;
-            count += 1;
         }
     }
 
@@ -796,13 +675,13 @@ fn compute_collapsed_crosshair(
     })
 }
 
-/// Compute grid lines with adaptive density based on zoom level.
+/// Compute horizontal price grid lines with adaptive density.
 ///
-/// Produces both horizontal (price) and vertical (time) grid lines.
+/// Produces ONLY horizontal (price) grid lines. Vertical time lines
+/// are handled by the `date_labels` module.
 fn compute_grid_lines(camera: &Camera2D, grid_color: &[f32; 4]) -> Vec<GridLine> {
     let mut lines = Vec::new();
 
-    // --- Horizontal (price) grid lines ---
     let price_range = camera.price_high - camera.price_low;
     if price_range > 0.0 {
         let price_step = nice_step(price_range, camera.viewport_height as f64 / 80.0);
@@ -824,29 +703,7 @@ fn compute_grid_lines(camera: &Camera2D, grid_color: &[f32; 4]) -> Vec<GridLine>
         }
     }
 
-    // --- Vertical (time) grid lines ---
-    let time_range = camera.time_end - camera.time_start;
-    if time_range > 0.0 {
-        let time_step = nice_time_step(time_range, camera.viewport_width as f64 / 150.0);
-        if time_step > 0.0 {
-            let first = (camera.time_start / time_step).ceil() * time_step;
-            let mut t = first;
-            let mut count = 0;
-            while t < camera.time_end && count < MAX_GRID_LINES {
-                let x = camera.snap_to_pixel(camera.time_to_x(t));
-                let is_major = is_major_time_step(t, time_step);
-                lines.push(GridLine {
-                    position: x,
-                    label: format_time_ms(t as i64),
-                    is_major,
-                });
-                t += time_step;
-                count += 1;
-            }
-        }
-    }
-
-    let _ = grid_color; // Color is stored in the input; lines carry positional data.
+    let _ = grid_color;
     lines
 }
 
@@ -1092,19 +949,25 @@ fn nice_step(range: f64, desired_divisions: f64) -> f64 {
 
 /// Standard time intervals for grid lines (in milliseconds).
 const TIME_STEPS_MS: &[f64] = &[
-    1_000.0,           // 1 second
-    5_000.0,           // 5 seconds
-    10_000.0,          // 10 seconds
-    30_000.0,          // 30 seconds
-    60_000.0,          // 1 minute
-    300_000.0,         // 5 minutes
-    600_000.0,         // 10 minutes
-    1_800_000.0,       // 30 minutes
-    3_600_000.0,       // 1 hour
-    14_400_000.0,      // 4 hours
-    86_400_000.0,      // 1 day
-    604_800_000.0,     // 1 week
-    2_592_000_000.0,   // ~30 days
+    1_000.0,              // 1 second
+    5_000.0,              // 5 seconds
+    10_000.0,             // 10 seconds
+    30_000.0,             // 30 seconds
+    60_000.0,             // 1 minute
+    300_000.0,            // 5 minutes
+    600_000.0,            // 10 minutes
+    1_800_000.0,          // 30 minutes
+    3_600_000.0,          // 1 hour
+    14_400_000.0,         // 4 hours
+    86_400_000.0,         // 1 day
+    604_800_000.0,        // 1 week
+    2_592_000_000.0,      // ~30 days (1 month)
+    5_184_000_000.0,      // ~60 days (2 months)
+    7_776_000_000.0,      // ~90 days (1 quarter)
+    15_552_000_000.0,     // ~180 days (6 months)
+    31_536_000_000.0,     // ~365 days (1 year)
+    63_072_000_000.0,     // ~2 years
+    157_680_000_000.0,    // ~5 years
 ];
 
 /// Choose a time step from the standard intervals.
@@ -1119,8 +982,12 @@ fn nice_time_step(time_range: f64, desired_divisions: f64) -> f64 {
             return step;
         }
     }
-    // Fall back to the largest standard step.
-    *TIME_STEPS_MS.last().unwrap_or(&86_400_000.0)
+    // Fall back: if target exceeds all predefined steps, use a nice
+    // multiple of years (round up to nearest 1/2/5 × 10^N years).
+    let year_ms = 31_536_000_000.0_f64;
+    let years = target / year_ms;
+    let nice_years = nice_step(years, 1.0).max(1.0);
+    nice_years * year_ms
 }
 
 /// Returns `true` if this price is at a major grid step (every 5th step).
@@ -1130,20 +997,6 @@ fn is_major_grid_step(price: f64, step: f64) -> bool {
     }
     let n = (price / step).round() as i64;
     n % 5 == 0
-}
-
-/// Returns `true` if this time position is at a major time step.
-///
-/// A major step is one that falls on a larger time boundary (e.g., an hour
-/// boundary when the step is minutes).
-fn is_major_time_step(t: f64, step: f64) -> bool {
-    if step <= 0.0 {
-        return false;
-    }
-    // Major if t is divisible by 5x the current step.
-    let major_step = step * 5.0;
-    let remainder = t % major_step;
-    remainder.abs() < step * 0.01
 }
 
 /// Format a price value for display.
@@ -1178,6 +1031,9 @@ fn format_time_ms(ts_ms: i64) -> String {
         format!("{:02}:{:02}", hours, minutes)
     }
 }
+
+// Date label types and computation moved to `crate::date_labels` module.
+pub use crate::date_labels::DateLabel;
 
 #[cfg(test)]
 mod tests {

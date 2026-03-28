@@ -8,6 +8,7 @@
 //! Produced by [`compute_chart_scene()`](crate::compute::compute_chart_scene)
 //! and consumed by `midas-render`.
 
+use crate::date_labels::DateLabel;
 use crate::instances::{
     AxisLabel, CandleInstance, CrosshairRender, GridLine, LevelRender, SessionBoundary,
     VolumeInstance,
@@ -51,6 +52,12 @@ pub struct ChartScene {
     /// Session boundary lines (only populated when `collapse_gaps` is enabled).
     pub session_boundaries: Vec<SessionBoundary>,
 
+    /// Y position of the separator line between price and volume areas.
+    pub separator_y: f32,
+
+    /// Date labels for the time axis (TC2000-style adaptive formatting).
+    pub date_labels: Vec<DateLabel>,
+
     /// Dirty generation counters -- renderer compares to decide what to upload.
     pub generations: SceneGenerations,
 }
@@ -65,6 +72,8 @@ pub struct SceneGenerations {
     pub candles: u64,
     /// Camera (viewport/zoom/pan) generation.
     pub camera: u64,
+    /// Grid lines / date lines generation.
+    pub grid: u64,
     /// Horizontal levels generation.
     pub levels: u64,
     /// Crosshair generation.

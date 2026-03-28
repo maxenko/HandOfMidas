@@ -18,7 +18,9 @@
 // ── Implemented modules ────────────────────────────────────────────
 pub mod camera;
 pub mod compute;
+pub mod date_labels;
 pub mod dirty;
+pub mod grid;
 pub mod input;
 pub mod instances;
 pub mod interaction;
@@ -28,14 +30,15 @@ pub mod state;
 
 // ── Re-exports ─────────────────────────────────────────────────────
 pub use camera::Camera2D;
-pub use compute::compute_chart_scene;
+pub use compute::{compute_chart_scene, estimate_candle_duration};
+pub use date_labels::{DateLabel, Tier as DateLabelTier};
 pub use dirty::{DirtyFlags, DirtyTracker};
 pub use input::ChartInput;
 pub use instances::{
     AxisLabel, CandleInstance, CrosshairRender, GridLine, GridLineInstance,
     LevelRender, OhlcvOverlay, SessionBoundary, VolumeInstance,
 };
-pub use interaction::{ChartAction, ChartEvent, Key, MouseButton, handle_event};
+pub use interaction::{ChartAction, ChartEvent, Key, MouseButton, handle_event, volume_handle_y};
 pub use levels::HorizontalLevel;
 pub use scene::{ChartScene, SceneGenerations};
 pub use compute::VOLUME_AREA_FRACTION;
