@@ -46,6 +46,13 @@ pub enum InteractionMode {
     VerticalScaling { anchor_y: f32, last_y: f32 },
     /// Right-click XY panning.
     RightPanning,
+    /// Dragging the timeline border line up/down.
+    DraggingTimelineBorder {
+        /// Y pixel position at drag start.
+        anchor_y: f32,
+        /// Timeline border ratio value at drag start.
+        start_ratio: f32,
+    },
     /// Dragging the volume scale handle up/down.
     DraggingVolumeScale {
         /// Y pixel position at drag start.
@@ -127,11 +134,18 @@ pub struct ChartState {
     /// rather than timestamp, eliminating overnight/weekend gaps. A faint
     /// vertical separator is drawn at session boundaries.
     pub collapse_gaps: bool,
-    /// User-controlled volume bar height multiplier (default 1.0).
+    /// Fraction of viewport height at which the timeline border line sits (0.0–1.0).
     ///
-    /// Adjusted by dragging the volume scale handle on the right edge of
-    /// the chart. Range: [`VOLUME_SCALE_MIN`, `VOLUME_SCALE_MAX`].
+    /// Adjusted by dragging the timeline border line (full-width hit zone).
+    /// Range: [`TIMELINE_BORDER_MIN`, `TIMELINE_BORDER_MAX`].
+    pub timeline_border_ratio: f32,
+    /// Volume bar height multiplier (1.0 = auto-normalized to visible range).
+    ///
+    /// Adjusted by dragging the triangle handle on the right edge.
+    /// Range: [`VOLUME_SCALE_MIN`, `VOLUME_SCALE_MAX`].
     pub volume_scale: f32,
+    /// Whether the Volume Profile overlay is visible.
+    pub show_volume_profile: bool,
     /// Next level ID to assign (monotonically increasing).
     next_level_id: u64,
 }
@@ -153,7 +167,9 @@ impl ChartState {
             data_time_start: 0.0,
             data_time_end: f64::MAX,
             collapse_gaps: false,
+            timeline_border_ratio: 0.20,
             volume_scale: 1.0,
+            show_volume_profile: false,
             next_level_id: 1,
         }
     }
@@ -168,9 +184,13 @@ impl ChartState {
     /// Fraction of the visible range allowed as padding beyond data edges.
     const PAN_EDGE_PADDING: f64 = 0.05;
 
-    /// Minimum allowed volume scale.
+    /// Minimum timeline border ratio (at least 5% of viewport).
+    pub const TIMELINE_BORDER_MIN: f32 = 0.05;
+    /// Maximum timeline border ratio (at most 80% of viewport).
+    pub const TIMELINE_BORDER_MAX: f32 = 0.80;
+    /// Minimum volume scale factor.
     pub const VOLUME_SCALE_MIN: f32 = 0.1;
-    /// Maximum allowed volume scale (volume area capped at 80% of viewport).
+    /// Maximum volume scale factor.
     pub const VOLUME_SCALE_MAX: f32 = 4.0;
 
     /// Clamp a horizontal pan delta so the camera can't scroll past the
@@ -327,6 +347,12 @@ impl ChartState {
                 let _ = span;
             }
 
+            ChartAction::SetTimelineBorderRatio { ratio } => {
+                self.timeline_border_ratio = *ratio as f32;
+                self.dirty.mark_data();
+                self.dirty.grid += 1;
+            }
+
             ChartAction::SetVolumeScale { scale } => {
                 self.volume_scale = *scale as f32;
                 self.dirty.mark_data();
@@ -378,8 +404,7 @@ impl ChartState {
         }
 
         // Stop when velocity is negligible.
-        if momentum.vx.abs() < Momentum::MIN_VELOCITY
-            && momentum.vy.abs() < Momentum::MIN_VELOCITY
+        if momentum.vx.abs() < Momentum::MIN_VELOCITY && momentum.vy.abs() < Momentum::MIN_VELOCITY
         {
             self.momentum = None;
             false
@@ -402,10 +427,8 @@ impl ChartState {
         // Exponential ease-out: converge at ~12x per second.
         let t = 1.0 - (-12.0 * dt as f64).exp();
 
-        self.camera.price_low +=
-            (anim.target_low - self.camera.price_low) * t;
-        self.camera.price_high +=
-            (anim.target_high - self.camera.price_high) * t;
+        self.camera.price_low += (anim.target_low - self.camera.price_low) * t;
+        self.camera.price_high += (anim.target_high - self.camera.price_high) * t;
         self.dirty.mark_camera();
 
         // Check convergence: within 0.01 price units of target.
@@ -607,10 +630,7 @@ mod tests {
     #[test]
     fn apply_set_and_clear_crosshair() {
         let mut state = ChartState::new(test_camera());
-        state.apply_action(&ChartAction::SetCrosshair {
-            x: 100.0,
-            y: 200.0,
-        });
+        state.apply_action(&ChartAction::SetCrosshair { x: 100.0, y: 200.0 });
         assert_eq!(state.crosshair_pos, Some((100.0, 200.0)));
 
         state.apply_action(&ChartAction::ClearCrosshair);
@@ -687,10 +707,7 @@ mod tests {
                 break;
             }
         }
-        assert!(
-            state.momentum.is_none(),
-            "momentum should have stopped"
-        );
+        assert!(state.momentum.is_none(), "momentum should have stopped");
     }
 
     #[test]
@@ -716,7 +733,10 @@ mod tests {
             }
         }
 
-        assert!(state.y_animation.is_none(), "animation should have converged");
+        assert!(
+            state.y_animation.is_none(),
+            "animation should have converged"
+        );
         assert!(
             (state.camera.price_low - 90.0).abs() < 0.1,
             "price_low={}, expected=90.0",

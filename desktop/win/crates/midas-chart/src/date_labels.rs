@@ -54,6 +54,8 @@ pub struct DateLabel {
     pub screen_x: f32,
     /// Whether this label sits at a higher-order boundary.
     pub is_boundary: bool,
+    /// The display tier this label belongs to (Minute, Hour, Day, Month).
+    pub tier: Tier,
 }
 
 // ── Public API ──────────────────────────────────────────────────────
@@ -86,7 +88,14 @@ pub fn compute(
             camera.snap_to_pixel(camera.time_to_x(global as f64 + 0.5))
         };
 
-        for_collapsed_mode(camera, data, vis_start, vis_end, candle_duration, &index_to_x)
+        for_collapsed_mode(
+            camera,
+            data,
+            vis_start,
+            vis_end,
+            candle_duration,
+            &index_to_x,
+        )
     } else {
         for_normal_mode(camera, candle_duration)
     }
@@ -117,7 +126,13 @@ pub fn for_normal_mode(camera: &Camera2D, _candle_duration: f64) -> Vec<DateLabe
         let x = camera.snap_to_pixel(camera.time_to_x(t));
         let ts = t as i64;
         let (text, is_boundary, secondary) = format_for_tier(ts, prev_ts, tier);
-        labels.push(DateLabel { text, secondary, screen_x: x, is_boundary });
+        labels.push(DateLabel {
+            text,
+            secondary,
+            screen_x: x,
+            is_boundary,
+            tier,
+        });
         prev_ts = Some(ts);
         t += time_step;
     }
@@ -243,12 +258,8 @@ fn is_tier_boundary(prev_ts: i64, ts: i64, tier: Tier) -> bool {
                 || prev.ordinal0() != curr.ordinal0()
                 || prev.year() != curr.year()
         }
-        Tier::Day => {
-            prev.ordinal0() != curr.ordinal0() || prev.year() != curr.year()
-        }
-        Tier::Month => {
-            prev.month() != curr.month() || prev.year() != curr.year()
-        }
+        Tier::Day => prev.ordinal0() != curr.ordinal0() || prev.year() != curr.year(),
+        Tier::Month => prev.month() != curr.month() || prev.year() != curr.year(),
     }
 }
 
@@ -314,7 +325,13 @@ fn thin_by_spacing(
             None
         };
 
-        labels.push(DateLabel { text, secondary, screen_x: x, is_boundary });
+        labels.push(DateLabel {
+            text,
+            secondary,
+            screen_x: x,
+            is_boundary,
+            tier,
+        });
         last_x = x;
         prev_emitted_ts = Some(ts);
 
@@ -357,7 +374,11 @@ fn format_for_tier(
             let is_boundary = prev_dt
                 .map(|p| p.ordinal0() != dt.ordinal0() || p.year() != dt.year())
                 .unwrap_or(false);
-            let secondary = if is_boundary { Some(format_month_day_year(&dt)) } else { None };
+            let secondary = if is_boundary {
+                Some(format_month_day_year(&dt))
+            } else {
+                None
+            };
             (primary, is_boundary, secondary)
         }
         Tier::Hour => {
@@ -366,7 +387,11 @@ fn format_for_tier(
             let is_boundary = prev_dt
                 .map(|p| p.ordinal0() != dt.ordinal0() || p.year() != dt.year())
                 .unwrap_or(false);
-            let secondary = if is_boundary { Some(format_month_day_year(&dt)) } else { None };
+            let secondary = if is_boundary {
+                Some(format_month_day_year(&dt))
+            } else {
+                None
+            };
             (primary, is_boundary, secondary)
         }
         Tier::Day => {
@@ -384,7 +409,11 @@ fn format_for_tier(
         Tier::Month => {
             let primary = month_abbrev(dt.month()).to_string();
             let is_boundary = prev_dt.map(|p| p.year() != dt.year()).unwrap_or(false);
-            let secondary = if is_boundary { Some(format!("{}", dt.year())) } else { None };
+            let secondary = if is_boundary {
+                Some(format!("{}", dt.year()))
+            } else {
+                None
+            };
             (primary, is_boundary, secondary)
         }
     }
@@ -394,26 +423,26 @@ fn format_for_tier(
 
 /// Standard time intervals (milliseconds), used for normal-mode grid alignment.
 const TIME_STEPS_MS: &[f64] = &[
-    1_000.0,              // 1 second
-    5_000.0,              // 5 seconds
-    10_000.0,             // 10 seconds
-    30_000.0,             // 30 seconds
-    60_000.0,             // 1 minute
-    300_000.0,            // 5 minutes
-    600_000.0,            // 10 minutes
-    900_000.0,            // 15 minutes
-    1_800_000.0,          // 30 minutes
-    3_600_000.0,          // 1 hour
-    14_400_000.0,         // 4 hours
-    86_400_000.0,         // 1 day
-    604_800_000.0,        // 1 week
-    2_592_000_000.0,      // ~30 days
-    5_184_000_000.0,      // ~60 days
-    7_776_000_000.0,      // ~90 days
-    15_552_000_000.0,     // ~180 days
-    31_536_000_000.0,     // ~1 year
-    63_072_000_000.0,     // ~2 years
-    157_680_000_000.0,    // ~5 years
+    1_000.0,           // 1 second
+    5_000.0,           // 5 seconds
+    10_000.0,          // 10 seconds
+    30_000.0,          // 30 seconds
+    60_000.0,          // 1 minute
+    300_000.0,         // 5 minutes
+    600_000.0,         // 10 minutes
+    900_000.0,         // 15 minutes
+    1_800_000.0,       // 30 minutes
+    3_600_000.0,       // 1 hour
+    14_400_000.0,      // 4 hours
+    86_400_000.0,      // 1 day
+    604_800_000.0,     // 1 week
+    2_592_000_000.0,   // ~30 days
+    5_184_000_000.0,   // ~60 days
+    7_776_000_000.0,   // ~90 days
+    15_552_000_000.0,  // ~180 days
+    31_536_000_000.0,  // ~1 year
+    63_072_000_000.0,  // ~2 years
+    157_680_000_000.0, // ~5 years
 ];
 
 /// Choose a time step from the standard intervals.
@@ -432,10 +461,15 @@ fn nice_time_step(time_range: f64, desired_divisions: f64) -> f64 {
     let years = target / year_ms;
     let magnitude = 10_f64.powf(years.log10().floor());
     let normalized = years / magnitude;
-    let nice = if normalized <= 1.5 { 1.0 }
-        else if normalized <= 3.5 { 2.0 }
-        else if normalized <= 7.5 { 5.0 }
-        else { 10.0 };
+    let nice = if normalized <= 1.5 {
+        1.0
+    } else if normalized <= 3.5 {
+        2.0
+    } else if normalized <= 7.5 {
+        5.0
+    } else {
+        10.0
+    };
     nice * magnitude * year_ms
 }
 
@@ -463,9 +497,18 @@ fn format_month_day_year(dt: &chrono::DateTime<chrono::Local>) -> String {
 
 fn month_abbrev(month: u32) -> &'static str {
     match month {
-        1 => "Jan", 2 => "Feb", 3 => "Mar", 4 => "Apr",
-        5 => "May", 6 => "Jun", 7 => "Jul", 8 => "Aug",
-        9 => "Sep", 10 => "Oct", 11 => "Nov", 12 => "Dec",
+        1 => "Jan",
+        2 => "Feb",
+        3 => "Mar",
+        4 => "Apr",
+        5 => "May",
+        6 => "Jun",
+        7 => "Jul",
+        8 => "Aug",
+        9 => "Sep",
+        10 => "Oct",
+        11 => "Nov",
+        12 => "Dec",
         _ => "???",
     }
 }

@@ -44,8 +44,12 @@ pub struct ChartInput<'a> {
     pub levels: &'a [HorizontalLevel],
     /// Whether session gaps are collapsed (index-based X positioning).
     pub collapse_gaps: bool,
-    /// Volume bar height multiplier (1.0 = auto-normalized to visible range).
+    /// Fraction of viewport height at which the timeline border line sits (0.0–1.0).
+    pub timeline_border_ratio: f32,
+    /// Volume bar height multiplier (1.0 = default).
     pub volume_scale: f32,
+    /// Whether to compute and render the Volume Profile overlay.
+    pub show_volume_profile: bool,
     /// Current dirty flags for generation tracking.
     pub dirty: &'a DirtyFlags,
 }
