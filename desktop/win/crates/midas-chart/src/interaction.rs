@@ -438,6 +438,7 @@ fn handle_mouse_pressed(
                 x, y,
                 state.camera.viewport_width,
                 state.camera.viewport_height,
+                state.volume_scale,
             ) {
                 state.interaction_mode = InteractionMode::DraggingVolumeScale {
                     anchor_y: y,
@@ -654,14 +655,27 @@ fn handle_key_pressed(state: &ChartState, key: Key) -> Vec<ChartAction> {
 
 /// Hit-test all horizontal levels against a pixel Y coordinate.
 ///
-/// Test whether cursor `(x, y)` is inside the volume scale handle zone.
+/// Compute the Y position of the volume scale handle for a given scale.
 ///
-/// The handle is a small triangle on the right edge of the chart at the
-/// boundary between the candle area and the volume area.
-fn is_over_volume_handle(x: f32, y: f32, viewport_width: u32, viewport_height: u32) -> bool {
+/// The handle tracks the effective volume area top, clamped so volume
+/// never exceeds 80% of the viewport (20% minimum candle area).
+pub fn volume_handle_y(viewport_height: u32, volume_scale: f32) -> f32 {
     let vh = viewport_height as f32;
+    let max_fraction = 0.80; // volume can take up to 80% of viewport
+    let effective = (VOLUME_AREA_FRACTION * volume_scale).min(max_fraction);
+    vh * (1.0 - effective)
+}
+
+/// Test whether cursor `(x, y)` is inside the volume scale handle zone.
+fn is_over_volume_handle(
+    x: f32,
+    y: f32,
+    viewport_width: u32,
+    viewport_height: u32,
+    volume_scale: f32,
+) -> bool {
     let vw = viewport_width as f32;
-    let handle_center_y = vh * (1.0 - VOLUME_AREA_FRACTION);
+    let handle_center_y = volume_handle_y(viewport_height, volume_scale);
     let half_h = VOLUME_HANDLE_HEIGHT / 2.0 + VOLUME_HANDLE_HIT_PADDING;
     let x_min = vw - VOLUME_HANDLE_WIDTH - VOLUME_HANDLE_HIT_PADDING;
     x >= x_min && y >= handle_center_y - half_h && y <= handle_center_y + half_h
