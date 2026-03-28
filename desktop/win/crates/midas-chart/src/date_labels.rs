@@ -441,9 +441,10 @@ fn nice_time_step(time_range: f64, desired_divisions: f64) -> f64 {
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-fn ts_to_dt(ts_ms: i64) -> chrono::DateTime<chrono::Utc> {
-    chrono::DateTime::from_timestamp_millis(ts_ms)
-        .unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).unwrap())
+fn ts_to_dt(ts_ms: i64) -> chrono::DateTime<chrono::Local> {
+    let utc = chrono::DateTime::from_timestamp_millis(ts_ms)
+        .unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).unwrap());
+    utc.with_timezone(&chrono::Local)
 }
 
 fn to_12h(hour24: u32) -> (&'static str, u32) {
@@ -455,7 +456,7 @@ fn to_12h(hour24: u32) -> (&'static str, u32) {
     }
 }
 
-fn format_month_day_year(dt: &chrono::DateTime<chrono::Utc>) -> String {
+fn format_month_day_year(dt: &chrono::DateTime<chrono::Local>) -> String {
     use chrono::Datelike;
     format!("{} {}, {}", month_abbrev(dt.month()), dt.day(), dt.year())
 }
