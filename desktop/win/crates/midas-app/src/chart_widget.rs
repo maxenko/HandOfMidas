@@ -276,6 +276,14 @@ impl shader::Program<Message> for ChartProgram {
         camera.viewport_width = bounds.width.max(1.0) as u32;
         camera.viewport_height = bounds.height.max(1.0) as u32;
 
+        // When volume_scale is being dragged, the local value diverges
+        // from the snapshot. Bump grid + crosshair generations so the
+        // renderer re-uploads those buffers (separator line + handle).
+        let mut dirty = snap.dirty.clone();
+        if (live_volume_scale - snap.volume_scale).abs() > f32::EPSILON {
+            dirty.grid += 1;
+        }
+
         // Build the clean input contract for chart scene computation.
         let input = ChartInput {
             symbol: &snap.symbol,
@@ -294,7 +302,7 @@ impl shader::Program<Message> for ChartProgram {
             levels: &snap.levels,
             collapse_gaps: snap.collapse_gaps,
             volume_scale: live_volume_scale,
-            dirty: &snap.dirty,
+            dirty: &dirty,
         };
 
         let scene = compute_chart_scene(&input);
@@ -549,7 +557,7 @@ impl shader::Primitive for ChartPrimitive {
         };
 
         // Render the volume scale handle triangle on the right edge.
-        // Position tracks the effective volume area top based on volume_scale.
+        // Lives in the crosshair overlay layer (drawn on top of everything).
         {
             let handle_y = midas_chart::volume_handle_y(
                 self.viewport_height,

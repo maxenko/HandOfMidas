@@ -114,7 +114,8 @@ fn compute_normal_scene(
     let levels = compute_levels(input.levels, camera);
     let crosshair = compute_crosshair(input.crosshair, data, camera, candle_duration, input.symbol);
     let date_labels = crate::date_labels::for_normal_mode(camera, candle_duration);
-    let separator_y = input.viewport_height as f32 * (1.0 - VOLUME_AREA_FRACTION);
+    let effective_vol = (VOLUME_AREA_FRACTION * input.volume_scale).min(0.80);
+    let separator_y = input.viewport_height as f32 * (1.0 - effective_vol);
     let projection = camera.projection_matrix();
 
     ChartScene {
@@ -261,7 +262,8 @@ fn compute_collapsed_scene(
         candle_duration,
         &index_to_x,
     );
-    let separator_y = input.viewport_height as f32 * (1.0 - VOLUME_AREA_FRACTION);
+    let effective_vol = (VOLUME_AREA_FRACTION * input.volume_scale).min(0.80);
+    let separator_y = input.viewport_height as f32 * (1.0 - effective_vol);
     let projection = camera.projection_matrix();
 
     ChartScene {

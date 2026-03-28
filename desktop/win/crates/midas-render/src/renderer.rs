@@ -158,11 +158,12 @@ impl ChartRenderer {
             self.grid_pipeline.update_instances(device, queue, scene.grid_lines);
         }
 
-        // Crosshair lines update whenever the crosshair generation changes.
-        if tracker.needs_crosshair_update(scene.dirty) {
-            self.crosshair_pipeline
-                .update_instances(device, queue, scene.crosshair_lines);
-        }
+        // Crosshair overlay always re-uploaded: the buffer is tiny
+        // (~16 instances for the volume handle + 2 for crosshair lines)
+        // and contains persistent UI elements (volume handle triangle)
+        // that must appear even when the crosshair generation is unchanged.
+        self.crosshair_pipeline
+            .update_instances(device, queue, scene.crosshair_lines);
 
         // -- Acknowledge all current generations --
         tracker.acknowledge(scene.dirty);
