@@ -575,24 +575,28 @@ fn build_date_label_overlay<'a>(
 
     // We express horizontal positions as FillPortion values (integers)
     // so the row scales proportionally to actual widget width.
-    // Scale factor: map pixel X to a portion out of total viewport width.
-    // Use a large multiplier so the integer portions have decent resolution.
     let portion_scale = 1000.0 / vw;
 
-    let mut label_row = Row::new();
-    let mut cursor_x = 0.0_f32;
+    // Two independent rows: time labels above the separator, date labels below.
+    // This keeps time text at a fixed vertical position regardless of whether
+    // a date label is present.
+    let mut time_row = Row::new();
+    let mut time_cursor = 0.0_f32;
+
+    let mut date_row = Row::new();
+    let mut date_cursor = 0.0_f32;
 
     for dl in labels {
         let text_width = dl.text.len() as f32 * char_width;
         let target_x = (dl.screen_x - text_width / 2.0).max(0.0);
-        let gap = target_x - cursor_x;
+        let gap = target_x - time_cursor;
 
         if gap > 1.0 {
             let portion = ((gap * portion_scale) as u16).max(1);
-            label_row = label_row.push(
+            time_row = time_row.push(
                 Space::new().width(Length::FillPortion(portion)),
             );
-            cursor_x += gap;
+            time_cursor += gap;
         } else if gap < -1.0 {
             // Labels overlap — skip.
             continue;
@@ -604,42 +608,79 @@ fn build_date_label_overlay<'a>(
             Color::from_rgb(0.55, 0.55, 0.55)
         };
 
-        if let Some(ref secondary) = dl.secondary {
-            let primary = text(dl.text.clone())
+        time_row = time_row.push(
+            text(dl.text.clone())
                 .size(label_font_size)
-                .color(label_color);
-            let sec = text(secondary.clone())
-                .size(secondary_font_size)
-                .color(Color::from_rgb(0.65, 0.65, 0.65));
-            label_row = label_row.push(column![primary, sec]);
+                .color(label_color),
+        );
+        time_cursor += text_width;
+
+        // Place secondary (date) text in the separate date row below.
+        if let Some(ref secondary) = dl.secondary {
             let sec_width = secondary.len() as f32 * (char_width * 0.9);
-            cursor_x += text_width.max(sec_width);
-        } else {
-            label_row = label_row.push(
-                text(dl.text.clone())
-                    .size(label_font_size)
-                    .color(label_color),
+            let sec_target_x = (dl.screen_x - sec_width / 2.0).max(0.0);
+            let sec_gap = sec_target_x - date_cursor;
+
+            if sec_gap > 1.0 {
+                let portion = ((sec_gap * portion_scale) as u16).max(1);
+                date_row = date_row.push(
+                    Space::new().width(Length::FillPortion(portion)),
+                );
+                date_cursor += sec_gap;
+            }
+
+            date_row = date_row.push(
+                text(secondary.clone())
+                    .size(secondary_font_size)
+                    .color(Color::from_rgb(0.65, 0.65, 0.65)),
             );
-            cursor_x += text_width;
+            date_cursor += sec_width;
         }
     }
 
-    // Right-side trailing spacer so labels don't stretch to fill.
-    let remaining = vw - cursor_x;
-    if remaining > 1.0 {
-        let portion = ((remaining * portion_scale) as u16).max(1);
-        label_row = label_row.push(
+    // Trailing spacers so labels don't stretch to fill.
+    let time_remaining = vw - time_cursor;
+    if time_remaining > 1.0 {
+        let portion = ((time_remaining * portion_scale) as u16).max(1);
+        time_row = time_row.push(
+            Space::new().width(Length::FillPortion(portion)),
+        );
+    }
+    let date_remaining = vw - date_cursor;
+    if date_remaining > 1.0 {
+        let portion = ((date_remaining * portion_scale) as u16).max(1);
+        date_row = date_row.push(
             Space::new().width(Length::FillPortion(portion)),
         );
     }
 
-    // Position the row at the separator line using FillPortion:
-    // 80% price area (top spacer), labels, 20% volume (bottom spacer).
+    // Fixed heights so the FillPortion math is stable regardless
+    // of whether a date label is present.
+    let time_row_height = label_font_size + 2.0;
+    let date_row_height = secondary_font_size + 2.0;
+
+    // Time row anchored at the bottom of the 80% price area (above separator).
+    // Date row anchored at the top of the 20% volume area (below separator).
+    // Neither row's content affects the other's position.
     container(
         column![
-            Space::new().width(Fill).height(Length::FillPortion(80)),
-            label_row,
-            Space::new().width(Fill).height(Length::FillPortion(20)),
+            container(
+                column![
+                    Space::new().width(Fill).height(Fill),
+                    time_row,
+                    Space::new().height(Length::Fixed(4.0)),
+                ]
+            )
+            .width(Fill)
+            .height(Length::FillPortion(80)),
+            container(
+                column![
+                    Space::new().height(Length::Fixed(4.0)),
+                    date_row,
+                ]
+            )
+            .width(Fill)
+            .height(Length::FillPortion(20)),
         ]
         .width(Fill)
         .height(Fill)
