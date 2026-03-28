@@ -79,11 +79,11 @@ mod tests {
         fn sample() -> Self {
             Self {
                 timestamps: vec![1000, 2000, 3000, 4000, 5000],
-                opens:      vec![100.0, 101.0, 102.0, 103.0, 104.0],
-                highs:      vec![105.0, 106.0, 107.0, 108.0, 109.0],
-                lows:       vec![95.0,  96.0,  97.0,  98.0,  99.0],
-                closes:     vec![101.0, 102.0, 103.0, 104.0, 105.0],
-                volumes:    vec![1000, 2000, 3000, 4000, 5000],
+                opens: vec![100.0, 101.0, 102.0, 103.0, 104.0],
+                highs: vec![105.0, 106.0, 107.0, 108.0, 109.0],
+                lows: vec![95.0, 96.0, 97.0, 98.0, 99.0],
+                closes: vec![101.0, 102.0, 103.0, 104.0, 105.0],
+                volumes: vec![1000, 2000, 3000, 4000, 5000],
             }
         }
     }
@@ -172,7 +172,7 @@ mod tests {
     fn price_range_subset() {
         let candles = TestCandles::sample();
         let (min, max) = candles.price_range(1..4);
-        assert_eq!(min, 96.0);  // min of lows[1..4]
+        assert_eq!(min, 96.0); // min of lows[1..4]
         assert_eq!(max, 108.0); // max of highs[1..4]
     }
 

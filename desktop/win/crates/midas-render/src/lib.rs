@@ -12,11 +12,11 @@ pub mod renderer;
 
 // ── Re-exports ─────────────────────────────────────────────────────
 
-pub use color::{ChartTheme, dark_theme, light_theme};
-pub use pipelines::{CameraUniform, DrawParamsUniform, QuadVertex, UNIT_QUAD_VERTICES};
+pub use color::{dark_theme, light_theme, ChartTheme};
 pub use pipelines::candle::CandlePipeline;
 pub use pipelines::grid::GridPipeline;
 pub use pipelines::volume::VolumePipeline;
+pub use pipelines::{CameraUniform, DrawParamsUniform, QuadVertex, UNIT_QUAD_VERTICES};
 pub use renderer::{ChartRenderer, ChartScene};
 
 // ── Shader sources (compile-time inclusion) ────────────────────────

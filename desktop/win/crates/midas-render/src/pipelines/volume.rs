@@ -6,7 +6,7 @@
 use midas_chart::VolumeInstance;
 use wgpu::util::DeviceExt;
 
-use super::{CameraUniform, UNIT_QUAD_VERTICES, quad_vertex_buffer_layout};
+use super::{quad_vertex_buffer_layout, CameraUniform, UNIT_QUAD_VERTICES};
 
 /// Shader source included at compile time.
 const SHADER_SRC: &str = include_str!("../../shaders/volume.wgsl");
@@ -54,10 +54,7 @@ impl VolumePipeline {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[
-                    quad_vertex_buffer_layout(),
-                    volume_instance_buffer_layout(),
-                ],
+                buffers: &[quad_vertex_buffer_layout(), volume_instance_buffer_layout()],
             },
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -161,18 +158,13 @@ impl VolumePipeline {
             self.instance_capacity = (self.instance_count * 2).max(INITIAL_CAPACITY);
             self.instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("volume_instance_buffer"),
-                size: self.instance_capacity as u64
-                    * std::mem::size_of::<VolumeInstance>() as u64,
+                size: self.instance_capacity as u64 * std::mem::size_of::<VolumeInstance>() as u64,
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
         }
 
-        queue.write_buffer(
-            &self.instance_buffer,
-            0,
-            bytemuck::cast_slice(instances),
-        );
+        queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(instances));
     }
 
     /// Upload a new projection matrix.

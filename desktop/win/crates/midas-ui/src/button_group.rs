@@ -205,11 +205,9 @@ mod tests {
 
     #[test]
     fn button_group_builder_chains() {
-        let group = ButtonGroup::new(
-            vec![("1m", Tf::M1), ("5m", Tf::M5)],
-            Tf::M1,
-            |tf| Msg::Selected(tf),
-        )
+        let group = ButtonGroup::new(vec![("1m", Tf::M1), ("5m", Tf::M5)], Tf::M1, |tf| {
+            Msg::Selected(tf)
+        })
         .size(10.0)
         .padding_h(6.0)
         .padding_v(2.0)

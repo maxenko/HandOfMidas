@@ -2,8 +2,8 @@
 //!
 //! Depends on: midas-core
 
-pub mod candle;
 pub mod binary;
+pub mod candle;
 pub mod lod;
 
 // ── Planned modules (uncomment as implemented) ──────────────────────
@@ -18,8 +18,7 @@ pub use candle::{CandleBuffer, CandleSlice};
 /// Re-export binary format types.
 /// Example: `use midas_data::{MidasHeader, CandleRecord, MmapCandleFile};`
 pub use binary::{
-    BinaryError, CandleRecord, MidasHeader, MmapCandleFile,
-    read_midas_file, write_midas_file,
+    read_midas_file, write_midas_file, BinaryError, CandleRecord, MidasHeader, MmapCandleFile,
     HEADER_SIZE, MIDAS_MAGIC, MIDAS_VERSION, RECORD_SIZE,
 };
 

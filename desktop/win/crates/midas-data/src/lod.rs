@@ -55,22 +55,19 @@ pub fn downsample_minmax(candles: &CandleBuffer, target_count: usize) -> CandleB
             .iter()
             .copied()
             .fold(f32::NEG_INFINITY, f32::max);
-        let low = bucket_lows
-            .iter()
-            .copied()
-            .fold(f32::INFINITY, f32::min);
+        let low = bucket_lows.iter().copied().fold(f32::INFINITY, f32::min);
         let volume: u32 = candles.volumes[i..end]
             .iter()
             .copied()
             .fold(0u32, u32::saturating_add);
 
         out.push(
-            candles.timestamps[i],    // first timestamp
-            candles.opens[i],         // first open
-            high,                     // max high
-            low,                      // min low
-            candles.closes[end - 1],  // last close
-            volume,                   // sum volume
+            candles.timestamps[i],   // first timestamp
+            candles.opens[i],        // first open
+            high,                    // max high
+            low,                     // min low
+            candles.closes[end - 1], // last close
+            volume,                  // sum volume
         );
 
         i = end;
@@ -92,11 +89,7 @@ pub fn downsample_minmax(candles: &CandleBuffer, target_count: usize) -> CandleB
 ///
 /// If `target_count >= timestamps.len()`, returns all points unchanged.
 /// Panics if `timestamps` and `values` have different lengths.
-pub fn downsample_lttb(
-    timestamps: &[i64],
-    values: &[f32],
-    target_count: usize,
-) -> Vec<(i64, f32)> {
+pub fn downsample_lttb(timestamps: &[i64], values: &[f32], target_count: usize) -> Vec<(i64, f32)> {
     assert_eq!(
         timestamps.len(),
         values.len(),
@@ -105,7 +98,11 @@ pub fn downsample_lttb(
 
     let n = timestamps.len();
     if n <= target_count || target_count < 2 {
-        return timestamps.iter().copied().zip(values.iter().copied()).collect();
+        return timestamps
+            .iter()
+            .copied()
+            .zip(values.iter().copied())
+            .collect();
     }
 
     let mut result = Vec::with_capacity(target_count);
@@ -123,8 +120,7 @@ pub fn downsample_lttb(
 
         // Next bucket range (for computing the average "C" point).
         let next_start = bucket_end;
-        let next_end =
-            (((bucket_idx + 1) as f64) * bucket_size + 1.0).min(n as f64) as usize;
+        let next_end = (((bucket_idx + 1) as f64) * bucket_size + 1.0).min(n as f64) as usize;
 
         // Average of the next bucket.
         let next_len = next_end - next_start;
@@ -204,10 +200,10 @@ mod tests {
             let price = 100.0 + i as f32;
             buf.push(
                 ts,
-                price,           // open
-                price + 5.0,     // high
-                price - 5.0,     // low
-                price + 1.0,     // close
+                price,       // open
+                price + 5.0, // high
+                price - 5.0, // low
+                price + 1.0, // close
                 (i as u32 + 1) * 100,
             );
         }
@@ -226,10 +222,7 @@ mod tests {
         // The first super-candle should start at the first original timestamp.
         assert_eq!(result.timestamps[0], buf.timestamps[0]);
         // The last super-candle should have the last original close.
-        assert_eq!(
-            *result.closes.last().unwrap(),
-            *buf.closes.last().unwrap()
-        );
+        assert_eq!(*result.closes.last().unwrap(), *buf.closes.last().unwrap());
     }
 
     #[test]
@@ -238,22 +231,10 @@ mod tests {
         let result = downsample_minmax(&buf, 100);
 
         // The overall price envelope must be preserved.
-        let original_min_low = buf
-            .lows
-            .iter()
-            .copied()
-            .fold(f32::INFINITY, f32::min);
-        let original_max_high = buf
-            .highs
-            .iter()
-            .copied()
-            .fold(f32::NEG_INFINITY, f32::max);
+        let original_min_low = buf.lows.iter().copied().fold(f32::INFINITY, f32::min);
+        let original_max_high = buf.highs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
 
-        let result_min_low = result
-            .lows
-            .iter()
-            .copied()
-            .fold(f32::INFINITY, f32::min);
+        let result_min_low = result.lows.iter().copied().fold(f32::INFINITY, f32::min);
         let result_max_high = result
             .highs
             .iter()
@@ -352,16 +333,8 @@ mod tests {
         assert_eq!(result.opens[0], buf.opens[0]);
         assert_eq!(result.closes[0], *buf.closes.last().unwrap());
 
-        let max_high = buf
-            .highs
-            .iter()
-            .copied()
-            .fold(f32::NEG_INFINITY, f32::max);
-        let min_low = buf
-            .lows
-            .iter()
-            .copied()
-            .fold(f32::INFINITY, f32::min);
+        let max_high = buf.highs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let min_low = buf.lows.iter().copied().fold(f32::INFINITY, f32::min);
         assert_eq!(result.highs[0], max_high);
         assert_eq!(result.lows[0], min_low);
     }
@@ -417,10 +390,7 @@ mod tests {
             .iter()
             .map(|&(_, v)| v)
             .fold(f32::NEG_INFINITY, f32::max);
-        let result_min = result
-            .iter()
-            .map(|&(_, v)| v)
-            .fold(f32::INFINITY, f32::min);
+        let result_min = result.iter().map(|&(_, v)| v).fold(f32::INFINITY, f32::min);
 
         // LTTB should capture values within 10% of the extremes.
         assert!(

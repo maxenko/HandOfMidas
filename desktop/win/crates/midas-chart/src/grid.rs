@@ -69,13 +69,14 @@ pub fn compute_price_grid(camera: &Camera2D) -> Vec<PriceGridLine> {
 
     // Standard price steps from finest to coarsest.
     let steps: &[f64] = &[
-        0.01, 0.02, 0.05, 0.10, 0.25, 0.50, 1.0,
-        2.0, 5.0, 10.0, 25.0, 50.0, 100.0,
-        250.0, 500.0, 1000.0, 2500.0, 5000.0,
+        0.01, 0.02, 0.05, 0.10, 0.25, 0.50, 1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0,
+        1000.0, 2500.0, 5000.0,
     ];
 
     // Find the finest step that maintains minimum spacing.
-    let base_step = steps.iter().copied()
+    let base_step = steps
+        .iter()
+        .copied()
         .find(|&s| s >= min_price_step)
         .unwrap_or(5000.0);
 
@@ -162,10 +163,10 @@ fn is_close_to_multiple(value: f64, step: f64) -> bool {
 /// for GPU `GridLineInstance` construction.
 pub fn style_for_weight(weight: GridWeight) -> ([f32; 4], f32) {
     match weight {
-        GridWeight::Major   => ([0.50, 0.50, 0.55, 0.20], 1.0),
-        GridWeight::Dollar  => ([0.40, 0.40, 0.45, 0.14], 1.0),
-        GridWeight::Half    => ([0.35, 0.35, 0.40, 0.10], 0.7),
+        GridWeight::Major => ([0.50, 0.50, 0.55, 0.20], 1.0),
+        GridWeight::Dollar => ([0.40, 0.40, 0.45, 0.14], 1.0),
+        GridWeight::Half => ([0.35, 0.35, 0.40, 0.10], 0.7),
         GridWeight::Quarter => ([0.30, 0.30, 0.35, 0.07], 0.5),
-        GridWeight::Dime    => ([0.25, 0.25, 0.30, 0.05], 0.5),
+        GridWeight::Dime => ([0.25, 0.25, 0.30, 0.05], 0.5),
     }
 }

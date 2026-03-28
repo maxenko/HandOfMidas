@@ -208,8 +208,7 @@ mod tests {
         let y = cam.price_to_y(original_price);
         let recovered_price = cam.y_to_price(y);
 
-        let price_per_pixel =
-            (cam.price_high - cam.price_low) / cam.viewport_height as f64;
+        let price_per_pixel = (cam.price_high - cam.price_low) / cam.viewport_height as f64;
         let error = (recovered_price - original_price).abs();
         assert!(
             error < price_per_pixel,
@@ -291,16 +290,13 @@ mod tests {
     fn visible_time_span_basic() {
         let cam = test_camera();
         let span = cam.visible_time_span();
-        assert!(
-            (span - 100_000_000.0).abs() < 1e-3,
-            "span = {span}"
-        );
+        assert!((span - 100_000_000.0).abs() < 1e-3, "span = {span}");
     }
 
     #[test]
     fn snap_to_pixel_at_1x_dpi() {
         let cam = test_camera(); // dpi_scale = 1.0
-        // At 1x DPI, snap_to_pixel should floor to integer pixels.
+                                 // At 1x DPI, snap_to_pixel should floor to integer pixels.
         assert!((cam.snap_to_pixel(10.3) - 10.0).abs() < 1e-5);
         assert!((cam.snap_to_pixel(10.7) - 10.0).abs() < 1e-5);
         assert!((cam.snap_to_pixel(10.0) - 10.0).abs() < 1e-5);

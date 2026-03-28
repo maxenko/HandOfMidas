@@ -54,9 +54,7 @@ fn view(state: &MidasApp, window_id: window::Id) -> Element<'_, Message> {
 /// and window close events.
 fn subscription(_state: &MidasApp) -> Subscription<Message> {
     let keyboard_sub = keyboard::listen().map(|event| match event {
-        keyboard::Event::KeyPressed {
-            key, modifiers, ..
-        } => {
+        keyboard::Event::KeyPressed { key, modifiers, .. } => {
             // Ctrl+N: add new chart.
             if modifiers.control() {
                 if let keyboard::Key::Character(ref c) = key {
@@ -71,25 +69,19 @@ fn subscription(_state: &MidasApp) -> Subscription<Message> {
     });
 
     // Periodic tick at 1 Hz for clock updates and debounced config saves.
-    let tick_sub = iced::time::every(std::time::Duration::from_secs(1))
-        .map(|_| Message::Tick);
+    let tick_sub = iced::time::every(std::time::Duration::from_secs(1)).map(|_| Message::Tick);
 
     // Listen for window close events so we can clean up floating charts
     // and save config when the main window is closed.
-    let close_sub =
-        window::close_events().map(Message::FloatingWindowClosed);
+    let close_sub = window::close_events().map(Message::FloatingWindowClosed);
 
     // Track window move/resize for config persistence.
-    let window_events_sub = window::events().map(|(_id, event)| {
-        match event {
-            iced::window::Event::Moved(pos) => {
-                Message::WindowMoved(pos.x as i32, pos.y as i32)
-            }
-            iced::window::Event::Resized(size) => {
-                Message::WindowResized(size.width as u32, size.height as u32)
-            }
-            _ => Message::Tick,
+    let window_events_sub = window::events().map(|(_id, event)| match event {
+        iced::window::Event::Moved(pos) => Message::WindowMoved(pos.x as i32, pos.y as i32),
+        iced::window::Event::Resized(size) => {
+            Message::WindowResized(size.width as u32, size.height as u32)
         }
+        _ => Message::Tick,
     });
 
     Subscription::batch([keyboard_sub, tick_sub, close_sub, window_events_sub])

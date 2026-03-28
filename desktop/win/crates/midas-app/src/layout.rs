@@ -168,12 +168,8 @@ impl WorkspaceLayout {
     pub fn apply_preset(&mut self, preset: &LayoutPresetKind) -> Vec<ChartId> {
         match preset {
             LayoutPresetKind::Single => self.preset_single(),
-            LayoutPresetKind::SplitH => {
-                self.preset_split(pane_grid::Axis::Vertical)
-            }
-            LayoutPresetKind::SplitV => {
-                self.preset_split(pane_grid::Axis::Horizontal)
-            }
+            LayoutPresetKind::SplitH => self.preset_split(pane_grid::Axis::Vertical),
+            LayoutPresetKind::SplitV => self.preset_split(pane_grid::Axis::Horizontal),
             LayoutPresetKind::Grid2x2 => self.preset_grid_2x2(),
         }
     }
@@ -256,19 +252,13 @@ impl WorkspaceLayout {
                 axis: pane_grid::Axis::Horizontal,
                 ratio: 0.5,
                 a: Box::new(pane_grid::Configuration::Pane(state_a)),
-                b: Box::new(pane_grid::Configuration::Pane(
-                    PaneState::new(ids[1]),
-                )),
+                b: Box::new(pane_grid::Configuration::Pane(PaneState::new(ids[1]))),
             }),
             b: Box::new(pane_grid::Configuration::Split {
                 axis: pane_grid::Axis::Horizontal,
                 ratio: 0.5,
-                a: Box::new(pane_grid::Configuration::Pane(
-                    PaneState::new(ids[2]),
-                )),
-                b: Box::new(pane_grid::Configuration::Pane(
-                    PaneState::new(ids[3]),
-                )),
+                a: Box::new(pane_grid::Configuration::Pane(PaneState::new(ids[2]))),
+                b: Box::new(pane_grid::Configuration::Pane(PaneState::new(ids[3]))),
             }),
         };
 
@@ -331,8 +321,7 @@ mod tests {
         let (mut layout, _first_id) = WorkspaceLayout::single();
         let first_pane = layout.focus.unwrap();
 
-        let (new_id, new_pane) =
-            layout.split(pane_grid::Axis::Vertical, first_pane).unwrap();
+        let (new_id, new_pane) = layout.split(pane_grid::Axis::Vertical, first_pane).unwrap();
 
         let closed = layout.close(new_pane);
         assert_eq!(closed, Some(new_id));

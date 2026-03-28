@@ -206,9 +206,7 @@ mod tests {
 
     #[test]
     fn disabled_icon_button() {
-        let btn = IconButton::new("+")
-            .on_press(Msg::Close)
-            .disabled(true);
+        let btn = IconButton::new("+").on_press(Msg::Close).disabled(true);
 
         assert!(btn.disabled);
     }

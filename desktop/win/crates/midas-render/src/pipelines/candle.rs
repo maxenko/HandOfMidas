@@ -10,10 +10,7 @@
 use midas_chart::CandleInstance;
 use wgpu::util::DeviceExt;
 
-use super::{
-    CameraUniform, DrawParamsUniform, UNIT_QUAD_VERTICES,
-    quad_vertex_buffer_layout,
-};
+use super::{quad_vertex_buffer_layout, CameraUniform, DrawParamsUniform, UNIT_QUAD_VERTICES};
 
 /// Shader source included at compile time.
 const SHADER_SRC: &str = include_str!("../../shaders/candle.wgsl");
@@ -66,10 +63,7 @@ impl CandlePipeline {
         // Pipeline layout
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("candle_pipeline_layout"),
-            bind_group_layouts: &[
-                &camera_bind_group_layout,
-                &draw_params_bind_group_layout,
-            ],
+            bind_group_layouts: &[&camera_bind_group_layout, &draw_params_bind_group_layout],
             push_constant_ranges: &[],
         });
 
@@ -81,10 +75,7 @@ impl CandlePipeline {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[
-                    quad_vertex_buffer_layout(),
-                    candle_instance_buffer_layout(),
-                ],
+                buffers: &[quad_vertex_buffer_layout(), candle_instance_buffer_layout()],
             },
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -226,18 +217,13 @@ impl CandlePipeline {
             self.instance_capacity = (self.instance_count * 2).max(INITIAL_CAPACITY);
             self.instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("candle_instance_buffer"),
-                size: self.instance_capacity as u64
-                    * std::mem::size_of::<CandleInstance>() as u64,
+                size: self.instance_capacity as u64 * std::mem::size_of::<CandleInstance>() as u64,
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
         }
 
-        queue.write_buffer(
-            &self.instance_buffer,
-            0,
-            bytemuck::cast_slice(instances),
-        );
+        queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(instances));
     }
 
     /// Upload a new projection matrix.

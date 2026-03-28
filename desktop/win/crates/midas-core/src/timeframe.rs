@@ -7,8 +7,9 @@ use chrono::Datelike;
 use std::fmt;
 
 /// Supported candle timeframes, from sub-second to monthly.
-#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(
+    Copy, Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
 pub enum Timeframe {
     /// 1 second
     S1,
@@ -43,18 +44,18 @@ impl Timeframe {
     /// (actual calendar duration varies for months).
     pub const fn as_secs(&self) -> u32 {
         match self {
-            Self::S1  => 1,
-            Self::S5  => 5,
+            Self::S1 => 1,
+            Self::S5 => 5,
             Self::S15 => 15,
             Self::S30 => 30,
-            Self::M1  => 60,
-            Self::M5  => 300,
+            Self::M1 => 60,
+            Self::M5 => 300,
             Self::M15 => 900,
             Self::M30 => 1800,
-            Self::H1  => 3600,
-            Self::H4  => 14400,
-            Self::D1  => 86400,
-            Self::W1  => 604800,
+            Self::H1 => 3600,
+            Self::H4 => 14400,
+            Self::D1 => 86400,
+            Self::W1 => 604800,
             Self::MN1 => 2592000, // 30 days nominal
         }
     }
@@ -62,18 +63,18 @@ impl Timeframe {
     /// File suffix for binary file naming (e.g., `"5m"` for `M5`).
     pub const fn file_suffix(&self) -> &'static str {
         match self {
-            Self::S1  => "1s",
-            Self::S5  => "5s",
+            Self::S1 => "1s",
+            Self::S5 => "5s",
             Self::S15 => "15s",
             Self::S30 => "30s",
-            Self::M1  => "1m",
-            Self::M5  => "5m",
+            Self::M1 => "1m",
+            Self::M5 => "5m",
             Self::M15 => "15m",
             Self::M30 => "30m",
-            Self::H1  => "1H",
-            Self::H4  => "4H",
-            Self::D1  => "1D",
-            Self::W1  => "1W",
+            Self::H1 => "1H",
+            Self::H4 => "4H",
+            Self::D1 => "1D",
+            Self::W1 => "1W",
             Self::MN1 => "1M",
         }
     }
@@ -81,18 +82,18 @@ impl Timeframe {
     /// Human-readable display name for UI labels.
     pub const fn display_name(&self) -> &'static str {
         match self {
-            Self::S1  => "1s",
-            Self::S5  => "5s",
+            Self::S1 => "1s",
+            Self::S5 => "5s",
             Self::S15 => "15s",
             Self::S30 => "30s",
-            Self::M1  => "1m",
-            Self::M5  => "5m",
+            Self::M1 => "1m",
+            Self::M5 => "5m",
             Self::M15 => "15m",
             Self::M30 => "30m",
-            Self::H1  => "1H",
-            Self::H4  => "4H",
-            Self::D1  => "1D",
-            Self::W1  => "1W",
+            Self::H1 => "1H",
+            Self::H4 => "4H",
+            Self::D1 => "1D",
+            Self::W1 => "1W",
             Self::MN1 => "1M",
         }
     }
@@ -100,20 +101,20 @@ impl Timeframe {
     /// Parse from file suffix string (e.g., `"1m"` -> `M1`).
     pub fn from_suffix(s: &str) -> Option<Self> {
         match s {
-            "1s"  => Some(Self::S1),
-            "5s"  => Some(Self::S5),
+            "1s" => Some(Self::S1),
+            "5s" => Some(Self::S5),
             "15s" => Some(Self::S15),
             "30s" => Some(Self::S30),
-            "1m"  => Some(Self::M1),
-            "5m"  => Some(Self::M5),
+            "1m" => Some(Self::M1),
+            "5m" => Some(Self::M5),
             "15m" => Some(Self::M15),
             "30m" => Some(Self::M30),
-            "1H"  => Some(Self::H1),
-            "4H"  => Some(Self::H4),
-            "1D"  => Some(Self::D1),
-            "1W"  => Some(Self::W1),
-            "1M"  => Some(Self::MN1),
-            _     => None,
+            "1H" => Some(Self::H1),
+            "4H" => Some(Self::H4),
+            "1D" => Some(Self::D1),
+            "1W" => Some(Self::W1),
+            "1M" => Some(Self::MN1),
+            _ => None,
         }
     }
 
@@ -132,9 +133,16 @@ impl Timeframe {
     pub fn floor_timestamp(&self, ts_ms: i64) -> i64 {
         match self {
             // Sub-daily and daily: modular arithmetic
-            Self::S1 | Self::S5 | Self::S15 | Self::S30 |
-            Self::M1 | Self::M5 | Self::M15 | Self::M30 |
-            Self::H1 | Self::H4 => {
+            Self::S1
+            | Self::S5
+            | Self::S15
+            | Self::S30
+            | Self::M1
+            | Self::M5
+            | Self::M15
+            | Self::M30
+            | Self::H1
+            | Self::H4 => {
                 let period_ms = self.as_secs() as i64 * 1000;
                 ts_ms - (ts_ms.rem_euclid(period_ms))
             }
@@ -160,7 +168,8 @@ impl Timeframe {
             Self::MN1 => {
                 let dt = chrono::DateTime::from_timestamp_millis(ts_ms)
                     .expect("timestamp out of range for DateTime");
-                let floored = dt.date_naive()
+                let floored = dt
+                    .date_naive()
                     .with_day(1)
                     .expect("day 1 is always valid")
                     .and_hms_opt(0, 0, 0)
@@ -178,11 +187,9 @@ impl Timeframe {
                     .expect("timestamp out of range for DateTime");
                 let d = dt.date_naive();
                 let next_month = if d.month() == 12 {
-                    chrono::NaiveDate::from_ymd_opt(d.year() + 1, 1, 1)
-                        .expect("valid date")
+                    chrono::NaiveDate::from_ymd_opt(d.year() + 1, 1, 1).expect("valid date")
                 } else {
-                    chrono::NaiveDate::from_ymd_opt(d.year(), d.month() + 1, 1)
-                        .expect("valid date")
+                    chrono::NaiveDate::from_ymd_opt(d.year(), d.month() + 1, 1).expect("valid date")
                 };
                 next_month
                     .and_hms_opt(0, 0, 0)
@@ -338,10 +345,19 @@ mod tests {
     #[test]
     fn suffix_roundtrip() {
         let all = [
-            Timeframe::S1, Timeframe::S5, Timeframe::S15, Timeframe::S30,
-            Timeframe::M1, Timeframe::M5, Timeframe::M15, Timeframe::M30,
-            Timeframe::H1, Timeframe::H4,
-            Timeframe::D1, Timeframe::W1, Timeframe::MN1,
+            Timeframe::S1,
+            Timeframe::S5,
+            Timeframe::S15,
+            Timeframe::S30,
+            Timeframe::M1,
+            Timeframe::M5,
+            Timeframe::M15,
+            Timeframe::M30,
+            Timeframe::H1,
+            Timeframe::H4,
+            Timeframe::D1,
+            Timeframe::W1,
+            Timeframe::MN1,
         ];
         for tf in all {
             let suffix = tf.file_suffix();

@@ -33,12 +33,24 @@ pub struct QuadVertex {
 /// Triangle 1: bottom-left, bottom-right, top-right
 /// Triangle 2: bottom-left, top-right, top-left
 pub const UNIT_QUAD_VERTICES: [QuadVertex; 6] = [
-    QuadVertex { position: [0.0, 0.0] },
-    QuadVertex { position: [1.0, 0.0] },
-    QuadVertex { position: [1.0, 1.0] },
-    QuadVertex { position: [0.0, 0.0] },
-    QuadVertex { position: [1.0, 1.0] },
-    QuadVertex { position: [0.0, 1.0] },
+    QuadVertex {
+        position: [0.0, 0.0],
+    },
+    QuadVertex {
+        position: [1.0, 0.0],
+    },
+    QuadVertex {
+        position: [1.0, 1.0],
+    },
+    QuadVertex {
+        position: [0.0, 0.0],
+    },
+    QuadVertex {
+        position: [1.0, 1.0],
+    },
+    QuadVertex {
+        position: [0.0, 1.0],
+    },
 ];
 
 // ── Draw parameters uniform ────────────────────────────────────────

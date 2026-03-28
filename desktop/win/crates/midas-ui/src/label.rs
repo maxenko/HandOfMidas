@@ -88,10 +88,7 @@ mod tests {
 
     #[test]
     fn label_builder_methods_chain() {
-        let label = Label::new("AAPL")
-            .size(14.0)
-            .color(Color::WHITE)
-            .bold();
+        let label = Label::new("AAPL").size(14.0).color(Color::WHITE).bold();
 
         assert_eq!(label.content, "AAPL");
         assert_eq!(label.size, Some(14.0));
@@ -109,9 +106,7 @@ mod tests {
     #[test]
     fn label_builder_methods_are_independent() {
         // Setting size should not reset color.
-        let label = Label::new("test")
-            .color(Color::WHITE)
-            .size(20.0);
+        let label = Label::new("test").color(Color::WHITE).size(20.0);
         assert!(label.color.is_some());
         assert!(label.size.is_some());
     }

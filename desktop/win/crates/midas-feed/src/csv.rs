@@ -52,18 +52,17 @@ fn detect_columns(headers: &csv::StringRecord) -> Result<ColumnMap, CsvError> {
     let date = find_col(&fields, &["date", "time", "timestamp", "datetime"])
         .ok_or_else(|| CsvError::MissingColumn("date/time/timestamp".into()))?;
 
-    let open = find_col(&fields, &["open", "o"])
-        .ok_or_else(|| CsvError::MissingColumn("open".into()))?;
+    let open =
+        find_col(&fields, &["open", "o"]).ok_or_else(|| CsvError::MissingColumn("open".into()))?;
 
-    let high = find_col(&fields, &["high", "h"])
-        .ok_or_else(|| CsvError::MissingColumn("high".into()))?;
+    let high =
+        find_col(&fields, &["high", "h"]).ok_or_else(|| CsvError::MissingColumn("high".into()))?;
 
-    let low = find_col(&fields, &["low", "l"])
-        .ok_or_else(|| CsvError::MissingColumn("low".into()))?;
+    let low =
+        find_col(&fields, &["low", "l"]).ok_or_else(|| CsvError::MissingColumn("low".into()))?;
 
     // "close" but NOT "adj close"
-    let close = find_close_col(&fields)
-        .ok_or_else(|| CsvError::MissingColumn("close".into()))?;
+    let close = find_close_col(&fields).ok_or_else(|| CsvError::MissingColumn("close".into()))?;
 
     let volume = find_col(&fields, &["volume", "vol", "v"])
         .ok_or_else(|| CsvError::MissingColumn("volume".into()))?;
@@ -124,9 +123,7 @@ fn parse_timestamp(value: &str, row: usize) -> Result<i64, CsvError> {
 
     // Try YYYY-MM-DD
     if let Ok(date) = NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
-        let dt = date
-            .and_hms_opt(0, 0, 0)
-            .expect("midnight is always valid");
+        let dt = date.and_hms_opt(0, 0, 0).expect("midnight is always valid");
         return Ok(dt.and_utc().timestamp_millis());
     }
 
@@ -388,13 +385,12 @@ Date,Open,High,Low,Close,Adj Close,Volume
         assert_eq!(buf.len(), 3);
 
         // First candle: 2024-01-02 00:00 UTC
-        let expected_first_ts =
-            NaiveDate::from_ymd_opt(2024, 1, 2)
-                .unwrap()
-                .and_hms_opt(0, 0, 0)
-                .unwrap()
-                .and_utc()
-                .timestamp_millis();
+        let expected_first_ts = NaiveDate::from_ymd_opt(2024, 1, 2)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_millis();
         assert_eq!(buf.timestamps[0], expected_first_ts);
         assert!((buf.opens[0] - 185.33).abs() < 0.01);
         assert!((buf.highs[0] - 186.35).abs() < 0.01);
@@ -611,13 +607,11 @@ timestamp,open,high,low,close,volume
         let buf = import_csv_from_str(csv).unwrap();
         assert_eq!(buf.len(), 1);
 
-        let expected_ts = chrono::NaiveDateTime::parse_from_str(
-            "2024-01-02 09:30:00",
-            "%Y-%m-%d %H:%M:%S",
-        )
-        .unwrap()
-        .and_utc()
-        .timestamp_millis();
+        let expected_ts =
+            chrono::NaiveDateTime::parse_from_str("2024-01-02 09:30:00", "%Y-%m-%d %H:%M:%S")
+                .unwrap()
+                .and_utc()
+                .timestamp_millis();
         assert_eq!(buf.timestamps[0], expected_ts);
     }
 

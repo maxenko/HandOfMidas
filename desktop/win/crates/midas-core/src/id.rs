@@ -6,20 +6,23 @@
 use std::fmt;
 
 /// Unique identifier for a chart panel within the workspace layout.
-#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(
+    Copy, Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
 pub struct ChartId(pub u32);
 
 /// Unique identifier for a pane (a slot in the binary split tree layout).
 ///
 /// Uses `u64` to accommodate composite IDs or high-throughput allocation.
-#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(
+    Copy, Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
 pub struct PaneId(pub u64);
 
 /// Unique identifier for a traded symbol (e.g., AAPL, MSFT).
-#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(
+    Copy, Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
 pub struct SymbolId(pub u32);
 
 impl ChartId {

@@ -375,8 +375,7 @@ impl MmapCandleFile {
             });
         }
         let offset = HEADER_SIZE + idx * RECORD_SIZE;
-        let record: &CandleRecord =
-            bytemuck::from_bytes(&self.mmap[offset..offset + RECORD_SIZE]);
+        let record: &CandleRecord = bytemuck::from_bytes(&self.mmap[offset..offset + RECORD_SIZE]);
         Ok(record)
     }
 
@@ -457,7 +456,14 @@ mod tests {
         for i in 0..n {
             let ts = (i as i64 + 1) * 60_000; // 1-minute candles
             let price = 100.0 + i as f32;
-            buf.push(ts, price, price + 5.0, price - 5.0, price + 1.0, (i as u32 + 1) * 100);
+            buf.push(
+                ts,
+                price,
+                price + 5.0,
+                price - 5.0,
+                price + 1.0,
+                (i as u32 + 1) * 100,
+            );
         }
         buf
     }
