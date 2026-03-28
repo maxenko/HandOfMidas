@@ -1292,7 +1292,7 @@ impl MidasApp {
     /// This serves as the drag handle for pane_grid's built-in docking.
     /// The title bar content (empty space) is the draggable area.
     /// Controls (ticker input + tf buttons + actions) are excluded from drag.
-    /// Layout: `[drag area] | [TICKER_INPUT] [1m|5m|15m|1H|4H|D|W] [⧉] [×]`
+    /// Layout: `[TICKER][1m|5m|...][G][R] [..drag area..] [⧉][×]`
     fn view_pane_title_bar(
         &self,
         chart_id: ChartId,
@@ -1300,19 +1300,16 @@ impl MidasApp {
         is_focused: bool,
         pane_count: usize,
     ) -> pane_grid::TitleBar<'_, Message> {
-        let _chart = self.charts.get(&chart_id);
+        // iced's TitleBar drag zone ("pick area") = title bar area NOT
+        // covered by content bounds or controls bounds.  We put the
+        // interactive buttons in the content (left-aligned, compact width)
+        // and only window-management buttons in controls (right-aligned).
+        // The gap between them is the drag zone.  Buttons in content still
+        // capture clicks — iced only interprets uncaptured presses as drags.
+        let title_content = self.view_title_bar_content(chart_id);
 
-        // The title bar "content" is an empty spacer — the entire area
-        // is the drag handle. All interactive widgets go in controls().
-        let title_content = Space::new().width(Fill).height(24);
-
-        // Build controls: ticker input + timeframe buttons + pop-out + close.
-        let controls_row = self.view_title_bar_controls(
-            chart_id,
-            pane,
-            is_focused,
-            pane_count,
-        );
+        // Window management buttons — right-aligned by iced.
+        let controls_row = self.view_title_bar_controls(pane, pane_count);
 
         pane_grid::TitleBar::new(title_content)
             .controls(controls_row)
@@ -1335,18 +1332,13 @@ impl MidasApp {
             })
     }
 
-    /// Build the controls area of a pane's TitleBar.
+    /// Build the content (left) area of a pane's TitleBar.
     ///
-    /// This area is excluded from the drag handle, so inputs and buttons
-    /// remain interactive even while drag-and-drop is enabled.
-    /// Layout: `[TICKER_INPUT] [1m|5m|15m|1H|4H|D|W] [fill] [⧉] [×]`
-    fn view_title_bar_controls(
-        &self,
-        chart_id: ChartId,
-        pane: pane_grid::Pane,
-        _is_focused: bool,
-        pane_count: usize,
-    ) -> Element<'_, Message> {
+    /// Contains the ticker input, timeframe selectors, and toggle buttons.
+    /// These sit inside the TitleBar's content region so they are
+    /// left-aligned. Their compact width leaves the center of the title
+    /// bar as the drag zone.
+    fn view_title_bar_content(&self, chart_id: ChartId) -> Element<'_, Message> {
         let chart = self.charts.get(&chart_id);
         let panel_tf = chart.map(|c| c.timeframe).unwrap_or(Timeframe::D1);
         let symbol_input_value = chart
@@ -1409,6 +1401,28 @@ impl MidasApp {
                 .style(button::text)
         };
 
+        // Reset button — fits view to all data.
+        let reset_btn = button(text("R").size(10))
+            .on_press(Message::ResetChart(chart_id))
+            .padding([1, 4])
+            .style(button::text);
+
+        row![ticker_input, tf_row, collapse_btn, reset_btn]
+            .spacing(4)
+            .align_y(iced::Alignment::Center)
+            .height(24)
+            .into()
+    }
+
+    /// Build the controls (right) area of a pane's TitleBar.
+    ///
+    /// Contains only window-management buttons (pop-out, close).
+    /// iced right-aligns this area and excludes it from the drag zone.
+    fn view_title_bar_controls(
+        &self,
+        pane: pane_grid::Pane,
+        pane_count: usize,
+    ) -> Element<'_, Message> {
         // Pop-out button.
         let pop_out_btn = button(text("\u{29C9}").size(12))
             .on_press(Message::PopOut(pane))
@@ -1426,14 +1440,8 @@ impl MidasApp {
             Space::new().width(0).height(0).into()
         };
 
-        // Reset button — fits view to all data.
-        let reset_btn = button(text("R").size(10))
-            .on_press(Message::ResetChart(chart_id))
-            .padding([1, 4])
-            .style(button::text);
-
-        row![ticker_input, tf_row, collapse_btn, reset_btn, Space::new().width(Fill), pop_out_btn, close_btn]
-            .spacing(4)
+        row![pop_out_btn, close_btn]
+            .spacing(2)
             .align_y(iced::Alignment::Center)
             .into()
     }
