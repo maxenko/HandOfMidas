@@ -15,7 +15,7 @@ use crate::scene::{ChartScene, SceneGenerations};
 use midas_core::CandleData;
 
 /// Fraction of the viewport height reserved for volume bars at the bottom.
-const VOLUME_AREA_FRACTION: f32 = 0.20;
+pub const VOLUME_AREA_FRACTION: f32 = 0.20;
 
 /// Body width as a fraction of the full candle slot width.
 const BODY_WIDTH_FRACTION: f32 = 0.70;
@@ -95,6 +95,7 @@ fn compute_normal_scene(
         input.viewport_height,
         &input.volume_bull_color,
         &input.volume_bear_color,
+        input.volume_scale,
     );
     let volume_count = volumes.as_ref().map_or(0, |v| v.len());
 
@@ -190,6 +191,7 @@ fn compute_collapsed_scene(
         &input.volume_bull_color,
         &input.volume_bear_color,
         &index_to_x,
+        input.volume_scale,
     );
     let volume_count = volumes.as_ref().map_or(0, |v| v.len());
 
@@ -384,6 +386,7 @@ fn build_volume_instances(
     viewport_height: u32,
     volume_bull_color: &[f32; 4],
     volume_bear_color: &[f32; 4],
+    volume_scale: f32,
 ) -> Option<Vec<VolumeInstance>> {
     if vis_start >= vis_end {
         return None;
@@ -410,7 +413,8 @@ fn build_volume_instances(
         let ts = data.timestamp(i) as f64;
         let x = camera.snap_to_pixel(camera.time_to_x(ts));
         let vol_fraction = data.volume(i) as f32 / max_volume as f32;
-        let bar_height = vol_fraction * volume_area_height;
+        let bar_height = (vol_fraction * volume_area_height * volume_scale)
+            .min(volume_area_height);
         let y_top = camera.snap_to_pixel(volume_area_bottom - bar_height);
         let y_bottom = volume_area_bottom;
 
@@ -508,6 +512,7 @@ fn build_collapsed_volume_instances(
     volume_bull_color: &[f32; 4],
     volume_bear_color: &[f32; 4],
     index_to_x: &dyn Fn(usize) -> f32,
+    volume_scale: f32,
 ) -> Option<Vec<VolumeInstance>> {
     if vis_start >= vis_end {
         return None;
@@ -534,7 +539,8 @@ fn build_collapsed_volume_instances(
         let local_idx = i - vis_start;
         let x = index_to_x(local_idx);
         let vol_fraction = data.volume(i) as f32 / max_volume as f32;
-        let bar_height = vol_fraction * volume_area_height;
+        let bar_height = (vol_fraction * volume_area_height * volume_scale)
+            .min(volume_area_height);
         let y_top = camera.snap_to_pixel(volume_area_bottom - bar_height);
         let y_bottom = volume_area_bottom;
 
@@ -1334,6 +1340,7 @@ mod tests {
             crosshair,
             levels,
             collapse_gaps: false,
+            volume_scale: 1.0,
             dirty,
         }
     }
@@ -1363,6 +1370,7 @@ mod tests {
             crosshair,
             levels,
             collapse_gaps,
+            volume_scale: 1.0,
             dirty,
         }
     }

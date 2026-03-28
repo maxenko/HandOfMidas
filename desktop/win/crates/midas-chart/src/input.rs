@@ -44,6 +44,8 @@ pub struct ChartInput<'a> {
     pub levels: &'a [HorizontalLevel],
     /// Whether session gaps are collapsed (index-based X positioning).
     pub collapse_gaps: bool,
+    /// Volume bar height multiplier (1.0 = auto-normalized to visible range).
+    pub volume_scale: f32,
     /// Current dirty flags for generation tracking.
     pub dirty: &'a DirtyFlags,
 }

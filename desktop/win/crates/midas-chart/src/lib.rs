@@ -38,6 +38,7 @@ pub use instances::{
 pub use interaction::{ChartAction, ChartEvent, Key, MouseButton, handle_event};
 pub use levels::HorizontalLevel;
 pub use scene::{ChartScene, SceneGenerations};
+pub use compute::VOLUME_AREA_FRACTION;
 pub use state::{ChartState, InteractionMode, Momentum, YAnimation};
 
 #[cfg(test)]

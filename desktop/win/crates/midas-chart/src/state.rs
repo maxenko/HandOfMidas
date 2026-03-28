@@ -46,6 +46,13 @@ pub enum InteractionMode {
     VerticalScaling { anchor_y: f32, last_y: f32 },
     /// Right-click XY panning.
     RightPanning,
+    /// Dragging the volume scale handle up/down.
+    DraggingVolumeScale {
+        /// Y pixel position at drag start.
+        anchor_y: f32,
+        /// Volume scale value at drag start.
+        start_scale: f32,
+    },
 }
 
 /// Momentum state for flick-to-scroll after a pan drag release.
@@ -120,6 +127,11 @@ pub struct ChartState {
     /// rather than timestamp, eliminating overnight/weekend gaps. A faint
     /// vertical separator is drawn at session boundaries.
     pub collapse_gaps: bool,
+    /// User-controlled volume bar height multiplier (default 1.0).
+    ///
+    /// Adjusted by dragging the volume scale handle on the right edge of
+    /// the chart. Range: [`VOLUME_SCALE_MIN`, `VOLUME_SCALE_MAX`].
+    pub volume_scale: f32,
     /// Next level ID to assign (monotonically increasing).
     next_level_id: u64,
 }
@@ -141,6 +153,7 @@ impl ChartState {
             data_time_start: 0.0,
             data_time_end: f64::MAX,
             collapse_gaps: false,
+            volume_scale: 1.0,
             next_level_id: 1,
         }
     }
@@ -154,6 +167,11 @@ impl ChartState {
 
     /// Fraction of the visible range allowed as padding beyond data edges.
     const PAN_EDGE_PADDING: f64 = 0.05;
+
+    /// Minimum allowed volume scale.
+    pub const VOLUME_SCALE_MIN: f32 = 0.1;
+    /// Maximum allowed volume scale.
+    pub const VOLUME_SCALE_MAX: f32 = 5.0;
 
     /// Clamp a horizontal pan delta so the camera can't scroll past the
     /// **beginning** of the data (left edge). The right edge is unclamped
@@ -307,6 +325,11 @@ impl ChartState {
             ChartAction::JumpToStart => {
                 let span = self.camera.time_end - self.camera.time_start;
                 let _ = span;
+            }
+
+            ChartAction::SetVolumeScale { scale } => {
+                self.volume_scale = *scale as f32;
+                self.dirty.mark_data();
             }
 
             ChartAction::Redraw => {

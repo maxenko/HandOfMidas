@@ -79,6 +79,8 @@ pub enum ChartAction {
     JumpToEnd,
     /// Jump the camera to show the oldest data.
     JumpToStart,
+    /// Set the volume bar height multiplier.
+    SetVolumeScale { scale: f64 },
     /// Request a full redraw.
     Redraw,
 }
@@ -124,6 +126,17 @@ const AXIS_LOCK_RATIO: f32 = 1.5;
 
 /// Sensitivity for middle-drag scaling (per pixel).
 const SCALE_SENSITIVITY: f64 = 0.005;
+
+/// Width of the volume scale handle triangle (pixels).
+const VOLUME_HANDLE_WIDTH: f32 = 10.0;
+/// Height of the volume scale handle triangle (pixels).
+const VOLUME_HANDLE_HEIGHT: f32 = 14.0;
+/// Extra hit-test padding around the volume handle (pixels).
+const VOLUME_HANDLE_HIT_PADDING: f32 = 8.0;
+/// Drag sensitivity for volume scale (exponential, per pixel).
+const VOLUME_SCALE_DRAG_SENSITIVITY: f32 = 0.008;
+/// Fraction of viewport height reserved for volume bars (must match compute.rs).
+const VOLUME_AREA_FRACTION: f32 = 0.20;
 
 /// Process a chart event and return zero or more actions.
 ///
@@ -195,13 +208,18 @@ fn handle_mouse_moved(
 ) -> Vec<ChartAction> {
     let mut actions = Vec::new();
 
-    // Update crosshair — only visible when left mouse is held down.
+    // Update crosshair — only visible when left mouse is held down
+    // and not dragging the volume scale handle.
+    let dragging_volume = matches!(
+        state.interaction_mode,
+        InteractionMode::DraggingVolumeScale { .. }
+    );
     let in_bounds = x >= 0.0
         && y >= 0.0
         && x <= state.camera.viewport_width as f32
         && y <= state.camera.viewport_height as f32;
 
-    if in_bounds && state.left_mouse_down {
+    if in_bounds && state.left_mouse_down && !dragging_volume {
         state.crosshair_pos = Some((x, y));
         actions.push(ChartAction::SetCrosshair { x, y });
     } else if state.crosshair_pos.is_some() {
@@ -385,6 +403,19 @@ fn handle_mouse_moved(
                 state.drag_start = Some((x, y));
             }
         }
+
+        InteractionMode::DraggingVolumeScale { anchor_y, start_scale } => {
+            // Dragging up (negative dy) increases volume scale.
+            let dy = anchor_y - y;
+            let scale_factor = (dy * VOLUME_SCALE_DRAG_SENSITIVITY).exp();
+            let new_scale = (start_scale * scale_factor).clamp(
+                ChartState::VOLUME_SCALE_MIN,
+                ChartState::VOLUME_SCALE_MAX,
+            );
+            actions.push(ChartAction::SetVolumeScale {
+                scale: new_scale as f64,
+            });
+        }
     }
 
     actions
@@ -399,6 +430,22 @@ fn handle_mouse_pressed(
     match button {
         MouseButton::Left => {
             let mut actions = Vec::new();
+
+            // Check if the press is on the volume scale handle first.
+            // Must come before setting left_mouse_down so the crosshair
+            // stays suppressed during volume scale drag.
+            if is_over_volume_handle(
+                x, y,
+                state.camera.viewport_width,
+                state.camera.viewport_height,
+            ) {
+                state.interaction_mode = InteractionMode::DraggingVolumeScale {
+                    anchor_y: y,
+                    start_scale: state.volume_scale,
+                };
+                return actions;
+            }
+
             state.left_mouse_down = true;
 
             // Show crosshair on press.
@@ -467,6 +514,16 @@ fn handle_mouse_released(
     }
 
     if button != MouseButton::Left {
+        return vec![];
+    }
+
+    // Volume scale drag ends without affecting crosshair state.
+    if matches!(
+        state.interaction_mode,
+        InteractionMode::DraggingVolumeScale { .. }
+    ) {
+        state.interaction_mode = InteractionMode::Idle;
+        state.left_mouse_down = false;
         return vec![];
     }
 
@@ -542,6 +599,9 @@ fn handle_mouse_released(
         }
 
         InteractionMode::Idle => {}
+
+        // Handled by the early return above; unreachable.
+        InteractionMode::DraggingVolumeScale { .. } => {}
     }
 
     // Always return to Idle on mouse release.
@@ -594,6 +654,19 @@ fn handle_key_pressed(state: &ChartState, key: Key) -> Vec<ChartAction> {
 
 /// Hit-test all horizontal levels against a pixel Y coordinate.
 ///
+/// Test whether cursor `(x, y)` is inside the volume scale handle zone.
+///
+/// The handle is a small triangle on the right edge of the chart at the
+/// boundary between the candle area and the volume area.
+fn is_over_volume_handle(x: f32, y: f32, viewport_width: u32, viewport_height: u32) -> bool {
+    let vh = viewport_height as f32;
+    let vw = viewport_width as f32;
+    let handle_center_y = vh * (1.0 - VOLUME_AREA_FRACTION);
+    let half_h = VOLUME_HANDLE_HEIGHT / 2.0 + VOLUME_HANDLE_HIT_PADDING;
+    let x_min = vw - VOLUME_HANDLE_WIDTH - VOLUME_HANDLE_HIT_PADDING;
+    x >= x_min && y >= handle_center_y - half_h && y <= handle_center_y + half_h
+}
+
 /// Returns `Some((level_id, grab_offset))` if a level is within
 /// `LEVEL_HIT_TOLERANCE_PX` of `cursor_y`. The `grab_offset` is the
 /// price difference between the level and the cursor, so the level
