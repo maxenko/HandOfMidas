@@ -835,7 +835,13 @@ impl MidasApp {
             }
 
             Message::ChartCrosshair(chart_id, pos) => {
-                self.focus_chart(chart_id);
+                // Only focus on crosshair set (user actively interacting),
+                // not on clear (housekeeping from release/leave). ButtonReleased
+                // is delivered to ALL shader widgets, so inactive charts emit
+                // ClearCrosshair — focusing on None would steal focus back.
+                if pos.is_some() {
+                    self.focus_chart(chart_id);
+                }
                 if let Some(chart) = self.charts.get_mut(&chart_id) {
                     chart.chart_state.crosshair_pos = pos;
                     chart.chart_state.dirty.mark_crosshair();
