@@ -170,8 +170,8 @@ impl ChartState {
 
     /// Minimum allowed volume scale.
     pub const VOLUME_SCALE_MIN: f32 = 0.1;
-    /// Maximum allowed volume scale.
-    pub const VOLUME_SCALE_MAX: f32 = 5.0;
+    /// Maximum allowed volume scale (volume area capped at 80% of viewport).
+    pub const VOLUME_SCALE_MAX: f32 = 4.0;
 
     /// Clamp a horizontal pan delta so the camera can't scroll past the
     /// **beginning** of the data (left edge). The right edge is unclamped
