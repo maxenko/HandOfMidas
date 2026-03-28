@@ -1,19 +1,19 @@
-//! Application state, Message enum, update logic, and view tree.
+//! Application state, Message enum, and update logic.
 //!
-//! This module implements the iced Elm architecture for Hand of Midas:
-//! - `MidasApp`: the top-level state struct
-//! - `Message`: all events the app can process
-//! - `MidasApp::update()`: pure state transitions + async tasks
-//! - `MidasApp::view()`: builds the widget tree each frame
+//! Sub-modules:
+//! - `views`: widget tree construction (toolbar, pane grid, status bar)
+//! - `persistence`: config build, save, and debounce
+
+mod persistence;
+mod views;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use iced::widget::pane_grid::{self, PaneGrid};
-use iced::widget::{button, column, container, row, text, text_input, Row, Space};
-use iced::{window, Color, Element, Fill, Task};
+use iced::widget::pane_grid;
+use iced::{window, Task};
 
 use midas_chart::camera::Camera2D;
 use midas_chart::state::ChartState;
@@ -23,7 +23,6 @@ use midas_data::CandleBuffer;
 use midas_feed::TestDataProvider;
 
 use crate::layout::{LayoutPresetKind, WorkspaceLayout};
-use crate::theme;
 
 // ── Load state ────────────────────────────────────────────────────────
 
@@ -314,95 +313,80 @@ impl MidasApp {
 
         let open_task = open_task.map(Message::MainWindowOpened);
 
-        if config.charts.is_empty() {
-            let (workspace, first_id) = WorkspaceLayout::single();
-            let mut charts = HashMap::new();
-            charts.insert(first_id, Self::make_empty_panel());
+        // Build workspace and charts from config (or empty defaults).
+        let (workspace, charts, status_message) =
+            if config.charts.is_empty() {
+                let (ws, first_id) = WorkspaceLayout::single();
+                let mut charts = HashMap::new();
+                charts.insert(first_id, Self::make_empty_panel());
+                (ws, charts, "Ready".to_string())
+            } else {
+                let (mut ws, first_id) = WorkspaceLayout::single();
+                let mut charts = HashMap::new();
 
-            let app = Self {
-                charts,
-                workspace,
-                status_message: "Ready".into(),
-                show_frame_overlay: false,
-                config_path,
-                config_dirty: false,
-                last_config_save: Instant::now(),
-                current_time,
-                main_window: Some(main_id),
-                floating_charts: HashMap::new(),
-                window_position: config.window.x.zip(config.window.y),
-                window_size: initial_size,
-                monitor_size: None,
-                test_data: TestDataProvider::new(),
-            };
+                // First chart goes into the initial pane.
+                let first_cfg = &config.charts[0];
+                let mut panel = Self::restore_panel(first_cfg);
+                charts.insert(first_id, panel);
 
-            (app, open_task)
-        } else {
-            let (mut workspace, first_id) = WorkspaceLayout::single();
-            let mut charts = HashMap::new();
-
-            let first_cfg = &config.charts[0];
-            let first_tf = Timeframe::from_suffix(&first_cfg.timeframe)
-                .unwrap_or(Timeframe::D1);
-            let mut first_panel = Self::make_empty_panel();
-            first_panel.symbol = first_cfg.symbol.clone();
-            first_panel.timeframe = first_tf;
-            Self::restore_levels(&first_cfg.levels, &mut first_panel);
-            Self::restore_camera(first_cfg, &mut first_panel);
-            charts.insert(first_id, first_panel);
-
-            let first_pane = workspace.focus.unwrap();
-            for chart_cfg in config.charts.iter().skip(1) {
-                let tf = Timeframe::from_suffix(&chart_cfg.timeframe)
-                    .unwrap_or(Timeframe::D1);
-                let mut panel = Self::make_empty_panel();
-                panel.symbol = chart_cfg.symbol.clone();
-                panel.timeframe = tf;
-                Self::restore_levels(&chart_cfg.levels, &mut panel);
-                Self::restore_camera(chart_cfg, &mut panel);
-
-                if let Some((new_id, _)) =
-                    workspace.split(pane_grid::Axis::Vertical, first_pane)
-                {
-                    charts.insert(new_id, panel);
+                // Additional charts split vertically from the first pane.
+                let first_pane = ws.focus.unwrap();
+                for chart_cfg in config.charts.iter().skip(1) {
+                    panel = Self::restore_panel(chart_cfg);
+                    if let Some((new_id, _)) =
+                        ws.split(pane_grid::Axis::Vertical, first_pane)
+                    {
+                        charts.insert(new_id, panel);
+                    }
                 }
-            }
+                ws.set_focus(first_pane);
 
-            workspace.set_focus(first_pane);
-
-            let chart_count = charts.len();
-            let mut app = Self {
-                charts,
-                workspace,
-                status_message: format!(
-                    "Restored {chart_count} chart(s) from config"
-                ),
-                show_frame_overlay: false,
-                config_path,
-                config_dirty: false,
-                last_config_save: Instant::now(),
-                current_time,
-                main_window: Some(main_id),
-                floating_charts: HashMap::new(),
-                window_position: config.window.x.zip(config.window.y),
-                window_size: initial_size,
-                monitor_size: None,
-                test_data: TestDataProvider::new(),
+                let n = charts.len();
+                (ws, charts, format!("Restored {n} chart(s) from config"))
             };
 
-            // Auto-load test data for all restored charts that have a symbol.
-            let chart_ids: Vec<(ChartId, String, Timeframe)> = app
-                .charts
-                .iter()
-                .filter(|(_, panel)| !panel.symbol.is_empty())
-                .map(|(&id, panel)| (id, panel.symbol.clone(), panel.timeframe))
-                .collect();
-            for (id, symbol, tf) in chart_ids {
-                app.load_test_data_for_chart(id, &symbol, tf, false);
-            }
+        let mut app = Self {
+            charts,
+            workspace,
+            status_message,
+            show_frame_overlay: false,
+            config_path,
+            config_dirty: false,
+            last_config_save: Instant::now(),
+            current_time,
+            main_window: Some(main_id),
+            floating_charts: HashMap::new(),
+            window_position: config.window.x.zip(config.window.y),
+            window_size: initial_size,
+            monitor_size: None,
+            test_data: TestDataProvider::new(),
+        };
 
-            (app, open_task)
+        // Auto-load test data for all restored charts that have a symbol.
+        let chart_ids: Vec<(ChartId, String, Timeframe)> = app
+            .charts
+            .iter()
+            .filter(|(_, panel)| !panel.symbol.is_empty())
+            .map(|(&id, panel)| (id, panel.symbol.clone(), panel.timeframe))
+            .collect();
+        for (id, symbol, tf) in chart_ids {
+            app.load_test_data_for_chart(id, &symbol, tf, false);
         }
+
+        (app, open_task)
+    }
+
+    /// Restore a single chart panel from config.
+    fn restore_panel(cfg: &ChartConfig) -> ChartPanel {
+        let tf = Timeframe::from_suffix(&cfg.timeframe)
+            .unwrap_or(Timeframe::D1);
+        let mut panel = Self::make_empty_panel();
+        panel.symbol = cfg.symbol.clone();
+        panel.symbol_input = cfg.symbol.clone();
+        panel.timeframe = tf;
+        Self::restore_levels(&cfg.levels, &mut panel);
+        Self::restore_camera(cfg, &mut panel);
+        panel
     }
 
     /// Restore horizontal levels from config into a chart panel.
@@ -600,103 +584,8 @@ impl MidasApp {
     }
 }
 
-// ── Config persistence ───────────────────────────────────────────────
-
-impl MidasApp {
-    /// Build an `AppConfig` from the current application state.
-    fn build_config(&self) -> AppConfig {
-        let chart_configs: Vec<ChartConfig> = self
-            .workspace
-            .chart_ids()
-            .iter()
-            .filter_map(|id| self.charts.get(id))
-            .map(|panel| {
-                let cam = &panel.chart_state.camera;
-                let levels = panel
-                    .chart_state
-                    .levels
-                    .iter()
-                    .map(|l| LevelConfig {
-                        price: l.price,
-                        color: l.color,
-                        line_width: l.line_width,
-                    })
-                    .collect();
-                ChartConfig {
-                    symbol: panel.symbol.clone(),
-                    timeframe: panel.timeframe.display_name().to_string(),
-                    levels,
-                    camera_time_start: Some(cam.time_start),
-                    camera_time_end: Some(cam.time_end),
-                    camera_price_low: Some(cam.price_low),
-                    camera_price_high: Some(cam.price_high),
-                    collapse_gaps: panel.chart_state.collapse_gaps,
-                    volume_scale: panel.chart_state.volume_scale,
-                    viewport_width: Some(cam.viewport_width),
-                    viewport_height: Some(cam.viewport_height),
-                }
-            })
-            .collect();
-
-        let (win_w, win_h) = self.window_size;
-        let (win_x, win_y) = self.window_position.unzip();
-
-        AppConfig {
-            window: midas_core::config::WindowConfig {
-                width: win_w,
-                height: win_h,
-                maximized: false,
-                x: win_x,
-                y: win_y,
-                monitor_width: self.monitor_size.map(|(w, _)| w),
-                monitor_height: self.monitor_size.map(|(_, h)| h),
-            },
-            theme: midas_core::config::ThemeConfig {
-                mode: "dark".into(),
-            },
-            charts: chart_configs,
-        }
-    }
-
-    /// Mark the configuration as dirty so it will be saved on the next tick.
-    fn mark_config_dirty(&mut self) {
-        self.config_dirty = true;
-    }
-
-    /// Save the configuration if dirty and debounce interval has elapsed.
-    fn maybe_save_config(&mut self) -> Task<Message> {
-        if !self.config_dirty {
-            return Task::none();
-        }
-        let elapsed = self.last_config_save.elapsed().as_secs_f64();
-        if elapsed < CONFIG_SAVE_DEBOUNCE_SECS {
-            return Task::none();
-        }
-        self.flush_config()
-    }
-
-    /// Unconditionally save the configuration right now.
-    fn flush_config(&mut self) -> Task<Message> {
-        self.config_dirty = false;
-        self.last_config_save = Instant::now();
-        let config = self.build_config();
-        let path = self.config_path.clone();
-
-        Task::perform(
-            async move {
-                let result =
-                    tokio::task::spawn_blocking(move || config.save(&path))
-                        .await;
-                match result {
-                    Ok(Ok(())) => Ok(()),
-                    Ok(Err(e)) => Err(e.to_string()),
-                    Err(e) => Err(format!("task join error: {e}")),
-                }
-            },
-            Message::ConfigSaved,
-        )
-    }
-}
+// Config persistence (build_config, mark_config_dirty, maybe_save_config,
+// flush_config) is in app/persistence.rs.
 
 // ── Update ────────────────────────────────────────────────────────────
 
@@ -1174,567 +1063,5 @@ impl MidasApp {
     }
 }
 
-// ── View ──────────────────────────────────────────────────────────────
-
-impl MidasApp {
-    /// Build the widget tree for a given window.
-    ///
-    /// The main window shows toolbar + pane_grid + status bar.
-    /// Floating chart windows show only the chart with a minimal header.
-    pub fn view(&self, window_id: window::Id) -> Element<'_, Message> {
-        // Check if this is a floating chart window.
-        if let Some(chart) = self.floating_charts.get(&window_id) {
-            return self.view_floating_chart(chart);
-        }
-
-        // Main window (or fallback for unknown windows).
-        let toolbar = self.view_toolbar();
-        let content = self.view_content();
-        let status_bar = self.view_status_bar();
-        column![toolbar, content, status_bar].into()
-    }
-
-    /// Build the view for a floating (pop-out) chart window.
-    fn view_floating_chart<'a>(
-        &'a self,
-        chart: &'a ChartPanel,
-    ) -> Element<'a, Message> {
-        // If data is loaded, render via GPU Shader widget.
-        if let (LoadState::Loaded, Some(ref data)) =
-            (&chart.load_state, &chart.data)
-        {
-            let snapshot = crate::chart_widget::ChartRenderSnapshot {
-                symbol: chart.symbol.clone(),
-                data: Some(Arc::clone(data)),
-                camera: chart.chart_state.camera.clone(),
-                dirty: chart.chart_state.dirty.clone(),
-                crosshair_pos: chart.chart_state.crosshair_pos,
-                levels: chart.chart_state.levels.clone(),
-                viewport_width: chart.chart_state.camera.viewport_width,
-                viewport_height: chart.chart_state.camera.viewport_height,
-                collapse_gaps: chart.chart_state.collapse_gaps,
-                volume_scale: chart.chart_state.volume_scale,
-                data_time_start: chart.chart_state.data_time_start,
-                data_time_end: chart.chart_state.data_time_end,
-            };
-            // Use ChartId(0) for floating windows -- they don't participate
-            // in the pane_grid's chart map.
-            let program = crate::chart_widget::ChartProgram {
-                chart_id: ChartId::new(0),
-                snapshot,
-            };
-            let shader = crate::chart_widget::chart_shader(program);
-
-            // Header bar with symbol and timeframe.
-            let header = container(
-                row![
-                    text(&chart.symbol)
-                        .size(13)
-                        .color(Color::WHITE),
-                    text(chart.timeframe.display_name())
-                        .size(11)
-                        .color(theme::TEXT_SECONDARY),
-                ]
-                .spacing(8)
-                .padding([4, 8])
-                .align_y(iced::Alignment::Center),
-            )
-            .width(Fill)
-            .style(|_theme| container::Style {
-                background: Some(iced::Background::Color(Color::from_rgba(
-                    0.06, 0.08, 0.12, 0.90,
-                ))),
-                ..Default::default()
-            });
-
-            return column![header, shader].into();
-        }
-
-        // No data placeholder for floating window.
-        let status_text = match &chart.load_state {
-            LoadState::Empty => "No data loaded".to_string(),
-            LoadState::Loading => "Loading...".to_string(),
-            LoadState::Loaded => "Loaded".to_string(),
-            LoadState::Error(e) => format!("Error: {e}"),
-        };
-        container(
-            text(status_text).size(14).color(theme::TEXT_SECONDARY),
-        )
-        .width(Fill)
-        .height(Fill)
-        .center_x(Fill)
-        .center_y(Fill)
-        .style(|_theme| container::Style {
-            background: Some(theme::CHART_EMPTY_BG.into()),
-            ..Default::default()
-        })
-        .into()
-    }
-
-    /// Build the toolbar row (layout controls only).
-    ///
-    /// Per-chart ticker inputs and timeframe buttons live in each pane's
-    /// title bar, so the global toolbar only holds layout presets, split
-    /// actions, and the add-chart button.
-    fn view_toolbar(&self) -> Element<'_, Message> {
-        let layout_buttons = row![
-            button(text("1").size(12))
-                .on_press(Message::LayoutPreset(LayoutPresetKind::Single))
-                .padding([4, 8])
-                .style(hover_text_button_style),
-            button(text("1|1").size(12))
-                .on_press(Message::LayoutPreset(LayoutPresetKind::SplitH))
-                .padding([4, 8])
-                .style(hover_text_button_style),
-            button(text("1/1").size(12))
-                .on_press(Message::LayoutPreset(LayoutPresetKind::SplitV))
-                .padding([4, 8])
-                .style(hover_text_button_style),
-            button(text("2x2").size(12))
-                .on_press(Message::LayoutPreset(LayoutPresetKind::Grid2x2))
-                .padding([4, 8])
-                .style(hover_text_button_style),
-        ]
-        .spacing(2);
-
-        let split_buttons = row![
-            button(text("Split H").size(11))
-                .on_press_maybe(self.workspace.focus.map(|p| {
-                    Message::PaneSplit(pane_grid::Axis::Horizontal, p)
-                }))
-                .padding([4, 6])
-                .style(hover_text_button_style),
-            button(text("Split V").size(11))
-                .on_press_maybe(self.workspace.focus.map(|p| {
-                    Message::PaneSplit(pane_grid::Axis::Vertical, p)
-                }))
-                .padding([4, 6])
-                .style(hover_text_button_style),
-        ]
-        .spacing(2);
-
-        let add_btn = button(text("+").size(14))
-            .on_press(Message::AddChart)
-            .padding([4, 10])
-            .style(hover_text_button_style);
-
-        let toolbar_row = row![
-            layout_buttons,
-            split_buttons,
-            add_btn,
-        ]
-        .spacing(8)
-        .padding(6)
-        .align_y(iced::Alignment::Center);
-
-        container(toolbar_row)
-            .width(Fill)
-            .style(|_theme| container::Style {
-                background: Some(theme::TOOLBAR_BG.into()),
-                ..Default::default()
-            })
-            .into()
-    }
-
-    /// Build the main content area using iced's pane_grid widget.
-    ///
-    /// Each pane has a thin, semi-transparent TitleBar that serves as the
-    /// drag handle for docking. The TitleBar contains the ticker symbol,
-    /// per-panel timeframe buttons, a pop-out button, and a close button.
-    fn view_content(&self) -> Element<'_, Message> {
-        let focused_pane = self.workspace.focus;
-        let pane_count = self.workspace.pane_count();
-
-        let pane_grid_widget = PaneGrid::new(
-            &self.workspace.panes,
-            |pane, pane_state, _is_maximized| {
-                let is_focused = focused_pane == Some(pane);
-                let chart_id = pane_state.chart_id;
-
-                // Build the drag-handle TitleBar.
-                let title_bar = self.view_pane_title_bar(
-                    chart_id,
-                    pane,
-                    is_focused,
-                    pane_count,
-                );
-
-                let body = self.view_pane_body(chart_id, pane, is_focused);
-                // Content style: dark background (serves as title bar bg
-                // since TitleBar is transparent) + focus border.  The border
-                // is drawn first; TitleBar and body sit inside it.  TitleBar
-                // is transparent so the border shows through at the top.
-                // Body has 2px padding so the border shows at sides/bottom.
-                pane_grid::Content::new(body)
-                    .title_bar(title_bar)
-                    .style(move |_theme| {
-                        let border_color = if is_focused {
-                            theme::CHART_ACTIVE_BORDER
-                        } else {
-                            theme::CHART_INACTIVE_BORDER
-                        };
-                        container::Style {
-                            background: Some(iced::Background::Color(
-                                Color::from_rgb(0.06, 0.08, 0.12),
-                            )),
-                            border: iced::Border {
-                                color: border_color,
-                                width: if is_focused { 2.0 } else { 1.0 },
-                                radius: 0.0.into(),
-                            },
-                            ..Default::default()
-                        }
-                    })
-            },
-        )
-        .on_resize(6, Message::PaneResized)
-        .on_drag(Message::PaneDragged)
-        .style(|_theme| pane_grid::Style {
-            hovered_region: pane_grid::Highlight {
-                background: iced::Background::Color(Color::from_rgba(
-                    0.2, 0.4, 0.8, 0.25,
-                )),
-                border: iced::Border {
-                    color: Color::from_rgba(0.3, 0.5, 1.0, 0.6),
-                    width: 2.0,
-                    radius: 0.0.into(),
-                },
-            },
-            hovered_split: pane_grid::Line {
-                color: Color::from_rgba(0.3, 0.5, 1.0, 0.8),
-                width: 2.0,
-            },
-            picked_split: pane_grid::Line {
-                color: Color::from_rgba(0.3, 0.5, 1.0, 1.0),
-                width: 3.0,
-            },
-        })
-        .width(Fill)
-        .height(Fill)
-        .spacing(1);
-
-        container(pane_grid_widget)
-            .width(Fill)
-            .height(Fill)
-            .style(|_theme| container::Style {
-                background: Some(theme::BACKGROUND.into()),
-                ..Default::default()
-            })
-            .into()
-    }
-
-    /// Build the semi-transparent TitleBar for a pane.
-    ///
-    /// This serves as the drag handle for pane_grid's built-in docking.
-    /// The title bar content (empty space) is the draggable area.
-    /// Controls (ticker input + tf buttons + actions) are excluded from drag.
-    /// Layout: `[TICKER][1m|5m|...][G][R] [..drag area..] [⧉][×]`
-    fn view_pane_title_bar(
-        &self,
-        chart_id: ChartId,
-        pane: pane_grid::Pane,
-        _is_focused: bool,
-        pane_count: usize,
-    ) -> pane_grid::TitleBar<'_, Message> {
-        // iced's TitleBar drag zone ("pick area") = title bar area NOT
-        // covered by content bounds or controls bounds.  We put the
-        // interactive buttons in the content (left-aligned, compact width)
-        // and only window-management buttons in controls (right-aligned).
-        // The gap between them is the drag zone.  Buttons in content still
-        // capture clicks — iced only interprets uncaptured presses as drags.
-        let title_content = self.view_title_bar_content(chart_id);
-
-        // Window management buttons — right-aligned by iced.
-        let controls_row = self.view_title_bar_controls(pane, pane_count);
-
-        pane_grid::TitleBar::new(title_content)
-            .controls(controls_row)
-            .padding([2, 4])
-            .always_show_controls()
-            // Transparent — Content's background + focus border show through.
-            .style(|_theme| container::Style::default())
-    }
-
-    /// Build the content (left) area of a pane's TitleBar.
-    ///
-    /// Contains the ticker input, timeframe selectors, and toggle buttons.
-    /// These sit inside the TitleBar's content region so they are
-    /// left-aligned. Their compact width leaves the center of the title
-    /// bar as the drag zone.
-    fn view_title_bar_content(&self, chart_id: ChartId) -> Element<'_, Message> {
-        let chart = self.charts.get(&chart_id);
-        let panel_tf = chart.map(|c| c.timeframe).unwrap_or(Timeframe::D1);
-        let symbol_input_value = chart
-            .map(|c| c.symbol_input.as_str())
-            .unwrap_or("");
-
-        // Per-chart ticker input — compact, inline.
-        let ticker_input = text_input("SYMBOL", symbol_input_value)
-            .on_input(move |val| Message::PanelSymbolInputChanged(chart_id, val))
-            .on_submit(Message::PanelSymbolSubmitted(chart_id))
-            .width(70)
-            .size(11)
-            .padding([2, 4]);
-
-        // Timeframe buttons.
-        let timeframes = [
-            Timeframe::M1,
-            Timeframe::M5,
-            Timeframe::M15,
-            Timeframe::H1,
-            Timeframe::H4,
-            Timeframe::D1,
-            Timeframe::W1,
-        ];
-        let tf_buttons: Vec<Element<'_, Message>> = timeframes
-            .iter()
-            .map(|&tf| {
-                let label = tf.display_name();
-                let is_active = panel_tf == tf;
-                if is_active {
-                    button(text(label).size(10).color(Color::WHITE))
-                        .on_press(Message::PanelTimeframeSelected(chart_id, tf))
-                        .padding([1, 4])
-                        .style(button::primary)
-                        .into()
-                } else {
-                    button(text(label).size(10))
-                        .on_press(Message::PanelTimeframeSelected(chart_id, tf))
-                        .padding([1, 4])
-                        .style(button::text)
-                        .into()
-                }
-            })
-            .collect();
-        let tf_row = Row::with_children(tf_buttons).spacing(1);
-
-        // Collapse-gaps toggle button (shown as "G" icon).
-        let collapse_active = chart
-            .map(|c| c.chart_state.collapse_gaps)
-            .unwrap_or(false);
-        let collapse_btn = if collapse_active {
-            button(text("G").size(10).color(Color::WHITE))
-                .on_press(Message::ToggleCollapseGaps(chart_id))
-                .padding([1, 4])
-                .style(button::primary)
-        } else {
-            button(text("G").size(10))
-                .on_press(Message::ToggleCollapseGaps(chart_id))
-                .padding([1, 4])
-                .style(button::text)
-        };
-
-        // Reset button — fits view to all data.
-        let reset_btn = button(text("R").size(10))
-            .on_press(Message::ResetChart(chart_id))
-            .padding([1, 4])
-            .style(button::text);
-
-        row![ticker_input, tf_row, collapse_btn, reset_btn]
-            .spacing(4)
-            .align_y(iced::Alignment::Center)
-            .height(24)
-            .into()
-    }
-
-    /// Build the controls (right) area of a pane's TitleBar.
-    ///
-    /// Contains only window-management buttons (pop-out, close).
-    /// iced right-aligns this area and excludes it from the drag zone.
-    fn view_title_bar_controls(
-        &self,
-        pane: pane_grid::Pane,
-        pane_count: usize,
-    ) -> Element<'_, Message> {
-        // Pop-out button.
-        let pop_out_btn = button(text("\u{29C9}").size(12))
-            .on_press(Message::PopOut(pane))
-            .padding([1, 5])
-            .style(button::text);
-
-        // Close button (only if more than one pane).
-        let close_btn: Element<'_, Message> = if pane_count > 1 {
-            button(text("\u{00D7}").size(12))
-                .on_press(Message::PaneClose(pane))
-                .padding([1, 5])
-                .style(button::text)
-                .into()
-        } else {
-            Space::new().width(0).height(0).into()
-        };
-
-        row![pop_out_btn, close_btn]
-            .spacing(2)
-            .align_y(iced::Alignment::Center)
-            .into()
-    }
-
-    /// Render the body content of a single pane (chart panel).
-    ///
-    /// Controls are now in the pane_grid TitleBar, so the body is just
-    /// the chart shader or a placeholder.
-    fn view_pane_body(
-        &self,
-        chart_id: ChartId,
-        _pane: pane_grid::Pane,
-        _is_focused: bool,
-    ) -> Element<'_, Message> {
-        let chart = match self.charts.get(&chart_id) {
-            Some(c) => c,
-            None => return self.view_empty_placeholder(),
-        };
-
-        // If data is loaded, render via GPU Shader widget.
-        if let (LoadState::Loaded, Some(ref data)) =
-            (&chart.load_state, &chart.data)
-        {
-            let snapshot = crate::chart_widget::ChartRenderSnapshot {
-                symbol: chart.symbol.clone(),
-                data: Some(Arc::clone(data)),
-                camera: chart.chart_state.camera.clone(),
-                dirty: chart.chart_state.dirty.clone(),
-                crosshair_pos: chart.chart_state.crosshair_pos,
-                levels: chart.chart_state.levels.clone(),
-                viewport_width: chart.chart_state.camera.viewport_width,
-                viewport_height: chart.chart_state.camera.viewport_height,
-                collapse_gaps: chart.chart_state.collapse_gaps,
-                volume_scale: chart.chart_state.volume_scale,
-                data_time_start: chart.chart_state.data_time_start,
-                data_time_end: chart.chart_state.data_time_end,
-            };
-            let program = crate::chart_widget::ChartProgram {
-                chart_id,
-                snapshot,
-            };
-            let shader = crate::chart_widget::chart_shader(program);
-
-            return container(shader)
-                .width(Fill)
-                .height(Fill)
-                .padding(2) // Inset so Content's focus border is visible.
-                .into();
-        }
-
-        // Placeholder for empty/loading/error states.
-        let status_text = match &chart.load_state {
-            LoadState::Empty => {
-                "No data -- type a symbol and press Enter".to_string()
-            }
-            LoadState::Loading => "Loading...".to_string(),
-            LoadState::Loaded => "Loaded".to_string(),
-            LoadState::Error(e) => format!("Error: {e}"),
-        };
-        let bg_color = theme::CHART_EMPTY_BG;
-
-        container(
-            text(status_text).size(14).color(theme::TEXT_SECONDARY),
-        )
-        .width(Fill)
-        .height(Fill)
-        .center_x(Fill)
-        .center_y(Fill)
-        .padding(2) // Inset so Content's focus border is visible.
-        .style(move |_theme| container::Style {
-            background: Some(bg_color.into()),
-            ..Default::default()
-        })
-        .into()
-    }
-
-    /// Render an empty placeholder when no chart data exists.
-    fn view_empty_placeholder(&self) -> Element<'_, Message> {
-        container(
-            text("Empty")
-                .size(16)
-                .color(theme::TEXT_MUTED)
-                .align_x(iced::alignment::Horizontal::Center),
-        )
-        .width(Fill)
-        .height(Fill)
-        .center(Fill)
-        .style(|_theme| container::Style {
-            background: Some(theme::CHART_EMPTY_BG.into()),
-            border: iced::Border {
-                color: theme::CHART_INACTIVE_BORDER,
-                width: 1.0,
-                radius: 0.0.into(),
-            },
-            ..Default::default()
-        })
-        .into()
-    }
-
-    /// Build the status bar at the bottom of the window.
-    fn view_status_bar(&self) -> Element<'_, Message> {
-        let active_info = if let Some(id) = self.active_chart_id() {
-            if let Some(chart) = self.charts.get(&id) {
-                let sym = if chart.symbol.is_empty() {
-                    "---"
-                } else {
-                    &chart.symbol
-                };
-                format!("{sym} | {}", chart.timeframe.display_name())
-            } else {
-                "---".to_string()
-            }
-        } else {
-            "No chart".to_string()
-        };
-        let pane_count = self.workspace.pane_count();
-        let overlay_indicator = if self.show_frame_overlay {
-            " | F11: overlay ON"
-        } else {
-            ""
-        };
-        let status_row = row![
-            text(&self.status_message)
-                .size(12)
-                .color(theme::TEXT_SECONDARY),
-            Space::new().width(Fill),
-            text(format!(
-                "{active_info} | {pane_count} pane(s){overlay_indicator} | {}",
-                self.current_time
-            ))
-            .size(12)
-            .color(theme::TEXT_MUTED),
-        ]
-        .padding([4, 8])
-        .align_y(iced::Alignment::Center);
-
-        container(status_row)
-            .width(Fill)
-            .style(|_theme| container::Style {
-                background: Some(theme::STATUS_BAR_BG.into()),
-                ..Default::default()
-            })
-            .into()
-    }
-}
-
-// ── Button style helpers ──────────────────────────────────────────────
-
-/// Button style with hover highlight: muted text by default, white text
-/// and subtle background on hover/press.
-fn hover_text_button_style(
-    _theme: &iced::Theme,
-    status: button::Status,
-) -> button::Style {
-    let text_color = match status {
-        button::Status::Hovered | button::Status::Pressed => Color::WHITE,
-        _ => theme::TEXT_MUTED,
-    };
-    let background = match status {
-        button::Status::Hovered => {
-            Some(iced::Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.1)))
-        }
-        button::Status::Pressed => {
-            Some(iced::Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.15)))
-        }
-        _ => None,
-    };
-    button::Style {
-        text_color,
-        background,
-        ..Default::default()
-    }
-}
+// View functions (view, view_toolbar, view_content, view_pane_*, view_status_bar)
+// are in app/views.rs.
