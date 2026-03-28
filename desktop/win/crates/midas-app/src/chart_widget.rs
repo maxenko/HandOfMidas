@@ -22,23 +22,23 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use iced::widget::shader::{self, Viewport};
-use iced::{Event, Rectangle, mouse};
+use iced::{mouse, Event, Rectangle};
 
 use midas_chart::camera::Camera2D;
 use midas_chart::dirty::{DirtyFlags, DirtyTracker};
 use midas_chart::input::ChartInput;
-use midas_chart::interaction::{ChartEvent, handle_event};
+use midas_chart::interaction::{handle_event, ChartEvent};
 use midas_chart::levels::HorizontalLevel;
 use midas_chart::scene::ChartScene;
 use midas_chart::state::{ChartState, InteractionMode};
 use midas_chart::{
-    CandleInstance, CrosshairRender, GridLineInstance, VolumeInstance, compute_chart_scene,
+    compute_chart_scene, CandleInstance, CrosshairRender, GridLineInstance, VolumeInstance,
 };
 use midas_core::ChartId;
 use midas_data::CandleBuffer;
-use midas_render::ChartRenderer;
 use midas_render::color::dark_theme;
 use midas_render::renderer::ChartScene as RenderScene;
+use midas_render::ChartRenderer;
 
 use crate::app::Message;
 
@@ -69,8 +69,12 @@ pub struct ChartRenderSnapshot {
     pub viewport_height: u32,
     /// Whether session gaps are collapsed (index-based X positioning).
     pub collapse_gaps: bool,
+    /// Timeline border position (fraction of viewport for volume area).
+    pub timeline_border_ratio: f32,
     /// Volume bar height multiplier (1.0 = default).
     pub volume_scale: f32,
+    /// Whether the Volume Profile overlay is visible.
+    pub show_volume_profile: bool,
     /// Data time bounds for scroll clamping (first candle timestamp ms).
     pub data_time_start: f64,
     /// Data time bounds for scroll clamping (last candle timestamp ms).
@@ -135,7 +139,9 @@ impl shader::Program<Message> for ChartProgram {
         chart_state.data_time_start = self.snapshot.data_time_start;
         chart_state.data_time_end = self.snapshot.data_time_end;
         chart_state.levels = self.snapshot.levels.clone();
+        chart_state.timeline_border_ratio = self.snapshot.timeline_border_ratio;
         chart_state.volume_scale = self.snapshot.volume_scale;
+        chart_state.show_volume_profile = self.snapshot.show_volume_profile;
 
         // Detect viewport resize and emit a scale-preserving adjustment.
         // Compare against the canonical camera viewport (from snapshot),
@@ -157,13 +163,13 @@ impl shader::Program<Message> for ChartProgram {
                 chart_state.crosshair_pos = None;
 
                 state.last_viewport = Some(new_vp);
-                return Some(shader::Action::publish(
-                    Message::ChartViewportChanged(
-                        self.chart_id,
-                        old_vp.0, old_vp.1,
-                        new_vp.0, new_vp.1,
-                    ),
-                ));
+                return Some(shader::Action::publish(Message::ChartViewportChanged(
+                    self.chart_id,
+                    old_vp.0,
+                    old_vp.1,
+                    new_vp.0,
+                    new_vp.1,
+                )));
             }
         }
         // Seed the initial viewport from snapshot so the first real
@@ -176,13 +182,13 @@ impl shader::Program<Message> for ChartProgram {
             // If snapshot viewport already differs from bounds, emit
             // an adjustment on this first frame.
             if snap_vp != new_vp && snap_vp.0 > 0 && snap_vp.1 > 0 {
-                return Some(shader::Action::publish(
-                    Message::ChartViewportChanged(
-                        self.chart_id,
-                        snap_vp.0, snap_vp.1,
-                        new_vp.0, new_vp.1,
-                    ),
-                ));
+                return Some(shader::Action::publish(Message::ChartViewportChanged(
+                    self.chart_id,
+                    snap_vp.0,
+                    snap_vp.1,
+                    new_vp.0,
+                    new_vp.1,
+                )));
             }
         }
 
@@ -203,6 +209,9 @@ impl shader::Program<Message> for ChartProgram {
                 // Apply volume scale locally so the triangle moves
                 // immediately during drag (before the message round-trip
                 // through the app updates the canonical state).
+                if let midas_chart::ChartAction::SetTimelineBorderRatio { ratio } = action {
+                    chart_state.timeline_border_ratio = *ratio as f32;
+                }
                 if let midas_chart::ChartAction::SetVolumeScale { scale } = action {
                     chart_state.volume_scale = *scale as f32;
                 }
@@ -245,8 +254,14 @@ impl shader::Program<Message> for ChartProgram {
     ) -> Self::Primitive {
         let snap = &self.snapshot;
 
-        // Read volume_scale from widget state (updated locally during drag)
-        // for immediate visual feedback, falling back to snapshot value.
+        // Read timeline_border_ratio and volume_scale from widget state
+        // (updated locally during drag) for immediate visual feedback,
+        // falling back to snapshot values.
+        let live_timeline_border_ratio = state
+            .chart_state
+            .as_ref()
+            .map(|cs| cs.timeline_border_ratio)
+            .unwrap_or(snap.timeline_border_ratio);
         let live_volume_scale = state
             .chart_state
             .as_ref()
@@ -263,6 +278,7 @@ impl shader::Program<Message> for ChartProgram {
                     viewport_width: bounds.width as u32,
                     viewport_height: bounds.height as u32,
                     background_color: dark_theme().background,
+                    timeline_border_ratio: 0.20,
                     volume_scale: 1.0,
                 };
             }
@@ -276,10 +292,13 @@ impl shader::Program<Message> for ChartProgram {
         camera.viewport_width = bounds.width.max(1.0) as u32;
         camera.viewport_height = bounds.height.max(1.0) as u32;
 
-        // When volume_scale is being dragged, the local value diverges
-        // from the snapshot. Bump grid + crosshair generations so the
-        // renderer re-uploads those buffers (separator line + handle).
+        // When timeline_border_ratio or volume_scale is being dragged, the
+        // local value diverges from the snapshot. Bump grid + crosshair
+        // generations so the renderer re-uploads those buffers.
         let mut dirty = snap.dirty.clone();
+        if (live_timeline_border_ratio - snap.timeline_border_ratio).abs() > f32::EPSILON {
+            dirty.grid += 1;
+        }
         if (live_volume_scale - snap.volume_scale).abs() > f32::EPSILON {
             dirty.grid += 1;
         }
@@ -301,7 +320,9 @@ impl shader::Program<Message> for ChartProgram {
             crosshair: snap.crosshair_pos,
             levels: &snap.levels,
             collapse_gaps: snap.collapse_gaps,
+            timeline_border_ratio: live_timeline_border_ratio,
             volume_scale: live_volume_scale,
+            show_volume_profile: snap.show_volume_profile,
             dirty: &dirty,
         };
 
@@ -313,6 +334,7 @@ impl shader::Program<Message> for ChartProgram {
             viewport_width: bounds.width as u32,
             viewport_height: bounds.height as u32,
             background_color: theme.background,
+            timeline_border_ratio: live_timeline_border_ratio,
             volume_scale: live_volume_scale,
         }
     }
@@ -323,33 +345,43 @@ impl shader::Program<Message> for ChartProgram {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> mouse::Interaction {
-        // While actively dragging the volume handle, always show resize cursor.
+        // While actively dragging the volume handle or timeline border,
+        // always show resize cursor.
         if let Some(cs) = &state.chart_state {
             if matches!(
                 cs.interaction_mode,
                 InteractionMode::DraggingVolumeScale { .. }
+                    | InteractionMode::DraggingTimelineBorder { .. }
             ) {
                 return mouse::Interaction::ResizingVertically;
             }
         }
 
         if let Some(pos) = cursor.position_in(bounds) {
-            // Hit-test the volume scale handle triangle zone.
-            let vol_scale = state.chart_state.as_ref()
+            // Check volume handle triangle.
+            let vol_scale = state
+                .chart_state
+                .as_ref()
                 .map(|cs| cs.volume_scale)
                 .unwrap_or(1.0);
-            let handle_y = midas_chart::volume_handle_y(
-                bounds.height as u32,
-                vol_scale,
-            );
-            let half_h = 7.0 + 8.0; // VOLUME_HANDLE_HEIGHT/2 + HIT_PADDING
-            let x_min = bounds.width - 10.0 - 8.0; // HANDLE_WIDTH + HIT_PADDING
-            if pos.x >= x_min
-                && pos.y >= handle_y - half_h
-                && pos.y <= handle_y + half_h
-            {
+            let handle_y = midas_chart::volume_handle_y(bounds.height as u32, vol_scale);
+            let half_h = 7.0 + 8.0;
+            let x_min = bounds.width - 10.0 - 8.0;
+            if pos.x >= x_min && pos.y >= handle_y - half_h && pos.y <= handle_y + half_h {
                 return mouse::Interaction::ResizingVertically;
             }
+
+            // Check timeline border line (full width, generous tolerance).
+            let border_ratio = state
+                .chart_state
+                .as_ref()
+                .map(|cs| cs.timeline_border_ratio)
+                .unwrap_or(0.20);
+            let border_y = midas_chart::timeline_border_y(bounds.height as u32, border_ratio);
+            if (pos.y - border_y).abs() <= 6.0 {
+                return mouse::Interaction::ResizingVertically;
+            }
+
             mouse::Interaction::Crosshair
         } else {
             mouse::Interaction::default()
@@ -374,6 +406,8 @@ pub struct ChartPrimitive {
     pub viewport_height: u32,
     /// Background color for clear.
     pub background_color: [f32; 4],
+    /// Timeline border ratio for separator line position in prepare().
+    pub timeline_border_ratio: f32,
     /// Volume scale for handle position in prepare().
     pub volume_scale: f32,
 }
@@ -408,6 +442,8 @@ struct ChartGpuResources {
     grid_lines: Vec<GridLineInstance>,
     /// Cached crosshair overlay lines (0 or 2 instances).
     crosshair_lines: Vec<GridLineInstance>,
+    /// Cached Volume Profile histogram bars.
+    volume_profile_instances: Vec<GridLineInstance>,
 }
 
 impl ChartGpuResources {
@@ -419,6 +455,7 @@ impl ChartGpuResources {
             volumes: Vec::new(),
             grid_lines: Vec::new(),
             crosshair_lines: Vec::new(),
+            volume_profile_instances: Vec::new(),
         }
     }
 }
@@ -438,11 +475,7 @@ pub struct ChartPipeline {
 }
 
 impl shader::Pipeline for ChartPipeline {
-    fn new(
-        _device: &wgpu::Device,
-        _queue: &wgpu::Queue,
-        format: wgpu::TextureFormat,
-    ) -> Self {
+    fn new(_device: &wgpu::Device, _queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         tracing::info!("Creating ChartPipeline with format {:?}", format);
         Self {
             texture_format: format,
@@ -482,72 +515,10 @@ impl shader::Primitive for ChartPrimitive {
             resources.volumes = volumes.clone();
         }
 
-        // ── Build all grid lines ─────────────────────────────────────
+        // Grid instances are fully built in compute_chart_scene().
         let vw = self.viewport_width as f32;
         let vh = self.viewport_height as f32;
-        let sep_y = scene.separator_y;
-
-        // 1. Horizontal price grid lines (from scene, price-only).
-        //    scene.grid_lines now contains ONLY horizontal price lines
-        //    (vertical time lines removed from compute_grid_lines).
-        resources.grid_lines = Vec::new();
-        for gl in &scene.grid_lines {
-            if gl.position < 0.0 || gl.position > sep_y {
-                continue;
-            }
-            let (color, thickness) = if gl.is_major {
-                ([0.40, 0.40, 0.45, 0.14], 1.0_f32)
-            } else {
-                ([0.30, 0.30, 0.35, 0.07], 0.5_f32)
-            };
-            resources.grid_lines.push(GridLineInstance {
-                rect: [0.0, gl.position, vw, gl.position + thickness],
-                color,
-            });
-        }
-
-        // 2. Separator line between price and volume areas.
-        resources.grid_lines.push(GridLineInstance {
-            rect: [0.0, sep_y, vw, sep_y + 1.0],
-            color: [0.45, 0.45, 0.50, 0.35],
-        });
-
-        // 3. Vertical date lines (from date_labels module).
-        for dl in &scene.date_labels {
-            let (color, thickness) = if dl.is_boundary {
-                ([0.45, 0.45, 0.50, 0.25], 1.0_f32)
-            } else {
-                ([0.30, 0.30, 0.35, 0.12], 0.5_f32)
-            };
-            resources.grid_lines.push(GridLineInstance {
-                rect: [dl.screen_x, 0.0, dl.screen_x + thickness, sep_y],
-                color,
-            });
-        }
-
-        // 4. Session boundary lines (collapsed mode only).
-        //    Skip boundaries that overlap with a date-label boundary line
-        //    (both fire at day transitions, producing a double line).
-        //    The session boundary sits at the midpoint between two candles
-        //    while the date label sits at the candle center, so the gap
-        //    equals half a candle slot — use full slot width as tolerance.
-        let slot_tol = if scene.candle_count > 1 {
-            vw / scene.candle_count as f32
-        } else {
-            40.0
-        };
-        for sb in &scene.session_boundaries {
-            let dominated = scene.date_labels.iter().any(|dl| {
-                dl.is_boundary && (dl.screen_x - sb.x).abs() < slot_tol
-            });
-            if dominated {
-                continue;
-            }
-            resources.grid_lines.push(GridLineInstance {
-                rect: [sb.x, 0.0, sb.x + 1.0, sep_y],
-                color: sb.color,
-            });
-        }
+        resources.grid_lines = scene.grid_instances.clone();
 
         // Convert crosshair into two full-width GridLineInstance rectangles.
         resources.crosshair_lines = if let Some(ref ch) = scene.crosshair {
@@ -556,14 +527,11 @@ impl shader::Primitive for ChartPrimitive {
             Vec::new()
         };
 
-        // Render the volume scale handle triangle on the right edge.
+        // Render the separator handle triangle on the right edge.
         // Lives in the crosshair overlay layer (drawn on top of everything).
         {
-            let handle_y = midas_chart::volume_handle_y(
-                self.viewport_height,
-                self.volume_scale,
-            );
-            let half_h: f32 = 7.0;   // VOLUME_HANDLE_HEIGHT / 2
+            let handle_y = midas_chart::volume_handle_y(self.viewport_height, self.volume_scale);
+            let half_h: f32 = 7.0; // VOLUME_HANDLE_HEIGHT / 2
             let tri_width: f32 = 10.0; // VOLUME_HANDLE_WIDTH
             let color = [0.55, 0.55, 0.55, 0.35];
             let num_slices = (half_h * 2.0) as i32;
@@ -580,6 +548,9 @@ impl shader::Primitive for ChartPrimitive {
                 });
             }
         }
+
+        // Volume Profile instances (pre-computed in the chart scene).
+        resources.volume_profile_instances = scene.volume_profile_instances.clone();
 
         // Build the render scene from cached data.
         let dirty = DirtyFlags {
@@ -598,23 +569,17 @@ impl shader::Primitive for ChartPrimitive {
             volumes: &resources.volumes,
             grid_lines: &resources.grid_lines,
             crosshair_lines: &resources.crosshair_lines,
+            volume_profile: &resources.volume_profile_instances,
             dirty: &dirty,
         };
 
         // Let the per-chart ChartRenderer upload to GPU buffers.
-        resources.renderer.render_prepare(
-            device,
-            queue,
-            &render_scene,
-            &mut resources.tracker,
-        );
+        resources
+            .renderer
+            .render_prepare(device, queue, &render_scene, &mut resources.tracker);
     }
 
-    fn draw(
-        &self,
-        pipeline: &Self::Pipeline,
-        render_pass: &mut wgpu::RenderPass<'_>,
-    ) -> bool {
+    fn draw(&self, pipeline: &Self::Pipeline, render_pass: &mut wgpu::RenderPass<'_>) -> bool {
         if self.scene.is_none() {
             return false;
         }
@@ -635,8 +600,7 @@ impl shader::Primitive for ChartPrimitive {
         // render pass by iced's architecture (Pipeline lives in Storage,
         // which is only dropped after all rendering is complete).
         let renderer: &ChartRenderer = &resources.renderer;
-        let renderer: &ChartRenderer =
-            unsafe { &*(renderer as *const ChartRenderer) };
+        let renderer: &ChartRenderer = unsafe { &*(renderer as *const ChartRenderer) };
         renderer.draw_pass(render_pass);
         true
     }
@@ -647,15 +611,9 @@ impl shader::Primitive for ChartPrimitive {
 /// Translate an iced `Event` into zero or more `ChartEvent`s.
 ///
 /// Only mouse events within the chart bounds are translated.
-fn translate_event(
-    event: &Event,
-    bounds: Rectangle,
-    cursor: mouse::Cursor,
-) -> Vec<ChartEvent> {
+fn translate_event(event: &Event, bounds: Rectangle, cursor: mouse::Cursor) -> Vec<ChartEvent> {
     match event {
-        Event::Mouse(mouse_event) => {
-            translate_mouse_event(mouse_event, bounds, cursor)
-        }
+        Event::Mouse(mouse_event) => translate_mouse_event(mouse_event, bounds, cursor),
         _ => Vec::new(),
     }
 }
@@ -771,9 +729,7 @@ fn action_to_message(
     use midas_chart::ChartAction;
 
     match action {
-        ChartAction::Pan { dx, dy } => {
-            Some(Message::ChartPan(chart_id, *dx, *dy))
-        }
+        ChartAction::Pan { dx, dy } => Some(Message::ChartPan(chart_id, *dx, *dy)),
         ChartAction::Zoom { center_x, factor } => {
             // Convert pixel X to data-space time using the widget's camera
             // which has the correct viewport dimensions from actual bounds.
@@ -788,11 +744,10 @@ fn action_to_message(
         ChartAction::SetCrosshair { x, y } => {
             Some(Message::ChartCrosshair(chart_id, Some((*x, *y))))
         }
-        ChartAction::ClearCrosshair => {
-            Some(Message::ChartCrosshair(chart_id, None))
-        }
-        ChartAction::CreateLevel { price } => {
-            Some(Message::ChartCreateLevel(chart_id, *price))
+        ChartAction::ClearCrosshair => Some(Message::ChartCrosshair(chart_id, None)),
+        ChartAction::CreateLevel { price } => Some(Message::ChartCreateLevel(chart_id, *price)),
+        ChartAction::SetTimelineBorderRatio { ratio } => {
+            Some(Message::ChartSetTimelineBorderRatio(chart_id, *ratio))
         }
         ChartAction::SetVolumeScale { scale } => {
             Some(Message::ChartSetVolumeScale(chart_id, *scale))

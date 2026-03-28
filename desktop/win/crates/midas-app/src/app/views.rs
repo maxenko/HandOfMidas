@@ -36,14 +36,9 @@ impl MidasApp {
     }
 
     /// Build the view for a floating (pop-out) chart window.
-    fn view_floating_chart<'a>(
-        &'a self,
-        chart: &'a ChartPanel,
-    ) -> Element<'a, Message> {
+    fn view_floating_chart<'a>(&'a self, chart: &'a ChartPanel) -> Element<'a, Message> {
         // If data is loaded, render via GPU Shader widget.
-        if let (LoadState::Loaded, Some(ref data)) =
-            (&chart.load_state, &chart.data)
-        {
+        if let (LoadState::Loaded, Some(ref data)) = (&chart.load_state, &chart.data) {
             let snapshot = crate::chart_widget::ChartRenderSnapshot {
                 symbol: chart.symbol.clone(),
                 data: Some(Arc::clone(data)),
@@ -54,7 +49,9 @@ impl MidasApp {
                 viewport_width: chart.chart_state.camera.viewport_width,
                 viewport_height: chart.chart_state.camera.viewport_height,
                 collapse_gaps: chart.chart_state.collapse_gaps,
+                timeline_border_ratio: chart.chart_state.timeline_border_ratio,
                 volume_scale: chart.chart_state.volume_scale,
+                show_volume_profile: chart.chart_state.show_volume_profile,
                 data_time_start: chart.chart_state.data_time_start,
                 data_time_end: chart.chart_state.data_time_end,
             };
@@ -68,26 +65,25 @@ impl MidasApp {
 
             // Compute date labels for the time axis overlay.
             let camera = &chart.chart_state.camera;
-            let candle_duration =
-                midas_chart::estimate_candle_duration(data.as_ref());
+            let candle_duration = midas_chart::estimate_candle_duration(data.as_ref());
             let date_labels = midas_chart::date_labels::compute(
                 camera,
                 data.as_ref(),
                 candle_duration,
                 chart.chart_state.collapse_gaps,
             );
-            let date_overlay = build_date_label_overlay(&date_labels, camera);
+            let date_overlay = build_date_label_overlay(
+                &date_labels,
+                camera,
+                chart.chart_state.timeline_border_ratio,
+            );
 
-            let chart_area = stack![shader, date_overlay]
-                .width(Fill)
-                .height(Fill);
+            let chart_area = stack![shader, date_overlay].width(Fill).height(Fill);
 
             // Header bar with symbol and timeframe.
             let header = container(
                 row![
-                    text(&chart.symbol)
-                        .size(13)
-                        .color(Color::WHITE),
+                    text(&chart.symbol).size(13).color(Color::WHITE),
                     text(chart.timeframe.display_name())
                         .size(11)
                         .color(theme::TEXT_SECONDARY),
@@ -114,18 +110,16 @@ impl MidasApp {
             LoadState::Loaded => "Loaded".to_string(),
             LoadState::Error(e) => format!("Error: {e}"),
         };
-        container(
-            text(status_text).size(14).color(theme::TEXT_SECONDARY),
-        )
-        .width(Fill)
-        .height(Fill)
-        .center_x(Fill)
-        .center_y(Fill)
-        .style(|_theme| container::Style {
-            background: Some(theme::CHART_EMPTY_BG.into()),
-            ..Default::default()
-        })
-        .into()
+        container(text(status_text).size(14).color(theme::TEXT_SECONDARY))
+            .width(Fill)
+            .height(Fill)
+            .center_x(Fill)
+            .center_y(Fill)
+            .style(|_theme| container::Style {
+                background: Some(theme::CHART_EMPTY_BG.into()),
+                ..Default::default()
+            })
+            .into()
     }
 }
 
@@ -136,19 +130,27 @@ impl MidasApp {
     fn view_toolbar(&self) -> Element<'_, Message> {
         let layout_buttons = row![
             button(text("1").size(12))
-                .on_press(Message::LayoutPreset(crate::layout::LayoutPresetKind::Single))
+                .on_press(Message::LayoutPreset(
+                    crate::layout::LayoutPresetKind::Single
+                ))
                 .padding([4, 8])
                 .style(hover_text_button_style),
             button(text("1|1").size(12))
-                .on_press(Message::LayoutPreset(crate::layout::LayoutPresetKind::SplitH))
+                .on_press(Message::LayoutPreset(
+                    crate::layout::LayoutPresetKind::SplitH
+                ))
                 .padding([4, 8])
                 .style(hover_text_button_style),
             button(text("1/1").size(12))
-                .on_press(Message::LayoutPreset(crate::layout::LayoutPresetKind::SplitV))
+                .on_press(Message::LayoutPreset(
+                    crate::layout::LayoutPresetKind::SplitV
+                ))
                 .padding([4, 8])
                 .style(hover_text_button_style),
             button(text("2x2").size(12))
-                .on_press(Message::LayoutPreset(crate::layout::LayoutPresetKind::Grid2x2))
+                .on_press(Message::LayoutPreset(
+                    crate::layout::LayoutPresetKind::Grid2x2
+                ))
                 .padding([4, 8])
                 .style(hover_text_button_style),
         ]
@@ -156,15 +158,19 @@ impl MidasApp {
 
         let split_buttons = row![
             button(text("Split H").size(11))
-                .on_press_maybe(self.workspace.focus.map(|p| {
-                    Message::PaneSplit(pane_grid::Axis::Horizontal, p)
-                }))
+                .on_press_maybe(
+                    self.workspace
+                        .focus
+                        .map(|p| { Message::PaneSplit(pane_grid::Axis::Horizontal, p) })
+                )
                 .padding([4, 6])
                 .style(hover_text_button_style),
             button(text("Split V").size(11))
-                .on_press_maybe(self.workspace.focus.map(|p| {
-                    Message::PaneSplit(pane_grid::Axis::Vertical, p)
-                }))
+                .on_press_maybe(
+                    self.workspace
+                        .focus
+                        .map(|p| { Message::PaneSplit(pane_grid::Axis::Vertical, p) })
+                )
                 .padding([4, 6])
                 .style(hover_text_button_style),
         ]
@@ -175,14 +181,10 @@ impl MidasApp {
             .padding([4, 10])
             .style(hover_text_button_style);
 
-        let toolbar_row = row![
-            layout_buttons,
-            split_buttons,
-            add_btn,
-        ]
-        .spacing(8)
-        .padding(6)
-        .align_y(iced::Alignment::Center);
+        let toolbar_row = row![layout_buttons, split_buttons, add_btn,]
+            .spacing(8)
+            .padding(6)
+            .align_y(iced::Alignment::Center);
 
         container(toolbar_row)
             .width(Fill)
@@ -202,17 +204,12 @@ impl MidasApp {
         let focused_pane = self.workspace.focus;
         let pane_count = self.workspace.pane_count();
 
-        let pane_grid_widget = PaneGrid::new(
-            &self.workspace.panes,
-            |pane, pane_state, _is_maximized| {
+        let pane_grid_widget =
+            PaneGrid::new(&self.workspace.panes, |pane, pane_state, _is_maximized| {
                 let is_focused = focused_pane == Some(pane);
                 let chart_id = pane_state.chart_id;
 
-                let title_bar = self.view_pane_title_bar(
-                    chart_id,
-                    pane,
-                    pane_count,
-                );
+                let title_bar = self.view_pane_title_bar(chart_id, pane, pane_count);
 
                 let body = self.view_pane_body(chart_id);
                 // Content style: dark background (serves as title bar bg
@@ -226,9 +223,9 @@ impl MidasApp {
                             theme::CHART_INACTIVE_BORDER
                         };
                         container::Style {
-                            background: Some(iced::Background::Color(
-                                Color::from_rgb(0.06, 0.08, 0.12),
-                            )),
+                            background: Some(iced::Background::Color(Color::from_rgb(
+                                0.06, 0.08, 0.12,
+                            ))),
                             border: iced::Border {
                                 color: border_color,
                                 width: if is_focused { 2.0 } else { 1.0 },
@@ -237,33 +234,30 @@ impl MidasApp {
                             ..Default::default()
                         }
                     })
-            },
-        )
-        .on_resize(6, Message::PaneResized)
-        .on_drag(Message::PaneDragged)
-        .style(|_theme| pane_grid::Style {
-            hovered_region: pane_grid::Highlight {
-                background: iced::Background::Color(Color::from_rgba(
-                    0.2, 0.4, 0.8, 0.25,
-                )),
-                border: iced::Border {
-                    color: Color::from_rgba(0.3, 0.5, 1.0, 0.6),
-                    width: 2.0,
-                    radius: 0.0.into(),
+            })
+            .on_resize(6, Message::PaneResized)
+            .on_drag(Message::PaneDragged)
+            .style(|_theme| pane_grid::Style {
+                hovered_region: pane_grid::Highlight {
+                    background: iced::Background::Color(Color::from_rgba(0.2, 0.4, 0.8, 0.25)),
+                    border: iced::Border {
+                        color: Color::from_rgba(0.3, 0.5, 1.0, 0.6),
+                        width: 2.0,
+                        radius: 0.0.into(),
+                    },
                 },
-            },
-            hovered_split: pane_grid::Line {
-                color: Color::from_rgba(0.3, 0.5, 1.0, 0.8),
-                width: 2.0,
-            },
-            picked_split: pane_grid::Line {
-                color: Color::from_rgba(0.3, 0.5, 1.0, 1.0),
-                width: 3.0,
-            },
-        })
-        .width(Fill)
-        .height(Fill)
-        .spacing(1);
+                hovered_split: pane_grid::Line {
+                    color: Color::from_rgba(0.3, 0.5, 1.0, 0.8),
+                    width: 2.0,
+                },
+                picked_split: pane_grid::Line {
+                    color: Color::from_rgba(0.3, 0.5, 1.0, 1.0),
+                    width: 3.0,
+                },
+            })
+            .width(Fill)
+            .height(Fill)
+            .spacing(1);
 
         container(pane_grid_widget)
             .width(Fill)
@@ -305,9 +299,7 @@ impl MidasApp {
     fn view_title_bar_content(&self, chart_id: ChartId) -> Element<'_, Message> {
         let chart = self.charts.get(&chart_id);
         let panel_tf = chart.map(|c| c.timeframe).unwrap_or(Timeframe::D1);
-        let symbol_input_value = chart
-            .map(|c| c.symbol_input.as_str())
-            .unwrap_or("");
+        let symbol_input_value = chart.map(|c| c.symbol_input.as_str()).unwrap_or("");
 
         let ticker_input = text_input("SYMBOL", symbol_input_value)
             .on_input(move |val| Message::PanelSymbolInputChanged(chart_id, val))
@@ -317,8 +309,13 @@ impl MidasApp {
             .padding([2, 4]);
 
         let timeframes = [
-            Timeframe::M1, Timeframe::M5, Timeframe::M15,
-            Timeframe::H1, Timeframe::H4, Timeframe::D1, Timeframe::W1,
+            Timeframe::M1,
+            Timeframe::M5,
+            Timeframe::M15,
+            Timeframe::H1,
+            Timeframe::H4,
+            Timeframe::D1,
+            Timeframe::W1,
         ];
         let tf_buttons: Vec<Element<'_, Message>> = timeframes
             .iter()
@@ -342,9 +339,7 @@ impl MidasApp {
             .collect();
         let tf_row = Row::with_children(tf_buttons).spacing(1);
 
-        let collapse_active = chart
-            .map(|c| c.chart_state.collapse_gaps)
-            .unwrap_or(false);
+        let collapse_active = chart.map(|c| c.chart_state.collapse_gaps).unwrap_or(false);
         let collapse_btn = if collapse_active {
             button(text("G").size(10).color(Color::WHITE))
                 .on_press(Message::ToggleCollapseGaps(chart_id))
@@ -357,12 +352,27 @@ impl MidasApp {
                 .style(button::text)
         };
 
+        let vp_active = chart
+            .map(|c| c.chart_state.show_volume_profile)
+            .unwrap_or(false);
+        let vp_btn = if vp_active {
+            button(text("VP").size(10).color(Color::WHITE))
+                .on_press(Message::ToggleVolumeProfile(chart_id))
+                .padding([1, 4])
+                .style(button::primary)
+        } else {
+            button(text("VP").size(10))
+                .on_press(Message::ToggleVolumeProfile(chart_id))
+                .padding([1, 4])
+                .style(button::text)
+        };
+
         let reset_btn = button(text("R").size(10))
             .on_press(Message::ResetChart(chart_id))
             .padding([1, 4])
             .style(button::text);
 
-        row![ticker_input, tf_row, collapse_btn, reset_btn]
+        row![ticker_input, tf_row, collapse_btn, vp_btn, reset_btn]
             .spacing(4)
             .align_y(iced::Alignment::Center)
             .height(24)
@@ -401,18 +411,13 @@ impl MidasApp {
 
 impl MidasApp {
     /// Render the body content of a single pane (chart or placeholder).
-    fn view_pane_body(
-        &self,
-        chart_id: ChartId,
-    ) -> Element<'_, Message> {
+    fn view_pane_body(&self, chart_id: ChartId) -> Element<'_, Message> {
         let chart = match self.charts.get(&chart_id) {
             Some(c) => c,
             None => return self.view_empty_placeholder(),
         };
 
-        if let (LoadState::Loaded, Some(ref data)) =
-            (&chart.load_state, &chart.data)
-        {
+        if let (LoadState::Loaded, Some(ref data)) = (&chart.load_state, &chart.data) {
             let snapshot = crate::chart_widget::ChartRenderSnapshot {
                 symbol: chart.symbol.clone(),
                 data: Some(Arc::clone(data)),
@@ -423,20 +428,18 @@ impl MidasApp {
                 viewport_width: chart.chart_state.camera.viewport_width,
                 viewport_height: chart.chart_state.camera.viewport_height,
                 collapse_gaps: chart.chart_state.collapse_gaps,
+                timeline_border_ratio: chart.chart_state.timeline_border_ratio,
                 volume_scale: chart.chart_state.volume_scale,
+                show_volume_profile: chart.chart_state.show_volume_profile,
                 data_time_start: chart.chart_state.data_time_start,
                 data_time_end: chart.chart_state.data_time_end,
             };
-            let program = crate::chart_widget::ChartProgram {
-                chart_id,
-                snapshot,
-            };
+            let program = crate::chart_widget::ChartProgram { chart_id, snapshot };
             let shader = crate::chart_widget::chart_shader(program);
 
             // Compute date labels for the time axis overlay.
             let camera = &chart.chart_state.camera;
-            let candle_duration =
-                midas_chart::estimate_candle_duration(data.as_ref());
+            let candle_duration = midas_chart::estimate_candle_duration(data.as_ref());
             let date_labels = midas_chart::date_labels::compute(
                 camera,
                 data.as_ref(),
@@ -444,43 +447,39 @@ impl MidasApp {
                 chart.chart_state.collapse_gaps,
             );
 
-            let date_overlay = build_date_label_overlay(&date_labels, camera);
+            let date_overlay = build_date_label_overlay(
+                &date_labels,
+                camera,
+                chart.chart_state.timeline_border_ratio,
+            );
 
-            return container(
-                stack![shader, date_overlay]
-                    .width(Fill)
-                    .height(Fill)
-            )
-            .width(Fill)
-            .height(Fill)
-            .padding(2) // Inset so Content's focus border is visible.
-            .into();
+            return container(stack![shader, date_overlay].width(Fill).height(Fill))
+                .width(Fill)
+                .height(Fill)
+                .padding(2) // Inset so Content's focus border is visible.
+                .into();
         }
 
         // Placeholder for empty/loading/error states.
         let status_text = match &chart.load_state {
-            LoadState::Empty => {
-                "No data -- type a symbol and press Enter".to_string()
-            }
+            LoadState::Empty => "No data -- type a symbol and press Enter".to_string(),
             LoadState::Loading => "Loading...".to_string(),
             LoadState::Loaded => "Loaded".to_string(),
             LoadState::Error(e) => format!("Error: {e}"),
         };
         let bg_color = theme::CHART_EMPTY_BG;
 
-        container(
-            text(status_text).size(14).color(theme::TEXT_SECONDARY),
-        )
-        .width(Fill)
-        .height(Fill)
-        .center_x(Fill)
-        .center_y(Fill)
-        .padding(2) // Inset so Content's focus border is visible.
-        .style(move |_theme| container::Style {
-            background: Some(bg_color.into()),
-            ..Default::default()
-        })
-        .into()
+        container(text(status_text).size(14).color(theme::TEXT_SECONDARY))
+            .width(Fill)
+            .height(Fill)
+            .center_x(Fill)
+            .center_y(Fill)
+            .padding(2) // Inset so Content's focus border is visible.
+            .style(move |_theme| container::Style {
+                background: Some(bg_color.into()),
+                ..Default::default()
+            })
+            .into()
     }
 
     /// Render an empty placeholder when no chart data exists.
@@ -567,6 +566,7 @@ impl MidasApp {
 fn build_date_label_overlay<'a>(
     labels: &[midas_chart::DateLabel],
     camera: &midas_chart::camera::Camera2D,
+    timeline_border_ratio: f32,
 ) -> Element<'a, Message> {
     let label_font_size = 10.0;
     let secondary_font_size = 9.0;
@@ -593,9 +593,7 @@ fn build_date_label_overlay<'a>(
 
         if gap > 1.0 {
             let portion = ((gap * portion_scale) as u16).max(1);
-            time_row = time_row.push(
-                Space::new().width(Length::FillPortion(portion)),
-            );
+            time_row = time_row.push(Space::new().width(Length::FillPortion(portion)));
             time_cursor += gap;
         } else if gap < -1.0 {
             // Labels overlap — skip.
@@ -623,9 +621,7 @@ fn build_date_label_overlay<'a>(
 
             if sec_gap > 1.0 {
                 let portion = ((sec_gap * portion_scale) as u16).max(1);
-                date_row = date_row.push(
-                    Space::new().width(Length::FillPortion(portion)),
-                );
+                date_row = date_row.push(Space::new().width(Length::FillPortion(portion)));
                 date_cursor += sec_gap;
             }
 
@@ -642,48 +638,40 @@ fn build_date_label_overlay<'a>(
     let time_remaining = vw - time_cursor;
     if time_remaining > 1.0 {
         let portion = ((time_remaining * portion_scale) as u16).max(1);
-        time_row = time_row.push(
-            Space::new().width(Length::FillPortion(portion)),
-        );
+        time_row = time_row.push(Space::new().width(Length::FillPortion(portion)));
     }
     let date_remaining = vw - date_cursor;
     if date_remaining > 1.0 {
         let portion = ((date_remaining * portion_scale) as u16).max(1);
-        date_row = date_row.push(
-            Space::new().width(Length::FillPortion(portion)),
-        );
+        date_row = date_row.push(Space::new().width(Length::FillPortion(portion)));
     }
 
     // Fixed heights so the FillPortion math is stable regardless
     // of whether a date label is present.
-    let time_row_height = label_font_size + 2.0;
-    let date_row_height = secondary_font_size + 2.0;
+    let _time_row_height = label_font_size + 2.0;
+    let _date_row_height = secondary_font_size + 2.0;
 
-    // Time row anchored at the bottom of the 80% price area (above separator).
-    // Date row anchored at the top of the 20% volume area (below separator).
+    // Time row anchored at the bottom of the price area (above border).
+    // Date row anchored at the top of the volume area (below border).
     // Neither row's content affects the other's position.
+    // Fixed pixel heights match the GPU separator line exactly.
+    let vh = camera.viewport_height.max(1) as f32;
+    let border_y = vh * (1.0 - timeline_border_ratio);
     container(
         column![
-            container(
-                column![
-                    Space::new().width(Fill).height(Fill),
-                    time_row,
-                    Space::new().height(Length::Fixed(4.0)),
-                ]
-            )
+            container(column![
+                Space::new().width(Fill).height(Fill),
+                time_row,
+                Space::new().height(Length::Fixed(4.0)),
+            ])
             .width(Fill)
-            .height(Length::FillPortion(80)),
-            container(
-                column![
-                    Space::new().height(Length::Fixed(4.0)),
-                    date_row,
-                ]
-            )
-            .width(Fill)
-            .height(Length::FillPortion(20)),
+            .height(Length::Fixed(border_y)),
+            container(column![Space::new().height(Length::Fixed(4.0)), date_row,])
+                .width(Fill)
+                .height(Length::Fixed(vh - border_y)),
         ]
         .width(Fill)
-        .height(Fill)
+        .height(Fill),
     )
     .width(Fill)
     .height(Fill)
@@ -691,21 +679,18 @@ fn build_date_label_overlay<'a>(
 }
 
 /// Button style: muted text by default, white text + subtle bg on hover.
-fn hover_text_button_style(
-    _theme: &iced::Theme,
-    status: button::Status,
-) -> button::Style {
+fn hover_text_button_style(_theme: &iced::Theme, status: button::Status) -> button::Style {
     let text_color = match status {
         button::Status::Hovered | button::Status::Pressed => Color::WHITE,
         _ => theme::TEXT_MUTED,
     };
     let background = match status {
-        button::Status::Hovered => {
-            Some(iced::Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.1)))
-        }
-        button::Status::Pressed => {
-            Some(iced::Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.15)))
-        }
+        button::Status::Hovered => Some(iced::Background::Color(Color::from_rgba(
+            1.0, 1.0, 1.0, 0.1,
+        ))),
+        button::Status::Pressed => Some(iced::Background::Color(Color::from_rgba(
+            1.0, 1.0, 1.0, 0.15,
+        ))),
         _ => None,
     };
     button::Style {

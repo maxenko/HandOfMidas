@@ -99,15 +99,26 @@ pub struct ChartConfig {
     /// Whether session gaps are collapsed (index-based X positioning).
     #[serde(default)]
     pub collapse_gaps: bool,
+    /// Timeline border position (fraction of viewport for volume area, default 0.20).
+    #[serde(default = "default_timeline_border_ratio", alias = "separator_ratio")]
+    pub timeline_border_ratio: f32,
     /// Volume bar height multiplier (1.0 = default).
     #[serde(default = "default_volume_scale")]
     pub volume_scale: f32,
+    /// Whether Volume Profile overlay is enabled.
+    #[serde(default)]
+    pub show_volume_profile: bool,
     /// Viewport width at save time (prevents scale distortion on restore).
     #[serde(default)]
     pub viewport_width: Option<u32>,
     /// Viewport height at save time.
     #[serde(default)]
     pub viewport_height: Option<u32>,
+}
+
+/// Default timeline border ratio for configs missing the field (backward compat).
+fn default_timeline_border_ratio() -> f32 {
+    0.20
 }
 
 /// Default volume scale for configs missing the field (backward compat).
@@ -162,7 +173,10 @@ impl AppConfig {
         let content = match std::fs::read_to_string(path) {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                tracing::info!("Config file not found at {}, using defaults", path.display());
+                tracing::info!(
+                    "Config file not found at {}, using defaults",
+                    path.display()
+                );
                 return Ok(Self::default());
             }
             Err(e) => return Err(ConfigError::Io(e)),
@@ -209,10 +223,8 @@ mod tests {
     /// Helper to create a unique temp directory for each test.
     fn temp_dir() -> std::path::PathBuf {
         let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "midas_config_test_{}_{id}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("midas_config_test_{}_{id}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         dir
     }
@@ -277,7 +289,9 @@ mod tests {
                 camera_price_low: Some(350.0),
                 camera_price_high: Some(450.0),
                 collapse_gaps: true,
+                timeline_border_ratio: 0.20,
                 volume_scale: 1.0,
+                show_volume_profile: false,
                 viewport_width: None,
                 viewport_height: None,
             }],
@@ -391,7 +405,9 @@ mod tests {
                     camera_price_low: None,
                     camera_price_high: None,
                     collapse_gaps: false,
+                    timeline_border_ratio: 0.20,
                     volume_scale: 1.0,
+                    show_volume_profile: false,
                     viewport_width: None,
                     viewport_height: None,
                 },
@@ -404,7 +420,9 @@ mod tests {
                     camera_price_low: Some(100.0),
                     camera_price_high: Some(300.0),
                     collapse_gaps: true,
+                    timeline_border_ratio: 0.20,
                     volume_scale: 1.0,
+                    show_volume_profile: false,
                     viewport_width: None,
                     viewport_height: None,
                 },
@@ -564,7 +582,9 @@ color = [1.0, 0.843, 0.0, 1.0]
                 camera_price_low: Some(50.0),
                 camera_price_high: Some(150.0),
                 collapse_gaps: false,
+                timeline_border_ratio: 0.20,
                 volume_scale: 1.0,
+                show_volume_profile: false,
                 viewport_width: None,
                 viewport_height: None,
             }],
@@ -595,10 +615,7 @@ color = [1.0, 0.843, 0.0, 1.0]
         assert!(
             temp_files.is_empty(),
             "stale temp files remain: {:?}",
-            temp_files
-                .iter()
-                .map(|e| e.file_name())
-                .collect::<Vec<_>>()
+            temp_files.iter().map(|e| e.file_name()).collect::<Vec<_>>()
         );
 
         cleanup(&dir);
@@ -640,7 +657,9 @@ color = [1.0, 0.843, 0.0, 1.0]
                     camera_price_low: Some(470.0),
                     camera_price_high: Some(510.0),
                     collapse_gaps: true,
+                    timeline_border_ratio: 0.20,
                     volume_scale: 1.0,
+                    show_volume_profile: false,
                     viewport_width: None,
                     viewport_height: None,
                 },
@@ -653,7 +672,9 @@ color = [1.0, 0.843, 0.0, 1.0]
                     camera_price_low: None,
                     camera_price_high: None,
                     collapse_gaps: false,
+                    timeline_border_ratio: 0.20,
                     volume_scale: 1.0,
+                    show_volume_profile: false,
                     viewport_width: None,
                     viewport_height: None,
                 },

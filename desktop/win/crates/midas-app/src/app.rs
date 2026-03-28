@@ -160,12 +160,16 @@ pub enum Message {
     ChartCrosshair(ChartId, Option<(f32, f32)>),
     /// Create a new horizontal price level.
     ChartCreateLevel(ChartId, f64),
+    /// Set the timeline border position for a chart.
+    ChartSetTimelineBorderRatio(ChartId, f64),
     /// Set the volume bar height multiplier for a chart.
     ChartSetVolumeScale(ChartId, f64),
 
     // -- Gap collapsing --
     /// Toggle session gap collapsing on a chart panel.
     ToggleCollapseGaps(ChartId),
+    /// Toggle Volume Profile overlay on a chart panel.
+    ToggleVolumeProfile(ChartId),
     /// Reset chart to default view (fit all data).
     ResetChart(ChartId),
 
@@ -209,8 +213,7 @@ impl MidasApp {
     /// (`C:\Users\<user>\AppData\Local\HandOfMidas\config.toml` on Windows).
     /// Falls back to `data/` if the platform directory cannot be determined.
     pub fn config_file_path() -> PathBuf {
-        let base = dirs::config_local_dir()
-            .unwrap_or_else(|| PathBuf::from("data"));
+        let base = dirs::config_local_dir().unwrap_or_else(|| PathBuf::from("data"));
         base.join("HandOfMidas").join("config.toml")
     }
 
@@ -247,9 +250,7 @@ impl MidasApp {
     /// monitor dimensions match the current system (heuristic: monitor_width
     /// and monitor_height are present). If the monitor config changed or no
     /// position was saved, falls back to `Position::Default`.
-    fn validate_saved_position(
-        wc: &midas_core::config::WindowConfig,
-    ) -> window::Position {
+    fn validate_saved_position(wc: &midas_core::config::WindowConfig) -> window::Position {
         let (x, y) = match (wc.x, wc.y) {
             (Some(x), Some(y)) => (x, y),
             _ => return window::Position::Default,
@@ -303,10 +304,7 @@ impl MidasApp {
         // Open the main window via the daemon. The returned Task produces
         // the window::Id once the OS window is created.
         let (main_id, open_task) = window::open(window::Settings {
-            size: iced::Size::new(
-                config.window.width as f32,
-                config.window.height as f32,
-            ),
+            size: iced::Size::new(config.window.width as f32, config.window.height as f32),
             position: initial_position,
             ..window::Settings::default()
         });
@@ -314,36 +312,33 @@ impl MidasApp {
         let open_task = open_task.map(Message::MainWindowOpened);
 
         // Build workspace and charts from config (or empty defaults).
-        let (workspace, charts, status_message) =
-            if config.charts.is_empty() {
-                let (ws, first_id) = WorkspaceLayout::single();
-                let mut charts = HashMap::new();
-                charts.insert(first_id, Self::make_empty_panel());
-                (ws, charts, "Ready".to_string())
-            } else {
-                let (mut ws, first_id) = WorkspaceLayout::single();
-                let mut charts = HashMap::new();
+        let (workspace, charts, status_message) = if config.charts.is_empty() {
+            let (ws, first_id) = WorkspaceLayout::single();
+            let mut charts = HashMap::new();
+            charts.insert(first_id, Self::make_empty_panel());
+            (ws, charts, "Ready".to_string())
+        } else {
+            let (mut ws, first_id) = WorkspaceLayout::single();
+            let mut charts = HashMap::new();
 
-                // First chart goes into the initial pane.
-                let first_cfg = &config.charts[0];
-                let mut panel = Self::restore_panel(first_cfg);
-                charts.insert(first_id, panel);
+            // First chart goes into the initial pane.
+            let first_cfg = &config.charts[0];
+            let mut panel = Self::restore_panel(first_cfg);
+            charts.insert(first_id, panel);
 
-                // Additional charts split vertically from the first pane.
-                let first_pane = ws.focus.unwrap();
-                for chart_cfg in config.charts.iter().skip(1) {
-                    panel = Self::restore_panel(chart_cfg);
-                    if let Some((new_id, _)) =
-                        ws.split(pane_grid::Axis::Vertical, first_pane)
-                    {
-                        charts.insert(new_id, panel);
-                    }
+            // Additional charts split vertically from the first pane.
+            let first_pane = ws.focus.unwrap();
+            for chart_cfg in config.charts.iter().skip(1) {
+                panel = Self::restore_panel(chart_cfg);
+                if let Some((new_id, _)) = ws.split(pane_grid::Axis::Vertical, first_pane) {
+                    charts.insert(new_id, panel);
                 }
-                ws.set_focus(first_pane);
+            }
+            ws.set_focus(first_pane);
 
-                let n = charts.len();
-                (ws, charts, format!("Restored {n} chart(s) from config"))
-            };
+            let n = charts.len();
+            (ws, charts, format!("Restored {n} chart(s) from config"))
+        };
 
         let mut app = Self {
             charts,
@@ -378,8 +373,7 @@ impl MidasApp {
 
     /// Restore a single chart panel from config.
     fn restore_panel(cfg: &ChartConfig) -> ChartPanel {
-        let tf = Timeframe::from_suffix(&cfg.timeframe)
-            .unwrap_or(Timeframe::D1);
+        let tf = Timeframe::from_suffix(&cfg.timeframe).unwrap_or(Timeframe::D1);
         let mut panel = Self::make_empty_panel();
         panel.symbol = cfg.symbol.clone();
         panel.symbol_input = cfg.symbol.clone();
@@ -393,14 +387,15 @@ impl MidasApp {
     fn restore_levels(level_cfgs: &[LevelConfig], panel: &mut ChartPanel) {
         for level_cfg in level_cfgs {
             let level_id = panel.chart_state.alloc_level_id();
-            panel.chart_state.levels.push(
-                midas_chart::levels::HorizontalLevel {
+            panel
+                .chart_state
+                .levels
+                .push(midas_chart::levels::HorizontalLevel {
                     id: level_id,
                     price: level_cfg.price,
                     color: level_cfg.color,
                     line_width: level_cfg.line_width,
-                },
-            );
+                });
         }
     }
 
@@ -418,13 +413,13 @@ impl MidasApp {
             panel.chart_state.camera.price_high = ph;
         }
         panel.chart_state.collapse_gaps = chart_cfg.collapse_gaps;
+        panel.chart_state.timeline_border_ratio = chart_cfg.timeline_border_ratio;
         panel.chart_state.volume_scale = chart_cfg.volume_scale;
+        panel.chart_state.show_volume_profile = chart_cfg.show_volume_profile;
         // Restore viewport so the first-frame ChartViewportChanged computes
         // the correct ratio (saved viewport → actual pane size) instead of
         // using the dummy 1280×720 from make_empty_panel.
-        if let (Some(vw), Some(vh)) =
-            (chart_cfg.viewport_width, chart_cfg.viewport_height)
-        {
+        if let (Some(vw), Some(vh)) = (chart_cfg.viewport_width, chart_cfg.viewport_height) {
             if vw > 0 && vh > 0 {
                 panel.chart_state.camera.viewport_width = vw;
                 panel.chart_state.camera.viewport_height = vh;
@@ -498,11 +493,11 @@ impl MidasApp {
         // Choose how many calendar days of data to generate based on
         // timeframe: more for coarser timeframes so the chart isn't empty.
         let days = match tf.as_secs() {
-            s if s >= Timeframe::W1.as_secs() => 3650,  // ~10 years
-            s if s >= Timeframe::D1.as_secs() => 730,   // ~2 years
-            s if s >= Timeframe::H1.as_secs() => 90,    // ~3 months
-            s if s >= Timeframe::M15.as_secs() => 30,   // ~1 month
-            _ => 10,                                      // <=M5: ~10 days
+            s if s >= Timeframe::W1.as_secs() => 3650, // ~10 years
+            s if s >= Timeframe::D1.as_secs() => 730,  // ~2 years
+            s if s >= Timeframe::H1.as_secs() => 90,   // ~3 months
+            s if s >= Timeframe::M15.as_secs() => 30,  // ~1 month
+            _ => 10,                                   // <=M5: ~10 days
         };
 
         let buffer = self.test_data.get_candles(symbol, tf, days);
@@ -536,14 +531,12 @@ impl MidasApp {
 
                     if chart.chart_state.collapse_gaps {
                         let start_idx = (len - visible_count) as f64;
-                        let end_idx =
-                            len as f64 + (visible_count as f64 * 0.05);
+                        let end_idx = len as f64 + (visible_count as f64 * 0.05);
                         chart.chart_state.camera.time_start = start_idx;
                         chart.chart_state.camera.time_end = end_idx;
                     } else {
                         let last_ts = buffer.timestamps[len - 1] as f64;
-                        let first_visible_ts =
-                            buffer.timestamps[len - visible_count] as f64;
+                        let first_visible_ts = buffer.timestamps[len - visible_count] as f64;
                         chart.chart_state.camera.time_start = first_visible_ts;
                         chart.chart_state.camera.time_end =
                             last_ts + (last_ts - first_visible_ts) * 0.05;
@@ -553,15 +546,13 @@ impl MidasApp {
                     let (low, high) = buffer.price_range(range);
                     let padding = (high - low) as f64 * 0.05;
                     chart.chart_state.camera.price_low = low as f64 - padding;
-                    chart.chart_state.camera.price_high =
-                        high as f64 + padding;
+                    chart.chart_state.camera.price_high = high as f64 + padding;
                 }
 
                 chart.chart_state.dirty.mark_camera();
             }
 
-            self.status_message =
-                format!("{}: {} candles at {}", symbol, count, tf.display_name());
+            self.status_message = format!("{}: {} candles at {}", symbol, count, tf.display_name());
         }
     }
 
@@ -646,9 +637,8 @@ impl MidasApp {
 
             Message::AddChart => {
                 if let Some(focused) = self.workspace.focus {
-                    if let Some((new_id, _new_pane)) = self
-                        .workspace
-                        .split(pane_grid::Axis::Vertical, focused)
+                    if let Some((new_id, _new_pane)) =
+                        self.workspace.split(pane_grid::Axis::Vertical, focused)
                     {
                         self.charts.insert(new_id, Self::make_empty_panel());
                         self.status_message = format!("Added {new_id}");
@@ -703,10 +693,7 @@ impl MidasApp {
                 Task::none()
             }
 
-            Message::PaneDragged(pane_grid::DragEvent::Dropped {
-                pane,
-                target,
-            }) => {
+            Message::PaneDragged(pane_grid::DragEvent::Dropped { pane, target }) => {
                 self.workspace.panes.drop(pane, target);
                 Task::none()
             }
@@ -714,12 +701,9 @@ impl MidasApp {
             Message::PaneDragged(_) => Task::none(),
 
             Message::PaneSplit(axis, pane) => {
-                if let Some((new_id, _new_pane)) =
-                    self.workspace.split(axis, pane)
-                {
+                if let Some((new_id, _new_pane)) = self.workspace.split(axis, pane) {
                     self.charts.insert(new_id, Self::make_empty_panel());
-                    self.status_message =
-                        format!("Split pane, added {new_id}");
+                    self.status_message = format!("Split pane, added {new_id}");
                 }
                 Task::none()
             }
@@ -733,9 +717,7 @@ impl MidasApp {
                 Task::none()
             }
 
-            Message::ChartViewportChanged(
-                chart_id, old_w, old_h, new_w, new_h,
-            ) => {
+            Message::ChartViewportChanged(chart_id, old_w, old_h, new_w, new_h) => {
                 if let Some(chart) = self.charts.get_mut(&chart_id) {
                     let cam = &mut chart.chart_state.camera;
                     if old_w > 0 && old_h > 0 {
@@ -747,10 +729,8 @@ impl MidasApp {
                         cam.time_start = cam.time_end - time_range * w_ratio;
 
                         // Vertical: anchor center, expand/contract both edges.
-                        let price_center =
-                            (cam.price_high + cam.price_low) / 2.0;
-                        let half_range =
-                            (cam.price_high - cam.price_low) / 2.0 * h_ratio;
+                        let price_center = (cam.price_high + cam.price_low) / 2.0;
+                        let half_range = (cam.price_high - cam.price_low) / 2.0 * h_ratio;
                         cam.price_high = price_center + half_range;
                         cam.price_low = price_center - half_range;
                     }
@@ -769,9 +749,9 @@ impl MidasApp {
             Message::ChartPan(chart_id, dx, dy) => {
                 self.focus_chart(chart_id);
                 if let Some(chart) = self.charts.get_mut(&chart_id) {
-                    chart.chart_state.apply_action(
-                        &midas_chart::ChartAction::Pan { dx, dy },
-                    );
+                    chart
+                        .chart_state
+                        .apply_action(&midas_chart::ChartAction::Pan { dx, dy });
                 }
                 self.mark_config_dirty();
                 Task::none()
@@ -828,17 +808,27 @@ impl MidasApp {
                 self.focus_chart(chart_id);
                 if let Some(chart) = self.charts.get_mut(&chart_id) {
                     let level_id = chart.chart_state.alloc_level_id();
-                    chart.chart_state.levels.push(
-                        midas_chart::levels::HorizontalLevel {
+                    chart
+                        .chart_state
+                        .levels
+                        .push(midas_chart::levels::HorizontalLevel {
                             id: level_id,
                             price,
                             color: [0.22, 0.55, 0.95, 0.8],
                             line_width: 1.0,
-                        },
-                    );
+                        });
                     chart.chart_state.dirty.mark_levels();
                     self.mark_config_dirty();
                 }
+                Task::none()
+            }
+
+            Message::ChartSetTimelineBorderRatio(chart_id, ratio) => {
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    chart.chart_state.timeline_border_ratio = ratio as f32;
+                    chart.chart_state.dirty.mark_data();
+                }
+                self.mark_config_dirty();
                 Task::none()
             }
 
@@ -864,37 +854,38 @@ impl MidasApp {
                             if !was_collapsed {
                                 // Switching ON: convert camera from time-space to
                                 // index-space so pan/zoom operate uniformly.
-                                let start_idx = data
-                                    .find_index_by_time(cam.time_start as i64)
-                                    as f64;
-                                let end_idx = data
-                                    .find_index_by_time(cam.time_end as i64)
-                                    as f64
-                                    + 1.0;
+                                let start_idx =
+                                    data.find_index_by_time(cam.time_start as i64) as f64;
+                                let end_idx =
+                                    data.find_index_by_time(cam.time_end as i64) as f64 + 1.0;
                                 cam.time_start = start_idx;
                                 cam.time_end = end_idx;
                                 chart.chart_state.data_time_start = 0.0;
-                                chart.chart_state.data_time_end =
-                                    len as f64;
+                                chart.chart_state.data_time_end = len as f64;
                             } else {
                                 // Switching OFF: convert camera from index-space
                                 // back to time-space.
-                                let si = (cam.time_start.round() as usize)
-                                    .min(len.saturating_sub(1));
-                                let ei = (cam.time_end.round() as usize)
-                                    .min(len.saturating_sub(1));
-                                cam.time_start =
-                                    data.timestamps[si] as f64;
-                                cam.time_end =
-                                    data.timestamps[ei] as f64;
-                                chart.chart_state.data_time_start =
-                                    data.timestamps[0] as f64;
-                                chart.chart_state.data_time_end =
-                                    data.timestamps[len - 1] as f64;
+                                let si =
+                                    (cam.time_start.round() as usize).min(len.saturating_sub(1));
+                                let ei = (cam.time_end.round() as usize).min(len.saturating_sub(1));
+                                cam.time_start = data.timestamps[si] as f64;
+                                cam.time_end = data.timestamps[ei] as f64;
+                                chart.chart_state.data_time_start = data.timestamps[0] as f64;
+                                chart.chart_state.data_time_end = data.timestamps[len - 1] as f64;
                             }
                         }
                     }
                     chart.chart_state.dirty.mark_camera();
+                }
+                self.mark_config_dirty();
+                Task::none()
+            }
+
+            Message::ToggleVolumeProfile(chart_id) => {
+                self.focus_chart(chart_id);
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    chart.chart_state.show_volume_profile = !chart.chart_state.show_volume_profile;
+                    chart.chart_state.dirty.mark_data();
                 }
                 self.mark_config_dirty();
                 Task::none()
@@ -932,8 +923,7 @@ impl MidasApp {
                     }
                     Err(ref e) => {
                         tracing::warn!("Config save failed: {e}");
-                        self.status_message =
-                            format!("Config save failed: {e}");
+                        self.status_message = format!("Config save failed: {e}");
                     }
                 }
                 Task::none()
@@ -955,15 +945,12 @@ impl MidasApp {
                                 floating_chart.timeframe.display_name()
                             )
                         };
-                        let (win_id, open_task) =
-                            window::open(window::Settings {
-                                size: iced::Size::new(800.0, 500.0),
-                                ..window::Settings::default()
-                            });
-                        self.floating_charts
-                            .insert(win_id, floating_chart);
-                        self.status_message =
-                            format!("Popped out {title} to new window");
+                        let (win_id, open_task) = window::open(window::Settings {
+                            size: iced::Size::new(800.0, 500.0),
+                            ..window::Settings::default()
+                        });
+                        self.floating_charts.insert(win_id, floating_chart);
+                        self.status_message = format!("Popped out {title} to new window");
                         return open_task.map(|_id| Message::Tick);
                     }
                 }
@@ -975,8 +962,7 @@ impl MidasApp {
                 self.mark_config_dirty();
                 // Re-query monitor size (window may have moved to a different monitor).
                 if let Some(id) = self.main_window {
-                    return window::monitor_size(id)
-                        .map(Message::MonitorSizeResult);
+                    return window::monitor_size(id).map(Message::MonitorSizeResult);
                 }
                 Task::none()
             }
@@ -989,8 +975,7 @@ impl MidasApp {
 
             Message::MonitorSizeResult(size) => {
                 if let Some(s) = size {
-                    self.monitor_size =
-                        Some((s.width as u32, s.height as u32));
+                    self.monitor_size = Some((s.width as u32, s.height as u32));
                 }
                 Task::none()
             }
@@ -1004,10 +989,7 @@ impl MidasApp {
 
             Message::FloatingWindowClosed(id) => {
                 if let Some(chart) = self.floating_charts.remove(&id) {
-                    tracing::info!(
-                        "Floating window closed for {}",
-                        chart.symbol
-                    );
+                    tracing::info!("Floating window closed for {}", chart.symbol);
                 }
                 // If the main window was closed, exit the application.
                 if self.main_window == Some(id) {

@@ -15,7 +15,7 @@ use midas_chart::input::ChartInput;
 use midas_chart::instances::CandleInstance;
 use midas_chart::levels::HorizontalLevel;
 use midas_chart::scene::ChartScene;
-use midas_data::binary::{MmapCandleFile, write_midas_file, MIDAS_MAGIC, MIDAS_VERSION};
+use midas_data::binary::{write_midas_file, MmapCandleFile, MIDAS_MAGIC, MIDAS_VERSION};
 use midas_data::candle::CandleBuffer;
 use midas_data::lod::downsample_minmax;
 use midas_feed::import_csv;
@@ -58,7 +58,9 @@ fn make_default_chart_input<'a>(
         crosshair: None,
         levels,
         collapse_gaps: false,
+        timeline_border_ratio: 0.20,
         volume_scale: 1.0,
+        show_volume_profile: false,
         dirty,
     }
 }
@@ -123,16 +125,12 @@ fn step2_write_midas_binary() {
     let dir = tempfile::tempdir().expect("create tempdir");
     let midas_path = dir.path().join("aapl_daily.midas");
 
-    write_midas_file(&midas_path, 1, 86400, "AAPL", &buf)
-        .expect("write_midas_file should succeed");
+    write_midas_file(&midas_path, 1, 86400, "AAPL", &buf).expect("write_midas_file should succeed");
 
     assert!(midas_path.exists(), ".midas file was not created");
 
     let metadata = std::fs::metadata(&midas_path).unwrap();
-    assert!(
-        metadata.len() > 0,
-        ".midas file should not be empty"
-    );
+    assert!(metadata.len() > 0, ".midas file should not be empty");
 }
 
 // ─── 3. Read back via mmap and verify round-trip ────────────────────────
@@ -147,14 +145,17 @@ fn step3_mmap_roundtrip() {
     write_midas_file(&midas_path, 42, 86400, "AAPL", &original).unwrap();
 
     // Open via memory-mapped I/O.
-    let mmap = MmapCandleFile::open(&midas_path)
-        .expect("MmapCandleFile::open should succeed");
+    let mmap = MmapCandleFile::open(&midas_path).expect("MmapCandleFile::open should succeed");
 
     // Verify header fields.
     let header = mmap.header();
     assert_eq!(header.magic, MIDAS_MAGIC, "magic mismatch");
     assert_eq!(header.version, MIDAS_VERSION, "version mismatch");
-    assert_eq!(header.candle_count, original.len() as u64, "candle_count mismatch");
+    assert_eq!(
+        header.candle_count,
+        original.len() as u64,
+        "candle_count mismatch"
+    );
     assert_eq!(header.symbol_id, 42, "symbol_id mismatch");
     assert_eq!(header.timeframe_secs, 86400, "timeframe_secs mismatch");
     assert_eq!(header.start_ts, original.timestamps[0], "start_ts mismatch");
@@ -167,9 +168,16 @@ fn step3_mmap_roundtrip() {
 
     // Convert mmap back to CandleBuffer and verify exact round-trip.
     let loaded = mmap.to_candle_buffer();
-    assert_eq!(loaded.len(), original.len(), "candle count mismatch after mmap round-trip");
+    assert_eq!(
+        loaded.len(),
+        original.len(),
+        "candle count mismatch after mmap round-trip"
+    );
 
-    assert_eq!(loaded.timestamps, original.timestamps, "timestamps mismatch");
+    assert_eq!(
+        loaded.timestamps, original.timestamps,
+        "timestamps mismatch"
+    );
     assert_eq!(loaded.opens, original.opens, "opens mismatch");
     assert_eq!(loaded.highs, original.highs, "highs mismatch");
     assert_eq!(loaded.lows, original.lows, "lows mismatch");
@@ -196,12 +204,10 @@ fn step4_compute_chart_scene() {
         "scene should contain candle instances"
     );
     let candles: &Vec<CandleInstance> = scene.candles.as_ref().unwrap();
-    assert!(
-        !candles.is_empty(),
-        "candle instance count must be > 0"
-    );
+    assert!(!candles.is_empty(), "candle instance count must be > 0");
     assert_eq!(
-        candles.len(), 20,
+        candles.len(),
+        20,
         "all 20 candles should be visible with a full-range camera"
     );
 
@@ -241,14 +247,11 @@ fn step4_compute_chart_scene() {
         "scene should contain volume instances"
     );
     let volumes = scene.volumes.as_ref().unwrap();
-    assert!(
-        !volumes.is_empty(),
-        "volume instance count must be > 0"
-    );
+    assert!(!volumes.is_empty(), "volume instance count must be > 0");
 
     // ── Grid lines exist ────────────────────────────────────────────
     assert!(
-        !scene.grid_lines.is_empty(),
+        !scene.grid_instances.is_empty(),
         "scene should contain grid lines"
     );
 
@@ -279,14 +282,14 @@ fn step5_lod_downsample() {
     let original = import_csv(csv_path).unwrap();
 
     let downsampled = downsample_minmax(&original, 10);
-    assert_eq!(downsampled.len(), 10, "downsampled buffer should have 10 candles");
+    assert_eq!(
+        downsampled.len(),
+        10,
+        "downsampled buffer should have 10 candles"
+    );
 
     // Price envelope must be preserved exactly.
-    let orig_min_low = original
-        .lows
-        .iter()
-        .copied()
-        .fold(f32::INFINITY, f32::min);
+    let orig_min_low = original.lows.iter().copied().fold(f32::INFINITY, f32::min);
     let orig_max_high = original
         .highs
         .iter()
@@ -349,8 +352,7 @@ fn full_pipeline_end_to_end() {
     // 2. CandleBuffer -> .midas binary
     let dir = tempfile::tempdir().unwrap();
     let midas_path = dir.path().join("aapl_gate.midas");
-    write_midas_file(&midas_path, 1, 86400, "AAPL", &original)
-        .expect("write_midas_file failed");
+    write_midas_file(&midas_path, 1, 86400, "AAPL", &original).expect("write_midas_file failed");
     assert!(midas_path.exists());
 
     // 3. .midas binary -> mmap -> CandleBuffer
@@ -378,7 +380,7 @@ fn full_pipeline_end_to_end() {
     let volumes = scene.volumes.as_ref().expect("volume instances missing");
     assert_eq!(volumes.len(), 20, "all volume bars present");
 
-    assert!(!scene.grid_lines.is_empty(), "grid lines present");
+    assert!(!scene.grid_instances.is_empty(), "grid lines present");
     assert!(!scene.y_labels.is_empty(), "y labels present");
     assert!(!scene.x_labels.is_empty(), "x labels present");
 
@@ -397,6 +399,9 @@ fn full_pipeline_end_to_end() {
     let ds_camera = camera_for_buffer(&downsampled);
     let ds_input = make_default_chart_input(&downsampled, &ds_camera, &dirty, &[]);
     let ds_scene = compute_chart_scene(&ds_input);
-    let ds_candles = ds_scene.candles.as_ref().expect("LOD scene missing candles");
+    let ds_candles = ds_scene
+        .candles
+        .as_ref()
+        .expect("LOD scene missing candles");
     assert_eq!(ds_candles.len(), 10, "LOD scene should have 10 candles");
 }

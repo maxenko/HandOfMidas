@@ -37,7 +37,9 @@ impl MidasApp {
                     camera_price_low: Some(cam.price_low),
                     camera_price_high: Some(cam.price_high),
                     collapse_gaps: panel.chart_state.collapse_gaps,
+                    timeline_border_ratio: panel.chart_state.timeline_border_ratio,
                     volume_scale: panel.chart_state.volume_scale,
+                    show_volume_profile: panel.chart_state.show_volume_profile,
                     viewport_width: Some(cam.viewport_width),
                     viewport_height: Some(cam.viewport_height),
                 }
@@ -90,9 +92,7 @@ impl MidasApp {
 
         Task::perform(
             async move {
-                let result =
-                    tokio::task::spawn_blocking(move || config.save(&path))
-                        .await;
+                let result = tokio::task::spawn_blocking(move || config.save(&path)).await;
                 match result {
                     Ok(Ok(())) => Ok(()),
                     Ok(Err(e)) => Err(e.to_string()),
