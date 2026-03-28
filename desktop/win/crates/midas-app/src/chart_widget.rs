@@ -200,6 +200,12 @@ impl shader::Program<Message> for ChartProgram {
         for chart_event in chart_events {
             let actions = handle_event(chart_state, chart_event);
             for action in &actions {
+                // Apply volume scale locally so the triangle moves
+                // immediately during drag (before the message round-trip
+                // through the app updates the canonical state).
+                if let midas_chart::ChartAction::SetVolumeScale { scale } = action {
+                    chart_state.volume_scale = *scale as f32;
+                }
                 if let Some(msg) = action_to_message(self.chart_id, action, &chart_state.camera) {
                     messages.push(msg);
                 }
@@ -233,11 +239,19 @@ impl shader::Program<Message> for ChartProgram {
 
     fn draw(
         &self,
-        _state: &Self::State,
+        state: &Self::State,
         _cursor: mouse::Cursor,
         bounds: Rectangle,
     ) -> Self::Primitive {
         let snap = &self.snapshot;
+
+        // Read volume_scale from widget state (updated locally during drag)
+        // for immediate visual feedback, falling back to snapshot value.
+        let live_volume_scale = state
+            .chart_state
+            .as_ref()
+            .map(|cs| cs.volume_scale)
+            .unwrap_or(snap.volume_scale);
 
         // If no data, return an empty primitive.
         let data = match &snap.data {
@@ -249,6 +263,7 @@ impl shader::Program<Message> for ChartProgram {
                     viewport_width: bounds.width as u32,
                     viewport_height: bounds.height as u32,
                     background_color: dark_theme().background,
+                    volume_scale: 1.0,
                 };
             }
         };
@@ -278,7 +293,7 @@ impl shader::Program<Message> for ChartProgram {
             crosshair: snap.crosshair_pos,
             levels: &snap.levels,
             collapse_gaps: snap.collapse_gaps,
-            volume_scale: snap.volume_scale,
+            volume_scale: live_volume_scale,
             dirty: &snap.dirty,
         };
 
@@ -290,6 +305,7 @@ impl shader::Program<Message> for ChartProgram {
             viewport_width: bounds.width as u32,
             viewport_height: bounds.height as u32,
             background_color: theme.background,
+            volume_scale: live_volume_scale,
         }
     }
 
@@ -311,8 +327,13 @@ impl shader::Program<Message> for ChartProgram {
 
         if let Some(pos) = cursor.position_in(bounds) {
             // Hit-test the volume scale handle triangle zone.
-            let vh = bounds.height;
-            let handle_y = vh * (1.0 - midas_chart::VOLUME_AREA_FRACTION);
+            let vol_scale = state.chart_state.as_ref()
+                .map(|cs| cs.volume_scale)
+                .unwrap_or(1.0);
+            let handle_y = midas_chart::volume_handle_y(
+                bounds.height as u32,
+                vol_scale,
+            );
             let half_h = 7.0 + 8.0; // VOLUME_HANDLE_HEIGHT/2 + HIT_PADDING
             let x_min = bounds.width - 10.0 - 8.0; // HANDLE_WIDTH + HIT_PADDING
             if pos.x >= x_min
@@ -345,6 +366,8 @@ pub struct ChartPrimitive {
     pub viewport_height: u32,
     /// Background color for clear.
     pub background_color: [f32; 4],
+    /// Volume scale for handle position in prepare().
+    pub volume_scale: f32,
 }
 
 impl std::fmt::Debug for ChartPrimitive {
@@ -451,19 +474,53 @@ impl shader::Primitive for ChartPrimitive {
             resources.volumes = volumes.clone();
         }
 
-        // Convert GridLine to GridLineInstance for the GPU.
+        // ── Build all grid lines ─────────────────────────────────────
         let vw = self.viewport_width as f32;
         let vh = self.viewport_height as f32;
-        resources.grid_lines = scene
-            .grid_lines
-            .iter()
-            .map(|gl| grid_line_to_instance(gl, vw, vh))
-            .collect();
+        let sep_y = scene.separator_y;
 
-        // Append session boundary lines (faint vertical lines at gap boundaries).
+        // 1. Horizontal price grid lines (from scene, price-only).
+        //    scene.grid_lines now contains ONLY horizontal price lines
+        //    (vertical time lines removed from compute_grid_lines).
+        resources.grid_lines = Vec::new();
+        for gl in &scene.grid_lines {
+            if gl.position < 0.0 || gl.position > sep_y {
+                continue;
+            }
+            let (color, thickness) = if gl.is_major {
+                ([0.40, 0.40, 0.45, 0.14], 1.0_f32)
+            } else {
+                ([0.30, 0.30, 0.35, 0.07], 0.5_f32)
+            };
+            resources.grid_lines.push(GridLineInstance {
+                rect: [0.0, gl.position, vw, gl.position + thickness],
+                color,
+            });
+        }
+
+        // 2. Separator line between price and volume areas.
+        resources.grid_lines.push(GridLineInstance {
+            rect: [0.0, sep_y, vw, sep_y + 1.0],
+            color: [0.45, 0.45, 0.50, 0.35],
+        });
+
+        // 3. Vertical date lines (from date_labels module).
+        for dl in &scene.date_labels {
+            let (color, thickness) = if dl.is_boundary {
+                ([0.45, 0.45, 0.50, 0.25], 1.0_f32)
+            } else {
+                ([0.30, 0.30, 0.35, 0.12], 0.5_f32)
+            };
+            resources.grid_lines.push(GridLineInstance {
+                rect: [dl.screen_x, 0.0, dl.screen_x + thickness, sep_y],
+                color,
+            });
+        }
+
+        // 4. Session boundary lines (collapsed mode only).
         for sb in &scene.session_boundaries {
             resources.grid_lines.push(GridLineInstance {
-                rect: [sb.x, 0.0, sb.x + 1.0, vh],
+                rect: [sb.x, 0.0, sb.x + 1.0, sep_y],
                 color: sb.color,
             });
         }
@@ -476,9 +533,12 @@ impl shader::Primitive for ChartPrimitive {
         };
 
         // Render the volume scale handle triangle on the right edge.
-        // Rasterized as horizontal line slices for the grid pipeline.
+        // Position tracks the effective volume area top based on volume_scale.
         {
-            let handle_y = vh * (1.0 - midas_chart::VOLUME_AREA_FRACTION);
+            let handle_y = midas_chart::volume_handle_y(
+                self.viewport_height,
+                self.volume_scale,
+            );
             let half_h: f32 = 7.0;   // VOLUME_HANDLE_HEIGHT / 2
             let tri_width: f32 = 10.0; // VOLUME_HANDLE_WIDTH
             let color = [0.55, 0.55, 0.55, 0.35];
@@ -501,6 +561,7 @@ impl shader::Primitive for ChartPrimitive {
         let dirty = DirtyFlags {
             camera: scene.generations.camera,
             candles: scene.generations.candles,
+            grid: scene.generations.grid,
             levels: scene.generations.levels,
             crosshair: scene.generations.crosshair,
             theme: scene.generations.theme,
@@ -714,67 +775,6 @@ fn action_to_message(
         }
         ChartAction::Redraw => None,
         _ => None,
-    }
-}
-
-// ── Grid line conversion ─────────────────────────────────────────────
-
-/// Convert a high-level `GridLine` to a GPU-ready `GridLineInstance`.
-///
-/// Horizontal grid lines span the full viewport width at a fixed Y position.
-/// Vertical grid lines span the full viewport height at a fixed X position.
-/// The line thickness is 1 logical pixel.
-fn grid_line_to_instance(
-    gl: &midas_chart::instances::GridLine,
-    viewport_width: f32,
-    _viewport_height: f32,
-) -> GridLineInstance {
-    // Convention: if position > viewport_height, treat as vertical (X-axis).
-    // Otherwise, horizontal (Y-axis). This is a heuristic; the grid computation
-    // in midas-chart outputs horizontal lines with Y positions and vertical
-    // lines with X positions. We distinguish by checking the range.
-    //
-    // A more robust approach: grid lines from compute_grid_lines include
-    // a `label` field, but we don't have an explicit H/V flag. We use
-    // the is_major field and position range as a proxy:
-    // - Y-axis (price) grid lines: position is in [0, viewport_height]
-    // - X-axis (time) grid lines: position is in [0, viewport_width]
-    //
-    // Since viewport_width is typically > viewport_height, and both position
-    // ranges overlap, we cannot distinguish reliably. Instead, the grid
-    // computation should produce both types.
-    //
-    // For now, we treat positions that appear in the price-grid range as
-    // horizontal lines, and those in the time-grid range as vertical lines.
-    // We'll use the label content as a heuristic: price labels contain '$'
-    // or are purely numeric.
-    //
-    // SIMPLIFICATION: The grid computation in midas-chart produces a flat
-    // list. Looking at the actual compute code, grid_lines contains both
-    // horizontal and vertical lines interleaved. We need a simple way to
-    // tell them apart. The compute_grid_lines function first pushes
-    // Y-axis (horizontal) lines, then X-axis (vertical) lines. Since we
-    // don't have that info, we use a heuristic: if the position is within
-    // the height range, it's a horizontal line at that Y; otherwise vertical.
-    //
-    // Actually, looking more carefully at the code, price grid lines have
-    // positions in [0, viewport_height] range and time grid lines have
-    // positions in [0, viewport_width] range. Both could overlap. Let's
-    // just make them all horizontal for now (a common simplification for
-    // v1), and we can add vertical grid lines later.
-    //
-    // For a working implementation, let's render horizontal lines.
-    let line_width = if gl.is_major { 1.0 } else { 0.5 };
-    let color = if gl.is_major {
-        dark_theme().grid_major
-    } else {
-        dark_theme().grid
-    };
-
-    // Horizontal line at Y = position, spanning full width.
-    GridLineInstance {
-        rect: [0.0, gl.position, viewport_width, gl.position + line_width],
-        color,
     }
 }
 
