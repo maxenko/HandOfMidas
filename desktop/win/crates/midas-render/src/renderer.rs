@@ -4,15 +4,9 @@
 //! draw order for a single chart. It consumes a [`ChartScene`] and
 //! a [`DirtyTracker`] to minimize GPU uploads.
 
-use midas_chart::{
-    CandleInstance, DirtyFlags, DirtyTracker, GridLineInstance, VolumeInstance,
-};
+use midas_chart::{CandleInstance, DirtyFlags, DirtyTracker, GridLineInstance, VolumeInstance};
 
-use crate::pipelines::{
-    candle::CandlePipeline,
-    grid::GridPipeline,
-    volume::VolumePipeline,
-};
+use crate::pipelines::{candle::CandlePipeline, grid::GridPipeline, volume::VolumePipeline};
 
 /// Scene data for a single chart frame.
 ///
@@ -34,6 +28,8 @@ pub struct ChartScene<'a> {
     pub grid_lines: &'a [GridLineInstance],
     /// Crosshair overlay lines (0 or 2 grid line instances: vertical + horizontal).
     pub crosshair_lines: &'a [GridLineInstance],
+    /// Volume Profile histogram bars (empty if VP disabled).
+    pub volume_profile: &'a [GridLineInstance],
     /// Current dirty flags snapshot.
     pub dirty: &'a DirtyFlags,
 }
@@ -46,6 +42,8 @@ pub struct ChartRenderer {
     candle_pipeline: CandlePipeline,
     volume_pipeline: VolumePipeline,
     grid_pipeline: GridPipeline,
+    /// Volume Profile histogram pipeline (reuses grid shader for horizontal bars).
+    volume_profile_pipeline: GridPipeline,
     /// Crosshair overlay pipeline (reuses the grid shader for thin lines).
     crosshair_pipeline: GridPipeline,
 }
@@ -57,6 +55,7 @@ impl ChartRenderer {
             candle_pipeline: CandlePipeline::new(device, format),
             volume_pipeline: VolumePipeline::new(device, format),
             grid_pipeline: GridPipeline::new(device, format),
+            volume_profile_pipeline: GridPipeline::new(device, format),
             crosshair_pipeline: GridPipeline::new(device, format),
         }
     }
@@ -85,21 +84,34 @@ impl ChartRenderer {
     ) {
         // -- Update projection on all pipelines if camera changed --
         if tracker.needs_camera_update(scene.dirty) {
-            self.candle_pipeline.update_projection(queue, &scene.projection);
-            self.volume_pipeline.update_projection(queue, &scene.projection);
-            self.grid_pipeline.update_projection(queue, &scene.projection);
-            self.crosshair_pipeline.update_projection(queue, &scene.projection);
+            self.candle_pipeline
+                .update_projection(queue, &scene.projection);
+            self.volume_pipeline
+                .update_projection(queue, &scene.projection);
+            self.grid_pipeline
+                .update_projection(queue, &scene.projection);
+            self.volume_profile_pipeline
+                .update_projection(queue, &scene.projection);
+            self.crosshair_pipeline
+                .update_projection(queue, &scene.projection);
         }
 
         // -- Update instance buffers only if dirty --
         if tracker.needs_candle_rebuild(scene.dirty) {
-            self.candle_pipeline.update_instances(device, queue, scene.candles);
-            self.volume_pipeline.update_instances(device, queue, scene.volumes);
+            self.candle_pipeline
+                .update_instances(device, queue, scene.candles);
+            self.volume_pipeline
+                .update_instances(device, queue, scene.volumes);
         }
 
         if tracker.needs_grid_rebuild(scene.dirty) {
-            self.grid_pipeline.update_instances(device, queue, scene.grid_lines);
+            self.grid_pipeline
+                .update_instances(device, queue, scene.grid_lines);
         }
+
+        // Volume Profile always re-uploaded (small buffer, tracks data changes).
+        self.volume_profile_pipeline
+            .update_instances(device, queue, scene.volume_profile);
 
         // Crosshair lines update on every frame they are present (mouse moves).
         if tracker.needs_crosshair_update(scene.dirty) {
@@ -117,6 +129,9 @@ impl ChartRenderer {
 
         // Layer 2: Volume bars (semi-transparent, behind candles)
         self.volume_pipeline.draw(render_pass);
+
+        // Layer 2.5: Volume Profile histogram (semi-transparent, on top of volume bars)
+        self.volume_profile_pipeline.draw(render_pass);
 
         // Layer 3: Candle wicks (opaque, behind bodies)
         self.candle_pipeline.draw_wicks(render_pass);
@@ -142,21 +157,34 @@ impl ChartRenderer {
     ) {
         // -- Update projection on all pipelines if camera changed --
         if tracker.needs_camera_update(scene.dirty) {
-            self.candle_pipeline.update_projection(queue, &scene.projection);
-            self.volume_pipeline.update_projection(queue, &scene.projection);
-            self.grid_pipeline.update_projection(queue, &scene.projection);
-            self.crosshair_pipeline.update_projection(queue, &scene.projection);
+            self.candle_pipeline
+                .update_projection(queue, &scene.projection);
+            self.volume_pipeline
+                .update_projection(queue, &scene.projection);
+            self.grid_pipeline
+                .update_projection(queue, &scene.projection);
+            self.volume_profile_pipeline
+                .update_projection(queue, &scene.projection);
+            self.crosshair_pipeline
+                .update_projection(queue, &scene.projection);
         }
 
         // -- Update instance buffers only if dirty --
         if tracker.needs_candle_rebuild(scene.dirty) {
-            self.candle_pipeline.update_instances(device, queue, scene.candles);
-            self.volume_pipeline.update_instances(device, queue, scene.volumes);
+            self.candle_pipeline
+                .update_instances(device, queue, scene.candles);
+            self.volume_pipeline
+                .update_instances(device, queue, scene.volumes);
         }
 
-        if tracker.needs_grid_rebuild(scene.dirty) {
-            self.grid_pipeline.update_instances(device, queue, scene.grid_lines);
-        }
+        // Grid lines always re-uploaded: the buffer is small and includes
+        // the timeline border line which tracks user drag in real-time.
+        self.grid_pipeline
+            .update_instances(device, queue, scene.grid_lines);
+
+        // Volume Profile always re-uploaded (small buffer, tracks data changes).
+        self.volume_profile_pipeline
+            .update_instances(device, queue, scene.volume_profile);
 
         // Crosshair overlay always re-uploaded: the buffer is tiny
         // (~16 instances for the volume handle + 2 for crosshair lines)
@@ -183,6 +211,7 @@ impl ChartRenderer {
     pub fn draw_pass<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
         self.grid_pipeline.draw(render_pass);
         self.volume_pipeline.draw(render_pass);
+        self.volume_profile_pipeline.draw(render_pass);
         self.candle_pipeline.draw_wicks(render_pass);
         self.candle_pipeline.draw_bodies(render_pass);
         self.crosshair_pipeline.draw(render_pass);

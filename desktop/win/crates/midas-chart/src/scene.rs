@@ -10,8 +10,7 @@
 
 use crate::date_labels::DateLabel;
 use crate::instances::{
-    AxisLabel, CandleInstance, CrosshairRender, GridLine, LevelRender, SessionBoundary,
-    VolumeInstance,
+    AxisLabel, CandleInstance, CrosshairRender, GridLineInstance, LevelRender, VolumeInstance,
 };
 
 /// The output of chart logic -- a complete description of what to render.
@@ -37,8 +36,9 @@ pub struct ChartScene {
     /// Number of visible volume bars.
     pub volume_count: usize,
 
-    /// Grid lines (rebuilt on camera change).
-    pub grid_lines: Vec<GridLine>,
+    /// GPU-ready grid line instances: horizontal price lines, separator,
+    /// vertical time lines, and session boundaries — all in one buffer.
+    pub grid_instances: Vec<GridLineInstance>,
     /// X-axis (time) labels.
     pub x_labels: Vec<AxisLabel>,
     /// Y-axis (price) labels.
@@ -49,14 +49,14 @@ pub struct ChartScene {
     /// Crosshair overlay (if active).
     pub crosshair: Option<CrosshairRender>,
 
-    /// Session boundary lines (only populated when `collapse_gaps` is enabled).
-    pub session_boundaries: Vec<SessionBoundary>,
-
     /// Y position of the separator line between price and volume areas.
     pub separator_y: f32,
 
     /// Date labels for the time axis (TC2000-style adaptive formatting).
     pub date_labels: Vec<DateLabel>,
+
+    /// Volume Profile horizontal histogram instances (empty if VP disabled).
+    pub volume_profile_instances: Vec<GridLineInstance>,
 
     /// Dirty generation counters -- renderer compares to decide what to upload.
     pub generations: SceneGenerations,

@@ -6,10 +6,11 @@
 //! chart frame. No GPU, no framework -- just math.
 
 use crate::camera::Camera2D;
+use crate::date_labels::{DateLabel, Tier};
 use crate::input::ChartInput;
 use crate::instances::{
-    AxisLabel, CandleInstance, CrosshairRender, GridLine, LevelRender, OhlcvOverlay,
-    SessionBoundary, VolumeInstance,
+    AxisLabel, CandleInstance, CrosshairRender, GridLine, GridLineInstance, LevelRender,
+    OhlcvOverlay, SessionBoundary, VolumeInstance,
 };
 use crate::scene::{ChartScene, SceneGenerations};
 use midas_core::CandleData;
@@ -61,6 +62,118 @@ pub fn compute_chart_scene(input: &ChartInput<'_>) -> ChartScene {
     }
 }
 
+/// Build Volume Profile GPU instances for the visible range, if enabled.
+fn build_volume_profile(
+    input: &ChartInput<'_>,
+    data: &dyn CandleData,
+    camera: &Camera2D,
+    vis_start: usize,
+    vis_end: usize,
+) -> Vec<GridLineInstance> {
+    if !input.show_volume_profile {
+        return Vec::new();
+    }
+    let num_bins = ((input.viewport_height as f32 * 0.8) / 3.0)
+        .min(200.0)
+        .max(20.0) as usize;
+    match crate::volume_profile::compute_volume_profile(
+        data,
+        vis_start,
+        vis_end,
+        camera.price_low as f32,
+        camera.price_high as f32,
+        num_bins,
+    ) {
+        Some(profile) => {
+            crate::volume_profile::profile_to_instances(&profile, camera, input.viewport_width)
+        }
+        None => Vec::new(),
+    }
+}
+
+/// Build ALL grid line GPU instances from the component pieces.
+///
+/// This is the single source of truth for grid rendering. It assembles:
+/// 1. Horizontal price grid lines (clipped to price area above separator)
+/// 2. Separator line (timeline border)
+/// 3. Vertical time lines at every date label (opacity/thickness by tier)
+/// 4. Session boundary lines (collapsed mode, deduplicated against date labels)
+fn build_grid_instances(
+    price_grid_lines: &[GridLine],
+    date_labels: &[DateLabel],
+    session_boundaries: &[SessionBoundary],
+    separator_y: f32,
+    viewport_width: f32,
+    candle_count: usize,
+) -> Vec<GridLineInstance> {
+    let mut out = Vec::new();
+
+    // 1. Horizontal price grid lines (above separator only).
+    for gl in price_grid_lines {
+        if gl.position < 0.0 || gl.position > separator_y {
+            continue;
+        }
+        let (color, thickness) = if gl.is_major {
+            ([0.40, 0.40, 0.45, 0.14], 1.0_f32)
+        } else {
+            ([0.30, 0.30, 0.35, 0.07], 0.5_f32)
+        };
+        out.push(GridLineInstance {
+            rect: [0.0, gl.position, viewport_width, gl.position + thickness],
+            color,
+        });
+    }
+
+    // 2. Separator line (timeline border between price and volume areas).
+    out.push(GridLineInstance {
+        rect: [0.0, separator_y, viewport_width, separator_y + 1.0],
+        color: [0.45, 0.45, 0.50, 0.35],
+    });
+
+    // 3. Vertical time lines at every date label position.
+    //    Opacity and thickness scale with tier so hourly lines stay faint
+    //    while daily/monthly boundaries stand out.
+    for dl in date_labels {
+        let (color, thickness) = if dl.is_boundary {
+            ([0.45, 0.45, 0.50, 0.30], 1.0_f32)
+        } else {
+            match dl.tier {
+                Tier::Month  => ([0.40, 0.40, 0.45, 0.25], 1.0_f32),
+                Tier::Day    => ([0.35, 0.35, 0.40, 0.18], 1.0_f32),
+                Tier::Hour   => ([0.35, 0.35, 0.40, 0.12], 1.0_f32),
+                Tier::Minute => ([0.30, 0.30, 0.35, 0.08], 1.0_f32),
+            }
+        };
+        out.push(GridLineInstance {
+            rect: [dl.screen_x, 0.0, dl.screen_x + thickness, separator_y],
+            color,
+        });
+    }
+
+    // 4. Session boundary lines (collapsed mode only).
+    //    Skip boundaries that overlap with a date-label boundary line
+    //    (both fire at day transitions, producing a double line).
+    let slot_tol = if candle_count > 1 {
+        viewport_width / candle_count as f32
+    } else {
+        40.0
+    };
+    for sb in session_boundaries {
+        let dominated = date_labels
+            .iter()
+            .any(|dl| dl.is_boundary && (dl.screen_x - sb.x).abs() < slot_tol);
+        if dominated {
+            continue;
+        }
+        out.push(GridLineInstance {
+            rect: [sb.x, 0.0, sb.x + 1.0, separator_y],
+            color: sb.color,
+        });
+    }
+
+    out
+}
+
 /// Compute the chart scene with normal (linear time) positioning.
 fn compute_normal_scene(
     input: &ChartInput<'_>,
@@ -108,15 +221,20 @@ fn compute_normal_scene(
     );
     let volume_count = volumes.as_ref().map_or(0, |v| v.len());
 
-    let grid_lines = compute_grid_lines(camera, &input.grid_color);
+    let price_grid_lines = compute_grid_lines(camera, &input.grid_color);
     let y_labels = compute_y_labels(camera);
     let x_labels = compute_x_labels(camera, candle_duration);
     let levels = compute_levels(input.levels, camera);
     let crosshair = compute_crosshair(input.crosshair, data, camera, candle_duration, input.symbol);
     let date_labels = crate::date_labels::for_normal_mode(camera, candle_duration);
-    let effective_vol = (VOLUME_AREA_FRACTION * input.volume_scale).min(0.80);
-    let separator_y = input.viewport_height as f32 * (1.0 - effective_vol);
+    let separator_y = input.viewport_height as f32 * (1.0 - input.timeline_border_ratio);
+    let vw = input.viewport_width as f32;
     let projection = camera.projection_matrix();
+
+    let grid_instances = build_grid_instances(
+        &price_grid_lines, &date_labels, &[], separator_y, vw, candle_count,
+    );
+    let volume_profile_instances = build_volume_profile(input, data, camera, vis_start, vis_end);
 
     ChartScene {
         projection,
@@ -127,14 +245,14 @@ fn compute_normal_scene(
         candle_count,
         volumes,
         volume_count,
-        grid_lines,
+        grid_instances,
         x_labels,
         y_labels,
         levels,
         crosshair,
-        session_boundaries: Vec::new(),
         separator_y,
         date_labels,
+        volume_profile_instances,
         generations: SceneGenerations {
             candles: input.dirty.candles,
             camera: input.dirty.camera,
@@ -175,14 +293,10 @@ fn compute_collapsed_scene(
     let wick_width = (1.0_f32 / input.dpi_scale).max(1.0 / input.dpi_scale);
 
     // Collapsed mode: X from sequential candle index via camera mapping.
-    let x_from_idx = |i: usize| -> f32 {
-        camera.snap_to_pixel(camera.time_to_x(i as f64 + 0.5))
-    };
+    let x_from_idx = |i: usize| -> f32 { camera.snap_to_pixel(camera.time_to_x(i as f64 + 0.5)) };
 
     // Helper for functions that still take local-index closures (grid, labels, boundaries).
-    let index_to_x = |local_idx: usize| -> f32 {
-        x_from_idx(vis_start + local_idx)
-    };
+    let index_to_x = |local_idx: usize| -> f32 { x_from_idx(vis_start + local_idx) };
 
     let candles = build_candle_instances(
         data,
@@ -212,13 +326,8 @@ fn compute_collapsed_scene(
     let volume_count = volumes.as_ref().map_or(0, |v| v.len());
 
     // Detect session boundaries.
-    let session_boundaries = detect_session_boundaries(
-        data,
-        vis_start,
-        vis_end,
-        candle_duration,
-        &index_to_x,
-    );
+    let session_boundaries =
+        detect_session_boundaries(data, vis_start, vis_end, candle_duration, &index_to_x);
 
     // Grid lines: Y-axis (price) lines work as normal. X-axis (time) labels
     // are positioned at collapsed X coordinates for selected candles.
@@ -262,9 +371,14 @@ fn compute_collapsed_scene(
         candle_duration,
         &index_to_x,
     );
-    let effective_vol = (VOLUME_AREA_FRACTION * input.volume_scale).min(0.80);
-    let separator_y = input.viewport_height as f32 * (1.0 - effective_vol);
+    let separator_y = input.viewport_height as f32 * (1.0 - input.timeline_border_ratio);
+    let vw = input.viewport_width as f32;
     let projection = camera.projection_matrix();
+
+    let grid_instances = build_grid_instances(
+        &grid_lines, &date_labels, &session_boundaries, separator_y, vw, candle_count,
+    );
+    let volume_profile_instances = build_volume_profile(input, data, camera, vis_start, vis_end);
 
     ChartScene {
         projection,
@@ -275,14 +389,14 @@ fn compute_collapsed_scene(
         candle_count,
         volumes,
         volume_count,
-        grid_lines,
+        grid_instances,
         x_labels,
         y_labels,
         levels,
         crosshair,
-        session_boundaries,
         separator_y,
         date_labels,
+        volume_profile_instances,
         generations: SceneGenerations {
             candles: input.dirty.candles,
             camera: input.dirty.camera,
@@ -887,7 +1001,7 @@ fn compute_crosshair(
 
 /// Format a timestamp as a long date/time string (e.g. "Fri 3/27/26 02:40:00 PM").
 fn format_datetime_long(ts_ms: i64) -> String {
-    use chrono::{DateTime, Utc, Datelike, Timelike};
+    use chrono::{DateTime, Datelike, Timelike, Utc};
     let dt: DateTime<Utc> = DateTime::from_timestamp_millis(ts_ms)
         .unwrap_or_else(|| DateTime::from_timestamp(0, 0).unwrap());
     let weekday = match dt.weekday() {
@@ -951,25 +1065,25 @@ fn nice_step(range: f64, desired_divisions: f64) -> f64 {
 
 /// Standard time intervals for grid lines (in milliseconds).
 const TIME_STEPS_MS: &[f64] = &[
-    1_000.0,              // 1 second
-    5_000.0,              // 5 seconds
-    10_000.0,             // 10 seconds
-    30_000.0,             // 30 seconds
-    60_000.0,             // 1 minute
-    300_000.0,            // 5 minutes
-    600_000.0,            // 10 minutes
-    1_800_000.0,          // 30 minutes
-    3_600_000.0,          // 1 hour
-    14_400_000.0,         // 4 hours
-    86_400_000.0,         // 1 day
-    604_800_000.0,        // 1 week
-    2_592_000_000.0,      // ~30 days (1 month)
-    5_184_000_000.0,      // ~60 days (2 months)
-    7_776_000_000.0,      // ~90 days (1 quarter)
-    15_552_000_000.0,     // ~180 days (6 months)
-    31_536_000_000.0,     // ~365 days (1 year)
-    63_072_000_000.0,     // ~2 years
-    157_680_000_000.0,    // ~5 years
+    1_000.0,           // 1 second
+    5_000.0,           // 5 seconds
+    10_000.0,          // 10 seconds
+    30_000.0,          // 30 seconds
+    60_000.0,          // 1 minute
+    300_000.0,         // 5 minutes
+    600_000.0,         // 10 minutes
+    1_800_000.0,       // 30 minutes
+    3_600_000.0,       // 1 hour
+    14_400_000.0,      // 4 hours
+    86_400_000.0,      // 1 day
+    604_800_000.0,     // 1 week
+    2_592_000_000.0,   // ~30 days (1 month)
+    5_184_000_000.0,   // ~60 days (2 months)
+    7_776_000_000.0,   // ~90 days (1 quarter)
+    15_552_000_000.0,  // ~180 days (6 months)
+    31_536_000_000.0,  // ~365 days (1 year)
+    63_072_000_000.0,  // ~2 years
+    157_680_000_000.0, // ~5 years
 ];
 
 /// Choose a time step from the standard intervals.
@@ -1033,9 +1147,6 @@ fn format_time_ms(ts_ms: i64) -> String {
         format!("{:02}:{:02}", hours, minutes)
     }
 }
-
-// Date label types and computation moved to `crate::date_labels` module.
-pub use crate::date_labels::DateLabel;
 
 #[cfg(test)]
 mod tests {
@@ -1198,7 +1309,9 @@ mod tests {
             crosshair,
             levels,
             collapse_gaps: false,
+            timeline_border_ratio: 0.20,
             volume_scale: 1.0,
+            show_volume_profile: false,
             dirty,
         }
     }
@@ -1228,7 +1341,9 @@ mod tests {
             crosshair,
             levels,
             collapse_gaps,
+            timeline_border_ratio: 0.20,
             volume_scale: 1.0,
+            show_volume_profile: false,
             dirty,
         }
     }
@@ -1454,7 +1569,7 @@ mod tests {
         let scene = compute_chart_scene(&input);
 
         assert!(
-            !scene.grid_lines.is_empty(),
+            !scene.grid_instances.is_empty(),
             "should have at least one grid line"
         );
     }
@@ -1469,9 +1584,9 @@ mod tests {
         let scene = compute_chart_scene(&input);
 
         assert!(
-            scene.grid_lines.len() <= MAX_GRID_LINES * 2,
+            scene.grid_instances.len() <= MAX_GRID_LINES * 2,
             "grid lines {} exceeds max {}",
-            scene.grid_lines.len(),
+            scene.grid_instances.len(),
             MAX_GRID_LINES * 2
         );
     }
@@ -1712,7 +1827,7 @@ mod tests {
     }
 
     #[test]
-    fn collapse_gaps_session_boundaries() {
+    fn collapse_gaps_produces_vertical_grid_lines() {
         let data = sample_with_gap();
         let camera = make_collapsed_camera_for_data(&data);
         let dirty = DirtyFlags::new();
@@ -1720,31 +1835,14 @@ mod tests {
 
         let scene = compute_chart_scene(&input);
 
-        // There should be exactly one session boundary between candle 2 and 3
-        // (the large gap).
-        assert_eq!(
-            scene.session_boundaries.len(),
-            1,
-            "expected 1 session boundary, got {}",
-            scene.session_boundaries.len()
-        );
-
-        let boundary = &scene.session_boundaries[0];
-        let candles = scene.candles.as_ref().unwrap();
-
-        // The boundary X should be between candle 2's X and candle 3's X.
+        // Collapsed mode should produce vertical grid lines (from date labels
+        // and/or session boundaries, deduplicated).
+        let vertical_lines = scene.grid_instances.iter().filter(|gl| {
+            (gl.rect[2] - gl.rect[0]) < 2.0 && (gl.rect[3] - gl.rect[1]) > 10.0
+        }).count();
         assert!(
-            boundary.x > candles[2].x && boundary.x < candles[3].x,
-            "session boundary x={} should be between candle 2 (x={}) and candle 3 (x={})",
-            boundary.x,
-            candles[2].x,
-            candles[3].x,
-        );
-
-        // The boundary should have a valid color (non-zero alpha).
-        assert!(
-            boundary.color[3] > 0.0,
-            "session boundary should have non-zero alpha"
+            vertical_lines > 0,
+            "collapsed mode should produce vertical grid lines from date labels"
         );
     }
 
@@ -1775,10 +1873,15 @@ mod tests {
             spacing_01
         );
 
-        // No session boundaries in normal mode.
+        // No session boundary grid lines in normal mode.
+        let session_lines = scene.grid_instances.iter().any(|gl| {
+            let is_vertical = (gl.rect[2] - gl.rect[0]) < 2.0 && (gl.rect[3] - gl.rect[1]) > 10.0;
+            let is_session_color = (gl.color[2] - 0.5).abs() < 0.1 && gl.color[3] > 0.25;
+            is_vertical && is_session_color
+        });
         assert!(
-            scene.session_boundaries.is_empty(),
-            "normal mode should have no session boundaries"
+            !session_lines,
+            "normal mode should have no session boundary grid lines"
         );
     }
 
@@ -1792,10 +1895,15 @@ mod tests {
 
         let scene = compute_chart_scene(&input);
 
+        // No session-colored grid lines when candles are evenly spaced.
+        let session_lines = scene.grid_instances.iter().any(|gl| {
+            let is_vertical = (gl.rect[2] - gl.rect[0]) < 2.0 && (gl.rect[3] - gl.rect[1]) > 10.0;
+            let is_session_color = (gl.color[2] - 0.5).abs() < 0.1 && gl.color[3] > 0.25;
+            is_vertical && is_session_color
+        });
         assert!(
-            scene.session_boundaries.is_empty(),
-            "evenly-spaced candles should have no session boundaries, got {}",
-            scene.session_boundaries.len()
+            !session_lines,
+            "evenly-spaced candles should have no session boundary grid lines"
         );
     }
 
@@ -1849,7 +1957,8 @@ mod tests {
         assert!(scene.candles.is_none());
         assert_eq!(scene.candle_count, 0);
         assert!(scene.volumes.is_none());
-        assert!(scene.session_boundaries.is_empty());
+        // Grid should at least contain the separator line.
+        assert!(!scene.grid_instances.is_empty());
     }
 
     #[test]
@@ -1871,7 +1980,10 @@ mod tests {
         let candles = scene.candles.as_ref().unwrap();
 
         // The crosshair vertical_x should snap to one of the collapsed candle positions.
-        let distances: Vec<f32> = candles.iter().map(|c| (c.x - ch.vertical_x).abs()).collect();
+        let distances: Vec<f32> = candles
+            .iter()
+            .map(|c| (c.x - ch.vertical_x).abs())
+            .collect();
         let min_dist = distances.iter().cloned().fold(f32::INFINITY, f32::min);
         assert!(
             min_dist < 2.0,

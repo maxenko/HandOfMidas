@@ -27,22 +27,26 @@ pub mod interaction;
 pub mod levels;
 pub mod scene;
 pub mod state;
+pub mod volume_profile;
 
 // ── Re-exports ─────────────────────────────────────────────────────
 pub use camera::Camera2D;
+pub use compute::VOLUME_AREA_FRACTION;
 pub use compute::{compute_chart_scene, estimate_candle_duration};
 pub use date_labels::{DateLabel, Tier as DateLabelTier};
 pub use dirty::{DirtyFlags, DirtyTracker};
 pub use input::ChartInput;
 pub use instances::{
-    AxisLabel, CandleInstance, CrosshairRender, GridLine, GridLineInstance,
-    LevelRender, OhlcvOverlay, SessionBoundary, VolumeInstance,
+    AxisLabel, CandleInstance, CrosshairRender, GridLine, GridLineInstance, LevelRender,
+    OhlcvOverlay, SessionBoundary, VolumeInstance,
 };
-pub use interaction::{ChartAction, ChartEvent, Key, MouseButton, handle_event, volume_handle_y};
+pub use interaction::{
+    handle_event, timeline_border_y, volume_handle_y, ChartAction, ChartEvent, Key, MouseButton,
+};
 pub use levels::HorizontalLevel;
 pub use scene::{ChartScene, SceneGenerations};
-pub use compute::VOLUME_AREA_FRACTION;
 pub use state::{ChartState, InteractionMode, Momentum, YAnimation};
+pub use volume_profile::{VolumeProfile, VolumeProfileBin};
 
 #[cfg(test)]
 mod tests {
