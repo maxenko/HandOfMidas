@@ -44,7 +44,7 @@ pub struct AppConfig {
 }
 
 /// Window geometry configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WindowConfig {
     /// Window width in logical pixels.
     pub width: u32,
@@ -53,6 +53,18 @@ pub struct WindowConfig {
     /// Whether the window is maximized.
     #[serde(default)]
     pub maximized: bool,
+    /// Window X position in logical pixels (top-left corner).
+    #[serde(default)]
+    pub x: Option<i32>,
+    /// Window Y position in logical pixels (top-left corner).
+    #[serde(default)]
+    pub y: Option<i32>,
+    /// Width of the monitor the window was last on (for fit validation).
+    #[serde(default)]
+    pub monitor_width: Option<u32>,
+    /// Height of the monitor the window was last on.
+    #[serde(default)]
+    pub monitor_height: Option<u32>,
 }
 
 /// Theme configuration.
@@ -87,6 +99,20 @@ pub struct ChartConfig {
     /// Whether session gaps are collapsed (index-based X positioning).
     #[serde(default)]
     pub collapse_gaps: bool,
+    /// Volume bar height multiplier (1.0 = default).
+    #[serde(default = "default_volume_scale")]
+    pub volume_scale: f32,
+    /// Viewport width at save time (prevents scale distortion on restore).
+    #[serde(default)]
+    pub viewport_width: Option<u32>,
+    /// Viewport height at save time.
+    #[serde(default)]
+    pub viewport_height: Option<u32>,
+}
+
+/// Default volume scale for configs missing the field (backward compat).
+fn default_volume_scale() -> f32 {
+    1.0
 }
 
 /// Persisted horizontal price level.
@@ -114,7 +140,7 @@ impl Default for AppConfig {
             window: WindowConfig {
                 width: 1280,
                 height: 800,
-                maximized: false,
+                ..Default::default()
             },
             theme: ThemeConfig {
                 mode: "dark".into(),
@@ -226,6 +252,7 @@ mod tests {
                 width: 1920,
                 height: 1080,
                 maximized: true,
+                ..Default::default()
             },
             theme: ThemeConfig {
                 mode: "light".into(),
@@ -250,6 +277,9 @@ mod tests {
                 camera_price_low: Some(350.0),
                 camera_price_high: Some(450.0),
                 collapse_gaps: true,
+                volume_scale: 1.0,
+                viewport_width: None,
+                viewport_height: None,
             }],
         };
 
@@ -335,7 +365,7 @@ mod tests {
             window: WindowConfig {
                 width: 1280,
                 height: 800,
-                maximized: false,
+                ..Default::default()
             },
             theme: ThemeConfig {
                 mode: "dark".into(),
@@ -361,6 +391,9 @@ mod tests {
                     camera_price_low: None,
                     camera_price_high: None,
                     collapse_gaps: false,
+                    volume_scale: 1.0,
+                    viewport_width: None,
+                    viewport_height: None,
                 },
                 ChartConfig {
                     symbol: "TSLA".into(),
@@ -371,6 +404,9 @@ mod tests {
                     camera_price_low: Some(100.0),
                     camera_price_high: Some(300.0),
                     collapse_gaps: true,
+                    volume_scale: 1.0,
+                    viewport_width: None,
+                    viewport_height: None,
                 },
             ],
         };
@@ -514,7 +550,7 @@ color = [1.0, 0.843, 0.0, 1.0]
             window: WindowConfig {
                 width: 1600,
                 height: 900,
-                maximized: false,
+                ..Default::default()
             },
             theme: ThemeConfig {
                 mode: "dark".into(),
@@ -528,6 +564,9 @@ color = [1.0, 0.843, 0.0, 1.0]
                 camera_price_low: Some(50.0),
                 camera_price_high: Some(150.0),
                 collapse_gaps: false,
+                volume_scale: 1.0,
+                viewport_width: None,
+                viewport_height: None,
             }],
         };
 
@@ -575,6 +614,7 @@ color = [1.0, 0.843, 0.0, 1.0]
                 width: 2560,
                 height: 1440,
                 maximized: true,
+                ..Default::default()
             },
             theme: ThemeConfig {
                 mode: "dark".into(),
@@ -600,6 +640,9 @@ color = [1.0, 0.843, 0.0, 1.0]
                     camera_price_low: Some(470.0),
                     camera_price_high: Some(510.0),
                     collapse_gaps: true,
+                    volume_scale: 1.0,
+                    viewport_width: None,
+                    viewport_height: None,
                 },
                 ChartConfig {
                     symbol: "QQQ".into(),
@@ -610,6 +653,9 @@ color = [1.0, 0.843, 0.0, 1.0]
                     camera_price_low: None,
                     camera_price_high: None,
                     collapse_gaps: false,
+                    volume_scale: 1.0,
+                    viewport_width: None,
+                    viewport_height: None,
                 },
             ],
         };

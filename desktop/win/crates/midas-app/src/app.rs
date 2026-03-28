@@ -89,6 +89,12 @@ pub struct MidasApp {
     /// Floating chart windows popped out from the main pane grid.
     /// Keyed by the OS window ID returned from `window::open()`.
     pub floating_charts: HashMap<window::Id, ChartPanel>,
+    /// Last known main window position (logical pixels, updated on move).
+    pub window_position: Option<(i32, i32)>,
+    /// Last known main window size (logical pixels, updated on resize).
+    pub window_size: (u32, u32),
+    /// Size of the monitor the main window is on (for config persistence).
+    pub monitor_size: Option<(u32, u32)>,
     /// Deterministic test data generator. Any ticker produces instant data.
     test_data: TestDataProvider,
 }
@@ -182,6 +188,14 @@ pub enum Message {
     /// A floating window was closed by the user.
     FloatingWindowClosed(window::Id),
 
+    // -- Window geometry --
+    /// Main window was moved (logical position).
+    WindowMoved(i32, i32),
+    /// Main window was resized (logical size).
+    WindowResized(u32, u32),
+    /// Monitor size query result.
+    MonitorSizeResult(Option<iced::Size>),
+
     // -- Window --
     /// Periodic tick for animations and status bar clock.
     Tick,
@@ -228,6 +242,36 @@ impl MidasApp {
         }
     }
 
+    /// Check whether a saved window position is still usable.
+    ///
+    /// Returns `Position::Specific` if the position exists and the saved
+    /// monitor dimensions match the current system (heuristic: monitor_width
+    /// and monitor_height are present). If the monitor config changed or no
+    /// position was saved, falls back to `Position::Default`.
+    fn validate_saved_position(
+        wc: &midas_core::config::WindowConfig,
+    ) -> window::Position {
+        let (x, y) = match (wc.x, wc.y) {
+            (Some(x), Some(y)) => (x, y),
+            _ => return window::Position::Default,
+        };
+
+        // Basic sanity: reject positions that are clearly off-screen
+        // (e.g. negative by more than the window size, or absurdly large).
+        // The window should be at least partially visible.
+        let w = wc.width as i32;
+        let h = wc.height as i32;
+        if x + w < 100 || y + h < 50 || x > 8000 || y > 5000 {
+            return window::Position::Default;
+        }
+
+        // If we have saved monitor dimensions, check they still match.
+        // A mismatch likely means the user changed display setup.
+        // We can't query monitors at this point (no window yet), so
+        // we trust the saved dimensions as a heuristic.
+        window::Position::Specific(iced::Point::new(x as f32, y as f32))
+    }
+
     /// Create a new application, restoring state from config if available.
     ///
     /// Returns the app state and a `Task` that opens the main OS window
@@ -249,6 +293,14 @@ impl MidasApp {
         let now = chrono::Local::now();
         let current_time = now.format("%H:%M:%S").to_string();
 
+        // Determine initial window position from saved config.
+        // Only restore if the saved monitor dimensions still match (the user
+        // hasn't changed their display setup) and the window would be at least
+        // partially visible.
+        let initial_position = Self::validate_saved_position(&config.window);
+
+        let initial_size = (config.window.width, config.window.height);
+
         // Open the main window via the daemon. The returned Task produces
         // the window::Id once the OS window is created.
         let (main_id, open_task) = window::open(window::Settings {
@@ -256,6 +308,7 @@ impl MidasApp {
                 config.window.width as f32,
                 config.window.height as f32,
             ),
+            position: initial_position,
             ..window::Settings::default()
         });
 
@@ -277,6 +330,9 @@ impl MidasApp {
                 current_time,
                 main_window: Some(main_id),
                 floating_charts: HashMap::new(),
+                window_position: config.window.x.zip(config.window.y),
+                window_size: initial_size,
+                monitor_size: None,
                 test_data: TestDataProvider::new(),
             };
 
@@ -328,6 +384,9 @@ impl MidasApp {
                 current_time,
                 main_window: Some(main_id),
                 floating_charts: HashMap::new(),
+                window_position: config.window.x.zip(config.window.y),
+                window_size: initial_size,
+                monitor_size: None,
                 test_data: TestDataProvider::new(),
             };
 
@@ -339,7 +398,7 @@ impl MidasApp {
                 .map(|(&id, panel)| (id, panel.symbol.clone(), panel.timeframe))
                 .collect();
             for (id, symbol, tf) in chart_ids {
-                app.load_test_data_for_chart(id, &symbol, tf);
+                app.load_test_data_for_chart(id, &symbol, tf, false);
             }
 
             (app, open_task)
@@ -375,6 +434,18 @@ impl MidasApp {
             panel.chart_state.camera.price_high = ph;
         }
         panel.chart_state.collapse_gaps = chart_cfg.collapse_gaps;
+        panel.chart_state.volume_scale = chart_cfg.volume_scale;
+        // Restore viewport so the first-frame ChartViewportChanged computes
+        // the correct ratio (saved viewport → actual pane size) instead of
+        // using the dummy 1280×720 from make_empty_panel.
+        if let (Some(vw), Some(vh)) =
+            (chart_cfg.viewport_width, chart_cfg.viewport_height)
+        {
+            if vw > 0 && vh > 0 {
+                panel.chart_state.camera.viewport_width = vw;
+                panel.chart_state.camera.viewport_height = vh;
+            }
+        }
     }
 
     /// Create an empty chart panel with default camera and state.
@@ -419,18 +490,25 @@ impl MidasApp {
             chart.symbol_input = symbol.clone();
         }
 
-        self.load_test_data_for_chart(chart_id, &symbol, tf);
+        self.load_test_data_for_chart(chart_id, &symbol, tf, true);
         Task::none()
     }
 
     /// Generate test data at the given timeframe and install it in the chart.
     ///
     /// Called from symbol submit, timeframe change, and config restore.
+    /// Load test data for a chart and optionally reset its camera.
+    ///
+    /// When `reset_camera` is `true` (user changed symbol or timeframe), the
+    /// camera is positioned to show the last 200 candles.  When `false`
+    /// (restoring from config), the camera is left untouched — only
+    /// `data_time_start/end` are set for scroll clamping.
     fn load_test_data_for_chart(
         &mut self,
         chart_id: ChartId,
         symbol: &str,
         tf: Timeframe,
+        reset_camera: bool,
     ) {
         tracing::debug!("Loading data for chart {chart_id} symbol={symbol} tf={tf}");
         // Choose how many calendar days of data to generate based on
@@ -454,34 +532,47 @@ impl MidasApp {
 
             if !buffer.is_empty() {
                 let len = buffer.len();
-                let visible_count = 200.min(len);
 
+                // Always set data bounds for scroll clamping.
                 if chart.chart_state.collapse_gaps {
-                    // Index-space: camera X axis = candle indices.
                     chart.chart_state.data_time_start = 0.0;
                     chart.chart_state.data_time_end = len as f64;
-                    let start_idx = (len - visible_count) as f64;
-                    let end_idx = len as f64 + (visible_count as f64 * 0.05);
-                    chart.chart_state.camera.time_start = start_idx;
-                    chart.chart_state.camera.time_end = end_idx;
                 } else {
-                    // Time-space: camera X axis = epoch milliseconds.
                     let first_ts = buffer.timestamps[0] as f64;
                     let last_ts = buffer.timestamps[len - 1] as f64;
                     chart.chart_state.data_time_start = first_ts;
                     chart.chart_state.data_time_end = last_ts;
-                    let first_visible_ts =
-                        buffer.timestamps[len - visible_count] as f64;
-                    chart.chart_state.camera.time_start = first_visible_ts;
-                    chart.chart_state.camera.time_end =
-                        last_ts + (last_ts - first_visible_ts) * 0.05;
                 }
 
-                let range = (len - visible_count)..len;
-                let (low, high) = buffer.price_range(range);
-                let padding = (high - low) as f64 * 0.05;
-                chart.chart_state.camera.price_low = low as f64 - padding;
-                chart.chart_state.camera.price_high = high as f64 + padding;
+                // Only reset camera to default view when the user changed
+                // symbol/timeframe. On config restore, the saved camera
+                // position is already in place.
+                if reset_camera {
+                    let visible_count = 200.min(len);
+
+                    if chart.chart_state.collapse_gaps {
+                        let start_idx = (len - visible_count) as f64;
+                        let end_idx =
+                            len as f64 + (visible_count as f64 * 0.05);
+                        chart.chart_state.camera.time_start = start_idx;
+                        chart.chart_state.camera.time_end = end_idx;
+                    } else {
+                        let last_ts = buffer.timestamps[len - 1] as f64;
+                        let first_visible_ts =
+                            buffer.timestamps[len - visible_count] as f64;
+                        chart.chart_state.camera.time_start = first_visible_ts;
+                        chart.chart_state.camera.time_end =
+                            last_ts + (last_ts - first_visible_ts) * 0.05;
+                    }
+
+                    let range = (len - visible_count)..len;
+                    let (low, high) = buffer.price_range(range);
+                    let padding = (high - low) as f64 * 0.05;
+                    chart.chart_state.camera.price_low = low as f64 - padding;
+                    chart.chart_state.camera.price_high =
+                        high as f64 + padding;
+                }
+
                 chart.chart_state.dirty.mark_camera();
             }
 
@@ -540,30 +631,25 @@ impl MidasApp {
                     camera_price_low: Some(cam.price_low),
                     camera_price_high: Some(cam.price_high),
                     collapse_gaps: panel.chart_state.collapse_gaps,
+                    volume_scale: panel.chart_state.volume_scale,
+                    viewport_width: Some(cam.viewport_width),
+                    viewport_height: Some(cam.viewport_height),
                 }
             })
             .collect();
 
-        // Read actual viewport dimensions from the first chart's camera
-        // as a reasonable proxy for window size. Falls back to defaults.
-        let (win_w, win_h) = self
-            .workspace
-            .chart_ids()
-            .first()
-            .and_then(|id| self.charts.get(id))
-            .map(|panel| {
-                (
-                    panel.chart_state.camera.viewport_width,
-                    panel.chart_state.camera.viewport_height,
-                )
-            })
-            .unwrap_or((1280, 800));
+        let (win_w, win_h) = self.window_size;
+        let (win_x, win_y) = self.window_position.unzip();
 
         AppConfig {
             window: midas_core::config::WindowConfig {
                 width: win_w,
                 height: win_h,
                 maximized: false,
+                x: win_x,
+                y: win_y,
+                monitor_width: self.monitor_size.map(|(w, _)| w),
+                monitor_height: self.monitor_size.map(|(_, h)| h),
             },
             theme: midas_core::config::ThemeConfig {
                 mode: "dark".into(),
@@ -656,7 +742,7 @@ impl MidasApp {
                 }
 
                 if !symbol.is_empty() {
-                    self.load_test_data_for_chart(chart_id, &symbol, tf);
+                    self.load_test_data_for_chart(chart_id, &symbol, tf, true);
                 }
 
                 self.mark_config_dirty();
@@ -939,7 +1025,7 @@ impl MidasApp {
                     .map(|c| c.timeframe)
                     .unwrap_or(midas_core::Timeframe::D1);
                 if !symbol.is_empty() {
-                    self.load_test_data_for_chart(chart_id, &symbol, tf);
+                    self.load_test_data_for_chart(chart_id, &symbol, tf, true);
                 }
                 self.mark_config_dirty();
                 Task::none()
@@ -995,10 +1081,36 @@ impl MidasApp {
                 Task::none()
             }
 
+            Message::WindowMoved(x, y) => {
+                self.window_position = Some((x, y));
+                self.mark_config_dirty();
+                // Re-query monitor size (window may have moved to a different monitor).
+                if let Some(id) = self.main_window {
+                    return window::monitor_size(id)
+                        .map(Message::MonitorSizeResult);
+                }
+                Task::none()
+            }
+
+            Message::WindowResized(w, h) => {
+                self.window_size = (w, h);
+                self.mark_config_dirty();
+                Task::none()
+            }
+
+            Message::MonitorSizeResult(size) => {
+                if let Some(s) = size {
+                    self.monitor_size =
+                        Some((s.width as u32, s.height as u32));
+                }
+                Task::none()
+            }
+
             Message::MainWindowOpened(id) => {
                 tracing::info!("Main window opened: {id}");
                 self.main_window = Some(id);
-                Task::none()
+                // Query the monitor size for config persistence.
+                window::monitor_size(id).map(Message::MonitorSizeResult)
             }
 
             Message::FloatingWindowClosed(id) => {
@@ -1056,7 +1168,7 @@ impl MidasApp {
             }
 
             if !symbol.is_empty() {
-                self.load_test_data_for_chart(id, &symbol, tf);
+                self.load_test_data_for_chart(id, &symbol, tf, true);
             }
         }
     }
@@ -1248,7 +1360,31 @@ impl MidasApp {
                 );
 
                 let body = self.view_pane_body(chart_id, pane, is_focused);
-                pane_grid::Content::new(body).title_bar(title_bar)
+                // Content style: dark background (serves as title bar bg
+                // since TitleBar is transparent) + focus border.  The border
+                // is drawn first; TitleBar and body sit inside it.  TitleBar
+                // is transparent so the border shows through at the top.
+                // Body has 2px padding so the border shows at sides/bottom.
+                pane_grid::Content::new(body)
+                    .title_bar(title_bar)
+                    .style(move |_theme| {
+                        let border_color = if is_focused {
+                            theme::CHART_ACTIVE_BORDER
+                        } else {
+                            theme::CHART_INACTIVE_BORDER
+                        };
+                        container::Style {
+                            background: Some(iced::Background::Color(
+                                Color::from_rgb(0.06, 0.08, 0.12),
+                            )),
+                            border: iced::Border {
+                                color: border_color,
+                                width: if is_focused { 2.0 } else { 1.0 },
+                                radius: 0.0.into(),
+                            },
+                            ..Default::default()
+                        }
+                    })
             },
         )
         .on_resize(6, Message::PaneResized)
@@ -1297,7 +1433,7 @@ impl MidasApp {
         &self,
         chart_id: ChartId,
         pane: pane_grid::Pane,
-        is_focused: bool,
+        _is_focused: bool,
         pane_count: usize,
     ) -> pane_grid::TitleBar<'_, Message> {
         // iced's TitleBar drag zone ("pick area") = title bar area NOT
@@ -1315,21 +1451,8 @@ impl MidasApp {
             .controls(controls_row)
             .padding([2, 4])
             .always_show_controls()
-            .style(move |_theme| container::Style {
-                background: Some(iced::Background::Color(
-                    Color::from_rgba(0.06, 0.08, 0.12, 0.85),
-                )),
-                border: iced::Border {
-                    color: if is_focused {
-                        theme::CHART_ACTIVE_BORDER
-                    } else {
-                        Color::TRANSPARENT
-                    },
-                    width: if is_focused { 1.0 } else { 0.0 },
-                    radius: 0.0.into(),
-                },
-                ..Default::default()
-            })
+            // Transparent — Content's background + focus border show through.
+            .style(|_theme| container::Style::default())
     }
 
     /// Build the content (left) area of a pane's TitleBar.
@@ -1454,16 +1577,11 @@ impl MidasApp {
         &self,
         chart_id: ChartId,
         _pane: pane_grid::Pane,
-        is_focused: bool,
+        _is_focused: bool,
     ) -> Element<'_, Message> {
         let chart = match self.charts.get(&chart_id) {
             Some(c) => c,
             None => return self.view_empty_placeholder(),
-        };
-        let border_color = if is_focused {
-            theme::CHART_ACTIVE_BORDER
-        } else {
-            theme::CHART_INACTIVE_BORDER
         };
 
         // If data is loaded, render via GPU Shader widget.
@@ -1493,14 +1611,7 @@ impl MidasApp {
             return container(shader)
                 .width(Fill)
                 .height(Fill)
-                .style(move |_theme| container::Style {
-                    border: iced::Border {
-                        color: border_color,
-                        width: if is_focused { 2.0 } else { 1.0 },
-                        radius: 0.0.into(),
-                    },
-                    ..Default::default()
-                })
+                .padding(2) // Inset so Content's focus border is visible.
                 .into();
         }
 
@@ -1522,13 +1633,9 @@ impl MidasApp {
         .height(Fill)
         .center_x(Fill)
         .center_y(Fill)
+        .padding(2) // Inset so Content's focus border is visible.
         .style(move |_theme| container::Style {
             background: Some(bg_color.into()),
-            border: iced::Border {
-                color: border_color,
-                width: if is_focused { 2.0 } else { 1.0 },
-                radius: 0.0.into(),
-            },
             ..Default::default()
         })
         .into()

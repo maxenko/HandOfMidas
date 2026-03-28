@@ -79,5 +79,18 @@ fn subscription(_state: &MidasApp) -> Subscription<Message> {
     let close_sub =
         window::close_events().map(Message::FloatingWindowClosed);
 
-    Subscription::batch([keyboard_sub, tick_sub, close_sub])
+    // Track window move/resize for config persistence.
+    let window_events_sub = window::events().map(|(_id, event)| {
+        match event {
+            iced::window::Event::Moved(pos) => {
+                Message::WindowMoved(pos.x as i32, pos.y as i32)
+            }
+            iced::window::Event::Resized(size) => {
+                Message::WindowResized(size.width as u32, size.height as u32)
+            }
+            _ => Message::Tick,
+        }
+    });
+
+    Subscription::batch([keyboard_sub, tick_sub, close_sub, window_events_sub])
 }
