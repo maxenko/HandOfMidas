@@ -1,0 +1,25 @@
+# ── Build artifacts ───────────────────────────────────────────────────
+/target/
+
+# ── Runtime data (binary candle files, user config) ──────────────────
+/data/candles/
+/data/config.toml
+!data/.gitkeep
+
+# ── Binary candle files anywhere ─────────────────────────────────────
+*.candles
+
+# ── IDE / editor ─────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS ────────────────────────────────────────────────────────────────
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ── Benchmark output ─────────────────────────────────────────────────
+/target/criterion/

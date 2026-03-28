@@ -1,0 +1,105 @@
+[package]
+name = "midas-workspace"
+version = "0.0.0"
+edition = "2021"
+publish = false
+# Thin root package: exists only so `tests/` integration tests can
+# depend on multiple workspace crates. No library or binary is built.
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/midas-core",
+    "crates/midas-data",
+    "crates/midas-chart",
+    "crates/midas-render",
+    "crates/midas-feed",
+    "crates/midas-ui",
+    "crates/midas-app",
+]
+default-members = ["crates/midas-app"]
+
+[dependencies]
+midas-core  = { path = "crates/midas-core" }
+midas-data  = { path = "crates/midas-data" }
+midas-chart = { path = "crates/midas-chart" }
+midas-feed  = { path = "crates/midas-feed" }
+glam        = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+# ─── Workspace-wide dependency versions ───────────────────────────────
+# Crates reference these via: dep = { workspace = true }
+[workspace.dependencies]
+
+# GPU rendering
+wgpu = "27"
+bytemuck = { version = "1", features = ["derive"] }
+
+# GUI framework
+iced = { version = "0.14", features = ["wgpu", "tokio"] }
+
+# Math
+glam = { version = "0.29", features = ["bytemuck"] }
+
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+
+# Concurrency
+crossbeam = "0.8"
+
+# Data / IO
+memmap2 = "0.9"
+
+# Serialization / config
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Font rendering
+ab_glyph = "0.2"
+etagere = "0.2"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# File system
+dirs = "6"
+tempfile = "3"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Concurrency primitives
+parking_lot = "0.12"
+
+# Caching
+lru = "0.12"
+
+# Benchmarks (dev only)
+criterion = { version = "0.5", features = ["html_reports"] }
+
+# ─── Workspace-wide profiles ──────────────────────────────────────────
+[profile.dev]
+opt-level = 1                   # Some optimization for GPU code in dev
+
+[profile.dev.package."*"]
+opt-level = 2                   # Full optimization for all dependencies
+
+[profile.release]
+opt-level = 3
+lto = "fat"                     # Full link-time optimization
+codegen-units = 1               # Maximum optimization, slower compile
+strip = "symbols"               # Strip debug symbols from release binary
+panic = "abort"                 # Smaller binary, no unwinding overhead
+
+[profile.release-debug]
+inherits = "release"
+debug = true                    # Release perf with debug symbols for profiling
+strip = "none"
