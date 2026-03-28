@@ -30,7 +30,7 @@ use midas_chart::input::ChartInput;
 use midas_chart::interaction::{ChartEvent, handle_event};
 use midas_chart::levels::HorizontalLevel;
 use midas_chart::scene::ChartScene;
-use midas_chart::state::ChartState;
+use midas_chart::state::{ChartState, InteractionMode};
 use midas_chart::{
     CandleInstance, CrosshairRender, GridLineInstance, VolumeInstance, compute_chart_scene,
 };
@@ -69,6 +69,8 @@ pub struct ChartRenderSnapshot {
     pub viewport_height: u32,
     /// Whether session gaps are collapsed (index-based X positioning).
     pub collapse_gaps: bool,
+    /// Volume bar height multiplier (1.0 = default).
+    pub volume_scale: f32,
     /// Data time bounds for scroll clamping (first candle timestamp ms).
     pub data_time_start: f64,
     /// Data time bounds for scroll clamping (last candle timestamp ms).
@@ -133,6 +135,7 @@ impl shader::Program<Message> for ChartProgram {
         chart_state.data_time_start = self.snapshot.data_time_start;
         chart_state.data_time_end = self.snapshot.data_time_end;
         chart_state.levels = self.snapshot.levels.clone();
+        chart_state.volume_scale = self.snapshot.volume_scale;
 
         // Detect viewport resize and emit a scale-preserving adjustment.
         // Compare against the canonical camera viewport (from snapshot),
@@ -144,6 +147,15 @@ impl shader::Program<Message> for ChartProgram {
         let new_vp = (new_w, new_h);
         if let Some(old_vp) = state.last_viewport {
             if old_vp != new_vp && old_vp.0 > 0 && old_vp.1 > 0 {
+                // Viewport is changing (window resize or pane divider drag).
+                // Reset any active interaction so stale pan/scale state
+                // doesn't linger — the early return below eats all events
+                // (including mouse release) during the resize.
+                chart_state.interaction_mode = InteractionMode::Idle;
+                chart_state.drag_start = None;
+                chart_state.left_mouse_down = false;
+                chart_state.crosshair_pos = None;
+
                 state.last_viewport = Some(new_vp);
                 return Some(shader::Action::publish(
                     Message::ChartViewportChanged(
@@ -266,6 +278,7 @@ impl shader::Program<Message> for ChartProgram {
             crosshair: snap.crosshair_pos,
             levels: &snap.levels,
             collapse_gaps: snap.collapse_gaps,
+            volume_scale: snap.volume_scale,
             dirty: &snap.dirty,
         };
 
@@ -282,11 +295,32 @@ impl shader::Program<Message> for ChartProgram {
 
     fn mouse_interaction(
         &self,
-        _state: &Self::State,
+        state: &Self::State,
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> mouse::Interaction {
-        if cursor.is_over(bounds) {
+        // While actively dragging the volume handle, always show resize cursor.
+        if let Some(cs) = &state.chart_state {
+            if matches!(
+                cs.interaction_mode,
+                InteractionMode::DraggingVolumeScale { .. }
+            ) {
+                return mouse::Interaction::ResizingVertically;
+            }
+        }
+
+        if let Some(pos) = cursor.position_in(bounds) {
+            // Hit-test the volume scale handle triangle zone.
+            let vh = bounds.height;
+            let handle_y = vh * (1.0 - midas_chart::VOLUME_AREA_FRACTION);
+            let half_h = 7.0 + 8.0; // VOLUME_HANDLE_HEIGHT/2 + HIT_PADDING
+            let x_min = bounds.width - 10.0 - 8.0; // HANDLE_WIDTH + HIT_PADDING
+            if pos.x >= x_min
+                && pos.y >= handle_y - half_h
+                && pos.y <= handle_y + half_h
+            {
+                return mouse::Interaction::ResizingVertically;
+            }
             mouse::Interaction::Crosshair
         } else {
             mouse::Interaction::default()
@@ -440,6 +474,28 @@ impl shader::Primitive for ChartPrimitive {
         } else {
             Vec::new()
         };
+
+        // Render the volume scale handle triangle on the right edge.
+        // Rasterized as horizontal line slices for the grid pipeline.
+        {
+            let handle_y = vh * (1.0 - midas_chart::VOLUME_AREA_FRACTION);
+            let half_h: f32 = 7.0;   // VOLUME_HANDLE_HEIGHT / 2
+            let tri_width: f32 = 10.0; // VOLUME_HANDLE_WIDTH
+            let color = [0.55, 0.55, 0.55, 0.35];
+            let num_slices = (half_h * 2.0) as i32;
+            for i in 0..num_slices {
+                let y = handle_y - half_h + i as f32;
+                let dist = ((i as f32 + 0.5) - half_h).abs();
+                let w = (1.0 - dist / half_h) * tri_width;
+                if w <= 0.0 {
+                    continue;
+                }
+                resources.crosshair_lines.push(GridLineInstance {
+                    rect: [vw - w, y, vw, y + 1.0],
+                    color,
+                });
+            }
+        }
 
         // Build the render scene from cached data.
         let dirty = DirtyFlags {
@@ -652,6 +708,9 @@ fn action_to_message(
         }
         ChartAction::CreateLevel { price } => {
             Some(Message::ChartCreateLevel(chart_id, *price))
+        }
+        ChartAction::SetVolumeScale { scale } => {
+            Some(Message::ChartSetVolumeScale(chart_id, *scale))
         }
         ChartAction::Redraw => None,
         _ => None,

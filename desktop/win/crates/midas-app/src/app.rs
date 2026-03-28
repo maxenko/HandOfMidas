@@ -155,6 +155,8 @@ pub enum Message {
     ChartCrosshair(ChartId, Option<(f32, f32)>),
     /// Create a new horizontal price level.
     ChartCreateLevel(ChartId, f64),
+    /// Set the volume bar height multiplier for a chart.
+    ChartSetVolumeScale(ChartId, f64),
 
     // -- Gap collapsing --
     /// Toggle session gap collapsing on a chart panel.
@@ -781,7 +783,10 @@ impl MidasApp {
                     // actual bounds on the next frame.
                     cam.viewport_width = new_w;
                     cam.viewport_height = new_h;
+                    // Clear crosshair during resize so it doesn't linger.
+                    chart.chart_state.crosshair_pos = None;
                     chart.chart_state.dirty.mark_camera();
+                    chart.chart_state.dirty.mark_crosshair();
                 }
                 Task::none()
             }
@@ -853,6 +858,15 @@ impl MidasApp {
                     chart.chart_state.dirty.mark_levels();
                     self.mark_config_dirty();
                 }
+                Task::none()
+            }
+
+            Message::ChartSetVolumeScale(chart_id, scale) => {
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    chart.chart_state.volume_scale = scale as f32;
+                    chart.chart_state.dirty.mark_data();
+                }
+                self.mark_config_dirty();
                 Task::none()
             }
 
@@ -1081,6 +1095,7 @@ impl MidasApp {
                 viewport_width: chart.chart_state.camera.viewport_width,
                 viewport_height: chart.chart_state.camera.viewport_height,
                 collapse_gaps: chart.chart_state.collapse_gaps,
+                volume_scale: chart.chart_state.volume_scale,
                 data_time_start: chart.chart_state.data_time_start,
                 data_time_end: chart.chart_state.data_time_end,
             };
@@ -1451,6 +1466,7 @@ impl MidasApp {
                 viewport_width: chart.chart_state.camera.viewport_width,
                 viewport_height: chart.chart_state.camera.viewport_height,
                 collapse_gaps: chart.chart_state.collapse_gaps,
+                volume_scale: chart.chart_state.volume_scale,
                 data_time_start: chart.chart_state.data_time_start,
                 data_time_end: chart.chart_state.data_time_end,
             };

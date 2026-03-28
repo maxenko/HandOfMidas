@@ -58,6 +58,7 @@ fn make_default_chart_input<'a>(
         crosshair: None,
         levels,
         collapse_gaps: false,
+        volume_scale: 1.0,
         dirty,
     }
 }
