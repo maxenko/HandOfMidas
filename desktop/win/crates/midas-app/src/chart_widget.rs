@@ -518,7 +518,23 @@ impl shader::Primitive for ChartPrimitive {
         }
 
         // 4. Session boundary lines (collapsed mode only).
+        //    Skip boundaries that overlap with a date-label boundary line
+        //    (both fire at day transitions, producing a double line).
+        //    The session boundary sits at the midpoint between two candles
+        //    while the date label sits at the candle center, so the gap
+        //    equals half a candle slot — use full slot width as tolerance.
+        let slot_tol = if scene.candle_count > 1 {
+            vw / scene.candle_count as f32
+        } else {
+            40.0
+        };
         for sb in &scene.session_boundaries {
+            let dominated = scene.date_labels.iter().any(|dl| {
+                dl.is_boundary && (dl.screen_x - sb.x).abs() < slot_tol
+            });
+            if dominated {
+                continue;
+            }
             resources.grid_lines.push(GridLineInstance {
                 rect: [sb.x, 0.0, sb.x + 1.0, sep_y],
                 color: sb.color,
