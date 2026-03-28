@@ -1,0 +1,46 @@
+# ── Rust build artifacts ────────────────────────────────────────────
+/target/
+**/*.rs.bk
+
+# ── Cargo lock — included for binaries, but this is a workspace ────
+# Cargo.lock is committed (workspace with a future binary crate)
+
+# ── IDE / editor ───────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.iml
+
+# ── OS ─────────────────────────────────────────────────────────────
+Thumbs.db
+Desktop.ini
+.DS_Store
+.DS_Store?
+._*
+
+# ── Environment / secrets ──────────────────────────────────────────
+.env
+.env.*
+*.pem
+*.key
+credentials.json
+
+# ── Runtime data ───────────────────────────────────────────────────
+/data/
+*.candles
+
+# ── SQLite databases ──────────────────────────────────────────────
+*.db
+*.db-wal
+*.db-shm
+
+# ── Benchmark / profiling output ───────────────────────────────────
+/target/criterion/
+perf.data
+perf.data.old
+flamegraph.svg
+
+# ── Claude Code ────────────────────────────────────────────────────
+.claude/
