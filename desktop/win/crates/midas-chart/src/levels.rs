@@ -28,7 +28,7 @@ impl LevelIcon {
             LevelIcon::None => None,
             LevelIcon::ArrowUp => Some('\u{25B2}'),   // ▲
             LevelIcon::ArrowDown => Some('\u{25BC}'),  // ▼
-            LevelIcon::Star => Some('\u{2605}'),       // ★
+            LevelIcon::Star => Some('\u{2726}'),       // ✦
             LevelIcon::Flag => Some('\u{2691}'),       // ⚑
             LevelIcon::Warning => Some('\u{26A0}'),    // ⚠
         }
@@ -88,17 +88,10 @@ impl LevelIcon {
 /// Returns `(coarse_step, fine_step)` where coarse is for arrow key clicks
 /// and fine is for Shift+arrow or scroll wheel.
 pub fn price_step_for(price: f64) -> (f64, f64) {
-    let abs_price = price.abs();
-    if abs_price >= 1000.0 {
-        (5.0, 1.0)
-    } else if abs_price >= 100.0 {
-        (1.0, 0.25)
-    } else if abs_price >= 10.0 {
-        (0.50, 0.10)
-    } else if abs_price >= 1.0 {
-        (0.10, 0.01)
+    if price.abs() >= 200.0 {
+        (0.05, 0.05)
     } else {
-        (0.01, 0.001)
+        (0.01, 0.01)
     }
 }
 
@@ -192,23 +185,19 @@ mod tests {
     #[test]
     fn price_step_for_various_prices() {
         let (c, f) = price_step_for(250.0);
-        assert_eq!(c, 1.0);
-        assert_eq!(f, 0.25);
+        assert_eq!(c, 0.05);
+        assert_eq!(f, 0.05);
 
         let (c, f) = price_step_for(50.0);
-        assert_eq!(c, 0.50);
-        assert_eq!(f, 0.10);
-
-        let (c, f) = price_step_for(5.0);
-        assert_eq!(c, 0.10);
+        assert_eq!(c, 0.01);
         assert_eq!(f, 0.01);
 
-        let (c, f) = price_step_for(0.50);
+        let (c, f) = price_step_for(199.99);
         assert_eq!(c, 0.01);
-        assert_eq!(f, 0.001);
+        assert_eq!(f, 0.01);
 
-        let (c, f) = price_step_for(1500.0);
-        assert_eq!(c, 5.0);
-        assert_eq!(f, 1.0);
+        let (c, f) = price_step_for(200.0);
+        assert_eq!(c, 0.05);
+        assert_eq!(f, 0.05);
     }
 }

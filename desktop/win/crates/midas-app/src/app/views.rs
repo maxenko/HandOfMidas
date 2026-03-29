@@ -920,11 +920,13 @@ fn build_level_labels_overlay<'a>(
         let label_color = Color::from_rgba(r, g, b, a.max(0.9));
         let bg_color = Color::from_rgba(r * 0.3, g * 0.3, b * 0.3, 0.75);
 
-        // Position: top padding = screen_y - 8 (center label on line).
-        let top_pad = (level.screen_y - 8.0).max(0.0);
+        // Center the badge vertically on the level line.
+        // Badge height ≈ font_size(16) + vertical_padding(3*2) + border ≈ 24px.
+        let badge_half_height = 14.0;
+        let top_pad = (level.screen_y - badge_half_height).max(0.0);
 
-        let label_widget = container(text(label_str).size(10).color(label_color))
-            .padding([2, 6])
+        let label_widget = container(text(label_str).size(16).color(label_color))
+            .padding([3, 8])
             .style(move |_theme: &iced::Theme| container::Style {
                 background: Some(iced::Background::Color(bg_color)),
                 border: iced::Border {
@@ -1004,7 +1006,7 @@ fn build_level_editor<'a>(
         .padding([2, 4])
         .style(button::text);
 
-    let price_row = row![
+    let price_row_inner = row![
         text("Price")
             .size(10)
             .color(Color::from_rgba(0.6, 0.6, 0.65, 1.0)),
@@ -1013,6 +1015,17 @@ fn build_level_editor<'a>(
     ]
     .spacing(4)
     .align_y(iced::Alignment::Center);
+
+    // Wrap in mouse_area to capture scroll wheel for price adjustment.
+    let price_row = iced::widget::mouse_area(price_row_inner).on_scroll(
+        move |delta| {
+            let lines = match delta {
+                iced::mouse::ScrollDelta::Lines { y, .. } => y,
+                iced::mouse::ScrollDelta::Pixels { y, .. } => y / 50.0,
+            };
+            Message::LevelEditorPriceStep(chart_id, level_id, coarse_step * lines as f64)
+        },
+    );
 
     // -- Label input --
     let current_label = level.label.as_deref().unwrap_or("");
@@ -1124,7 +1137,7 @@ fn build_level_editor<'a>(
         };
         let icon_clone = icon_variant.clone();
         icon_buttons = icon_buttons.push(
-            button(text(label).size(12))
+            button(text(label).size(20))
                 .on_press(Message::LevelEditorIconChanged(
                     chart_id, level_id, icon_clone,
                 ))

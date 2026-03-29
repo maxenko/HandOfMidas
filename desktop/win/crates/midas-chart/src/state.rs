@@ -318,7 +318,7 @@ impl ChartState {
                 self.levels.push(HorizontalLevel {
                     id,
                     price: *price,
-                    color: [1.0, 0.843, 0.0, 1.0], // gold
+                    color: [0.85, 0.85, 0.85, 0.8], // gray (last palette color)
                     line_width: 1.0,
                     label: None,
                     icon: crate::levels::LevelIcon::None,

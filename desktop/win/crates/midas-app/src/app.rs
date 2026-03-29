@@ -918,7 +918,7 @@ impl MidasApp {
                         .push(midas_chart::levels::HorizontalLevel {
                             id: level_id,
                             price,
-                            color: [0.22, 0.55, 0.95, 0.8],
+                            color: [0.85, 0.85, 0.85, 0.8],
                             line_width: 1.0,
                             label: None,
                             icon: midas_chart::LevelIcon::None,
