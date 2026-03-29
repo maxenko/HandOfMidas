@@ -893,6 +893,82 @@ pub fn compute_y_labels(camera: &Camera2D) -> Vec<AxisLabel> {
     labels
 }
 
+/// Label data for crosshair axis overlays (price on Y axis, time on X axis).
+///
+/// Produced by [`compute_crosshair_labels()`] and consumed by the iced
+/// overlay builder in midas-app.
+#[derive(Clone, Debug)]
+pub struct CrosshairLabels {
+    /// Price label: formatted price text, positioned at the right edge of
+    /// the chart, vertically centered on the cursor Y.
+    pub price_label: AxisLabel,
+    /// Time label: formatted date/time text, positioned at the bottom of
+    /// the price area, horizontally centered on the snapped cursor X.
+    pub time_label: AxisLabel,
+}
+
+/// Compute crosshair axis label data for the iced widget overlay.
+///
+/// Returns `None` if the crosshair is not active (position is `None`) or
+/// the data source is empty.
+///
+/// When `collapse_gaps` is true, `cursor_x` maps to a candle index via
+/// the camera's index-space; otherwise it maps to a timestamp.
+pub fn compute_crosshair_labels(
+    cursor_pos: Option<(f32, f32)>,
+    camera: &Camera2D,
+    data: &dyn CandleData,
+    collapse_gaps: bool,
+) -> Option<CrosshairLabels> {
+    let (cx, cy) = cursor_pos?;
+
+    if data.is_empty() {
+        return None;
+    }
+
+    // Price label uses the raw cursor Y so the displayed price matches
+    // the user's exact cursor position, not a snapped value.
+    let cursor_price = camera.y_to_price(cy);
+    let snap_y = camera.snap_to_pixel(cy);
+    let price_label = AxisLabel {
+        text: format_price(cursor_price),
+        screen_x: camera.viewport_width as f32,
+        screen_y: snap_y,
+        bg_color: [1.0, 1.0, 1.0, 0.95],
+        text_color: [0.1, 0.1, 0.1, 1.0],
+    };
+
+    // Time label — snap to nearest candle, show detailed datetime.
+    let (snap_x, snap_ts) = if collapse_gaps {
+        // In collapsed mode, camera X axis is index-space.
+        let global_idx_f = camera.x_to_time(cx);
+        let idx = (global_idx_f.round() as usize).min(data.len().saturating_sub(1));
+        let ts = data.timestamp(idx);
+        let sx = camera.snap_to_pixel(camera.time_to_x(idx as f64));
+        (sx, ts)
+    } else {
+        // Normal mode: camera X axis is timestamp-space.
+        let cursor_time = camera.x_to_time(cx);
+        let nearest_idx = data.find_index_by_time(cursor_time as i64);
+        let ts = data.timestamp(nearest_idx);
+        let sx = camera.snap_to_pixel(camera.time_to_x(ts as f64));
+        (sx, ts)
+    };
+
+    let time_label = AxisLabel {
+        text: format_datetime_long(snap_ts),
+        screen_x: snap_x,
+        screen_y: camera.viewport_height as f32,
+        bg_color: [1.0, 1.0, 1.0, 0.95],
+        text_color: [0.1, 0.1, 0.1, 1.0],
+    };
+
+    Some(CrosshairLabels {
+        price_label,
+        time_label,
+    })
+}
+
 /// Compute X-axis (time) labels.
 fn compute_x_labels(camera: &Camera2D, candle_duration: f64) -> Vec<AxisLabel> {
     let time_range = camera.time_end - camera.time_start;
@@ -983,10 +1059,11 @@ fn compute_crosshair(
 }
 
 /// Format a timestamp as a long date/time string (e.g. "Fri 3/27/26 02:40:00 PM").
-fn format_datetime_long(ts_ms: i64) -> String {
-    use chrono::{DateTime, Datelike, Timelike, Utc};
-    let dt: DateTime<Utc> = DateTime::from_timestamp_millis(ts_ms)
-        .unwrap_or_else(|| DateTime::from_timestamp(0, 0).unwrap());
+pub fn format_datetime_long(ts_ms: i64) -> String {
+    use chrono::{Datelike, Timelike};
+    let utc = chrono::DateTime::from_timestamp_millis(ts_ms)
+        .unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).unwrap());
+    let dt = utc.with_timezone(&chrono::Local);
     let weekday = match dt.weekday() {
         chrono::Weekday::Mon => "Mon",
         chrono::Weekday::Tue => "Tue",

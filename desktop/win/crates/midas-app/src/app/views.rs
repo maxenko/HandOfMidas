@@ -103,6 +103,21 @@ impl MidasApp {
                     chart.chart_state.camera.viewport_height,
                 ));
             }
+
+            // Crosshair axis labels for floating window.
+            let crosshair_labels = midas_chart::compute_crosshair_labels(
+                chart.chart_state.crosshair.render_pos(),
+                camera,
+                data.as_ref(),
+                chart.chart_state.collapse_gaps,
+            );
+            chart_layers.push(build_crosshair_label_overlay(
+                crosshair_labels.as_ref(),
+                chart.chart_state.timeline_border_ratio,
+                chart.chart_state.camera.viewport_width,
+                chart.chart_state.camera.viewport_height,
+            ));
+
             chart_layers.push(drawing_panel);
 
             // Level editor popup (when a level is being edited).
@@ -535,6 +550,21 @@ impl MidasApp {
                     chart.chart_state.camera.viewport_height,
                 ));
             }
+
+            // Crosshair axis labels (white badges at arm endpoints).
+            let crosshair_labels = midas_chart::compute_crosshair_labels(
+                chart.chart_state.crosshair.render_pos(),
+                camera,
+                data.as_ref(),
+                chart.chart_state.collapse_gaps,
+            );
+            chart_layers.push(build_crosshair_label_overlay(
+                crosshair_labels.as_ref(),
+                chart.chart_state.timeline_border_ratio,
+                chart.chart_state.camera.viewport_width,
+                chart.chart_state.camera.viewport_height,
+            ));
+
             chart_layers.push(drawing_panel);
 
             // Level editor popup (when a level is being edited).
@@ -968,6 +998,124 @@ fn build_level_labels_overlay<'a>(
     // Stack all labels on top of each other (each positions itself via
     // top padding).
     stack(label_elements).width(Fill).height(Fill).into()
+}
+
+// ── Crosshair axis labels overlay ─────────────────────────────────
+
+/// Build an overlay for crosshair axis labels (price on right, time at bottom).
+///
+/// Renders two white-background badges anchored at the crosshair arm endpoints:
+/// - A price label right-aligned on the Y axis (right end of horizontal arm)
+/// - A time label centered at the bottom of the price area (bottom of vertical arm)
+///
+/// Returns an empty Space if `labels` is `None` (crosshair inactive).
+fn build_crosshair_label_overlay<'a>(
+    labels: Option<&midas_chart::CrosshairLabels>,
+    timeline_border_ratio: f32,
+    viewport_width: u32,
+    viewport_height: u32,
+) -> Element<'a, Message> {
+    let labels = match labels {
+        Some(l) => l,
+        None => return Space::new().width(0).height(0).into(),
+    };
+
+    let label_font_size = 11.0;
+    let vw = viewport_width.max(1) as f32;
+    let vh = viewport_height.max(1) as f32;
+    let border_y = vh * (1.0 - timeline_border_ratio);
+
+    let mut elements: Vec<Element<'a, Message>> = Vec::new();
+
+    // ── Price label (right edge, centered on cursor Y) ────────────
+    {
+        let pl = &labels.price_label;
+        let [r, g, b, a] = pl.bg_color;
+        let bg = Color::from_rgba(r, g, b, a);
+        let [tr, tg, tb, ta] = pl.text_color;
+        let fg = Color::from_rgba(tr, tg, tb, ta);
+
+        let badge_half_h = (label_font_size + 6.0) / 2.0;
+        let top_pad = (pl.screen_y - badge_half_h)
+            .max(0.0)
+            .min(border_y - badge_half_h * 2.0);
+
+        let badge = container(text(pl.text.clone()).size(label_font_size).color(fg))
+            .padding([3, 6])
+            .style(move |_theme: &iced::Theme| container::Style {
+                background: Some(iced::Background::Color(bg)),
+                border: iced::Border {
+                    radius: 3.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+
+        // Right-aligned: flexible spacer on the left, badge, small gap to edge.
+        let positioned = container(
+            row![Space::new().width(Fill), badge, Space::new().width(Length::Fixed(4.0))]
+                .width(Fill),
+        )
+        .padding(iced::Padding::ZERO.top(top_pad))
+        .width(Fill)
+        .height(Fill);
+
+        elements.push(positioned.into());
+    }
+
+    // ── Time label (below timeline, centered on snap X) ────────────
+    {
+        let tl = &labels.time_label;
+        let [r, g, b, a] = tl.bg_color;
+        let bg = Color::from_rgba(r, g, b, a);
+        let [tr, tg, tb, ta] = tl.text_color;
+        let fg = Color::from_rgba(tr, tg, tb, ta);
+
+        // Position below the timeline area (below date labels).
+        // border_y is the top of the timeline; the bottom is at vh.
+        // Place the badge near the bottom of the viewport.
+        let badge_height = label_font_size + 6.0;
+        let top_pad = (vh - badge_height - 2.0).max(0.0);
+
+        let badge = container(text(tl.text.clone()).size(label_font_size).color(fg))
+            .padding([3, 6])
+            .style(move |_theme: &iced::Theme| container::Style {
+                background: Some(iced::Background::Color(bg)),
+                border: iced::Border {
+                    radius: 3.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+
+        // Use a fixed-width left spacer to position at snap_x, then
+        // let the badge auto-size, and center it by offsetting half
+        // the badge width. Since we can't know the exact rendered
+        // width, use a two-column approach: left portion + centered badge.
+        let snap_x = tl.screen_x;
+
+        // Build a row: [left spacer][badge][right fill]
+        // The left spacer pushes the badge to snap_x. We use
+        // FillPortion to split the row at the snap_x ratio.
+        let left_portion = ((snap_x / vw) * 1000.0) as u16;
+        let right_portion = 1000_u16.saturating_sub(left_portion);
+
+        let positioned = container(
+            row![
+                Space::new().width(Length::FillPortion(left_portion.max(1))),
+                badge,
+                Space::new().width(Length::FillPortion(right_portion.max(1))),
+            ]
+            .width(Fill),
+        )
+        .padding(iced::Padding::ZERO.top(top_pad))
+        .width(Fill)
+        .height(Fill);
+
+        elements.push(positioned.into());
+    }
+
+    stack(elements).width(Fill).height(Fill).into()
 }
 
 // ── Level editor popup ─────────────────────────────────────────────

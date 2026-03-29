@@ -35,7 +35,10 @@ pub mod volume_profile;
 pub use camera::Camera2D;
 pub use compute::VOLUME_AREA_FRACTION;
 pub use crosshair_tool::{CrosshairMode, CrosshairTool};
-pub use compute::{compute_chart_scene, compute_y_labels, estimate_candle_duration, format_price};
+pub use compute::{
+    compute_chart_scene, compute_crosshair_labels, compute_y_labels, estimate_candle_duration,
+    format_datetime_long, format_price, CrosshairLabels,
+};
 pub use date_labels::{DateLabel, Tier as DateLabelTier};
 pub use dirty::{DirtyFlags, DirtyTracker};
 pub use input::ChartInput;
