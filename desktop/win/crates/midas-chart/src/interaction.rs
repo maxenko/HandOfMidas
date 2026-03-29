@@ -296,13 +296,14 @@ fn handle_mouse_moved(
             let dist = (ddx * ddx + ddy * ddy).sqrt();
 
             if dist >= DRAG_THRESHOLD_PX {
-                // Exceeded threshold. Determine if we hit a level.
+                // Exceeded threshold. Left-drag only initiates level drag,
+                // never panning (panning is right-mouse only).
                 if let Some((level_id, grab_offset)) =
                     hit_test_levels(&state.levels, start_y, &state.camera)
                 {
                     let is_locked = state.levels.iter().any(|l| l.id == level_id && l.locked);
                     if !is_locked {
-                        // Transition to LevelTool dragging instead of InteractionMode.
+                        // Transition to LevelTool dragging.
                         state.level_tool.mode = crate::level_tool::LevelToolMode::Dragging {
                             level_id,
                             grab_offset,
@@ -315,24 +316,15 @@ fn handle_mouse_moved(
                         { state.crosshair_pos = None; }
                         actions.push(ChartAction::SelectLevel { id: level_id });
                         actions.push(ChartAction::ClearCrosshair);
+                        state.drag_start = Some((x, y));
                     } else {
-                        // Locked level — fall through to panning.
-                        state.interaction_mode = InteractionMode::Panning;
-                        if state.momentum.is_some() {
-                            actions.push(ChartAction::StopMomentum);
-                            state.momentum = None;
-                        }
+                        // Locked level — can't drag. Return to Idle.
+                        state.interaction_mode = InteractionMode::Idle;
                     }
                 } else {
-                    state.interaction_mode = InteractionMode::Panning;
-                    // Stop any active momentum when starting a new pan.
-                    if state.momentum.is_some() {
-                        actions.push(ChartAction::StopMomentum);
-                        state.momentum = None;
-                    }
+                    // No level hit — left-drag is just crosshair. Return to Idle.
+                    state.interaction_mode = InteractionMode::Idle;
                 }
-                // Set drag_start to current position for delta computation.
-                state.drag_start = Some((x, y));
             }
         }
 
@@ -570,10 +562,20 @@ fn handle_mouse_pressed(
             #[allow(deprecated)]
             { state.left_mouse_down = true; }
 
-            // Show crosshair on press (tool already called on_left_press above).
-            #[allow(deprecated)]
-            { state.crosshair_pos = state.crosshair.render_pos(); }
-            actions.push(ChartAction::SetCrosshair { x, y });
+            // Don't show crosshair if pressing on a draggable (unlocked) level —
+            // the PendingDrag will resolve to a level drag, not a crosshair.
+            let over_draggable_level = hit_test_levels(&state.levels, y, &state.camera)
+                .map(|(id, _)| !state.levels.iter().any(|l| l.id == id && l.locked))
+                .unwrap_or(false);
+            if over_draggable_level {
+                state.crosshair.suppress();
+                #[allow(deprecated)]
+                { state.crosshair_pos = None; }
+            } else {
+                #[allow(deprecated)]
+                { state.crosshair_pos = state.crosshair.render_pos(); }
+                actions.push(ChartAction::SetCrosshair { x, y });
+            }
 
             // Stop any active momentum.
             if state.momentum.is_some() {
@@ -634,15 +636,39 @@ fn handle_mouse_released(
         return vec![];
     }
 
-    // Handle right button release — exit right-panning.
+    // Handle right button release — exit right-panning with momentum.
     if button == MouseButton::Right {
+        let mut actions = Vec::new();
         if matches!(state.interaction_mode, InteractionMode::RightPanning) {
+            // Compute flick-to-scroll momentum from last drag delta.
+            if let Some((prev_x, prev_y)) = state.drag_start {
+                let pixel_dx = x - prev_x;
+                let pixel_dy = y - prev_y;
+                let time_range = state.camera.time_end - state.camera.time_start;
+                let price_range = state.camera.price_high - state.camera.price_low;
+                let vw = state.camera.viewport_width as f64;
+                let vh = state.camera.viewport_height as f64;
+                let fps = 60.0_f64;
+                let vx = if vw > 0.0 {
+                    -(pixel_dx as f64) * (time_range / vw) * fps
+                } else {
+                    0.0
+                };
+                let vy = if vh > 0.0 {
+                    pixel_dy as f64 * (price_range / vh) * fps
+                } else {
+                    0.0
+                };
+                if vx.abs() > 1.0 || vy.abs() > 0.001 {
+                    actions.push(ChartAction::StartMomentum { vx, vy });
+                }
+            }
             state.interaction_mode = InteractionMode::Idle;
             state.drag_start = None;
         }
         state.level_tool.try_resume_placing();
         sync_crosshair_to_claim(state);
-        return vec![];
+        return actions;
     }
 
     if button != MouseButton::Left {
@@ -696,33 +722,8 @@ fn handle_mouse_released(
         }
 
         InteractionMode::Panning => {
-            // Compute momentum from the last drag delta.
-            // Positive vx = forward in time (consistent with Pan convention).
-            // Dragging right (positive pixel_dx) = backward in time (negative vx).
-            if let Some((prev_x, prev_y)) = state.drag_start {
-                let pixel_dx = x - prev_x;
-                let pixel_dy = y - prev_y;
-                let time_range = state.camera.time_end - state.camera.time_start;
-                let price_range = state.camera.price_high - state.camera.price_low;
-                let vw = state.camera.viewport_width as f64;
-                let vh = state.camera.viewport_height as f64;
-
-                let fps = 60.0_f64;
-                let vx = if vw > 0.0 {
-                    -(pixel_dx as f64) * (time_range / vw) * fps
-                } else {
-                    0.0
-                };
-                let vy = if vh > 0.0 {
-                    pixel_dy as f64 * (price_range / vh) * fps
-                } else {
-                    0.0
-                };
-
-                if vx.abs() > 1.0 || vy.abs() > 0.001 {
-                    actions.push(ChartAction::StartMomentum { vx, vy });
-                }
-            }
+            // Left-drag no longer pans, but handle gracefully if
+            // state was entered before the change.
         }
 
         InteractionMode::PendingScale { .. }
@@ -732,7 +733,7 @@ fn handle_mouse_released(
         }
 
         InteractionMode::RightPanning => {
-            // Right panning completed — nothing extra.
+            // Right-release handled by early return above; unreachable here.
         }
 
         InteractionMode::Idle => {}
@@ -1198,7 +1199,7 @@ mod tests {
     }
 
     #[test]
-    fn large_move_transitions_to_panning() {
+    fn large_left_drag_does_not_pan() {
         let mut state = test_state();
         handle_event(
             &mut state,
@@ -1212,32 +1213,32 @@ mod tests {
             false,
         );
         handle_event(&mut state, ChartEvent::MouseMoved { x: 110.0, y: 200.0, alt_held: false }, None, false);
-        assert_eq!(state.interaction_mode, InteractionMode::Panning);
+        // Left-drag returns to Idle (no panning), not Panning.
+        assert_eq!(state.interaction_mode, InteractionMode::Idle);
     }
 
     #[test]
-    fn release_after_panning_returns_to_idle() {
+    fn right_click_pans() {
         let mut state = test_state();
         handle_event(
             &mut state,
             ChartEvent::MousePressed {
                 x: 100.0,
                 y: 200.0,
-                button: MouseButton::Left,
+                button: MouseButton::Right,
                 alt_held: false,
             },
             None,
             false,
         );
-        handle_event(&mut state, ChartEvent::MouseMoved { x: 110.0, y: 200.0, alt_held: false }, None, false);
-        assert_eq!(state.interaction_mode, InteractionMode::Panning);
+        assert_eq!(state.interaction_mode, InteractionMode::RightPanning);
 
         handle_event(
             &mut state,
             ChartEvent::MouseReleased {
                 x: 200.0,
                 y: 200.0,
-                button: MouseButton::Left,
+                button: MouseButton::Right,
                 alt_held: false,
             },
             None,
@@ -1247,7 +1248,7 @@ mod tests {
     }
 
     #[test]
-    fn full_cycle_idle_pending_panning_idle() {
+    fn full_cycle_right_pan() {
         let mut state = test_state();
         assert_eq!(state.interaction_mode, InteractionMode::Idle);
 
@@ -1256,26 +1257,25 @@ mod tests {
             ChartEvent::MousePressed {
                 x: 100.0,
                 y: 200.0,
-                button: MouseButton::Left,
+                button: MouseButton::Right,
                 alt_held: false,
             },
             None,
             false,
         );
-        assert!(matches!(
-            state.interaction_mode,
-            InteractionMode::PendingDrag { .. }
-        ));
+        assert_eq!(state.interaction_mode, InteractionMode::RightPanning);
 
-        handle_event(&mut state, ChartEvent::MouseMoved { x: 110.0, y: 200.0, alt_held: false }, None, false);
-        assert_eq!(state.interaction_mode, InteractionMode::Panning);
+        // Drag moves the camera.
+        let actions = handle_event(&mut state, ChartEvent::MouseMoved { x: 200.0, y: 200.0, alt_held: false }, None, false);
+        let has_pan = actions.iter().any(|a| matches!(a, ChartAction::Pan { .. }));
+        assert!(has_pan, "expected Pan action during right-drag, got {:?}", actions);
 
         handle_event(
             &mut state,
             ChartEvent::MouseReleased {
                 x: 200.0,
                 y: 200.0,
-                button: MouseButton::Left,
+                button: MouseButton::Right,
                 alt_held: false,
             },
             None,
@@ -1287,27 +1287,26 @@ mod tests {
     // ── Pan tests ───────────────────────────────────────────────────
 
     #[test]
-    fn pan_drag_100px_right_shifts_time_left() {
+    fn right_pan_drag_100px_shifts_time() {
         let mut state = test_state();
         let orig_start = state.camera.time_start;
 
-        // Press -> cross threshold -> pan.
+        // Right-press starts panning immediately.
         handle_event(
             &mut state,
             ChartEvent::MousePressed {
                 x: 500.0,
                 y: 540.0,
-                button: MouseButton::Left,
+                button: MouseButton::Right,
                 alt_held: false,
             },
             None,
             false,
         );
-        handle_event(&mut state, ChartEvent::MouseMoved { x: 505.0, y: 540.0, alt_held: false }, None, false);
-        assert_eq!(state.interaction_mode, InteractionMode::Panning);
+        assert_eq!(state.interaction_mode, InteractionMode::RightPanning);
 
         // Drag 100px to the right.
-        let actions = handle_event(&mut state, ChartEvent::MouseMoved { x: 605.0, y: 540.0, alt_held: false }, None, false);
+        let actions = handle_event(&mut state, ChartEvent::MouseMoved { x: 600.0, y: 540.0, alt_held: false }, None, false);
 
         let pan_action = actions
             .iter()
@@ -1322,7 +1321,7 @@ mod tests {
             state.apply_action(a);
         }
 
-        // Dragging right shifts time_start backward (dx > 0, subtracted).
+        // Dragging right shifts time_start backward.
         assert!(
             state.camera.time_start < orig_start,
             "time_start={} should be < orig={}",
@@ -1334,7 +1333,7 @@ mod tests {
     // ── Momentum tests ─────────────────────────────────────────────
 
     #[test]
-    fn release_after_drag_emits_start_momentum() {
+    fn right_pan_release_emits_start_momentum() {
         let mut state = test_state();
 
         handle_event(
@@ -1342,13 +1341,12 @@ mod tests {
             ChartEvent::MousePressed {
                 x: 500.0,
                 y: 540.0,
-                button: MouseButton::Left,
+                button: MouseButton::Right,
                 alt_held: false,
             },
             None,
             false,
         );
-        handle_event(&mut state, ChartEvent::MouseMoved { x: 510.0, y: 540.0, alt_held: false }, None, false);
         handle_event(&mut state, ChartEvent::MouseMoved { x: 610.0, y: 540.0, alt_held: false }, None, false);
 
         let actions = handle_event(
@@ -1356,7 +1354,7 @@ mod tests {
             ChartEvent::MouseReleased {
                 x: 710.0,
                 y: 540.0,
-                button: MouseButton::Left,
+                button: MouseButton::Right,
                 alt_held: false,
             },
             None,

@@ -343,6 +343,17 @@ impl shader::Program<Message> for ChartProgram {
             dirty.grid += 1;
         }
 
+        // When the local crosshair state differs from the snapshot (widget
+        // updated this frame but the message hasn't round-tripped yet), bump
+        // the crosshair generation so the renderer re-uploads the buffer.
+        let local_crosshair = state
+            .chart_state
+            .as_ref()
+            .and_then(|cs| cs.crosshair.render_pos());
+        if local_crosshair != snap.crosshair_pos {
+            dirty.crosshair += 1;
+        }
+
         // Build the clean input contract for chart scene computation.
         let default_level_tool = LevelTool::default();
         let input = ChartInput {
@@ -452,7 +463,17 @@ impl shader::Program<Message> for ChartProgram {
                 }
             }
 
-            mouse::Interaction::Crosshair
+            // Hide OS cursor when our custom crosshair is active (left mouse held).
+            let crosshair_active = state
+                .chart_state
+                .as_ref()
+                .map(|cs| cs.crosshair.should_render())
+                .unwrap_or(false);
+            if crosshair_active {
+                mouse::Interaction::Hidden
+            } else {
+                mouse::Interaction::default()
+            }
         } else {
             mouse::Interaction::default()
         }
