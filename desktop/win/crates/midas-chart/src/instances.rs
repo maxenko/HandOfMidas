@@ -138,6 +138,8 @@ pub struct AxisLabel {
 /// pipeline. Contains both the geometric data and display state.
 #[derive(Clone, Debug)]
 pub struct LevelRender {
+    /// Unique ID of this level (for interaction targeting).
+    pub id: u64,
     /// Price value of this level.
     pub price: f64,
     /// Screen Y position in logical pixels.
@@ -154,6 +156,12 @@ pub struct LevelRender {
     pub original_screen_y: Option<f32>,
     /// Price formatted to tick size.
     pub label_text: String,
+    /// User-defined label text (displayed on chart).
+    pub label: Option<String>,
+    /// Icon displayed next to the label.
+    pub icon: crate::levels::LevelIcon,
+    /// Whether this level is locked (prevents drag/delete).
+    pub locked: bool,
 }
 
 /// Render data for the crosshair overlay.

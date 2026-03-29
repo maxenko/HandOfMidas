@@ -26,6 +26,9 @@ impl MidasApp {
                         price: l.price,
                         color: l.color,
                         line_width: l.line_width,
+                        label: l.label.clone(),
+                        icon: l.icon.to_str_id().to_string(),
+                        locked: l.locked,
                     })
                     .collect();
                 ChartConfig {

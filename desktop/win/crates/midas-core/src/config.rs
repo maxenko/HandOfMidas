@@ -136,11 +136,25 @@ pub struct LevelConfig {
     /// Line width in logical pixels.
     #[serde(default = "default_line_width")]
     pub line_width: f32,
+    /// Optional user label displayed on the chart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Icon identifier ("none", "arrow_up", "arrow_down", "star", "flag", "warning").
+    #[serde(default = "default_icon")]
+    pub icon: String,
+    /// Whether this level is locked (prevents drag and delete).
+    #[serde(default)]
+    pub locked: bool,
 }
 
 /// Default line width for levels missing the field (backward compat).
 fn default_line_width() -> f32 {
     1.0
+}
+
+/// Default icon for levels missing the field (backward compat).
+fn default_icon() -> String {
+    "none".into()
 }
 
 // ── Default implementation ───────────────────────────────────────────
@@ -277,11 +291,17 @@ mod tests {
                         price: 420.50,
                         color: [1.0, 0.0, 0.0, 1.0],
                         line_width: 2.0,
+                        label: None,
+                        icon: "none".into(),
+                        locked: false,
                     },
                     LevelConfig {
                         price: 380.25,
                         color: [0.0, 1.0, 0.5, 0.8],
                         line_width: 1.5,
+                        label: None,
+                        icon: "none".into(),
+                        locked: false,
                     },
                 ],
                 camera_time_start: Some(1_000_000.0),
@@ -393,11 +413,17 @@ mod tests {
                             price: 150.0,
                             color: [1.0, 0.843, 0.0, 1.0],
                             line_width: 1.0,
+                            label: None,
+                            icon: "none".into(),
+                            locked: false,
                         },
                         LevelConfig {
                             price: 175.50,
                             color: [0.0, 1.0, 0.0, 1.0],
                             line_width: 3.0,
+                            label: None,
+                            icon: "none".into(),
+                            locked: false,
                         },
                     ],
                     camera_time_start: None,
@@ -645,11 +671,17 @@ color = [1.0, 0.843, 0.0, 1.0]
                             price: 500.0,
                             color: [1.0, 0.0, 0.0, 1.0],
                             line_width: 2.5,
+                            label: None,
+                            icon: "none".into(),
+                            locked: false,
                         },
                         LevelConfig {
                             price: 480.0,
                             color: [0.0, 1.0, 0.0, 0.7],
                             line_width: 0.5,
+                            label: None,
+                            icon: "none".into(),
+                            locked: false,
                         },
                     ],
                     camera_time_start: Some(1_700_000_000.0),

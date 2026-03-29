@@ -43,7 +43,7 @@ pub use instances::{
 pub use interaction::{
     handle_event, timeline_border_y, volume_handle_y, ChartAction, ChartEvent, Key, MouseButton,
 };
-pub use levels::HorizontalLevel;
+pub use levels::{HorizontalLevel, LevelIcon, price_step_for};
 pub use scene::{ChartScene, SceneGenerations};
 pub use state::{ChartState, InteractionMode, Momentum, YAnimation};
 pub use volume_profile::{VolumeProfile, VolumeProfileBin};
