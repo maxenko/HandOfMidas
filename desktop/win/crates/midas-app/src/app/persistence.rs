@@ -43,6 +43,7 @@ impl MidasApp {
                     timeline_border_ratio: panel.chart_state.timeline_border_ratio,
                     volume_scale: panel.chart_state.volume_scale,
                     show_volume_profile: panel.chart_state.show_volume_profile,
+                    show_levels: panel.chart_state.show_levels,
                     viewport_width: Some(cam.viewport_width),
                     viewport_height: Some(cam.viewport_height),
                 }

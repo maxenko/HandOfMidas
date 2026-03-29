@@ -159,6 +159,8 @@ pub struct ChartState {
     pub volume_scale: f32,
     /// Whether the Volume Profile overlay is visible.
     pub show_volume_profile: bool,
+    /// Whether horizontal price levels are visible.
+    pub show_levels: bool,
     /// Self-contained level tool state machine (Phase 2+).
     pub level_tool: LevelTool,
     /// Next level ID to assign (monotonically increasing).
@@ -187,6 +189,7 @@ impl ChartState {
             timeline_border_ratio: 0.20,
             volume_scale: 1.0,
             show_volume_profile: false,
+            show_levels: true,
             level_tool: LevelTool::default(),
             next_level_id: 1,
         }

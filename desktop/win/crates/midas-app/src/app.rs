@@ -212,6 +212,8 @@ pub enum Message {
     ToggleCollapseGaps(ChartId),
     /// Toggle Volume Profile overlay on a chart panel.
     ToggleVolumeProfile(ChartId),
+    /// Toggle horizontal price level visibility on a chart panel.
+    ToggleLevels(ChartId),
     /// Reset chart to default view (fit all data).
     ResetChart(ChartId),
 
@@ -465,6 +467,7 @@ impl MidasApp {
         panel.chart_state.timeline_border_ratio = chart_cfg.timeline_border_ratio;
         panel.chart_state.volume_scale = chart_cfg.volume_scale;
         panel.chart_state.show_volume_profile = chart_cfg.show_volume_profile;
+        panel.chart_state.show_levels = chart_cfg.show_levels;
         // Restore viewport so the first-frame ChartViewportChanged computes
         // the correct ratio (saved viewport → actual pane size) instead of
         // using the dummy 1280×720 from make_empty_panel.
@@ -1142,7 +1145,15 @@ impl MidasApp {
             Message::DrawingPanelCreateLevel(chart_id) => {
                 self.focus_chart(chart_id);
                 if let Some(chart) = self.charts.get_mut(&chart_id) {
-                    chart.chart_state.level_tool.activate();
+                    if chart.chart_state.level_tool.is_placing() {
+                        chart.chart_state.level_tool.cancel();
+                        chart.chart_state.crosshair.force_hide();
+                        #[allow(deprecated)]
+                        { chart.chart_state.crosshair_pos = None; }
+                        chart.chart_state.dirty.mark_crosshair();
+                    } else {
+                        chart.chart_state.level_tool.activate();
+                    }
                 }
                 Task::none()
             }
@@ -1192,6 +1203,16 @@ impl MidasApp {
                 if let Some(chart) = self.charts.get_mut(&chart_id) {
                     chart.chart_state.show_volume_profile = !chart.chart_state.show_volume_profile;
                     chart.chart_state.dirty.mark_data();
+                }
+                self.mark_config_dirty();
+                Task::none()
+            }
+
+            Message::ToggleLevels(chart_id) => {
+                self.focus_chart(chart_id);
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    chart.chart_state.show_levels = !chart.chart_state.show_levels;
+                    chart.chart_state.dirty.mark_levels();
                 }
                 self.mark_config_dirty();
                 Task::none()

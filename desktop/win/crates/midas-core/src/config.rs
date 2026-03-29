@@ -108,12 +108,20 @@ pub struct ChartConfig {
     /// Whether Volume Profile overlay is enabled.
     #[serde(default)]
     pub show_volume_profile: bool,
+    /// Whether horizontal price levels are visible.
+    #[serde(default = "default_true")]
+    pub show_levels: bool,
     /// Viewport width at save time (prevents scale distortion on restore).
     #[serde(default)]
     pub viewport_width: Option<u32>,
     /// Viewport height at save time.
     #[serde(default)]
     pub viewport_height: Option<u32>,
+}
+
+/// Serde default for bool fields that should default to `true`.
+fn default_true() -> bool {
+    true
 }
 
 /// Default timeline border ratio for configs missing the field (backward compat).
@@ -312,6 +320,7 @@ mod tests {
                 timeline_border_ratio: 0.20,
                 volume_scale: 1.0,
                 show_volume_profile: false,
+                show_levels: true,
                 viewport_width: None,
                 viewport_height: None,
             }],
@@ -434,6 +443,7 @@ mod tests {
                     timeline_border_ratio: 0.20,
                     volume_scale: 1.0,
                     show_volume_profile: false,
+                    show_levels: true,
                     viewport_width: None,
                     viewport_height: None,
                 },
@@ -449,6 +459,7 @@ mod tests {
                     timeline_border_ratio: 0.20,
                     volume_scale: 1.0,
                     show_volume_profile: false,
+                    show_levels: true,
                     viewport_width: None,
                     viewport_height: None,
                 },
@@ -611,6 +622,7 @@ color = [1.0, 0.843, 0.0, 1.0]
                 timeline_border_ratio: 0.20,
                 volume_scale: 1.0,
                 show_volume_profile: false,
+                show_levels: true,
                 viewport_width: None,
                 viewport_height: None,
             }],
@@ -692,6 +704,7 @@ color = [1.0, 0.843, 0.0, 1.0]
                     timeline_border_ratio: 0.20,
                     volume_scale: 1.0,
                     show_volume_profile: false,
+                    show_levels: true,
                     viewport_width: None,
                     viewport_height: None,
                 },
@@ -707,6 +720,7 @@ color = [1.0, 0.843, 0.0, 1.0]
                     timeline_border_ratio: 0.20,
                     volume_scale: 1.0,
                     show_volume_profile: false,
+                    show_levels: true,
                     viewport_width: None,
                     viewport_height: None,
                 },

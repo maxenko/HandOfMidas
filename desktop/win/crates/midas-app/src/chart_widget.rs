@@ -76,6 +76,8 @@ pub struct ChartRenderSnapshot {
     pub volume_scale: f32,
     /// Whether the Volume Profile overlay is visible.
     pub show_volume_profile: bool,
+    /// Whether horizontal price levels are visible.
+    pub show_levels: bool,
     /// Data time bounds for scroll clamping (first candle timestamp ms).
     pub data_time_start: f64,
     /// Data time bounds for scroll clamping (last candle timestamp ms).
@@ -115,6 +117,10 @@ pub struct ChartWidgetState {
     last_viewport: Option<(u32, u32)>,
     /// Current keyboard modifier state (for Alt detection during level placement).
     modifiers: iced::keyboard::Modifiers,
+    /// Set when the interaction layer cancels the level tool this frame.
+    /// Prevents the snapshot sync from reverting the cancel before the
+    /// message round-trips to the app.
+    tool_cancelled_this_frame: bool,
 }
 
 impl shader::Program<Message> for ChartProgram {
@@ -145,16 +151,25 @@ impl shader::Program<Message> for ChartProgram {
         chart_state.dirty = self.snapshot.dirty.clone();
         chart_state.data_time_start = self.snapshot.data_time_start;
         chart_state.data_time_end = self.snapshot.data_time_end;
-        // Only sync level_tool and levels from snapshot when the tool is NOT
-        // active. During placement or drag, the widget owns the live state;
-        // overwriting from the stale snapshot would revert in-progress edits.
-        if !chart_state.level_tool.is_active() {
-            chart_state.level_tool = self.snapshot.level_tool.clone();
+        // Sync levels from snapshot unless actively dragging (drag needs
+        // local positions for immediate visual feedback).
+        if !chart_state.level_tool.is_dragging() {
             chart_state.levels = self.snapshot.levels.clone();
+        }
+        // Sync level_tool from snapshot when the local tool is idle,
+        // UNLESS the widget just cancelled the tool this frame (the
+        // snapshot hasn't caught up yet and would revert the cancel).
+        if !chart_state.level_tool.is_active() && !state.tool_cancelled_this_frame {
+            chart_state.level_tool = self.snapshot.level_tool.clone();
+        }
+        // Clear the flag once the snapshot has caught up.
+        if !self.snapshot.level_tool.is_active() {
+            state.tool_cancelled_this_frame = false;
         }
         chart_state.timeline_border_ratio = self.snapshot.timeline_border_ratio;
         chart_state.volume_scale = self.snapshot.volume_scale;
         chart_state.show_volume_profile = self.snapshot.show_volume_profile;
+        chart_state.show_levels = self.snapshot.show_levels;
 
         // Detect viewport resize and emit a scale-preserving adjustment.
         // Compare against the canonical camera viewport (from snapshot),
@@ -240,6 +255,11 @@ impl shader::Program<Message> for ChartProgram {
                 }
                 if let midas_chart::ChartAction::SetVolumeScale { scale } = action {
                     chart_state.volume_scale = *scale as f32;
+                }
+                // Track when the interaction layer cancels the level tool
+                // so the snapshot sync doesn't revert it.
+                if matches!(action, midas_chart::ChartAction::CancelPlacing) {
+                    state.tool_cancelled_this_frame = true;
                 }
                 // Apply level drag locally so the line moves immediately
                 // (before the message round-trip through the app).
@@ -375,12 +395,17 @@ impl shader::Program<Message> for ChartProgram {
                 .and_then(|cs| cs.crosshair.render_pos())
                 .or(snap.crosshair_pos),
             // Use widget's live levels during drag for immediate visual feedback.
-            levels: state
-                .chart_state
-                .as_ref()
-                .filter(|cs| cs.level_tool.is_dragging())
-                .map(|cs| cs.levels.as_slice())
-                .unwrap_or(&snap.levels),
+            // Pass empty slice when levels are hidden.
+            levels: if snap.show_levels {
+                state
+                    .chart_state
+                    .as_ref()
+                    .filter(|cs| cs.level_tool.is_dragging())
+                    .map(|cs| cs.levels.as_slice())
+                    .unwrap_or(&snap.levels)
+            } else {
+                &[]
+            },
             collapse_gaps: snap.collapse_gaps,
             timeline_border_ratio: live_timeline_border_ratio,
             volume_scale: live_volume_scale,

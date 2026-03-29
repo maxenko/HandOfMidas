@@ -507,6 +507,7 @@ fn handle_mouse_pressed(
                 { state.crosshair_pos = None; }
                 return vec![
                     ChartAction::CreateLevel { price },
+                    ChartAction::CancelPlacing,
                     ChartAction::ClearCrosshair,
                 ];
             }

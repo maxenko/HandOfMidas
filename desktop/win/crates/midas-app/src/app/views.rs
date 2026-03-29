@@ -52,6 +52,7 @@ impl MidasApp {
                 timeline_border_ratio: chart.chart_state.timeline_border_ratio,
                 volume_scale: chart.chart_state.volume_scale,
                 show_volume_profile: chart.chart_state.show_volume_profile,
+                show_levels: chart.chart_state.show_levels,
                 data_time_start: chart.chart_state.data_time_start,
                 data_time_end: chart.chart_state.data_time_end,
                 editing_level_id: chart.editing_level_id,
@@ -87,11 +88,6 @@ impl MidasApp {
 
             // Build level-related overlays for floating window.
             let floating_chart_id = ChartId::new(0);
-            let level_renders = compute_level_renders(chart);
-            let level_labels_overlay = build_level_labels_overlay(
-                &level_renders,
-                chart.chart_state.camera.viewport_height,
-            );
             let is_placing = chart.chart_state.level_tool.is_placing();
             let drawing_panel = build_drawing_panel(floating_chart_id, is_placing);
 
@@ -99,9 +95,15 @@ impl MidasApp {
                 shader.into(),
                 date_overlay,
                 price_overlay,
-                level_labels_overlay,
-                drawing_panel,
             ];
+            if chart.chart_state.show_levels {
+                let level_renders = compute_level_renders(chart);
+                chart_layers.push(build_level_labels_overlay(
+                    &level_renders,
+                    chart.chart_state.camera.viewport_height,
+                ));
+            }
+            chart_layers.push(drawing_panel);
 
             // Level editor popup (when a level is being edited).
             if let (Some(editing_id), Some(screen_pos)) =
@@ -408,12 +410,27 @@ impl MidasApp {
                 .style(button::text)
         };
 
+        let levels_active = chart
+            .map(|c| c.chart_state.show_levels)
+            .unwrap_or(true);
+        let levels_btn = if levels_active {
+            button(text("LV").size(10).color(Color::WHITE))
+                .on_press(Message::ToggleLevels(chart_id))
+                .padding([1, 4])
+                .style(button::primary)
+        } else {
+            button(text("LV").size(10))
+                .on_press(Message::ToggleLevels(chart_id))
+                .padding([1, 4])
+                .style(button::text)
+        };
+
         let reset_btn = button(text("R").size(10))
             .on_press(Message::ResetChart(chart_id))
             .padding([1, 4])
             .style(button::text);
 
-        row![ticker_input, tf_row, collapse_btn, vp_btn, reset_btn]
+        row![ticker_input, tf_row, collapse_btn, vp_btn, levels_btn, reset_btn]
             .spacing(4)
             .align_y(iced::Alignment::Center)
             .height(24)
@@ -472,6 +489,7 @@ impl MidasApp {
                 timeline_border_ratio: chart.chart_state.timeline_border_ratio,
                 volume_scale: chart.chart_state.volume_scale,
                 show_volume_profile: chart.chart_state.show_volume_profile,
+                show_levels: chart.chart_state.show_levels,
                 data_time_start: chart.chart_state.data_time_start,
                 data_time_end: chart.chart_state.data_time_end,
                 editing_level_id: chart.editing_level_id,
@@ -502,11 +520,6 @@ impl MidasApp {
             );
 
             // Build level-related overlays.
-            let level_renders = compute_level_renders(chart);
-            let level_labels_overlay = build_level_labels_overlay(
-                &level_renders,
-                chart.chart_state.camera.viewport_height,
-            );
             let is_placing = chart.chart_state.level_tool.is_placing();
             let drawing_panel = build_drawing_panel(chart_id, is_placing);
 
@@ -514,9 +527,15 @@ impl MidasApp {
                 shader.into(),
                 date_overlay,
                 price_overlay,
-                level_labels_overlay,
-                drawing_panel,
             ];
+            if chart.chart_state.show_levels {
+                let level_renders = compute_level_renders(chart);
+                chart_layers.push(build_level_labels_overlay(
+                    &level_renders,
+                    chart.chart_state.camera.viewport_height,
+                ));
+            }
+            chart_layers.push(drawing_panel);
 
             // Level editor popup (when a level is being edited).
             if let (Some(editing_id), Some(screen_pos)) =
