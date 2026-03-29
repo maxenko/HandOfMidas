@@ -58,6 +58,9 @@ pub struct ChartScene {
     /// Volume Profile horizontal histogram instances (empty if VP disabled).
     pub volume_profile_instances: Vec<GridLineInstance>,
 
+    /// OHLC-snapped price during level placement (used to place at exact OHLC value).
+    pub level_preview_snapped_price: Option<f64>,
+
     /// Dirty generation counters -- renderer compares to decide what to upload.
     pub generations: SceneGenerations,
 }

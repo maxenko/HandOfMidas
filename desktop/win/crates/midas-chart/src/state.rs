@@ -60,6 +60,10 @@ pub enum InteractionMode {
         /// Volume scale value at drag start.
         start_scale: f32,
     },
+    /// User activated the level tool — preview line follows cursor Y
+    /// (snapped to nearest OHLC within threshold, unless Alt held).
+    /// Single click places the level. Escape/right-click cancels.
+    PlacingLevel,
 }
 
 /// Momentum state for flick-to-scroll after a pan drag release.
@@ -146,6 +150,12 @@ pub struct ChartState {
     pub volume_scale: f32,
     /// Whether the Volume Profile overlay is visible.
     pub show_volume_profile: bool,
+    /// Whether Alt is held during level placement (disables OHLC snap).
+    pub placing_alt_held: bool,
+    /// Snapped price for level preview (set by compute layer during placement).
+    /// Used by the interaction layer on mouse-up to create the level at the
+    /// visually previewed price rather than the raw cursor position.
+    pub level_preview_snapped_price: Option<f64>,
     /// Next level ID to assign (monotonically increasing).
     next_level_id: u64,
 }
@@ -170,6 +180,8 @@ impl ChartState {
             timeline_border_ratio: 0.20,
             volume_scale: 1.0,
             show_volume_profile: false,
+            placing_alt_held: false,
+            level_preview_snapped_price: None,
             next_level_id: 1,
         }
     }
@@ -308,6 +320,9 @@ impl ChartState {
                     price: *price,
                     color: [1.0, 0.843, 0.0, 1.0], // gold
                     line_width: 1.0,
+                    label: None,
+                    icon: crate::levels::LevelIcon::None,
+                    locked: false,
                 });
                 self.dirty.mark_levels();
             }
@@ -324,14 +339,22 @@ impl ChartState {
             }
 
             ChartAction::DeleteSelectedLevel => {
-                if let Some(sel_id) = self.selected_level.take() {
-                    self.levels.retain(|l| l.id != sel_id);
-                    self.dirty.mark_levels();
+                if let Some(sel_id) = self.selected_level {
+                    let is_locked = self.levels.iter().any(|l| l.id == sel_id && l.locked);
+                    if !is_locked {
+                        self.selected_level = None;
+                        self.levels.retain(|l| l.id != sel_id);
+                        self.dirty.mark_levels();
+                    }
                 }
             }
 
             ChartAction::DeselectLevel => {
                 self.selected_level = None;
+            }
+
+            ChartAction::RightClickLevel { id, .. } => {
+                self.selected_level = Some(*id);
             }
 
             ChartAction::JumpToEnd => {
@@ -361,6 +384,16 @@ impl ChartState {
             ChartAction::Redraw => {
                 // Mark everything dirty to force a full redraw.
                 self.dirty.mark_all();
+            }
+
+            ChartAction::EnterPlacingLevel => {
+                self.interaction_mode = InteractionMode::PlacingLevel;
+            }
+
+            ChartAction::CancelPlacing => {
+                self.interaction_mode = InteractionMode::Idle;
+                self.crosshair_pos = None;
+                self.dirty.mark_crosshair();
             }
         }
     }

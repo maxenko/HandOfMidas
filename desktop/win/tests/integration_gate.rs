@@ -62,6 +62,8 @@ fn make_default_chart_input<'a>(
         volume_scale: 1.0,
         show_volume_profile: false,
         dirty,
+        placing_level: false,
+        placing_alt_held: false,
     }
 }
 

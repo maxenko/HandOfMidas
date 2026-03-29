@@ -18,11 +18,11 @@ use crate::state::{ChartState, InteractionMode};
 #[derive(Clone, Debug)]
 pub enum ChartEvent {
     /// Mouse moved to a new position (logical pixels, chart-widget-local).
-    MouseMoved { x: f32, y: f32 },
+    MouseMoved { x: f32, y: f32, alt_held: bool },
     /// Mouse button pressed.
-    MousePressed { x: f32, y: f32, button: MouseButton },
+    MousePressed { x: f32, y: f32, button: MouseButton, alt_held: bool },
     /// Mouse button released.
-    MouseReleased { x: f32, y: f32, button: MouseButton },
+    MouseReleased { x: f32, y: f32, button: MouseButton, alt_held: bool },
     /// Mouse wheel scrolled. `delta` is positive for scroll-up (forward in time).
     /// `x` and `y` are the cursor position at time of scroll.
     MouseWheel { delta: f32, x: f32, y: f32 },
@@ -37,6 +37,8 @@ pub enum ChartEvent {
     TickMomentum { dt_secs: f32 },
     /// Tick the Y-axis auto-scale animation.
     TickAutoScale { dt_secs: f32 },
+    /// Enter level-placement mode (from app layer, e.g., drawing panel button).
+    ActivateLevelTool,
 }
 
 /// A semantic action produced by the interaction state machine.
@@ -75,6 +77,8 @@ pub enum ChartAction {
     DeleteSelectedLevel,
     /// Deselect any selected horizontal level.
     DeselectLevel,
+    /// Right-click on a horizontal level — opens context menu / level editor.
+    RightClickLevel { id: u64, x: f32, y: f32 },
     /// Jump the camera to show the most recent data.
     JumpToEnd,
     /// Jump the camera to show the oldest data.
@@ -85,6 +89,10 @@ pub enum ChartAction {
     SetVolumeScale { scale: f64 },
     /// Request a full redraw.
     Redraw,
+    /// Enter level-placement mode (from toolbar button).
+    EnterPlacingLevel,
+    /// Cancel the active drawing/placement mode.
+    CancelPlacing,
 }
 
 /// Mouse button discriminant.
@@ -109,6 +117,8 @@ pub enum Key {
     Home,
     /// End key.
     End,
+    /// H key (hotkey for horizontal level).
+    H,
 }
 
 /// Drag threshold in pixels. A mouse move must exceed this distance from
@@ -147,11 +157,15 @@ const TIMELINE_BORDER_HIT_TOLERANCE: f32 = 6.0;
 /// `ChartState::apply_action`.
 pub fn handle_event(state: &mut ChartState, event: ChartEvent) -> Vec<ChartAction> {
     match event {
-        ChartEvent::MouseMoved { x, y } => handle_mouse_moved(state, x, y),
+        ChartEvent::MouseMoved { x, y, alt_held } => handle_mouse_moved(state, x, y, alt_held),
 
-        ChartEvent::MousePressed { x, y, button } => handle_mouse_pressed(state, x, y, button),
+        ChartEvent::MousePressed { x, y, button, alt_held } => {
+            handle_mouse_pressed(state, x, y, button, alt_held)
+        }
 
-        ChartEvent::MouseReleased { x, y, button } => handle_mouse_released(state, x, y, button),
+        ChartEvent::MouseReleased { x, y, button, .. } => {
+            handle_mouse_released(state, x, y, button)
+        }
 
         ChartEvent::MouseWheel { delta, x, .. } => handle_mouse_wheel(state, delta, x),
 
@@ -189,13 +203,34 @@ pub fn handle_event(state: &mut ChartState, event: ChartEvent) -> Vec<ChartActio
                 vec![]
             }
         }
+
+        ChartEvent::ActivateLevelTool => {
+            state.interaction_mode = InteractionMode::PlacingLevel;
+            Vec::new()
+        }
     }
 }
 
 // ── Private handler functions ────────────────────────────────────────────
 
-fn handle_mouse_moved(state: &mut ChartState, x: f32, y: f32) -> Vec<ChartAction> {
+fn handle_mouse_moved(state: &mut ChartState, x: f32, y: f32, alt_held: bool) -> Vec<ChartAction> {
     let mut actions = Vec::new();
+
+    // In PlacingLevel mode, the crosshair (preview line) follows cursor.
+    // The `alt_held` flag is stored so the compute layer can decide whether to snap to OHLC.
+    if matches!(state.interaction_mode, InteractionMode::PlacingLevel) {
+        state.placing_alt_held = alt_held;
+        let in_bounds = x >= 0.0
+            && y >= 0.0
+            && x <= state.camera.viewport_width as f32
+            && y <= state.camera.viewport_height as f32;
+        if in_bounds {
+            state.crosshair_pos = Some((x, y));
+            return vec![ChartAction::SetCrosshair { x, y }];
+        } else {
+            return Vec::new();
+        }
+    }
 
     // Update crosshair — only visible when left mouse is held down
     // and not dragging a handle or the timeline border.
@@ -233,11 +268,21 @@ fn handle_mouse_moved(state: &mut ChartState, x: f32, y: f32) -> Vec<ChartAction
                 if let Some((level_id, grab_offset)) =
                     hit_test_levels(&state.levels, start_y, &state.camera)
                 {
-                    state.interaction_mode = InteractionMode::DraggingLevel {
-                        level_id,
-                        grab_offset,
-                    };
-                    actions.push(ChartAction::SelectLevel { id: level_id });
+                    let is_locked = state.levels.iter().any(|l| l.id == level_id && l.locked);
+                    if !is_locked {
+                        state.interaction_mode = InteractionMode::DraggingLevel {
+                            level_id,
+                            grab_offset,
+                        };
+                        actions.push(ChartAction::SelectLevel { id: level_id });
+                    } else {
+                        // Locked level — fall through to panning.
+                        state.interaction_mode = InteractionMode::Panning;
+                        if state.momentum.is_some() {
+                            actions.push(ChartAction::StopMomentum);
+                            state.momentum = None;
+                        }
+                    }
                 } else {
                     state.interaction_mode = InteractionMode::Panning;
                     // Stop any active momentum when starting a new pan.
@@ -412,6 +457,11 @@ fn handle_mouse_moved(state: &mut ChartState, x: f32, y: f32) -> Vec<ChartAction
                 scale: new_scale as f64,
             });
         }
+
+        InteractionMode::PlacingLevel => {
+            // Handled by the early return at the top of this function.
+            unreachable!("PlacingLevel handled before the match");
+        }
     }
 
     actions
@@ -422,7 +472,45 @@ fn handle_mouse_pressed(
     x: f32,
     y: f32,
     button: MouseButton,
+    _alt_held: bool,
 ) -> Vec<ChartAction> {
+    // In PlacingLevel mode:
+    // - Left-click: place the level at (snapped) cursor price
+    // - Right-click / Middle-click: temporarily suspend placement for pan/scale
+    //   (placement resumes when pan/scale ends via the widget sync)
+    if matches!(state.interaction_mode, InteractionMode::PlacingLevel) {
+        match button {
+            MouseButton::Left => {
+                let price = state
+                    .level_preview_snapped_price
+                    .unwrap_or_else(|| state.camera.y_to_price(y));
+                state.interaction_mode = InteractionMode::Idle;
+                state.crosshair_pos = None;
+                state.placing_alt_held = false;
+                state.level_preview_snapped_price = None;
+                return vec![
+                    ChartAction::CreateLevel { price },
+                    ChartAction::ClearCrosshair,
+                ];
+            }
+            MouseButton::Right => {
+                // Temporarily exit PlacingLevel for right-click panning.
+                // The widget sync will restore PlacingLevel when panning ends.
+                state.interaction_mode = InteractionMode::RightPanning;
+                state.drag_start = Some((x, y));
+                return Vec::new();
+            }
+            MouseButton::Middle => {
+                // Temporarily exit PlacingLevel for middle-click scaling.
+                state.interaction_mode = InteractionMode::PendingScale {
+                    start_x: x,
+                    start_y: y,
+                };
+                return Vec::new();
+            }
+        }
+    }
+
     match button {
         MouseButton::Left => {
             let mut actions = Vec::new();
@@ -483,10 +571,15 @@ fn handle_mouse_pressed(
         }
 
         MouseButton::Right => {
-            // Right-click starts XY panning.
-            state.interaction_mode = InteractionMode::RightPanning;
-            state.drag_start = Some((x, y));
-            vec![]
+            // Hit-test levels first — right-click on a level opens the editor.
+            if let Some((level_id, _offset)) = hit_test_levels(&state.levels, y, &state.camera) {
+                vec![ChartAction::RightClickLevel { id: level_id, x, y }]
+            } else {
+                // No level hit — right-click starts XY panning.
+                state.interaction_mode = InteractionMode::RightPanning;
+                state.drag_start = Some((x, y));
+                vec![]
+            }
         }
     }
 }
@@ -606,6 +699,11 @@ fn handle_mouse_released(
         // Handled by the early return above; unreachable.
         InteractionMode::DraggingVolumeScale { .. } => {}
         InteractionMode::DraggingTimelineBorder { .. } => {}
+
+        InteractionMode::PlacingLevel => {
+            // PlacingLevel stray release — keep mode intact.
+            return Vec::new();
+        }
     }
 
     // Always return to Idle on mouse release.
@@ -633,7 +731,7 @@ fn handle_mouse_wheel(state: &mut ChartState, delta: f32, _x: f32) -> Vec<ChartA
     }]
 }
 
-fn handle_key_pressed(state: &ChartState, key: Key) -> Vec<ChartAction> {
+fn handle_key_pressed(state: &mut ChartState, key: Key) -> Vec<ChartAction> {
     match key {
         Key::Delete => {
             if state.selected_level.is_some() {
@@ -644,6 +742,15 @@ fn handle_key_pressed(state: &ChartState, key: Key) -> Vec<ChartAction> {
         }
         Key::Escape => {
             let mut actions = Vec::new();
+            // Cancel placement mode if active.
+            if matches!(state.interaction_mode, InteractionMode::PlacingLevel) {
+                state.interaction_mode = InteractionMode::Idle;
+                state.crosshair_pos = None;
+                state.placing_alt_held = false;
+                actions.push(ChartAction::CancelPlacing);
+                actions.push(ChartAction::ClearCrosshair);
+                return actions;
+            }
             if state.selected_level.is_some() {
                 actions.push(ChartAction::DeselectLevel);
             }
@@ -652,6 +759,12 @@ fn handle_key_pressed(state: &ChartState, key: Key) -> Vec<ChartAction> {
         }
         Key::Home => vec![ChartAction::JumpToStart],
         Key::End => vec![ChartAction::JumpToEnd],
+        Key::H => {
+            if matches!(state.interaction_mode, InteractionMode::Idle) {
+                state.interaction_mode = InteractionMode::PlacingLevel;
+            }
+            Vec::new()
+        }
     }
 }
 
@@ -749,6 +862,9 @@ mod tests {
             price,
             color: [1.0, 0.0, 0.0, 1.0],
             line_width: 1.0,
+            label: None,
+            icon: crate::levels::LevelIcon::None,
+            locked: false,
         });
         state
     }
@@ -760,7 +876,7 @@ mod tests {
         let mut state = test_state();
         // Crosshair only shows when left mouse is held down.
         state.left_mouse_down = true;
-        let actions = handle_event(&mut state, ChartEvent::MouseMoved { x: 500.0, y: 300.0 });
+        let actions = handle_event(&mut state, ChartEvent::MouseMoved { x: 500.0, y: 300.0, alt_held: false });
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0], ChartAction::SetCrosshair { x: 500.0, y: 300.0 });
         assert_eq!(state.crosshair_pos, Some((500.0, 300.0)));
@@ -770,7 +886,7 @@ mod tests {
     fn mouse_move_without_button_does_not_set_crosshair() {
         let mut state = test_state();
         // left_mouse_down is false by default.
-        let actions = handle_event(&mut state, ChartEvent::MouseMoved { x: 500.0, y: 300.0 });
+        let actions = handle_event(&mut state, ChartEvent::MouseMoved { x: 500.0, y: 300.0, alt_held: false });
         assert!(actions.is_empty());
         assert_eq!(state.crosshair_pos, None);
     }
@@ -779,8 +895,8 @@ mod tests {
     fn mouse_move_out_of_bounds_clears_crosshair() {
         let mut state = test_state();
         state.left_mouse_down = true;
-        handle_event(&mut state, ChartEvent::MouseMoved { x: 500.0, y: 300.0 });
-        let actions = handle_event(&mut state, ChartEvent::MouseMoved { x: -10.0, y: 300.0 });
+        handle_event(&mut state, ChartEvent::MouseMoved { x: 500.0, y: 300.0, alt_held: false });
+        let actions = handle_event(&mut state, ChartEvent::MouseMoved { x: -10.0, y: 300.0, alt_held: false });
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0], ChartAction::ClearCrosshair);
         assert_eq!(state.crosshair_pos, None);
@@ -908,6 +1024,7 @@ mod tests {
                 x: 100.0,
                 y: 200.0,
                 button: MouseButton::Left,
+                alt_held: false,
             },
         );
         // Left press now also sets crosshair.
@@ -934,9 +1051,10 @@ mod tests {
                 x: 100.0,
                 y: 200.0,
                 button: MouseButton::Left,
+                alt_held: false,
             },
         );
-        handle_event(&mut state, ChartEvent::MouseMoved { x: 102.0, y: 201.0 });
+        handle_event(&mut state, ChartEvent::MouseMoved { x: 102.0, y: 201.0, alt_held: false });
         assert_eq!(
             state.interaction_mode,
             InteractionMode::PendingDrag {
@@ -955,9 +1073,10 @@ mod tests {
                 x: 100.0,
                 y: 200.0,
                 button: MouseButton::Left,
+                alt_held: false,
             },
         );
-        handle_event(&mut state, ChartEvent::MouseMoved { x: 110.0, y: 200.0 });
+        handle_event(&mut state, ChartEvent::MouseMoved { x: 110.0, y: 200.0, alt_held: false });
         assert_eq!(state.interaction_mode, InteractionMode::Panning);
     }
 
@@ -970,9 +1089,10 @@ mod tests {
                 x: 100.0,
                 y: 200.0,
                 button: MouseButton::Left,
+                alt_held: false,
             },
         );
-        handle_event(&mut state, ChartEvent::MouseMoved { x: 110.0, y: 200.0 });
+        handle_event(&mut state, ChartEvent::MouseMoved { x: 110.0, y: 200.0, alt_held: false });
         assert_eq!(state.interaction_mode, InteractionMode::Panning);
 
         handle_event(
@@ -981,6 +1101,7 @@ mod tests {
                 x: 200.0,
                 y: 200.0,
                 button: MouseButton::Left,
+                alt_held: false,
             },
         );
         assert_eq!(state.interaction_mode, InteractionMode::Idle);
@@ -997,6 +1118,7 @@ mod tests {
                 x: 100.0,
                 y: 200.0,
                 button: MouseButton::Left,
+                alt_held: false,
             },
         );
         assert!(matches!(
@@ -1004,7 +1126,7 @@ mod tests {
             InteractionMode::PendingDrag { .. }
         ));
 
-        handle_event(&mut state, ChartEvent::MouseMoved { x: 110.0, y: 200.0 });
+        handle_event(&mut state, ChartEvent::MouseMoved { x: 110.0, y: 200.0, alt_held: false });
         assert_eq!(state.interaction_mode, InteractionMode::Panning);
 
         handle_event(
@@ -1013,6 +1135,7 @@ mod tests {
                 x: 200.0,
                 y: 200.0,
                 button: MouseButton::Left,
+                alt_held: false,
             },
         );
         assert_eq!(state.interaction_mode, InteractionMode::Idle);
@@ -1032,13 +1155,14 @@ mod tests {
                 x: 500.0,
                 y: 540.0,
                 button: MouseButton::Left,
+                alt_held: false,
             },
         );
-        handle_event(&mut state, ChartEvent::MouseMoved { x: 505.0, y: 540.0 });
+        handle_event(&mut state, ChartEvent::MouseMoved { x: 505.0, y: 540.0, alt_held: false });
         assert_eq!(state.interaction_mode, InteractionMode::Panning);
 
         // Drag 100px to the right.
-        let actions = handle_event(&mut state, ChartEvent::MouseMoved { x: 605.0, y: 540.0 });
+        let actions = handle_event(&mut state, ChartEvent::MouseMoved { x: 605.0, y: 540.0, alt_held: false });
 
         let pan_action = actions
             .iter()
@@ -1074,10 +1198,11 @@ mod tests {
                 x: 500.0,
                 y: 540.0,
                 button: MouseButton::Left,
+                alt_held: false,
             },
         );
-        handle_event(&mut state, ChartEvent::MouseMoved { x: 510.0, y: 540.0 });
-        handle_event(&mut state, ChartEvent::MouseMoved { x: 610.0, y: 540.0 });
+        handle_event(&mut state, ChartEvent::MouseMoved { x: 510.0, y: 540.0, alt_held: false });
+        handle_event(&mut state, ChartEvent::MouseMoved { x: 610.0, y: 540.0, alt_held: false });
 
         let actions = handle_event(
             &mut state,
@@ -1085,6 +1210,7 @@ mod tests {
                 x: 710.0,
                 y: 540.0,
                 button: MouseButton::Left,
+                alt_held: false,
             },
         );
 
@@ -1245,6 +1371,7 @@ mod tests {
                 x: 960.0,
                 y: 540.0,
                 button: MouseButton::Middle,
+                alt_held: false,
             },
         );
         assert!(actions.is_empty());
@@ -1268,10 +1395,11 @@ mod tests {
                 x: 500.0,
                 y: 500.0,
                 button: MouseButton::Middle,
+                alt_held: false,
             },
         );
         // Move less than 6px — should stay in PendingScale.
-        let actions = handle_event(&mut state, ChartEvent::MouseMoved { x: 504.0, y: 502.0 });
+        let actions = handle_event(&mut state, ChartEvent::MouseMoved { x: 504.0, y: 502.0, alt_held: false });
         // No scaling actions should be produced in the dead zone.
         let has_zoom = actions
             .iter()
@@ -1300,10 +1428,11 @@ mod tests {
                 x: 500.0,
                 y: 500.0,
                 button: MouseButton::Middle,
+                alt_held: false,
             },
         );
         // Move 20px to the right (strongly horizontal).
-        handle_event(&mut state, ChartEvent::MouseMoved { x: 520.0, y: 501.0 });
+        handle_event(&mut state, ChartEvent::MouseMoved { x: 520.0, y: 501.0, alt_held: false });
         assert!(
             matches!(
                 state.interaction_mode,
@@ -1314,7 +1443,7 @@ mod tests {
         );
 
         // Further horizontal movement should produce Zoom actions.
-        let actions = handle_event(&mut state, ChartEvent::MouseMoved { x: 540.0, y: 501.0 });
+        let actions = handle_event(&mut state, ChartEvent::MouseMoved { x: 540.0, y: 501.0, alt_held: false });
         let has_zoom = actions
             .iter()
             .any(|a| matches!(a, ChartAction::Zoom { .. }));
@@ -1334,10 +1463,11 @@ mod tests {
                 x: 500.0,
                 y: 500.0,
                 button: MouseButton::Middle,
+                alt_held: false,
             },
         );
         // Move 20px upward (strongly vertical).
-        handle_event(&mut state, ChartEvent::MouseMoved { x: 501.0, y: 480.0 });
+        handle_event(&mut state, ChartEvent::MouseMoved { x: 501.0, y: 480.0, alt_held: false });
         assert!(
             matches!(
                 state.interaction_mode,
@@ -1348,7 +1478,7 @@ mod tests {
         );
 
         // Further vertical movement should produce ZoomY actions.
-        let actions = handle_event(&mut state, ChartEvent::MouseMoved { x: 501.0, y: 460.0 });
+        let actions = handle_event(&mut state, ChartEvent::MouseMoved { x: 501.0, y: 460.0, alt_held: false });
         let has_zoom_y = actions
             .iter()
             .any(|a| matches!(a, ChartAction::ZoomY { .. }));
@@ -1368,10 +1498,11 @@ mod tests {
                 x: 500.0,
                 y: 500.0,
                 button: MouseButton::Middle,
+                alt_held: false,
             },
         );
         // Move 20px to the right to lock horizontal.
-        handle_event(&mut state, ChartEvent::MouseMoved { x: 520.0, y: 501.0 });
+        handle_event(&mut state, ChartEvent::MouseMoved { x: 520.0, y: 501.0, alt_held: false });
         assert!(
             matches!(
                 state.interaction_mode,
@@ -1381,7 +1512,7 @@ mod tests {
         );
 
         // Now move mostly vertical — axis should STAY horizontal.
-        handle_event(&mut state, ChartEvent::MouseMoved { x: 520.0, y: 600.0 });
+        handle_event(&mut state, ChartEvent::MouseMoved { x: 520.0, y: 600.0, alt_held: false });
         assert!(
             matches!(
                 state.interaction_mode,
@@ -1401,10 +1532,11 @@ mod tests {
                 x: 500.0,
                 y: 500.0,
                 button: MouseButton::Middle,
+                alt_held: false,
             },
         );
         // Move to lock horizontal.
-        handle_event(&mut state, ChartEvent::MouseMoved { x: 520.0, y: 501.0 });
+        handle_event(&mut state, ChartEvent::MouseMoved { x: 520.0, y: 501.0, alt_held: false });
         // Release middle button.
         handle_event(
             &mut state,
@@ -1412,6 +1544,7 @@ mod tests {
                 x: 520.0,
                 y: 501.0,
                 button: MouseButton::Middle,
+                alt_held: false,
             },
         );
         assert_eq!(
@@ -1445,6 +1578,7 @@ mod tests {
                 x: 500.0,
                 y: level_y,
                 button: MouseButton::Left,
+                alt_held: false,
             },
         );
         let actions = handle_event(
@@ -1453,6 +1587,7 @@ mod tests {
                 x: 500.0,
                 y: level_y,
                 button: MouseButton::Left,
+                alt_held: false,
             },
         );
 
@@ -1473,6 +1608,7 @@ mod tests {
                 x: 500.0,
                 y: 10.0,
                 button: MouseButton::Left,
+                alt_held: false,
             },
         );
         let actions = handle_event(
@@ -1481,6 +1617,7 @@ mod tests {
                 x: 500.0,
                 y: 10.0,
                 button: MouseButton::Left,
+                alt_held: false,
             },
         );
 
@@ -1507,6 +1644,7 @@ mod tests {
                 x: 500.0,
                 y: level_y,
                 button: MouseButton::Left,
+                alt_held: false,
             },
         );
         handle_event(
@@ -1514,6 +1652,7 @@ mod tests {
             ChartEvent::MouseMoved {
                 x: 500.0,
                 y: level_y + 10.0,
+                alt_held: false,
             },
         );
 
@@ -1538,6 +1677,7 @@ mod tests {
                 x: 500.0,
                 y: level_y,
                 button: MouseButton::Left,
+                alt_held: false,
             },
         );
         handle_event(
@@ -1545,11 +1685,12 @@ mod tests {
             ChartEvent::MouseMoved {
                 x: 500.0,
                 y: level_y + 10.0,
+                alt_held: false,
             },
         );
 
         let new_y = level_y + 50.0;
-        let actions = handle_event(&mut state, ChartEvent::MouseMoved { x: 500.0, y: new_y });
+        let actions = handle_event(&mut state, ChartEvent::MouseMoved { x: 500.0, y: new_y, alt_held: false });
 
         let has_drag = actions
             .iter()
@@ -1672,6 +1813,7 @@ mod tests {
                 x: 500.0,
                 y: 500.0,
                 button: MouseButton::Left,
+                alt_held: false,
             },
         );
 
@@ -1704,12 +1846,18 @@ mod tests {
                 price: 50.0,
                 color: [1.0, 0.0, 0.0, 1.0],
                 line_width: 1.0,
+                label: None,
+                icon: crate::levels::LevelIcon::None,
+                locked: false,
             },
             HorizontalLevel {
                 id: 2,
                 price: 55.0,
                 color: [0.0, 1.0, 0.0, 1.0],
                 line_width: 1.0,
+                label: None,
+                icon: crate::levels::LevelIcon::None,
+                locked: false,
             },
         ];
 
@@ -1738,6 +1886,7 @@ mod tests {
                 x: 500.0,
                 y: 500.0,
                 button: MouseButton::Left,
+                alt_held: false,
             },
         );
         let actions = handle_event(
@@ -1746,6 +1895,7 @@ mod tests {
                 x: 500.0,
                 y: 500.0,
                 button: MouseButton::Left,
+                alt_held: false,
             },
         );
 
@@ -1770,6 +1920,7 @@ mod tests {
                 x: 100.0,
                 y: 200.0,
                 button: MouseButton::Left,
+                alt_held: false,
             },
         );
         assert_eq!(state.drag_start, None);

@@ -52,4 +52,8 @@ pub struct ChartInput<'a> {
     pub show_volume_profile: bool,
     /// Current dirty flags for generation tracking.
     pub dirty: &'a DirtyFlags,
+    /// Whether the chart is in level-placement mode (PlacingLevel or PlacingLevelDrag).
+    pub placing_level: bool,
+    /// Whether Alt is held during level placement (disables OHLC snapping).
+    pub placing_alt_held: bool,
 }

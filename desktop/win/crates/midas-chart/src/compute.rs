@@ -226,6 +226,14 @@ fn compute_normal_scene(
     let x_labels = compute_x_labels(camera, candle_duration);
     let levels = compute_levels(input.levels, camera);
     let crosshair = compute_crosshair(input.crosshair, data, camera, candle_duration, input.symbol);
+    // In level-placement mode (without Alt), snap the crosshair Y to nearest OHLC.
+    let (crosshair, snapped_price) = if input.placing_level && !input.placing_alt_held {
+        snap_crosshair_to_ohlc(crosshair, input.crosshair, data, camera, false)
+    } else {
+        let p = crosshair.as_ref().map(|ch| camera.y_to_price(ch.horizontal_y));
+        (crosshair, p)
+    };
+    let level_preview_snapped_price = if input.placing_level { snapped_price } else { None };
     let date_labels = crate::date_labels::for_normal_mode(camera, candle_duration);
     let separator_y = input.viewport_height as f32 * (1.0 - input.timeline_border_ratio);
     let vw = input.viewport_width as f32;
@@ -249,6 +257,7 @@ fn compute_normal_scene(
         x_labels,
         y_labels,
         levels,
+        level_preview_snapped_price,
         crosshair,
         separator_y,
         date_labels,
@@ -362,6 +371,14 @@ fn compute_collapsed_scene(
         input.symbol,
         &index_to_x,
     );
+    // In level-placement mode (without Alt), snap the crosshair Y to nearest OHLC.
+    let (crosshair, snapped_price) = if input.placing_level && !input.placing_alt_held {
+        snap_crosshair_to_ohlc(crosshair, input.crosshair, data, camera, true)
+    } else {
+        let p = crosshair.as_ref().map(|ch| camera.y_to_price(ch.horizontal_y));
+        (crosshair, p)
+    };
+    let level_preview_snapped_price = if input.placing_level { snapped_price } else { None };
 
     let date_labels = crate::date_labels::for_collapsed_mode(
         camera,
@@ -393,6 +410,7 @@ fn compute_collapsed_scene(
         x_labels,
         y_labels,
         levels,
+        level_preview_snapped_price,
         crosshair,
         separator_y,
         date_labels,
@@ -900,6 +918,7 @@ fn compute_levels(
         .map(|lev| {
             let y = camera.snap_to_pixel(camera.price_to_y(lev.price));
             LevelRender {
+                id: lev.id,
                 price: lev.price,
                 screen_y: y,
                 color: lev.color,
@@ -908,6 +927,9 @@ fn compute_levels(
                 is_being_dragged: false,
                 original_screen_y: None,
                 label_text: format_price(lev.price),
+                label: lev.label.clone(),
+                icon: lev.icon.clone(),
+                locked: lev.locked,
             }
         })
         .collect()
@@ -1002,6 +1024,105 @@ fn compute_crosshair(
         line_color: [0.7, 0.7, 0.7, 0.5],
         ohlcv_overlay,
     })
+}
+
+/// Snap a crosshair's Y position to the nearest OHLC value of the nearest candle.
+///
+/// Used during level-placement mode so the preview line sticks to meaningful
+/// price levels. Finds the candle nearest to the crosshair's X position, then
+/// picks whichever of O, H, L, C is closest to the current cursor Y price.
+/// Snap the level preview to the nearest OHLC value of candles near the cursor.
+///
+/// Only checks candles within approximately one candle-width of the cursor X
+/// position. Uses the raw cursor position (not the already-snapped crosshair X)
+/// so the snap target matches what the user is pointing at. Handles both normal
+/// (timestamp) and collapsed (index) coordinate systems.
+fn snap_crosshair_to_ohlc(
+    crosshair: Option<CrosshairRender>,
+    raw_cursor: Option<(f32, f32)>,
+    data: &dyn CandleData,
+    camera: &Camera2D,
+    is_collapsed: bool,
+) -> (Option<CrosshairRender>, Option<f64>) {
+    let mut ch = match crosshair {
+        Some(ch) => ch,
+        None => return (None, None),
+    };
+    let len = data.len();
+    if len == 0 {
+        let price = camera.y_to_price(ch.horizontal_y);
+        return (Some(ch), Some(price));
+    }
+
+    // Use the raw cursor X (before crosshair snap) for candle proximity.
+    let raw_x = raw_cursor.map(|(x, _)| x).unwrap_or(ch.vertical_x);
+    let cursor_y = ch.horizontal_y;
+    let cursor_price = camera.y_to_price(cursor_y);
+
+    // Find the candle index nearest to the raw cursor X.
+    let nearest_idx = if is_collapsed {
+        // In collapsed mode, camera X maps to candle indices directly.
+        let idx_f = camera.x_to_time(raw_x);
+        (idx_f.round() as isize).clamp(0, len as isize - 1) as usize
+    } else {
+        let cursor_time = camera.x_to_time(raw_x);
+        data.find_index_by_time(cursor_time as i64)
+    };
+
+    // Compute approximate candle width in pixels to determine search radius.
+    // Use 1 candle slot width as the snap radius on the X axis.
+    let visible_candles = if is_collapsed {
+        (camera.time_end - camera.time_start).max(1.0)
+    } else {
+        let vis_start = data.find_index_by_time(camera.time_start as i64);
+        let vis_end = (data.find_index_by_time(camera.time_end as i64) + 1).min(len);
+        (vis_end.saturating_sub(vis_start)).max(1) as f64
+    };
+    let candle_width_px = camera.viewport_width as f64 / visible_candles;
+    // Search radius: 1 candle-width worth of indices on each side (minimum 1).
+    let search_radius = (1.0_f64).max(candle_width_px / candle_width_px).ceil() as usize;
+    // Actually, use a fixed small radius: the nearest candle ± 1.
+    // This ensures we snap to the candle the cursor is over or adjacent ones.
+    let search_start = nearest_idx.saturating_sub(search_radius);
+    let search_end = (nearest_idx + search_radius + 1).min(len);
+
+    // Snap threshold in pixels: 1 candle-body height worth of distance.
+    // Use a generous threshold proportional to visible price density.
+    let snap_threshold_px = (candle_width_px as f32).max(15.0).min(40.0);
+
+    let mut best_price = cursor_price;
+    let mut best_dist = f32::MAX;
+
+    for i in search_start..search_end {
+        let prices = [
+            data.open(i) as f64,
+            data.high(i) as f64,
+            data.low(i) as f64,
+            data.close(i) as f64,
+        ];
+        for &p in &prices {
+            let py = camera.price_to_y(p);
+            let dist = (py - cursor_y).abs();
+            if dist < best_dist {
+                best_dist = dist;
+                best_price = p;
+            }
+        }
+    }
+
+    // Only snap if within threshold.
+    let snapped_price = if best_dist <= snap_threshold_px {
+        best_price
+    } else {
+        cursor_price
+    };
+
+    let snapped_y = camera.snap_to_pixel(camera.price_to_y(snapped_price));
+    ch.horizontal_y = snapped_y;
+    ch.price_label.text = format_price(snapped_price);
+    ch.price_label.screen_y = snapped_y;
+
+    (Some(ch), Some(snapped_price))
 }
 
 /// Format a timestamp as a long date/time string (e.g. "Fri 3/27/26 02:40:00 PM").
@@ -1320,6 +1441,8 @@ mod tests {
             timeline_border_ratio: 0.20,
             volume_scale: 1.0,
             show_volume_profile: false,
+            placing_level: false,
+            placing_alt_held: false,
             dirty,
         }
     }
@@ -1352,6 +1475,8 @@ mod tests {
             timeline_border_ratio: 0.20,
             volume_scale: 1.0,
             show_volume_profile: false,
+            placing_level: false,
+            placing_alt_held: false,
             dirty,
         }
     }
@@ -1639,6 +1764,9 @@ mod tests {
             price: 105.0,
             color: [1.0, 0.0, 0.0, 1.0],
             line_width: 1.0,
+            label: None,
+            icon: crate::levels::LevelIcon::None,
+            locked: false,
         }];
         let input = make_input(&data, &camera, &dirty, &levels, None);
 
