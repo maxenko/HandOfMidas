@@ -824,7 +824,12 @@ fn compute_grid_lines(camera: &Camera2D, grid_color: &[f32; 4]) -> Vec<GridLine>
 }
 
 /// Compute Y-axis (price) labels.
-fn compute_y_labels(camera: &Camera2D) -> Vec<AxisLabel> {
+///
+/// Labels are placed at "nice" price intervals (1-2-5 multiples of powers
+/// of 10) targeting roughly one label per 80 logical pixels of viewport
+/// height. The labels include the formatted price string and their
+/// screen-Y position.
+pub fn compute_y_labels(camera: &Camera2D) -> Vec<AxisLabel> {
     let price_range = camera.price_high - camera.price_low;
     if price_range <= 0.0 {
         return Vec::new();
@@ -1116,7 +1121,10 @@ fn is_major_grid_step(price: f64, step: f64) -> bool {
 }
 
 /// Format a price value for display.
-fn format_price(price: f64) -> String {
+///
+/// Adapts decimal places to the magnitude: no decimals above $1000,
+/// one decimal above $100, two below $100, four below $1.
+pub fn format_price(price: f64) -> String {
     if price.abs() >= 1000.0 {
         format!("{:.0}", price)
     } else if price.abs() >= 100.0 {

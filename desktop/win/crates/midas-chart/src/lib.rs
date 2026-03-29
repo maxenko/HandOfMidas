@@ -32,7 +32,7 @@ pub mod volume_profile;
 // ── Re-exports ─────────────────────────────────────────────────────
 pub use camera::Camera2D;
 pub use compute::VOLUME_AREA_FRACTION;
-pub use compute::{compute_chart_scene, estimate_candle_duration};
+pub use compute::{compute_chart_scene, compute_y_labels, estimate_candle_duration, format_price};
 pub use date_labels::{DateLabel, Tier as DateLabelTier};
 pub use dirty::{DirtyFlags, DirtyTracker};
 pub use input::ChartInput;

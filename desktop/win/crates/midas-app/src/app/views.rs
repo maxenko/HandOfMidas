@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use iced::widget::pane_grid::{self, PaneGrid};
-use iced::widget::{button, column, container, row, stack, text, text_input, Row, Space};
+use iced::widget::{button, column, container, row, stack, text, text_input, Column, Row, Space};
 use iced::{window, Color, Element, Fill, Length};
 
 use midas_core::{ChartId, Timeframe};
@@ -78,7 +78,12 @@ impl MidasApp {
                 chart.chart_state.timeline_border_ratio,
             );
 
-            let chart_area = stack![shader, date_overlay].width(Fill).height(Fill);
+            let price_overlay = build_price_label_overlay(
+                camera,
+                chart.chart_state.timeline_border_ratio,
+            );
+
+            let chart_area = stack![shader, date_overlay, price_overlay].width(Fill).height(Fill);
 
             // Header bar with symbol and timeframe.
             let header = container(
@@ -453,7 +458,12 @@ impl MidasApp {
                 chart.chart_state.timeline_border_ratio,
             );
 
-            return container(stack![shader, date_overlay].width(Fill).height(Fill))
+            let price_overlay = build_price_label_overlay(
+                camera,
+                chart.chart_state.timeline_border_ratio,
+            );
+
+            return container(stack![shader, date_overlay, price_overlay].width(Fill).height(Fill))
                 .width(Fill)
                 .height(Fill)
                 .padding(2) // Inset so Content's focus border is visible.
@@ -676,6 +686,70 @@ fn build_date_label_overlay<'a>(
     .width(Fill)
     .height(Fill)
     .into()
+}
+
+/// Build an iced widget overlay for price labels along the right edge of
+/// the chart's price area. Labels are positioned at the same Y coordinates
+/// as the horizontal grid lines, using fixed-pixel spacers for exact alignment.
+///
+/// Uses the same font size (10pt) and muted-gray color as the time axis labels
+/// so the two scales look consistent.
+fn build_price_label_overlay<'a>(
+    camera: &midas_chart::camera::Camera2D,
+    timeline_border_ratio: f32,
+) -> Element<'a, Message> {
+    let label_font_size = 10.0;
+    let label_height = label_font_size + 2.0;
+    let vh = camera.viewport_height.max(1) as f32;
+    let border_y = vh * (1.0 - timeline_border_ratio);
+
+    let labels = midas_chart::compute_y_labels(camera);
+
+    // Filter to labels within the price area and sort top-to-bottom.
+    let mut visible: Vec<_> = labels
+        .iter()
+        .filter(|l| l.screen_y >= label_height / 2.0 && l.screen_y < border_y - label_height / 2.0)
+        .collect();
+    visible.sort_by(|a, b| a.screen_y.partial_cmp(&b.screen_y).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Build a column with fixed-height spacers between right-aligned labels.
+    let mut col = Column::new();
+    let mut cursor_y = 0.0_f32;
+    let label_color = Color::from_rgb(0.55, 0.55, 0.55);
+
+    for label in &visible {
+        let target_y = (label.screen_y - label_height / 2.0).max(0.0);
+        let gap = target_y - cursor_y;
+
+        if gap < 1.0 {
+            // Labels would overlap — skip.
+            continue;
+        }
+
+        col = col.push(Space::new().height(Length::Fixed(gap)));
+        cursor_y += gap;
+
+        col = col.push(
+            container(
+                row![
+                    Space::new().width(Fill),
+                    text(label.text.clone()).size(label_font_size).color(label_color),
+                    Space::new().width(Length::Fixed(4.0)),
+                ]
+                .width(Fill),
+            )
+            .width(Fill),
+        );
+        cursor_y += label_height;
+    }
+
+    // Trailing spacer absorbs remaining height.
+    col = col.push(Space::new().height(Fill));
+
+    container(col.width(Fill))
+        .width(Fill)
+        .height(Length::Fixed(border_y))
+        .into()
 }
 
 /// Button style: muted text by default, white text + subtle bg on hover.
