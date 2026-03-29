@@ -18,6 +18,7 @@
 // ── Implemented modules ────────────────────────────────────────────
 pub mod camera;
 pub mod compute;
+pub mod crosshair_tool;
 pub mod date_labels;
 pub mod dirty;
 pub mod grid;
@@ -33,6 +34,7 @@ pub mod volume_profile;
 // ── Re-exports ─────────────────────────────────────────────────────
 pub use camera::Camera2D;
 pub use compute::VOLUME_AREA_FRACTION;
+pub use crosshair_tool::{CrosshairMode, CrosshairTool};
 pub use compute::{compute_chart_scene, compute_y_labels, estimate_candle_duration, format_price};
 pub use date_labels::{DateLabel, Tier as DateLabelTier};
 pub use dirty::{DirtyFlags, DirtyTracker};
@@ -47,7 +49,7 @@ pub use interaction::{
 pub use level_tool::{LevelTool, LevelToolMode};
 pub use levels::{HorizontalLevel, LevelIcon, price_step_for};
 pub use scene::{ChartScene, SceneGenerations};
-pub use state::{ChartState, InteractionMode, Momentum, YAnimation};
+pub use state::{ChartState, CursorClaim, InteractionMode, Momentum, YAnimation};
 pub use volume_profile::{VolumeProfile, VolumeProfileBin};
 
 #[cfg(test)]

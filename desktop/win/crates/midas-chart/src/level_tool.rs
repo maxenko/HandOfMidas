@@ -52,6 +52,10 @@ pub struct LevelTool {
     /// placement/drag price. This field exists for the compute layer
     /// to read during the same frame (price label adjustment).
     pub snapped_price: Option<f64>,
+    /// Current preview price during placement (snapped or raw).
+    /// Always `Some` while placing and cursor is in bounds.
+    /// The compute layer reads this for the preview line position.
+    pub preview_price: Option<f64>,
     /// Whether the tool was in `Placing` mode before a temporary
     /// pan/scale interruption. When the pan/scale ends and mode
     /// returns to `Idle`, this flag causes automatic re-entry
@@ -68,6 +72,7 @@ impl Default for LevelTool {
             mode: LevelToolMode::Idle,
             alt_held: false,
             snapped_price: None,
+            preview_price: None,
             was_placing: false,
         }
     }
@@ -156,6 +161,7 @@ impl LevelTool {
         self.mode = LevelToolMode::Idle;
         self.alt_held = false;
         self.snapped_price = None;
+        self.preview_price = None;
         self.was_placing = false;
     }
 
@@ -169,6 +175,7 @@ impl LevelTool {
         self.mode = LevelToolMode::Placing;
         self.alt_held = false;
         self.snapped_price = None;
+        self.preview_price = None;
         self.was_placing = false;
     }
 

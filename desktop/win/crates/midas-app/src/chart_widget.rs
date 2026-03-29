@@ -173,8 +173,12 @@ impl shader::Program<Message> for ChartProgram {
                 chart_state.interaction_mode = InteractionMode::Idle;
                 chart_state.level_tool.cancel();
                 chart_state.drag_start = None;
-                chart_state.left_mouse_down = false;
-                chart_state.crosshair_pos = None;
+                chart_state.crosshair.force_hide();
+                #[allow(deprecated)]
+                {
+                    chart_state.left_mouse_down = false;
+                    chart_state.crosshair_pos = None;
+                }
 
                 state.last_viewport = Some(new_vp);
                 return Some(shader::Action::publish(Message::ChartViewportChanged(
@@ -316,7 +320,6 @@ impl shader::Program<Message> for ChartProgram {
                     background_color: dark_theme().background,
                     timeline_border_ratio: 0.20,
                     volume_scale: 1.0,
-                    placing_level: false,
                 };
             }
         };
@@ -358,7 +361,7 @@ impl shader::Program<Message> for ChartProgram {
             crosshair: state
                 .chart_state
                 .as_ref()
-                .and_then(|cs| cs.crosshair_pos)
+                .and_then(|cs| cs.crosshair.render_pos())
                 .or(snap.crosshair_pos),
             // Use widget's live levels during drag for immediate visual feedback.
             levels: state
@@ -389,7 +392,6 @@ impl shader::Program<Message> for ChartProgram {
             background_color: theme.background,
             timeline_border_ratio: live_timeline_border_ratio,
             volume_scale: live_volume_scale,
-            placing_level: snap.level_tool.is_placing(),
         }
     }
 
@@ -478,8 +480,6 @@ pub struct ChartPrimitive {
     pub timeline_border_ratio: f32,
     /// Volume scale for handle position in prepare().
     pub volume_scale: f32,
-    /// Whether in level placement mode (for preview line rendering).
-    pub placing_level: bool,
 }
 
 impl std::fmt::Debug for ChartPrimitive {
@@ -617,20 +617,20 @@ impl shader::Primitive for ChartPrimitive {
         }
 
         // Preview level line during placement mode (thicker, colored).
-        if self.placing_level {
-            if let Some(ref ch) = scene.crosshair {
-                let preview_color = [0.22, 0.55, 0.95, 0.7];
-                // Solid preview line (2px).
-                resources.grid_lines.push(GridLineInstance {
-                    rect: [0.0, ch.horizontal_y, vw, ch.horizontal_y + 2.0],
-                    color: preview_color,
-                });
-                // Glow around preview line.
-                resources.grid_lines.push(GridLineInstance {
-                    rect: [0.0, ch.horizontal_y - 2.0, vw, ch.horizontal_y + 4.0],
-                    color: [0.22, 0.55, 0.95, 0.2],
-                });
-            }
+        // Reads from scene.level_preview_y — independent of crosshair,
+        // which is suppressed during placement.
+        if let Some(preview_y) = scene.level_preview_y {
+            let preview_color = [0.22, 0.55, 0.95, 0.7];
+            // Solid preview line (2px, centered on preview_y).
+            resources.grid_lines.push(GridLineInstance {
+                rect: [0.0, preview_y - 1.0, vw, preview_y + 1.0],
+                color: preview_color,
+            });
+            // Glow around preview line.
+            resources.grid_lines.push(GridLineInstance {
+                rect: [0.0, preview_y - 3.0, vw, preview_y + 3.0],
+                color: [0.22, 0.55, 0.95, 0.2],
+            });
         }
 
         // Convert crosshair into two full-width GridLineInstance rectangles.

@@ -9,7 +9,7 @@
 //! or click to select. The `PendingDrag` state resolves this ambiguity once
 //! the mouse has moved past the drag threshold (4px).
 
-use crate::state::{ChartState, InteractionMode};
+use crate::state::{ChartState, CursorClaim, InteractionMode};
 use midas_core::CandleData;
 
 /// A raw input event delivered to the chart.
@@ -245,61 +245,17 @@ fn handle_mouse_moved(
 ) -> Vec<ChartAction> {
     let mut actions = Vec::new();
 
-    // In Placing mode (via LevelTool), the crosshair (preview line) follows cursor.
-    // The `alt_held` flag is stored so the compute/snap layer can decide whether to snap to OHLC.
-    if state.level_tool.is_placing() {
-        state.level_tool.alt_held = alt_held;
-        let in_bounds = x >= 0.0
-            && y >= 0.0
-            && x <= state.camera.viewport_width as f32
-            && y <= state.camera.viewport_height as f32;
-        if in_bounds {
-            // If candle data is available, snap to OHLC.
-            let snap_y = if let Some(d) = data {
-                let raw_price = state.camera.y_to_price(y);
-                let snapped_price =
-                    state
-                        .level_tool
-                        .snap_to_ohlc(raw_price, x, &state.camera, d, is_collapsed);
-                state.camera.price_to_y(snapped_price)
-            } else {
-                y
-            };
-            state.crosshair_pos = Some((x, snap_y));
-            return vec![ChartAction::SetCrosshair { x, y: snap_y }];
-        } else {
-            return Vec::new();
+    // Dispatch based on the collective cursor claim of all active tools.
+    // This replaces tool-specific if/else chains — new tools only need to
+    // be added to `active_cursor_claim()`.
+    match state.active_cursor_claim() {
+        CursorClaim::Suppress => {
+            return handle_suppressed_move(state, x, y, alt_held, data, is_collapsed);
         }
+        CursorClaim::Preview | CursorClaim::None => {}
     }
 
-    // In Dragging mode (via LevelTool), compute snapped price and emit DragLevel.
-    if state.level_tool.is_dragging() {
-        state.level_tool.alt_held = alt_held;
-        if let crate::level_tool::LevelToolMode::Dragging { level_id, grab_offset } =
-            state.level_tool.mode
-        {
-            let raw_price = state.camera.y_to_price(y) + grab_offset;
-            let snapped = if let Some(d) = data {
-                state
-                    .level_tool
-                    .snap_to_ohlc(raw_price, x, &state.camera, d, is_collapsed)
-            } else {
-                raw_price
-            };
-            // Clear crosshair during drag.
-            state.crosshair_pos = None;
-            return vec![
-                ChartAction::DragLevel {
-                    id: level_id,
-                    new_price: snapped,
-                },
-                ChartAction::ClearCrosshair,
-            ];
-        }
-    }
-
-    // Update crosshair — only visible when left mouse is held down
-    // and not dragging a handle or the timeline border.
+    // Update crosshair via CrosshairTool — the tool's mode handles visibility.
     let dragging_handle = matches!(
         state.interaction_mode,
         InteractionMode::DraggingVolumeScale { .. }
@@ -310,11 +266,21 @@ fn handle_mouse_moved(
         && x <= state.camera.viewport_width as f32
         && y <= state.camera.viewport_height as f32;
 
-    if in_bounds && state.left_mouse_down && !dragging_handle {
-        state.crosshair_pos = Some((x, y));
-        actions.push(ChartAction::SetCrosshair { x, y });
-    } else if state.crosshair_pos.is_some() {
-        state.crosshair_pos = None;
+    let was_visible = state.crosshair.should_render();
+    if !dragging_handle {
+        state.crosshair.on_mouse_move(x, y, in_bounds);
+    }
+    let is_visible = state.crosshair.should_render();
+
+    // Keep deprecated field in sync.
+    #[allow(deprecated)]
+    { state.crosshair_pos = state.crosshair.render_pos(); }
+
+    if is_visible {
+        if let Some((rx, ry)) = state.crosshair.render_pos() {
+            actions.push(ChartAction::SetCrosshair { x: rx, y: ry });
+        }
+    } else if was_visible {
         actions.push(ChartAction::ClearCrosshair);
     }
 
@@ -342,7 +308,11 @@ fn handle_mouse_moved(
                             grab_offset,
                         };
                         state.interaction_mode = InteractionMode::Idle;
-                        state.crosshair_pos = None;
+                        // suppress() hides crosshair but preserves left_mouse_down
+                        // so on_left_release() works correctly when the drag ends.
+                        state.crosshair.suppress();
+                        #[allow(deprecated)]
+                        { state.crosshair_pos = None; }
                         actions.push(ChartAction::SelectLevel { id: level_id });
                         actions.push(ChartAction::ClearCrosshair);
                     } else {
@@ -540,7 +510,9 @@ fn handle_mouse_pressed(
                     .snapped_price
                     .unwrap_or_else(|| state.camera.y_to_price(y));
                 state.level_tool.cancel();
-                state.crosshair_pos = None;
+                state.crosshair.force_hide();
+                #[allow(deprecated)]
+                { state.crosshair_pos = None; }
                 return vec![
                     ChartAction::CreateLevel { price },
                     ChartAction::ClearCrosshair,
@@ -594,10 +566,13 @@ fn handle_mouse_pressed(
                 return actions;
             }
 
-            state.left_mouse_down = true;
+            state.crosshair.on_left_press(x, y);
+            #[allow(deprecated)]
+            { state.left_mouse_down = true; }
 
-            // Show crosshair on press.
-            state.crosshair_pos = Some((x, y));
+            // Show crosshair on press (tool already called on_left_press above).
+            #[allow(deprecated)]
+            { state.crosshair_pos = state.crosshair.render_pos(); }
             actions.push(ChartAction::SetCrosshair { x, y });
 
             // Stop any active momentum.
@@ -655,6 +630,7 @@ fn handle_mouse_released(
             state.interaction_mode = InteractionMode::Idle;
         }
         state.level_tool.try_resume_placing();
+        sync_crosshair_to_claim(state);
         return vec![];
     }
 
@@ -665,6 +641,7 @@ fn handle_mouse_released(
             state.drag_start = None;
         }
         state.level_tool.try_resume_placing();
+        sync_crosshair_to_claim(state);
         return vec![];
     }
 
@@ -679,23 +656,28 @@ fn handle_mouse_released(
             | InteractionMode::DraggingTimelineBorder { .. }
     ) {
         state.interaction_mode = InteractionMode::Idle;
-        state.left_mouse_down = false;
+        state.crosshair.on_left_release();
+        #[allow(deprecated)]
+        { state.left_mouse_down = false; }
         return vec![];
     }
 
     // End LevelTool dragging on left mouse-up.
     if state.level_tool.is_dragging() {
         state.level_tool.mode = crate::level_tool::LevelToolMode::Idle;
-        state.left_mouse_down = false;
+        state.crosshair.on_left_release();
+        #[allow(deprecated)]
+        { state.left_mouse_down = false; }
         return vec![ChartAction::ClearCrosshair];
     }
 
-    state.left_mouse_down = false;
+    state.crosshair.on_left_release();
+    #[allow(deprecated)]
+    { state.left_mouse_down = false; }
 
     // Hide crosshair on release.
-    if state.crosshair_pos.is_some() {
-        state.crosshair_pos = None;
-    }
+    #[allow(deprecated)]
+    { state.crosshair_pos = state.crosshair.render_pos(); }
 
     let mut actions = vec![ChartAction::ClearCrosshair];
     let prev_mode = state.interaction_mode.clone();
@@ -796,10 +778,12 @@ fn handle_key_pressed(state: &mut ChartState, key: Key) -> Vec<ChartAction> {
         }
         Key::Escape => {
             let mut actions = Vec::new();
-            // Cancel placement/dragging if active (via LevelTool).
+            // Cancel whichever tool is active (each tool has its own cleanup).
             if state.level_tool.is_active() {
                 state.level_tool.cancel();
-                state.crosshair_pos = None;
+                state.crosshair.force_hide();
+                #[allow(deprecated)]
+                { state.crosshair_pos = None; }
                 actions.push(ChartAction::CancelPlacing);
                 actions.push(ChartAction::ClearCrosshair);
                 return actions;
@@ -819,6 +803,90 @@ fn handle_key_pressed(state: &mut ChartState, key: Key) -> Vec<ChartAction> {
             Vec::new()
         }
     }
+}
+
+// ── Cursor-claim dispatch helpers ────────────────────────────────────────
+
+/// Handle mouse movement when a tool claims `CursorClaim::Suppress`
+/// (level placement or dragging). Crosshair is hidden; tool-specific
+/// computation (OHLC snap, drag price) runs instead.
+fn handle_suppressed_move(
+    state: &mut ChartState,
+    x: f32,
+    y: f32,
+    alt_held: bool,
+    data: Option<&dyn CandleData>,
+    is_collapsed: bool,
+) -> Vec<ChartAction> {
+    state.level_tool.alt_held = alt_held;
+
+    // Placing mode: compute preview price (with OHLC snap if available).
+    // Crosshair stays hidden — preview line rendered via scene.level_preview_y.
+    if state.level_tool.is_placing() {
+        let in_bounds = x >= 0.0
+            && y >= 0.0
+            && x <= state.camera.viewport_width as f32
+            && y <= state.camera.viewport_height as f32;
+        if in_bounds {
+            let raw_price = state.camera.y_to_price(y);
+            let price = if let Some(d) = data {
+                state
+                    .level_tool
+                    .snap_to_ohlc(raw_price, x, &state.camera, d, is_collapsed)
+            } else {
+                raw_price
+            };
+            state.level_tool.preview_price = Some(price);
+        }
+        state.crosshair.suppress();
+        #[allow(deprecated)]
+        { state.crosshair_pos = None; }
+        return vec![ChartAction::ClearCrosshair];
+    }
+
+    // Dragging mode: compute snapped drag price and emit DragLevel.
+    if let crate::level_tool::LevelToolMode::Dragging { level_id, grab_offset } =
+        state.level_tool.mode
+    {
+        let raw_price = state.camera.y_to_price(y) + grab_offset;
+        let snapped = if let Some(d) = data {
+            state
+                .level_tool
+                .snap_to_ohlc(raw_price, x, &state.camera, d, is_collapsed)
+        } else {
+            raw_price
+        };
+        state.crosshair.suppress();
+        #[allow(deprecated)]
+        { state.crosshair_pos = None; }
+        return vec![
+            ChartAction::DragLevel {
+                id: level_id,
+                new_price: snapped,
+            },
+            ChartAction::ClearCrosshair,
+        ];
+    }
+    Vec::new()
+}
+
+/// Sync crosshair state to the current `active_cursor_claim()`.
+///
+/// Called after tool state transitions (e.g., `try_resume_placing()`)
+/// to update crosshair mode without the caller needing to know which
+/// specific tool changed.
+fn sync_crosshair_to_claim(state: &mut ChartState) {
+    match state.active_cursor_claim() {
+        CursorClaim::Preview => {
+            state.crosshair.resume_preview();
+        }
+        CursorClaim::Suppress => {
+            state.crosshair.suppress();
+        }
+        CursorClaim::None => {}
+    }
+    #[allow(deprecated)]
+    { state.crosshair_pos = state.crosshair.render_pos(); }
 }
 
 /// Compute the Y position of the volume handle triangle.
@@ -890,6 +958,7 @@ fn hit_test_levels(
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::camera::Camera2D;
@@ -928,31 +997,30 @@ mod tests {
     fn mouse_move_in_bounds_sets_crosshair() {
         let mut state = test_state();
         // Crosshair only shows when left mouse is held down.
-        state.left_mouse_down = true;
+        state.crosshair.on_left_press(500.0, 300.0);
         let actions = handle_event(&mut state, ChartEvent::MouseMoved { x: 500.0, y: 300.0, alt_held: false }, None, false);
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0], ChartAction::SetCrosshair { x: 500.0, y: 300.0 });
-        assert_eq!(state.crosshair_pos, Some((500.0, 300.0)));
+        assert!(state.crosshair.should_render());
     }
 
     #[test]
     fn mouse_move_without_button_does_not_set_crosshair() {
         let mut state = test_state();
-        // left_mouse_down is false by default.
         let actions = handle_event(&mut state, ChartEvent::MouseMoved { x: 500.0, y: 300.0, alt_held: false }, None, false);
         assert!(actions.is_empty());
-        assert_eq!(state.crosshair_pos, None);
+        assert!(!state.crosshair.should_render());
     }
 
     #[test]
     fn mouse_move_out_of_bounds_clears_crosshair() {
         let mut state = test_state();
-        state.left_mouse_down = true;
+        state.crosshair.on_left_press(500.0, 300.0);
         handle_event(&mut state, ChartEvent::MouseMoved { x: 500.0, y: 300.0, alt_held: false }, None, false);
         let actions = handle_event(&mut state, ChartEvent::MouseMoved { x: -10.0, y: 300.0, alt_held: false }, None, false);
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0], ChartAction::ClearCrosshair);
-        assert_eq!(state.crosshair_pos, None);
+        assert!(!state.crosshair.should_render());
     }
 
     // ── Scroll pan tests ─────────────────────────────────────────────

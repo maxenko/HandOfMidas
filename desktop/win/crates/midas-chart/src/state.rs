@@ -6,10 +6,27 @@
 //! chart displays.
 
 use crate::camera::Camera2D;
+use crate::crosshair_tool::CrosshairTool;
 use crate::dirty::DirtyFlags;
 use crate::interaction::ChartAction;
 use crate::level_tool::LevelTool;
 use crate::levels::HorizontalLevel;
+
+/// What the active tool needs from the crosshair.
+///
+/// The interaction layer queries this via [`ChartState::active_cursor_claim()`]
+/// instead of checking each tool individually. Priority order:
+/// `Suppress > Preview > None`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CursorClaim {
+    /// No tool claims the cursor. Normal crosshair rules apply.
+    None,
+    /// A placement tool wants a preview line. Crosshair visible
+    /// regardless of mouse button, Y may be snapped.
+    Preview,
+    /// An active drag/edit wants the crosshair hidden entirely.
+    Suppress,
+}
 
 /// The interaction mode state machine.
 ///
@@ -99,7 +116,10 @@ pub struct ChartState {
     pub dirty: DirtyFlags,
     /// User-defined horizontal price levels.
     pub levels: Vec<HorizontalLevel>,
+    /// Self-contained crosshair component.
+    pub crosshair: CrosshairTool,
     /// Current crosshair position in chart-local pixels, or `None` if inactive.
+    #[deprecated(note = "Use `crosshair.render_pos()` instead")]
     pub crosshair_pos: Option<(f32, f32)>,
     /// Currently selected level ID, or `None` if no level is selected.
     pub selected_level: Option<u64>,
@@ -114,6 +134,7 @@ pub struct ChartState {
     pub y_animation: Option<YAnimation>,
     /// Whether the left mouse button is currently held down.
     /// Crosshair is only visible when this is true.
+    #[deprecated(note = "Use `crosshair.left_mouse_down()` instead")]
     pub left_mouse_down: bool,
     /// Data time bounds (first and last candle timestamps in ms).
     /// Used to clamp scroll pan so the user can't scroll past the data edges.
@@ -146,11 +167,13 @@ pub struct ChartState {
 
 impl ChartState {
     /// Create a new `ChartState` with the given camera and default values.
+    #[allow(deprecated)]
     pub fn new(camera: Camera2D) -> Self {
         Self {
             camera,
             dirty: DirtyFlags::new(),
             levels: Vec::new(),
+            crosshair: CrosshairTool::new(),
             crosshair_pos: None,
             selected_level: None,
             interaction_mode: InteractionMode::Idle,
@@ -174,6 +197,18 @@ impl ChartState {
         let id = self.next_level_id;
         self.next_level_id += 1;
         id
+    }
+
+    /// Query the collective cursor requirement of all active tools.
+    ///
+    /// The interaction layer calls this instead of checking each tool
+    /// individually. New tools only need to be added here.
+    /// Priority: Suppress > Preview > None.
+    pub fn active_cursor_claim(&self) -> CursorClaim {
+        if self.level_tool.is_active() {
+            return CursorClaim::Suppress;
+        }
+        CursorClaim::None
     }
 
     /// Fraction of the visible range allowed as padding beyond data edges.
@@ -258,12 +293,16 @@ impl ChartState {
                 self.dirty.mark_camera();
             }
 
+            #[allow(deprecated)]
             ChartAction::SetCrosshair { x, y } => {
+                self.crosshair.set_pos(*x, *y);
                 self.crosshair_pos = Some((*x, *y));
                 self.dirty.mark_crosshair();
             }
 
+            #[allow(deprecated)]
             ChartAction::ClearCrosshair => {
+                self.crosshair.force_hide();
                 self.crosshair_pos = None;
                 self.dirty.mark_crosshair();
             }
@@ -369,8 +408,10 @@ impl ChartState {
                 self.dirty.mark_all();
             }
 
+            #[allow(deprecated)]
             ChartAction::CancelPlacing => {
                 self.level_tool.cancel();
+                self.crosshair.force_hide();
                 self.interaction_mode = InteractionMode::Idle;
                 self.crosshair_pos = None;
                 self.dirty.mark_crosshair();
@@ -460,6 +501,7 @@ impl ChartState {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
 

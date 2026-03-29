@@ -44,7 +44,7 @@ impl MidasApp {
                 data: Some(Arc::clone(data)),
                 camera: chart.chart_state.camera.clone(),
                 dirty: chart.chart_state.dirty.clone(),
-                crosshair_pos: chart.chart_state.crosshair_pos,
+                crosshair_pos: chart.chart_state.crosshair.render_pos(),
                 levels: chart.chart_state.levels.clone(),
                 viewport_width: chart.chart_state.camera.viewport_width,
                 viewport_height: chart.chart_state.camera.viewport_height,
@@ -464,7 +464,7 @@ impl MidasApp {
                 data: Some(Arc::clone(data)),
                 camera: chart.chart_state.camera.clone(),
                 dirty: chart.chart_state.dirty.clone(),
-                crosshair_pos: chart.chart_state.crosshair_pos,
+                crosshair_pos: chart.chart_state.crosshair.render_pos(),
                 levels: chart.chart_state.levels.clone(),
                 viewport_width: chart.chart_state.camera.viewport_width,
                 viewport_height: chart.chart_state.camera.viewport_height,
@@ -920,7 +920,7 @@ fn build_level_labels_overlay<'a>(
 
         // Center the badge vertically on the level line.
         // Badge height ≈ font_size(16) + vertical_padding(3*2) + border ≈ 24px.
-        let badge_half_height = 14.0;
+        let badge_half_height = 15.0;
         let top_pad = (level.screen_y - badge_half_height).max(0.0);
 
         let label_widget = container(text(label_str).size(16).color(label_color))

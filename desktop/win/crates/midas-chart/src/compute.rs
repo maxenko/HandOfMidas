@@ -225,18 +225,13 @@ fn compute_normal_scene(
     let y_labels = compute_y_labels(camera);
     let x_labels = compute_x_labels(camera, candle_duration);
     let levels = compute_levels(input.levels, camera);
-    let mut crosshair = compute_crosshair(input.crosshair, data, camera, candle_duration, input.symbol);
-    // If the level tool has a snapped price, adjust the crosshair's Y / price label.
-    if input.level_tool.is_placing() {
-        if let Some(sp) = input.level_tool.snapped_price {
-            if let Some(ref mut ch) = crosshair {
-                let snapped_y = camera.snap_to_pixel(camera.price_to_y(sp));
-                ch.horizontal_y = snapped_y;
-                ch.price_label.text = format_price(sp);
-                ch.price_label.screen_y = snapped_y;
-            }
-        }
-    }
+    let crosshair = compute_crosshair(input.crosshair, data, camera, candle_duration, input.symbol);
+    // Level placement preview: compute Y from snapped price, independent of crosshair.
+    let level_preview_y = if input.level_tool.is_placing() {
+        input.level_tool.preview_price.map(|p| camera.snap_to_pixel(camera.price_to_y(p)))
+    } else {
+        None
+    };
     let date_labels = crate::date_labels::for_normal_mode(camera, candle_duration);
     let separator_y = input.viewport_height as f32 * (1.0 - input.timeline_border_ratio);
     let vw = input.viewport_width as f32;
@@ -261,6 +256,7 @@ fn compute_normal_scene(
         y_labels,
         levels,
         crosshair,
+        level_preview_y,
         separator_y,
         date_labels,
         volume_profile_instances,
@@ -364,7 +360,7 @@ fn compute_collapsed_scene(
     let levels = compute_levels(input.levels, camera);
 
     // Crosshair in collapsed mode: convert cursor X to the nearest candle index.
-    let mut crosshair = compute_collapsed_crosshair(
+    let crosshair = compute_collapsed_crosshair(
         input.crosshair,
         data,
         camera,
@@ -373,17 +369,12 @@ fn compute_collapsed_scene(
         input.symbol,
         &index_to_x,
     );
-    // If the level tool has a snapped price, adjust the crosshair's Y / price label.
-    if input.level_tool.is_placing() {
-        if let Some(sp) = input.level_tool.snapped_price {
-            if let Some(ref mut ch) = crosshair {
-                let snapped_y = camera.snap_to_pixel(camera.price_to_y(sp));
-                ch.horizontal_y = snapped_y;
-                ch.price_label.text = format_price(sp);
-                ch.price_label.screen_y = snapped_y;
-            }
-        }
-    }
+    // Level placement preview: compute Y from snapped price, independent of crosshair.
+    let level_preview_y = if input.level_tool.is_placing() {
+        input.level_tool.preview_price.map(|p| camera.snap_to_pixel(camera.price_to_y(p)))
+    } else {
+        None
+    };
 
     let date_labels = crate::date_labels::for_collapsed_mode(
         camera,
@@ -416,6 +407,7 @@ fn compute_collapsed_scene(
         y_labels,
         levels,
         crosshair,
+        level_preview_y,
         separator_y,
         date_labels,
         volume_profile_instances,
@@ -750,8 +742,29 @@ fn compute_collapsed_crosshair(
     let snap_y = camera.snap_to_pixel(cy);
     let snap_ts = data.timestamp(data_idx);
 
-    // Build price label at cursor Y.
-    let cursor_price = camera.y_to_price(cy);
+    Some(build_crosshair_data(data, camera, data_idx, snap_x, cy, snap_y, snap_ts, symbol))
+}
+
+/// Build the labels and OHLCV overlay for a crosshair at the given
+/// candle index and snap positions.
+///
+/// Shared between normal and collapsed crosshair computation.
+/// `cursor_y` is the raw (unsnapped) cursor Y used for the price label;
+/// `snap_y` is the pixel-snapped Y used for the horizontal line position.
+#[allow(clippy::too_many_arguments)]
+fn build_crosshair_data(
+    data: &dyn CandleData,
+    camera: &Camera2D,
+    data_idx: usize,
+    snap_x: f32,
+    cursor_y: f32,
+    snap_y: f32,
+    snap_ts: i64,
+    symbol: &str,
+) -> CrosshairRender {
+    // Price label uses the raw cursor Y so the displayed price matches
+    // the user's exact cursor position, not the pixel-snapped line.
+    let cursor_price = camera.y_to_price(cursor_y);
     let price_label = AxisLabel {
         text: format_price(cursor_price),
         screen_x: camera.viewport_width as f32,
@@ -803,14 +816,14 @@ fn compute_collapsed_crosshair(
         change_pct,
     });
 
-    Some(CrosshairRender {
+    CrosshairRender {
         vertical_x: snap_x,
         horizontal_y: snap_y,
         price_label,
         time_label,
         line_color: [0.7, 0.7, 0.7, 0.5],
         ohlcv_overlay,
-    })
+    }
 }
 
 /// Compute horizontal price grid lines with adaptive density.
@@ -939,7 +952,7 @@ fn compute_levels(
         .collect()
 }
 
-/// Compute crosshair render data.
+/// Compute crosshair render data (normal timestamp mode).
 ///
 /// The vertical line snaps to the center of the nearest candle. The horizontal
 /// line follows the cursor Y position exactly. Includes OHLCV overlay data
@@ -957,77 +970,16 @@ fn compute_crosshair(
         return None;
     }
 
+    let _ = candle_duration;
+
     // Convert cursor X to time, then find the nearest candle.
     let cursor_time = camera.x_to_time(cx);
     let nearest_idx = data.find_index_by_time(cursor_time as i64);
-    let snap_ts = data.timestamp(nearest_idx) as f64;
-    let snap_x = camera.snap_to_pixel(camera.time_to_x(snap_ts));
+    let snap_ts = data.timestamp(nearest_idx);
+    let snap_x = camera.snap_to_pixel(camera.time_to_x(snap_ts as f64));
     let snap_y = camera.snap_to_pixel(cy);
 
-    // Build price label at cursor Y.
-    let cursor_price = camera.y_to_price(cy);
-    let price_label = AxisLabel {
-        text: format_price(cursor_price),
-        screen_x: camera.viewport_width as f32,
-        screen_y: snap_y,
-        bg_color: [0.2, 0.2, 0.2, 0.95],
-        text_color: [1.0, 1.0, 1.0, 1.0],
-    };
-
-    // Build time label at snap X.
-    let time_label = AxisLabel {
-        text: format_time_ms(snap_ts as i64),
-        screen_x: snap_x,
-        screen_y: camera.viewport_height as f32,
-        bg_color: [0.2, 0.2, 0.2, 0.95],
-        text_color: [1.0, 1.0, 1.0, 1.0],
-    };
-
-    let _ = candle_duration;
-
-    // Build OHLCV overlay for the candle under the crosshair.
-    let o = data.open(nearest_idx);
-    let h = data.high(nearest_idx);
-    let l = data.low(nearest_idx);
-    let c = data.close(nearest_idx);
-    let v = data.volume(nearest_idx);
-    let is_bullish = c >= o;
-
-    // Compute change from previous candle (if available).
-    let (change, change_pct) = if nearest_idx > 0 {
-        let prev_close = data.close(nearest_idx - 1);
-        let chg = c - prev_close;
-        let pct = if prev_close.abs() > f32::EPSILON {
-            (chg / prev_close) * 100.0
-        } else {
-            0.0
-        };
-        (Some(chg), Some(pct))
-    } else {
-        (None, None)
-    };
-
-    let ohlcv_overlay = Some(OhlcvOverlay {
-        symbol: symbol.to_string(),
-        datetime: format_datetime_long(snap_ts as i64),
-        open: o,
-        high: h,
-        low: l,
-        close: c,
-        volume: v,
-        is_bullish,
-        change,
-        change_pct,
-    });
-
-    Some(CrosshairRender {
-        vertical_x: snap_x,
-        horizontal_y: snap_y,
-        price_label,
-        time_label,
-        line_color: [0.7, 0.7, 0.7, 0.5],
-        ohlcv_overlay,
-    })
+    Some(build_crosshair_data(data, camera, nearest_idx, snap_x, cy, snap_y, snap_ts, symbol))
 }
 
 /// Format a timestamp as a long date/time string (e.g. "Fri 3/27/26 02:40:00 PM").

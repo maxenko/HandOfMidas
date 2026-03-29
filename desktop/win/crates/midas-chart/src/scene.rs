@@ -48,6 +48,10 @@ pub struct ChartScene {
     pub levels: Vec<LevelRender>,
     /// Crosshair overlay (if active).
     pub crosshair: Option<CrosshairRender>,
+    /// Y position of the level placement preview line (if placing).
+    /// Independent of the crosshair — the crosshair is suppressed during
+    /// placement but this preview line still renders.
+    pub level_preview_y: Option<f32>,
 
     /// Y position of the separator line between price and volume areas.
     pub separator_y: f32,

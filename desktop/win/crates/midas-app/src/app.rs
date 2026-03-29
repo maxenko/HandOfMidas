@@ -791,7 +791,9 @@ impl MidasApp {
                     cam.viewport_width = new_w;
                     cam.viewport_height = new_h;
                     // Clear crosshair during resize so it doesn't linger.
-                    chart.chart_state.crosshair_pos = None;
+                    chart.chart_state.crosshair.force_hide();
+                    #[allow(deprecated)]
+                    { chart.chart_state.crosshair_pos = None; }
                     chart.chart_state.dirty.mark_camera();
                     chart.chart_state.dirty.mark_crosshair();
                 }
@@ -850,7 +852,12 @@ impl MidasApp {
                     self.focus_chart(chart_id);
                 }
                 if let Some(chart) = self.charts.get_mut(&chart_id) {
-                    chart.chart_state.crosshair_pos = pos;
+                    match pos {
+                        Some((x, y)) => chart.chart_state.crosshair.set_pos(x, y),
+                        None => chart.chart_state.crosshair.force_hide(),
+                    }
+                    #[allow(deprecated)]
+                    { chart.chart_state.crosshair_pos = pos; }
                     chart.chart_state.dirty.mark_crosshair();
                 }
                 Task::none()
@@ -1335,7 +1342,9 @@ impl MidasApp {
                 if let Some(active_id) = self.active_chart_id() {
                     if let Some(chart) = self.charts.get_mut(&active_id) {
                         chart.chart_state.level_tool.cancel();
-                        chart.chart_state.crosshair_pos = None;
+                        chart.chart_state.crosshair.force_hide();
+                        #[allow(deprecated)]
+                        { chart.chart_state.crosshair_pos = None; }
                         chart.chart_state.dirty.mark_crosshair();
                     }
                 }
