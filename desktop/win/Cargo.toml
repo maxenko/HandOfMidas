@@ -11,6 +11,7 @@ resolver = "2"
 members = [
     "crates/midas-core",
     "crates/midas-data",
+    "crates/midas-indicators",
     "crates/midas-chart",
     "crates/midas-render",
     "crates/midas-feed",

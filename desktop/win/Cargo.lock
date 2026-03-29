@@ -2011,6 +2011,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "midas-indicators"
+version = "0.1.0"
+
+[[package]]
 name = "midas-render"
 version = "0.1.0"
 dependencies = [
