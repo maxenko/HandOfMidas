@@ -1,0 +1,25 @@
+[package]
+name = "midas-feed"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+midas-core = { path = "../midas-core" }
+midas-data = { path = "../midas-data" }
+
+serde     = { workspace = true }
+tokio     = { workspace = true }
+chrono    = { workspace = true }
+thiserror = { workspace = true }
+anyhow    = { workspace = true }
+tracing   = { workspace = true }
+
+# CSV parsing — not in workspace deps since only this crate needs it
+csv = "1"
+
+# Deterministic RNG for test data generation
+rand = "0.8"
+
+[dev-dependencies]
+tempfile = "3"

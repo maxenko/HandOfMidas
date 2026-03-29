@@ -1,0 +1,24 @@
+[package]
+name = "midas-data"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+midas-core = { path = "../midas-core" }
+
+bytemuck  = { workspace = true }
+memmap2   = { workspace = true }
+serde     = { workspace = true }
+chrono    = { workspace = true }
+thiserror = { workspace = true }
+tracing   = { workspace = true }
+glam      = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+tempfile = "3"
+
+[[bench]]
+name = "data_bench"
+harness = false

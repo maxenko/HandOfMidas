@@ -1,0 +1,16 @@
+# ─── Windows-specific build flags ─────────────────────────────────────
+[target.'cfg(target_os = "windows")']
+rustflags = [
+    "-C", "target-cpu=native",      # Enable AVX2/SSE4.2 SIMD on build machine
+]
+
+# ─── General build settings ───────────────────────────────────────────
+# [build]
+# jobs: omitted to use Cargo's default (all available CPU cores)
+
+[term]
+# Color output in terminal
+color = "always"
+
+[registries.crates-io]
+protocol = "sparse"
