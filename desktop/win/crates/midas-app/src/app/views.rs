@@ -54,6 +54,9 @@ impl MidasApp {
                 show_volume_profile: chart.chart_state.show_volume_profile,
                 data_time_start: chart.chart_state.data_time_start,
                 data_time_end: chart.chart_state.data_time_end,
+                editing_level_id: chart.editing_level_id,
+                placing_level: matches!(chart.chart_state.interaction_mode, midas_chart::InteractionMode::PlacingLevel),
+                placing_alt_held: chart.chart_state.placing_alt_held,
             };
             // Use ChartId(0) for floating windows -- they don't participate
             // in the pane_grid's chart map.
@@ -83,7 +86,41 @@ impl MidasApp {
                 chart.chart_state.timeline_border_ratio,
             );
 
-            let chart_area = stack![shader, date_overlay, price_overlay].width(Fill).height(Fill);
+            // Build level-related overlays for floating window.
+            let floating_chart_id = ChartId::new(0);
+            let level_renders = compute_level_renders(chart);
+            let level_labels_overlay = build_level_labels_overlay(
+                &level_renders,
+                chart.chart_state.camera.viewport_height,
+            );
+            let is_placing = matches!(chart.chart_state.interaction_mode, midas_chart::InteractionMode::PlacingLevel);
+            let drawing_panel = build_drawing_panel(floating_chart_id, is_placing);
+
+            let mut chart_layers: Vec<Element<'_, Message>> = vec![
+                shader.into(),
+                date_overlay,
+                price_overlay,
+                level_labels_overlay,
+                drawing_panel,
+            ];
+
+            // Level editor popup (when a level is being edited).
+            if let (Some(editing_id), Some(screen_pos)) =
+                (chart.editing_level_id, chart.editing_level_screen_pos)
+            {
+                if let Some(level) = chart.chart_state.levels.iter().find(|l| l.id == editing_id) {
+                    chart_layers.push(build_level_editor(
+                        floating_chart_id,
+                        level,
+                        screen_pos,
+                        &chart.level_editor_price_input,
+                        chart.chart_state.camera.viewport_width,
+                        chart.chart_state.camera.viewport_height,
+                    ));
+                }
+            }
+
+            let chart_area = stack(chart_layers).width(Fill).height(Fill);
 
             // Header bar with symbol and timeframe.
             let header = container(
@@ -438,6 +475,9 @@ impl MidasApp {
                 show_volume_profile: chart.chart_state.show_volume_profile,
                 data_time_start: chart.chart_state.data_time_start,
                 data_time_end: chart.chart_state.data_time_end,
+                editing_level_id: chart.editing_level_id,
+                placing_level: matches!(chart.chart_state.interaction_mode, midas_chart::InteractionMode::PlacingLevel),
+                placing_alt_held: chart.chart_state.placing_alt_held,
             };
             let program = crate::chart_widget::ChartProgram { chart_id, snapshot };
             let shader = crate::chart_widget::chart_shader(program);
@@ -463,7 +503,40 @@ impl MidasApp {
                 chart.chart_state.timeline_border_ratio,
             );
 
-            return container(stack![shader, date_overlay, price_overlay].width(Fill).height(Fill))
+            // Build level-related overlays.
+            let level_renders = compute_level_renders(chart);
+            let level_labels_overlay = build_level_labels_overlay(
+                &level_renders,
+                chart.chart_state.camera.viewport_height,
+            );
+            let is_placing = matches!(chart.chart_state.interaction_mode, midas_chart::InteractionMode::PlacingLevel);
+            let drawing_panel = build_drawing_panel(chart_id, is_placing);
+
+            let mut chart_layers: Vec<Element<'_, Message>> = vec![
+                shader.into(),
+                date_overlay,
+                price_overlay,
+                level_labels_overlay,
+                drawing_panel,
+            ];
+
+            // Level editor popup (when a level is being edited).
+            if let (Some(editing_id), Some(screen_pos)) =
+                (chart.editing_level_id, chart.editing_level_screen_pos)
+            {
+                if let Some(level) = chart.chart_state.levels.iter().find(|l| l.id == editing_id) {
+                    chart_layers.push(build_level_editor(
+                        chart_id,
+                        level,
+                        screen_pos,
+                        &chart.level_editor_price_input,
+                        chart.chart_state.camera.viewport_width,
+                        chart.chart_state.camera.viewport_height,
+                    ));
+                }
+            }
+
+            return container(stack(chart_layers).width(Fill).height(Fill))
                 .width(Fill)
                 .height(Fill)
                 .padding(2) // Inset so Content's focus border is visible.
@@ -751,6 +824,451 @@ fn build_price_label_overlay<'a>(
         .height(Length::Fixed(border_y))
         .into()
 }
+
+// ── Drawing panel overlay ──────────────────────────────────────────
+
+/// Build the drawing-tools panel that floats at the top-left of the chart.
+///
+/// Contains a single "Level" button that enters level-placement mode.
+/// When `is_placing` is true the button is highlighted to indicate the
+/// active tool.
+fn build_drawing_panel<'a>(chart_id: ChartId, is_placing: bool) -> Element<'a, Message> {
+    let bg_color = if is_placing {
+        Color::from_rgba(0.22, 0.55, 0.95, 0.85) // Blue highlight when active
+    } else {
+        Color::from_rgba(0.15, 0.17, 0.22, 0.85)
+    };
+    let border_color = if is_placing {
+        Color::from_rgba(0.3, 0.5, 0.9, 0.7)
+    } else {
+        Color::from_rgba(0.3, 0.3, 0.4, 0.5)
+    };
+
+    let level_btn = button(
+        row![
+            text("\u{2500}").size(14), // horizontal line
+            text("Level").size(11),
+        ]
+        .spacing(4)
+        .align_y(iced::Alignment::Center),
+    )
+    .on_press(Message::DrawingPanelCreateLevel(chart_id))
+    .padding([4, 10])
+    .style(move |_theme: &iced::Theme, _status| button::Style {
+        background: Some(iced::Background::Color(bg_color)),
+        border: iced::Border {
+            color: border_color,
+            width: 1.0,
+            radius: 6.0.into(),
+        },
+        text_color: Color::from_rgba(0.8, 0.8, 0.85, 0.9),
+        ..Default::default()
+    });
+
+    let clear_btn = button(
+        row![
+            text("\u{00D7}").size(14), // ×
+            text("Clear").size(11),
+        ]
+        .spacing(4)
+        .align_y(iced::Alignment::Center),
+    )
+    .on_press(Message::ChartClearAllLevels(chart_id))
+    .padding([4, 10])
+    .style(|_theme: &iced::Theme, _status| button::Style {
+        background: Some(iced::Background::Color(Color::from_rgba(
+            0.15, 0.17, 0.22, 0.85,
+        ))),
+        border: iced::Border {
+            color: Color::from_rgba(0.3, 0.3, 0.4, 0.5),
+            width: 1.0,
+            radius: 6.0.into(),
+        },
+        text_color: Color::from_rgba(0.8, 0.8, 0.85, 0.9),
+        ..Default::default()
+    });
+
+    container(column![level_btn, clear_btn].spacing(4))
+        .padding(iced::Padding::ZERO.top(40.0).left(8.0))
+        .width(Fill)
+        .height(Fill)
+        .into()
+}
+
+// ── Level labels overlay ───────────────────────────────────────────
+
+/// Build an overlay that renders text labels for levels that have labels
+/// or icons set. Each label is positioned at the level's Y coordinate
+/// on the chart, appearing as a small badge near the left side.
+fn build_level_labels_overlay<'a>(
+    levels: &[midas_chart::LevelRender],
+    _viewport_height: u32,
+) -> Element<'a, Message> {
+    let mut label_elements: Vec<Element<'a, Message>> = Vec::new();
+
+    for level in levels {
+        let label_str = match (&level.label, level.icon.as_char()) {
+            (Some(lbl), Some(icon_ch)) if !lbl.is_empty() => {
+                format!("{} {}", icon_ch, lbl)
+            }
+            (Some(lbl), None) if !lbl.is_empty() => lbl.clone(),
+            (None, Some(icon_ch)) | (Some(_), Some(icon_ch)) => icon_ch.to_string(),
+            _ => continue,
+        };
+
+        let [r, g, b, a] = level.color;
+        let label_color = Color::from_rgba(r, g, b, a.max(0.9));
+        let bg_color = Color::from_rgba(r * 0.3, g * 0.3, b * 0.3, 0.75);
+
+        // Position: top padding = screen_y - 8 (center label on line).
+        let top_pad = (level.screen_y - 8.0).max(0.0);
+
+        let label_widget = container(text(label_str).size(10).color(label_color))
+            .padding([2, 6])
+            .style(move |_theme: &iced::Theme| container::Style {
+                background: Some(iced::Background::Color(bg_color)),
+                border: iced::Border {
+                    radius: 3.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+
+        let positioned = container(label_widget)
+            .padding(iced::Padding::ZERO.top(top_pad).left(8.0))
+            .width(Fill)
+            .height(Fill);
+
+        label_elements.push(positioned.into());
+    }
+
+    if label_elements.is_empty() {
+        return Space::new().width(0).height(0).into();
+    }
+
+    // Stack all labels on top of each other (each positions itself via
+    // top padding).
+    stack(label_elements).width(Fill).height(Fill).into()
+}
+
+// ── Level editor popup ─────────────────────────────────────────────
+
+/// Build the floating level-editor popup that appears on right-click.
+///
+/// Contains price input with step buttons, label input, color presets,
+/// thickness buttons, icon selector, lock toggle, and delete button.
+fn build_level_editor<'a>(
+    chart_id: ChartId,
+    level: &midas_chart::HorizontalLevel,
+    screen_pos: (f32, f32),
+    price_input: &str,
+    viewport_width: u32,
+    viewport_height: u32,
+) -> Element<'a, Message> {
+    let level_id = level.id;
+    let (coarse_step, _fine_step) = midas_chart::price_step_for(level.price);
+
+    // -- Header --
+    let header = row![
+        text("Edit Level").size(11).color(Color::WHITE),
+        Space::new().width(Fill),
+        button(text("\u{00D7}").size(13)) // x close
+            .on_press(Message::ChartCloseLevelEditor(chart_id))
+            .padding([0, 4])
+            .style(button::text),
+    ]
+    .align_y(iced::Alignment::Center)
+    .spacing(4);
+
+    // -- Price input with up/down --
+    let price_input_field = text_input("Price", price_input)
+        .on_input(move |s| Message::LevelEditorPriceChanged(chart_id, level_id, s))
+        .size(11)
+        .width(100);
+
+    let price_up = button(text("\u{25B2}").size(8)) // upward triangle
+        .on_press(Message::LevelEditorPriceStep(
+            chart_id,
+            level_id,
+            coarse_step,
+        ))
+        .padding([2, 4])
+        .style(button::text);
+
+    let price_down = button(text("\u{25BC}").size(8)) // downward triangle
+        .on_press(Message::LevelEditorPriceStep(
+            chart_id,
+            level_id,
+            -coarse_step,
+        ))
+        .padding([2, 4])
+        .style(button::text);
+
+    let price_row = row![
+        text("Price")
+            .size(10)
+            .color(Color::from_rgba(0.6, 0.6, 0.65, 1.0)),
+        price_input_field,
+        column![price_up, price_down].spacing(0),
+    ]
+    .spacing(4)
+    .align_y(iced::Alignment::Center);
+
+    // -- Label input --
+    let current_label = level.label.as_deref().unwrap_or("");
+    let label_input = text_input("Label", current_label)
+        .on_input(move |s| Message::LevelEditorLabelChanged(chart_id, level_id, s))
+        .size(11)
+        .width(140);
+
+    let label_row = row![
+        text("Label")
+            .size(10)
+            .color(Color::from_rgba(0.6, 0.6, 0.65, 1.0)),
+        label_input,
+    ]
+    .spacing(4)
+    .align_y(iced::Alignment::Center);
+
+    // -- Color presets --
+    let color_presets: [[f32; 4]; 8] = [
+        [0.22, 0.55, 0.95, 0.8], // blue
+        [0.95, 0.22, 0.22, 0.8], // red
+        [0.22, 0.85, 0.35, 0.8], // green
+        [1.0, 0.843, 0.0, 1.0],  // gold
+        [0.95, 0.55, 0.15, 0.9], // orange
+        [0.7, 0.35, 0.95, 0.8],  // purple
+        [0.0, 0.85, 0.85, 0.8],  // cyan
+        [0.85, 0.85, 0.85, 0.8], // gray
+    ];
+
+    let mut color_buttons = Row::new().spacing(3);
+    for preset in &color_presets {
+        let c = *preset;
+        let is_selected = (level.color[0] - c[0]).abs() < 0.05
+            && (level.color[1] - c[1]).abs() < 0.05
+            && (level.color[2] - c[2]).abs() < 0.05;
+        let border_color = if is_selected {
+            Color::WHITE
+        } else {
+            Color::TRANSPARENT
+        };
+        let swatch_color = Color::from_rgba(c[0], c[1], c[2], c[3]);
+        color_buttons = color_buttons.push(
+            button(Space::new().width(14).height(14))
+                .on_press(Message::LevelEditorColorChanged(chart_id, level_id, c))
+                .padding(0)
+                .style(move |_theme: &iced::Theme, _status| button::Style {
+                    background: Some(iced::Background::Color(swatch_color)),
+                    border: iced::Border {
+                        color: border_color,
+                        width: if is_selected { 2.0 } else { 1.0 },
+                        radius: 2.0.into(),
+                    },
+                    text_color: Color::WHITE,
+                    ..Default::default()
+                }),
+        );
+    }
+
+    let color_row = row![
+        text("Color")
+            .size(10)
+            .color(Color::from_rgba(0.6, 0.6, 0.65, 1.0)),
+        color_buttons,
+    ]
+    .spacing(4)
+    .align_y(iced::Alignment::Center);
+
+    // -- Thickness --
+    let thicknesses: [f32; 4] = [1.0, 2.0, 3.0, 4.0];
+    let mut thickness_buttons = Row::new().spacing(3);
+    for &t in &thicknesses {
+        let is_sel = (level.line_width - t).abs() < 0.1;
+        let label = format!("{}px", t as u32);
+        thickness_buttons = thickness_buttons.push(
+            button(text(label).size(9))
+                .on_press(Message::LevelEditorThicknessChanged(
+                    chart_id, level_id, t,
+                ))
+                .padding([2, 6])
+                .style(move |theme: &iced::Theme, status| {
+                    let mut s = button::text(theme, status);
+                    if is_sel {
+                        s.background = Some(iced::Background::Color(Color::from_rgba(
+                            0.3, 0.4, 0.6, 0.8,
+                        )));
+                        s.border.radius = 3.0.into();
+                    }
+                    s
+                }),
+        );
+    }
+
+    let thickness_row = row![
+        text("Width")
+            .size(10)
+            .color(Color::from_rgba(0.6, 0.6, 0.65, 1.0)),
+        thickness_buttons,
+    ]
+    .spacing(4)
+    .align_y(iced::Alignment::Center);
+
+    // -- Icon selector --
+    let mut icon_buttons = Row::new().spacing(3);
+    for icon_variant in midas_chart::LevelIcon::all() {
+        let is_sel = level.icon == *icon_variant;
+        let label = match icon_variant.as_char() {
+            Some(ch) => ch.to_string(),
+            None => "\u{2014}".to_string(), // em dash for "None"
+        };
+        let icon_clone = icon_variant.clone();
+        icon_buttons = icon_buttons.push(
+            button(text(label).size(12))
+                .on_press(Message::LevelEditorIconChanged(
+                    chart_id, level_id, icon_clone,
+                ))
+                .padding([2, 5])
+                .style(move |theme: &iced::Theme, status| {
+                    let mut s = button::text(theme, status);
+                    if is_sel {
+                        s.background = Some(iced::Background::Color(Color::from_rgba(
+                            0.3, 0.4, 0.6, 0.8,
+                        )));
+                        s.border.radius = 3.0.into();
+                    }
+                    s
+                }),
+        );
+    }
+
+    let icon_row = row![
+        text("Icon")
+            .size(10)
+            .color(Color::from_rgba(0.6, 0.6, 0.65, 1.0)),
+        icon_buttons,
+    ]
+    .spacing(4)
+    .align_y(iced::Alignment::Center);
+
+    // -- Lock toggle + Delete --
+    let lock_label = if level.locked { "Lock" } else { "Unlock" };
+    let is_locked = level.locked;
+    let lock_btn = button(text(lock_label).size(10))
+        .on_press(Message::LevelEditorToggleLock(chart_id, level_id))
+        .padding([3, 8])
+        .style(move |theme: &iced::Theme, status| {
+            let mut s = button::text(theme, status);
+            if is_locked {
+                s.background = Some(iced::Background::Color(Color::from_rgba(
+                    0.5, 0.35, 0.1, 0.6,
+                )));
+                s.border.radius = 3.0.into();
+            }
+            s
+        });
+
+    let delete_btn = button(
+        text("Delete")
+            .size(10)
+            .color(Color::from_rgba(1.0, 0.4, 0.4, 1.0)),
+    )
+    .on_press(Message::ChartDeleteLevel(chart_id, level_id))
+    .padding([3, 8])
+    .style(button::text);
+
+    let action_row = row![lock_btn, Space::new().width(Fill), delete_btn]
+        .spacing(4)
+        .align_y(iced::Alignment::Center);
+
+    // -- Divider helper (styled thin container instead of rule widget) --
+    let divider = || -> Element<'a, Message> {
+        container(Space::new().width(Fill).height(1))
+            .width(Fill)
+            .style(|_theme: &iced::Theme| container::Style {
+                background: Some(iced::Background::Color(Color::from_rgba(
+                    0.3, 0.35, 0.45, 0.5,
+                ))),
+                ..Default::default()
+            })
+            .into()
+    };
+
+    // -- Assemble popup --
+    let popup_content = column![
+        header,
+        divider(),
+        price_row,
+        label_row,
+        color_row,
+        thickness_row,
+        icon_row,
+        divider(),
+        action_row,
+    ]
+    .spacing(6)
+    .padding(10)
+    .width(240);
+
+    let popup = container(popup_content).style(|_theme: &iced::Theme| container::Style {
+        background: Some(iced::Background::Color(Color::from_rgba(
+            0.10, 0.12, 0.16, 0.95,
+        ))),
+        border: iced::Border {
+            color: Color::from_rgba(0.3, 0.35, 0.45, 0.7),
+            width: 1.0,
+            radius: 8.0.into(),
+        },
+        shadow: iced::Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.5),
+            offset: iced::Vector::new(2.0, 4.0),
+            blur_radius: 12.0,
+        },
+        ..Default::default()
+    });
+
+    // Position: clamp to viewport bounds.
+    let popup_w: f32 = 240.0;
+    let popup_h: f32 = 280.0;
+    let left = (screen_pos.0 + 10.0)
+        .min((viewport_width as f32) - popup_w - 10.0)
+        .max(0.0);
+    let top = (screen_pos.1 - popup_h / 2.0)
+        .min((viewport_height as f32) - popup_h - 10.0)
+        .max(0.0);
+
+    container(popup)
+        .padding(iced::Padding::ZERO.top(top).left(left))
+        .width(Fill)
+        .height(Fill)
+        .into()
+}
+
+/// Compute `LevelRender` data from a chart panel's state for use in overlays.
+fn compute_level_renders(chart: &ChartPanel) -> Vec<midas_chart::LevelRender> {
+    let cam = &chart.chart_state.camera;
+    chart
+        .chart_state
+        .levels
+        .iter()
+        .map(|lev| midas_chart::LevelRender {
+            id: lev.id,
+            price: lev.price,
+            screen_y: cam.price_to_y(lev.price),
+            color: lev.color,
+            line_width: lev.line_width,
+            is_selected: chart.chart_state.selected_level == Some(lev.id),
+            is_being_dragged: false,
+            original_screen_y: None,
+            label_text: midas_chart::format_price(lev.price),
+            label: lev.label.clone(),
+            icon: lev.icon.clone(),
+            locked: lev.locked,
+        })
+        .collect()
+}
+
+// ── Button style helpers ────────────────────────────────────────────
 
 /// Button style: muted text by default, white text + subtle bg on hover.
 fn hover_text_button_style(_theme: &iced::Theme, status: button::Status) -> button::Style {

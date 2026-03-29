@@ -79,6 +79,12 @@ pub struct ChartRenderSnapshot {
     pub data_time_start: f64,
     /// Data time bounds for scroll clamping (last candle timestamp ms).
     pub data_time_end: f64,
+    /// ID of the level currently being edited (for highlight/selection).
+    pub editing_level_id: Option<u64>,
+    /// Whether the chart is in level-placement mode.
+    pub placing_level: bool,
+    /// Whether Alt is held during level placement (disables OHLC snap).
+    pub placing_alt_held: bool,
 }
 
 // ── ChartProgram ─────────────────────────────────────────────────────
@@ -108,6 +114,12 @@ pub struct ChartWidgetState {
     /// Last known viewport dimensions, used to detect resize and emit
     /// a scale-preserving camera adjustment message.
     last_viewport: Option<(u32, u32)>,
+    /// Current keyboard modifier state (for Alt detection during level placement).
+    modifiers: iced::keyboard::Modifiers,
+    /// OHLC-snapped price from the most recent render frame.
+    /// Written by `draw()` (via Cell for interior mutability), read by `update()`
+    /// when the user clicks to place a level.
+    snapped_price: std::cell::Cell<Option<f64>>,
 }
 
 impl shader::Program<Message> for ChartProgram {
@@ -142,6 +154,30 @@ impl shader::Program<Message> for ChartProgram {
         chart_state.timeline_border_ratio = self.snapshot.timeline_border_ratio;
         chart_state.volume_scale = self.snapshot.volume_scale;
         chart_state.show_volume_profile = self.snapshot.show_volume_profile;
+        // Sync placement mode between app and widget.
+        //
+        // The app is the source of truth for "tool is active" (placing_level).
+        // The widget temporarily exits PlacingLevel for pan/scale operations
+        // and re-enters when those finish (mode returns to Idle).
+        //
+        // When the widget cancels (Escape), it sends CancelPlacing which sets
+        // the app's interaction_mode to Idle → placing_level becomes false on
+        // the next snapshot → widget stays in Idle.
+        if self.snapshot.placing_level {
+            // App says placement is active. Re-enter PlacingLevel whenever
+            // the widget is Idle (e.g., after pan/scale completes).
+            if matches!(chart_state.interaction_mode, InteractionMode::Idle) {
+                chart_state.interaction_mode = InteractionMode::PlacingLevel;
+            }
+        } else {
+            // App says placement is NOT active. Force widget out of PlacingLevel
+            // if it's still there (handles the frame after CancelPlacing).
+            if matches!(chart_state.interaction_mode, InteractionMode::PlacingLevel) {
+                chart_state.interaction_mode = InteractionMode::Idle;
+                chart_state.crosshair_pos = None;
+                chart_state.placing_alt_held = false;
+            }
+        }
 
         // Detect viewport resize and emit a scale-preserving adjustment.
         // Compare against the canonical camera viewport (from snapshot),
@@ -192,8 +228,18 @@ impl shader::Program<Message> for ChartProgram {
             }
         }
 
+        // Track modifier keys for Alt detection during level placement.
+        if let Event::Keyboard(iced::keyboard::Event::ModifiersChanged(mods)) = event {
+            state.modifiers = *mods;
+        }
+
+        // Feed the OHLC-snapped price from the last render into the
+        // interaction state so clicks place at the snapped position.
+        chart_state.level_preview_snapped_price = state.snapped_price.get();
+
         // Convert iced event to ChartEvent(s).
-        let chart_events = translate_event(event, bounds, cursor);
+        let alt_held = state.modifiers.alt();
+        let chart_events = translate_event(event, bounds, cursor, alt_held);
         if chart_events.is_empty() {
             return None;
         }
@@ -280,6 +326,7 @@ impl shader::Program<Message> for ChartProgram {
                     background_color: dark_theme().background,
                     timeline_border_ratio: 0.20,
                     volume_scale: 1.0,
+                    placing_level: false,
                 };
             }
         };
@@ -317,16 +364,35 @@ impl shader::Program<Message> for ChartProgram {
             volume_bull_color: theme.volume_bull,
             volume_bear_color: theme.volume_bear,
             grid_color: theme.grid,
-            crosshair: snap.crosshair_pos,
+            crosshair: state
+                .chart_state
+                .as_ref()
+                .and_then(|cs| cs.crosshair_pos)
+                .or(snap.crosshair_pos),
             levels: &snap.levels,
             collapse_gaps: snap.collapse_gaps,
             timeline_border_ratio: live_timeline_border_ratio,
             volume_scale: live_volume_scale,
             show_volume_profile: snap.show_volume_profile,
             dirty: &dirty,
+            placing_level: snap.placing_level
+                || state
+                    .chart_state
+                    .as_ref()
+                    .map(|cs| matches!(cs.interaction_mode, InteractionMode::PlacingLevel))
+                    .unwrap_or(false),
+            placing_alt_held: state
+                .chart_state
+                .as_ref()
+                .map(|cs| cs.placing_alt_held)
+                .unwrap_or(snap.placing_alt_held),
         };
 
         let scene = compute_chart_scene(&input);
+
+        // Write the snapped price back to widget state so the interaction
+        // layer can read it when the user clicks to place a level.
+        state.snapped_price.set(scene.level_preview_snapped_price);
 
         ChartPrimitive {
             chart_id: self.chart_id,
@@ -336,6 +402,7 @@ impl shader::Program<Message> for ChartProgram {
             background_color: theme.background,
             timeline_border_ratio: live_timeline_border_ratio,
             volume_scale: live_volume_scale,
+            placing_level: snap.placing_level,
         }
     }
 
@@ -410,6 +477,8 @@ pub struct ChartPrimitive {
     pub timeline_border_ratio: f32,
     /// Volume scale for handle position in prepare().
     pub volume_scale: f32,
+    /// Whether in level placement mode (for preview line rendering).
+    pub placing_level: bool,
 }
 
 impl std::fmt::Debug for ChartPrimitive {
@@ -520,6 +589,49 @@ impl shader::Primitive for ChartPrimitive {
         let vh = self.viewport_height as f32;
         resources.grid_lines = scene.grid_instances.clone();
 
+        // Convert horizontal price levels into full-width grid line instances.
+        for level in &scene.levels {
+            let y = level.screen_y;
+            let thickness = level.line_width.max(1.0);
+            resources.grid_lines.push(GridLineInstance {
+                rect: [0.0, y, vw, y + thickness],
+                color: level.color,
+            });
+            // Selection highlight: thicker semi-transparent glow behind the line.
+            if level.is_selected {
+                let glow_thickness = thickness + 4.0;
+                let glow_y = y - 2.0;
+                resources.grid_lines.push(GridLineInstance {
+                    rect: [0.0, glow_y, vw, glow_y + glow_thickness],
+                    color: [level.color[0], level.color[1], level.color[2], level.color[3] * 0.3],
+                });
+            }
+            // Ghost line during drag (original position).
+            if let Some(orig_y) = level.original_screen_y {
+                resources.grid_lines.push(GridLineInstance {
+                    rect: [0.0, orig_y, vw, orig_y + 1.0],
+                    color: [level.color[0], level.color[1], level.color[2], level.color[3] * 0.2],
+                });
+            }
+        }
+
+        // Preview level line during placement mode (thicker, colored).
+        if self.placing_level {
+            if let Some(ref ch) = scene.crosshair {
+                let preview_color = [0.22, 0.55, 0.95, 0.7];
+                // Solid preview line (2px).
+                resources.grid_lines.push(GridLineInstance {
+                    rect: [0.0, ch.horizontal_y, vw, ch.horizontal_y + 2.0],
+                    color: preview_color,
+                });
+                // Glow around preview line.
+                resources.grid_lines.push(GridLineInstance {
+                    rect: [0.0, ch.horizontal_y - 2.0, vw, ch.horizontal_y + 4.0],
+                    color: [0.22, 0.55, 0.95, 0.2],
+                });
+            }
+        }
+
         // Convert crosshair into two full-width GridLineInstance rectangles.
         resources.crosshair_lines = if let Some(ref ch) = scene.crosshair {
             crosshair_to_instances(ch, vw, vh)
@@ -610,10 +722,56 @@ impl shader::Primitive for ChartPrimitive {
 
 /// Translate an iced `Event` into zero or more `ChartEvent`s.
 ///
-/// Only mouse events within the chart bounds are translated.
-fn translate_event(event: &Event, bounds: Rectangle, cursor: mouse::Cursor) -> Vec<ChartEvent> {
+/// Mouse events are translated to chart-local coordinates. Keyboard
+/// events are translated to `ChartEvent::KeyPressed` variants so the
+/// sans-IO interaction state machine can handle hotkeys (e.g. Escape to
+/// cancel placement, H to enter placement mode).
+fn translate_event(
+    event: &Event,
+    bounds: Rectangle,
+    cursor: mouse::Cursor,
+    alt_held: bool,
+) -> Vec<ChartEvent> {
     match event {
-        Event::Mouse(mouse_event) => translate_mouse_event(mouse_event, bounds, cursor),
+        Event::Mouse(mouse_event) => translate_mouse_event(mouse_event, bounds, cursor, alt_held),
+        Event::Keyboard(keyboard_event) => translate_keyboard_event(keyboard_event),
+        _ => Vec::new(),
+    }
+}
+
+/// Translate an iced keyboard event to chart events.
+///
+/// Maps named keys (Delete, Escape, Home, End) and character keys (H)
+/// to `ChartEvent::KeyPressed` so the sans-IO interaction state machine
+/// can handle keyboard shortcuts for level operations and navigation.
+fn translate_keyboard_event(event: &iced::keyboard::Event) -> Vec<ChartEvent> {
+    match event {
+        iced::keyboard::Event::KeyPressed { key, .. } => {
+            let chart_key = match key {
+                iced::keyboard::Key::Named(iced::keyboard::key::Named::Delete)
+                | iced::keyboard::Key::Named(iced::keyboard::key::Named::Backspace) => {
+                    Some(midas_chart::Key::Delete)
+                }
+                iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape) => {
+                    Some(midas_chart::Key::Escape)
+                }
+                iced::keyboard::Key::Named(iced::keyboard::key::Named::Home) => {
+                    Some(midas_chart::Key::Home)
+                }
+                iced::keyboard::Key::Named(iced::keyboard::key::Named::End) => {
+                    Some(midas_chart::Key::End)
+                }
+                iced::keyboard::Key::Character(c)
+                    if c.as_str() == "h" || c.as_str() == "H" =>
+                {
+                    Some(midas_chart::Key::H)
+                }
+                _ => None,
+            };
+            chart_key
+                .map(|k| vec![ChartEvent::KeyPressed { key: k }])
+                .unwrap_or_default()
+        }
         _ => Vec::new(),
     }
 }
@@ -628,6 +786,7 @@ fn translate_mouse_event(
     event: &mouse::Event,
     bounds: Rectangle,
     cursor: mouse::Cursor,
+    alt_held: bool,
 ) -> Vec<ChartEvent> {
     // position_in returns None when cursor is outside bounds.
     // For drags we need coords even outside bounds, so compute manually.
@@ -641,9 +800,9 @@ fn translate_mouse_event(
         mouse::Event::CursorMoved { .. } => {
             // Use unclamped position so drags continue outside bounds.
             if let Some(p) = pos_unclamped {
-                vec![ChartEvent::MouseMoved { x: p.x, y: p.y }]
+                vec![ChartEvent::MouseMoved { x: p.x, y: p.y, alt_held }]
             } else {
-                vec![ChartEvent::MouseMoved { x: -1.0, y: -1.0 }]
+                vec![ChartEvent::MouseMoved { x: -1.0, y: -1.0, alt_held }]
             }
         }
 
@@ -655,6 +814,7 @@ fn translate_mouse_event(
                     x: p.x,
                     y: p.y,
                     button,
+                    alt_held,
                 }]
             } else {
                 Vec::new()
@@ -671,6 +831,7 @@ fn translate_mouse_event(
                 x: p.x,
                 y: p.y,
                 button,
+                alt_held,
             }]
         }
 
@@ -752,6 +913,16 @@ fn action_to_message(
         ChartAction::SetVolumeScale { scale } => {
             Some(Message::ChartSetVolumeScale(chart_id, *scale))
         }
+        ChartAction::RightClickLevel { id, x, y } => {
+            Some(Message::ChartRightClickLevel(chart_id, *id, *x, *y))
+        }
+        ChartAction::DragLevel { id, new_price } => {
+            Some(Message::ChartDragLevel(chart_id, *id, *new_price))
+        }
+        ChartAction::SelectLevel { id } => Some(Message::ChartSelectLevel(chart_id, *id)),
+        ChartAction::DeselectLevel => Some(Message::ChartDeselectLevel(chart_id)),
+        ChartAction::DeleteSelectedLevel => Some(Message::ChartDeleteSelectedLevel(chart_id)),
+        ChartAction::CancelPlacing => Some(Message::ChartCancelPlacing(chart_id)),
         ChartAction::Redraw => None,
         _ => None,
     }

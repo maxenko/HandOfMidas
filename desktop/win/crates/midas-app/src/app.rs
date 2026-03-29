@@ -18,9 +18,59 @@ use iced::{window, Task};
 use midas_chart::camera::Camera2D;
 use midas_chart::state::ChartState;
 use midas_core::config::{AppConfig, ChartConfig, LevelConfig};
-use midas_core::{ChartId, Timeframe};
+use midas_core::{CandleData, ChartId, Timeframe};
 use midas_data::CandleBuffer;
 use midas_feed::TestDataProvider;
+
+/// Maximum pixel distance for OHLC snapping during level placement.
+const OHLC_SNAP_THRESHOLD_PX: f32 = 20.0;
+
+/// Snap a price to the nearest OHLC value of candles near the viewport center,
+/// but only if that OHLC point is within the snap threshold.
+fn snap_price_to_ohlc(
+    raw_price: f64,
+    camera: &Camera2D,
+    data: Option<&dyn CandleData>,
+) -> f64 {
+    let data = match data {
+        Some(d) if !d.is_empty() => d,
+        _ => return raw_price,
+    };
+
+    let cursor_y = camera.price_to_y(raw_price);
+    let center_time = camera.x_to_time(camera.viewport_width as f32 / 2.0);
+    let nearest_idx = data.find_index_by_time(center_time as i64);
+    let len = data.len();
+
+    // Search nearest candle ± 1.
+    let search_start = nearest_idx.saturating_sub(1);
+    let search_end = (nearest_idx + 2).min(len);
+
+    let mut best_price = raw_price;
+    let mut best_dist = f32::MAX;
+
+    for i in search_start..search_end {
+        for &p in &[
+            data.open(i) as f64,
+            data.high(i) as f64,
+            data.low(i) as f64,
+            data.close(i) as f64,
+        ] {
+            let py = camera.price_to_y(p);
+            let dist = (py - cursor_y).abs();
+            if dist < best_dist {
+                best_dist = dist;
+                best_price = p;
+            }
+        }
+    }
+
+    if best_dist <= OHLC_SNAP_THRESHOLD_PX {
+        best_price
+    } else {
+        raw_price
+    }
+}
 
 use crate::layout::{LayoutPresetKind, WorkspaceLayout};
 
@@ -61,6 +111,12 @@ pub struct ChartPanel {
     pub load_state: LoadState,
     /// Per-chart ticker input text (for inline editing in title bar).
     pub symbol_input: String,
+    /// ID of the level currently being edited in the popup, or None.
+    pub editing_level_id: Option<u64>,
+    /// Screen position where the level editor should appear (x, y in chart-local pixels).
+    pub editing_level_screen_pos: Option<(f32, f32)>,
+    /// Temporary string for the price input field in the level editor.
+    pub level_editor_price_input: String,
 }
 
 // ── Application state ─────────────────────────────────────────────────
@@ -160,10 +216,46 @@ pub enum Message {
     ChartCrosshair(ChartId, Option<(f32, f32)>),
     /// Create a new horizontal price level.
     ChartCreateLevel(ChartId, f64),
+    /// Drag a level to a new price.
+    ChartDragLevel(ChartId, u64, f64),
+    /// Select a level.
+    ChartSelectLevel(ChartId, u64),
+    /// Deselect any selected level.
+    ChartDeselectLevel(ChartId),
+    /// Delete the currently selected level.
+    ChartDeleteSelectedLevel(ChartId),
+    /// Clear all levels from a chart.
+    ChartClearAllLevels(ChartId),
+    /// Cancel level placement mode (from widget Escape/right-click).
+    ChartCancelPlacing(ChartId),
     /// Set the timeline border position for a chart.
     ChartSetTimelineBorderRatio(ChartId, f64),
     /// Set the volume bar height multiplier for a chart.
     ChartSetVolumeScale(ChartId, f64),
+
+    // -- Level editing --
+    /// Right-click on a level — open the level editor popup.
+    ChartRightClickLevel(ChartId, u64, f32, f32),
+    /// Close the level editor popup.
+    ChartCloseLevelEditor(ChartId),
+    /// Delete a specific level by ID.
+    ChartDeleteLevel(ChartId, u64),
+    /// Update a level's price (from editor input).
+    LevelEditorPriceChanged(ChartId, u64, String),
+    /// Increment/decrement a level's price by delta.
+    LevelEditorPriceStep(ChartId, u64, f64),
+    /// Update a level's label text.
+    LevelEditorLabelChanged(ChartId, u64, String),
+    /// Update a level's color.
+    LevelEditorColorChanged(ChartId, u64, [f32; 4]),
+    /// Update a level's line thickness.
+    LevelEditorThicknessChanged(ChartId, u64, f32),
+    /// Update a level's icon.
+    LevelEditorIconChanged(ChartId, u64, midas_chart::LevelIcon),
+    /// Toggle a level's lock state.
+    LevelEditorToggleLock(ChartId, u64),
+    /// Create a new level from the drawing panel (at center of visible price range).
+    DrawingPanelCreateLevel(ChartId),
 
     // -- Gap collapsing --
     /// Toggle session gap collapsing on a chart panel.
@@ -395,6 +487,9 @@ impl MidasApp {
                     price: level_cfg.price,
                     color: level_cfg.color,
                     line_width: level_cfg.line_width,
+                    label: level_cfg.label.clone(),
+                    icon: midas_chart::LevelIcon::from_str_id(&level_cfg.icon),
+                    locked: level_cfg.locked,
                 });
         }
     }
@@ -445,6 +540,9 @@ impl MidasApp {
             chart_state: ChartState::new(camera),
             load_state: LoadState::Empty,
             symbol_input: String::new(),
+            editing_level_id: None,
+            editing_level_screen_pos: None,
+            level_editor_price_input: String::new(),
         }
     }
 
@@ -804,9 +902,15 @@ impl MidasApp {
                 Task::none()
             }
 
-            Message::ChartCreateLevel(chart_id, price) => {
+            Message::ChartCreateLevel(chart_id, raw_price) => {
                 self.focus_chart(chart_id);
                 if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    // Snap to nearest OHLC if within threshold (unless Alt was held).
+                    let price = if !chart.chart_state.placing_alt_held {
+                        snap_price_to_ohlc(raw_price, &chart.chart_state.camera, chart.data.as_ref().map(|d| d.as_ref() as &dyn CandleData))
+                    } else {
+                        raw_price
+                    };
                     let level_id = chart.chart_state.alloc_level_id();
                     chart
                         .chart_state
@@ -816,9 +920,82 @@ impl MidasApp {
                             price,
                             color: [0.22, 0.55, 0.95, 0.8],
                             line_width: 1.0,
+                            label: None,
+                            icon: midas_chart::LevelIcon::None,
+                            locked: false,
                         });
                     chart.chart_state.dirty.mark_levels();
+                    // Exit placement mode after creating the level.
+                    chart.chart_state.interaction_mode = midas_chart::InteractionMode::Idle;
+                    chart.chart_state.placing_alt_held = false;
+                    chart.chart_state.level_preview_snapped_price = None;
                     self.mark_config_dirty();
+                }
+                Task::none()
+            }
+
+            Message::ChartDragLevel(chart_id, level_id, new_price) => {
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    if let Some(level) = chart.chart_state.levels.iter_mut().find(|l| l.id == level_id) {
+                        level.price = new_price;
+                        chart.chart_state.dirty.mark_levels();
+                    }
+                }
+                self.mark_config_dirty();
+                Task::none()
+            }
+
+            Message::ChartSelectLevel(chart_id, level_id) => {
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    chart.chart_state.selected_level = Some(level_id);
+                    chart.chart_state.dirty.mark_levels();
+                }
+                Task::none()
+            }
+
+            Message::ChartDeselectLevel(chart_id) => {
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    chart.chart_state.selected_level = None;
+                    chart.chart_state.dirty.mark_levels();
+                }
+                Task::none()
+            }
+
+            Message::ChartDeleteSelectedLevel(chart_id) => {
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    if let Some(sel_id) = chart.chart_state.selected_level {
+                        let is_locked = chart.chart_state.levels.iter().any(|l| l.id == sel_id && l.locked);
+                        if !is_locked {
+                            chart.chart_state.selected_level = None;
+                            chart.chart_state.levels.retain(|l| l.id != sel_id);
+                            chart.chart_state.dirty.mark_levels();
+                            self.mark_config_dirty();
+                        }
+                    }
+                }
+                Task::none()
+            }
+
+            Message::ChartClearAllLevels(chart_id) => {
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    chart.chart_state.levels.clear();
+                    chart.chart_state.selected_level = None;
+                    chart.chart_state.dirty.mark_levels();
+                    // Close editor if open.
+                    chart.editing_level_id = None;
+                    chart.editing_level_screen_pos = None;
+                    self.mark_config_dirty();
+                }
+                Task::none()
+            }
+
+            Message::ChartCancelPlacing(chart_id) => {
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    chart.chart_state.interaction_mode = midas_chart::InteractionMode::Idle;
+                    chart.chart_state.crosshair_pos = None;
+                    chart.chart_state.placing_alt_held = false;
+                    chart.chart_state.level_preview_snapped_price = None;
+                    chart.chart_state.dirty.mark_crosshair();
                 }
                 Task::none()
             }
@@ -838,6 +1015,182 @@ impl MidasApp {
                     chart.chart_state.dirty.mark_data();
                 }
                 self.mark_config_dirty();
+                Task::none()
+            }
+
+            Message::ChartRightClickLevel(chart_id, level_id, x, y) => {
+                self.focus_chart(chart_id);
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    chart.editing_level_id = Some(level_id);
+                    chart.editing_level_screen_pos = Some((x, y));
+                    // Initialize price input from current level price.
+                    if let Some(level) = chart
+                        .chart_state
+                        .levels
+                        .iter()
+                        .find(|l| l.id == level_id)
+                    {
+                        chart.level_editor_price_input =
+                            midas_chart::format_price(level.price);
+                    }
+                    chart.chart_state.selected_level = Some(level_id);
+                    chart.chart_state.dirty.mark_levels();
+                }
+                Task::none()
+            }
+
+            Message::ChartCloseLevelEditor(chart_id) => {
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    chart.editing_level_id = None;
+                    chart.editing_level_screen_pos = None;
+                }
+                Task::none()
+            }
+
+            Message::ChartDeleteLevel(chart_id, level_id) => {
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    let is_locked = chart
+                        .chart_state
+                        .levels
+                        .iter()
+                        .any(|l| l.id == level_id && l.locked);
+                    if !is_locked {
+                        chart.chart_state.levels.retain(|l| l.id != level_id);
+                        chart.chart_state.dirty.mark_levels();
+                        chart.editing_level_id = None;
+                        chart.editing_level_screen_pos = None;
+                        self.mark_config_dirty();
+                    }
+                }
+                Task::none()
+            }
+
+            Message::LevelEditorPriceChanged(chart_id, level_id, text) => {
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    chart.level_editor_price_input = text.clone();
+                    if let Ok(price) = text.parse::<f64>() {
+                        if let Some(level) = chart
+                            .chart_state
+                            .levels
+                            .iter_mut()
+                            .find(|l| l.id == level_id)
+                        {
+                            level.price = price;
+                            chart.chart_state.dirty.mark_levels();
+                            self.mark_config_dirty();
+                        }
+                    }
+                }
+                Task::none()
+            }
+
+            Message::LevelEditorPriceStep(chart_id, level_id, delta) => {
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    if let Some(level) = chart
+                        .chart_state
+                        .levels
+                        .iter_mut()
+                        .find(|l| l.id == level_id)
+                    {
+                        level.price += delta;
+                        chart.level_editor_price_input =
+                            midas_chart::format_price(level.price);
+                        chart.chart_state.dirty.mark_levels();
+                        self.mark_config_dirty();
+                    }
+                }
+                Task::none()
+            }
+
+            Message::LevelEditorLabelChanged(chart_id, level_id, label_text) => {
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    if let Some(level) = chart
+                        .chart_state
+                        .levels
+                        .iter_mut()
+                        .find(|l| l.id == level_id)
+                    {
+                        level.label = if label_text.is_empty() {
+                            None
+                        } else {
+                            Some(label_text)
+                        };
+                        chart.chart_state.dirty.mark_levels();
+                        self.mark_config_dirty();
+                    }
+                }
+                Task::none()
+            }
+
+            Message::LevelEditorColorChanged(chart_id, level_id, color) => {
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    if let Some(level) = chart
+                        .chart_state
+                        .levels
+                        .iter_mut()
+                        .find(|l| l.id == level_id)
+                    {
+                        level.color = color;
+                        chart.chart_state.dirty.mark_levels();
+                        self.mark_config_dirty();
+                    }
+                }
+                Task::none()
+            }
+
+            Message::LevelEditorThicknessChanged(chart_id, level_id, thickness) => {
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    if let Some(level) = chart
+                        .chart_state
+                        .levels
+                        .iter_mut()
+                        .find(|l| l.id == level_id)
+                    {
+                        level.line_width = thickness;
+                        chart.chart_state.dirty.mark_levels();
+                        self.mark_config_dirty();
+                    }
+                }
+                Task::none()
+            }
+
+            Message::LevelEditorIconChanged(chart_id, level_id, icon) => {
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    if let Some(level) = chart
+                        .chart_state
+                        .levels
+                        .iter_mut()
+                        .find(|l| l.id == level_id)
+                    {
+                        level.icon = icon;
+                        chart.chart_state.dirty.mark_levels();
+                        self.mark_config_dirty();
+                    }
+                }
+                Task::none()
+            }
+
+            Message::LevelEditorToggleLock(chart_id, level_id) => {
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    if let Some(level) = chart
+                        .chart_state
+                        .levels
+                        .iter_mut()
+                        .find(|l| l.id == level_id)
+                    {
+                        level.locked = !level.locked;
+                        chart.chart_state.dirty.mark_levels();
+                        self.mark_config_dirty();
+                    }
+                }
+                Task::none()
+            }
+
+            Message::DrawingPanelCreateLevel(chart_id) => {
+                self.focus_chart(chart_id);
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    chart.chart_state.interaction_mode = midas_chart::InteractionMode::PlacingLevel;
+                }
                 Task::none()
             }
 
@@ -1015,8 +1368,39 @@ impl MidasApp {
                 "5" => self.set_active_timeframe(Timeframe::H4),
                 "6" => self.set_active_timeframe(Timeframe::D1),
                 "7" => self.set_active_timeframe(Timeframe::W1),
+                "h" | "H" => {
+                    if let Some(active_id) = self.active_chart_id() {
+                        if let Some(chart) = self.charts.get_mut(&active_id) {
+                            if matches!(
+                                chart.chart_state.interaction_mode,
+                                midas_chart::InteractionMode::Idle
+                            ) {
+                                chart.chart_state.interaction_mode =
+                                    midas_chart::InteractionMode::PlacingLevel;
+                            }
+                        }
+                    }
+                }
                 _ => {}
             },
+            Key::Named(Named::Escape) => {
+                // Cancel placement mode on the active chart.
+                if let Some(active_id) = self.active_chart_id() {
+                    if let Some(chart) = self.charts.get_mut(&active_id) {
+                        if matches!(
+                            chart.chart_state.interaction_mode,
+                            midas_chart::InteractionMode::PlacingLevel
+                        ) {
+                            chart.chart_state.interaction_mode =
+                                midas_chart::InteractionMode::Idle;
+                            chart.chart_state.crosshair_pos = None;
+                            chart.chart_state.placing_alt_held = false;
+                            chart.chart_state.level_preview_snapped_price = None;
+                            chart.chart_state.dirty.mark_crosshair();
+                        }
+                    }
+                }
+            }
             Key::Named(Named::F11) => {
                 self.show_frame_overlay = !self.show_frame_overlay;
             }
