@@ -55,8 +55,7 @@ impl MidasApp {
                 data_time_start: chart.chart_state.data_time_start,
                 data_time_end: chart.chart_state.data_time_end,
                 editing_level_id: chart.editing_level_id,
-                placing_level: matches!(chart.chart_state.interaction_mode, midas_chart::InteractionMode::PlacingLevel),
-                placing_alt_held: chart.chart_state.placing_alt_held,
+                level_tool: chart.chart_state.level_tool.clone(),
             };
             // Use ChartId(0) for floating windows -- they don't participate
             // in the pane_grid's chart map.
@@ -93,7 +92,7 @@ impl MidasApp {
                 &level_renders,
                 chart.chart_state.camera.viewport_height,
             );
-            let is_placing = matches!(chart.chart_state.interaction_mode, midas_chart::InteractionMode::PlacingLevel);
+            let is_placing = chart.chart_state.level_tool.is_placing();
             let drawing_panel = build_drawing_panel(floating_chart_id, is_placing);
 
             let mut chart_layers: Vec<Element<'_, Message>> = vec![
@@ -476,8 +475,7 @@ impl MidasApp {
                 data_time_start: chart.chart_state.data_time_start,
                 data_time_end: chart.chart_state.data_time_end,
                 editing_level_id: chart.editing_level_id,
-                placing_level: matches!(chart.chart_state.interaction_mode, midas_chart::InteractionMode::PlacingLevel),
-                placing_alt_held: chart.chart_state.placing_alt_held,
+                level_tool: chart.chart_state.level_tool.clone(),
             };
             let program = crate::chart_widget::ChartProgram { chart_id, snapshot };
             let shader = crate::chart_widget::chart_shader(program);
@@ -509,7 +507,7 @@ impl MidasApp {
                 &level_renders,
                 chart.chart_state.camera.viewport_height,
             );
-            let is_placing = matches!(chart.chart_state.interaction_mode, midas_chart::InteractionMode::PlacingLevel);
+            let is_placing = chart.chart_state.level_tool.is_placing();
             let drawing_panel = build_drawing_panel(chart_id, is_placing);
 
             let mut chart_layers: Vec<Element<'_, Message>> = vec![

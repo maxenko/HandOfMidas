@@ -28,6 +28,7 @@ use midas_chart::camera::Camera2D;
 use midas_chart::dirty::{DirtyFlags, DirtyTracker};
 use midas_chart::input::ChartInput;
 use midas_chart::interaction::{handle_event, ChartEvent};
+use midas_chart::level_tool::LevelTool;
 use midas_chart::levels::HorizontalLevel;
 use midas_chart::scene::ChartScene;
 use midas_chart::state::{ChartState, InteractionMode};
@@ -81,10 +82,8 @@ pub struct ChartRenderSnapshot {
     pub data_time_end: f64,
     /// ID of the level currently being edited (for highlight/selection).
     pub editing_level_id: Option<u64>,
-    /// Whether the chart is in level-placement mode.
-    pub placing_level: bool,
-    /// Whether Alt is held during level placement (disables OHLC snap).
-    pub placing_alt_held: bool,
+    /// Self-contained level tool state (placement, drag, OHLC snap).
+    pub level_tool: LevelTool,
 }
 
 // ── ChartProgram ─────────────────────────────────────────────────────
@@ -116,10 +115,6 @@ pub struct ChartWidgetState {
     last_viewport: Option<(u32, u32)>,
     /// Current keyboard modifier state (for Alt detection during level placement).
     modifiers: iced::keyboard::Modifiers,
-    /// OHLC-snapped price from the most recent render frame.
-    /// Written by `draw()` (via Cell for interior mutability), read by `update()`
-    /// when the user clicks to place a level.
-    snapped_price: std::cell::Cell<Option<f64>>,
 }
 
 impl shader::Program<Message> for ChartProgram {
@@ -150,39 +145,16 @@ impl shader::Program<Message> for ChartProgram {
         chart_state.dirty = self.snapshot.dirty.clone();
         chart_state.data_time_start = self.snapshot.data_time_start;
         chart_state.data_time_end = self.snapshot.data_time_end;
-        // Only sync levels from snapshot when NOT actively dragging a level.
-        // During drag, the widget's local levels have the live dragged position;
-        // overwriting from the stale snapshot would snap the level back.
-        if !matches!(chart_state.interaction_mode, InteractionMode::DraggingLevel { .. }) {
+        // Only sync level_tool and levels from snapshot when the tool is NOT
+        // active. During placement or drag, the widget owns the live state;
+        // overwriting from the stale snapshot would revert in-progress edits.
+        if !chart_state.level_tool.is_active() {
+            chart_state.level_tool = self.snapshot.level_tool.clone();
             chart_state.levels = self.snapshot.levels.clone();
         }
         chart_state.timeline_border_ratio = self.snapshot.timeline_border_ratio;
         chart_state.volume_scale = self.snapshot.volume_scale;
         chart_state.show_volume_profile = self.snapshot.show_volume_profile;
-        // Sync placement mode between app and widget.
-        //
-        // The app is the source of truth for "tool is active" (placing_level).
-        // The widget temporarily exits PlacingLevel for pan/scale operations
-        // and re-enters when those finish (mode returns to Idle).
-        //
-        // When the widget cancels (Escape), it sends CancelPlacing which sets
-        // the app's interaction_mode to Idle → placing_level becomes false on
-        // the next snapshot → widget stays in Idle.
-        if self.snapshot.placing_level {
-            // App says placement is active. Re-enter PlacingLevel whenever
-            // the widget is Idle (e.g., after pan/scale completes).
-            if matches!(chart_state.interaction_mode, InteractionMode::Idle) {
-                chart_state.interaction_mode = InteractionMode::PlacingLevel;
-            }
-        } else {
-            // App says placement is NOT active. Force widget out of PlacingLevel
-            // if it's still there (handles the frame after CancelPlacing).
-            if matches!(chart_state.interaction_mode, InteractionMode::PlacingLevel) {
-                chart_state.interaction_mode = InteractionMode::Idle;
-                chart_state.crosshair_pos = None;
-                chart_state.placing_alt_held = false;
-            }
-        }
 
         // Detect viewport resize and emit a scale-preserving adjustment.
         // Compare against the canonical camera viewport (from snapshot),
@@ -199,6 +171,7 @@ impl shader::Program<Message> for ChartProgram {
                 // doesn't linger — the early return below eats all events
                 // (including mouse release) during the resize.
                 chart_state.interaction_mode = InteractionMode::Idle;
+                chart_state.level_tool.cancel();
                 chart_state.drag_start = None;
                 chart_state.left_mouse_down = false;
                 chart_state.crosshair_pos = None;
@@ -238,10 +211,6 @@ impl shader::Program<Message> for ChartProgram {
             state.modifiers = *mods;
         }
 
-        // Feed the OHLC-snapped price from the last render into the
-        // interaction state so clicks place at the snapped position.
-        chart_state.level_preview_snapped_price = state.snapped_price.get();
-
         // Convert iced event to ChartEvent(s).
         let alt_held = state.modifiers.alt();
         let chart_events = translate_event(event, bounds, cursor, alt_held);
@@ -255,7 +224,9 @@ impl shader::Program<Message> for ChartProgram {
         let mut captured = false;
 
         for chart_event in chart_events {
-            let actions = handle_event(chart_state, chart_event);
+            let data_ref = self.snapshot.data.as_ref().map(|d| d.as_ref() as &dyn midas_core::CandleData);
+            let is_collapsed = self.snapshot.collapse_gaps;
+            let actions = handle_event(chart_state, chart_event, data_ref, is_collapsed);
             for action in &actions {
                 // Apply volume scale locally so the triangle moves
                 // immediately during drag (before the message round-trip
@@ -370,6 +341,7 @@ impl shader::Program<Message> for ChartProgram {
         }
 
         // Build the clean input contract for chart scene computation.
+        let default_level_tool = LevelTool::default();
         let input = ChartInput {
             symbol: &snap.symbol,
             data: data.as_ref(),
@@ -392,7 +364,7 @@ impl shader::Program<Message> for ChartProgram {
             levels: state
                 .chart_state
                 .as_ref()
-                .filter(|cs| matches!(cs.interaction_mode, InteractionMode::DraggingLevel { .. }))
+                .filter(|cs| cs.level_tool.is_dragging())
                 .map(|cs| cs.levels.as_slice())
                 .unwrap_or(&snap.levels),
             collapse_gaps: snap.collapse_gaps,
@@ -400,24 +372,14 @@ impl shader::Program<Message> for ChartProgram {
             volume_scale: live_volume_scale,
             show_volume_profile: snap.show_volume_profile,
             dirty: &dirty,
-            placing_level: snap.placing_level
-                || state
-                    .chart_state
-                    .as_ref()
-                    .map(|cs| matches!(cs.interaction_mode, InteractionMode::PlacingLevel))
-                    .unwrap_or(false),
-            placing_alt_held: state
+            level_tool: state
                 .chart_state
                 .as_ref()
-                .map(|cs| cs.placing_alt_held)
-                .unwrap_or(snap.placing_alt_held),
+                .map(|cs| &cs.level_tool)
+                .unwrap_or(&default_level_tool),
         };
 
         let scene = compute_chart_scene(&input);
-
-        // Write the snapped price back to widget state so the interaction
-        // layer can read it when the user clicks to place a level.
-        state.snapped_price.set(scene.level_preview_snapped_price);
 
         ChartPrimitive {
             chart_id: self.chart_id,
@@ -427,7 +389,7 @@ impl shader::Program<Message> for ChartProgram {
             background_color: theme.background,
             timeline_border_ratio: live_timeline_border_ratio,
             volume_scale: live_volume_scale,
-            placing_level: snap.placing_level,
+            placing_level: snap.level_tool.is_placing(),
         }
     }
 
@@ -444,8 +406,8 @@ impl shader::Program<Message> for ChartProgram {
                 cs.interaction_mode,
                 InteractionMode::DraggingVolumeScale { .. }
                     | InteractionMode::DraggingTimelineBorder { .. }
-                    | InteractionMode::DraggingLevel { .. }
-            ) {
+            ) || cs.level_tool.is_dragging()
+            {
                 return mouse::Interaction::ResizingVertically;
             }
         }

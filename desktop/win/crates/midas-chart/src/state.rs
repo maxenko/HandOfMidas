@@ -8,6 +8,7 @@
 use crate::camera::Camera2D;
 use crate::dirty::DirtyFlags;
 use crate::interaction::ChartAction;
+use crate::level_tool::LevelTool;
 use crate::levels::HorizontalLevel;
 
 /// The interaction mode state machine.
@@ -15,9 +16,8 @@ use crate::levels::HorizontalLevel;
 /// Transitions:
 /// - `Idle` -> `PendingDrag` on left mouse press
 /// - `PendingDrag` -> `Panning` when mouse moves >= 4px from start
-/// - `PendingDrag` -> `DraggingLevel` when mouse moves >= 4px and start was near a level
+/// - `PendingDrag` -> `Idle` + `LevelTool::Dragging` when near a level
 /// - `Panning` -> `Idle` on mouse release
-/// - `DraggingLevel` -> `Idle` on mouse release
 /// - `Idle` -> `PendingScale` on middle mouse press
 /// - `PendingScale` -> `HorizontalScaling` or `VerticalScaling` after 6px movement
 /// - `HorizontalScaling` / `VerticalScaling` -> `Idle` on middle mouse release
@@ -30,14 +30,6 @@ pub enum InteractionMode {
     PendingDrag { start_x: f32, start_y: f32 },
     /// User is panning the chart via click+drag.
     Panning,
-    /// User is dragging a horizontal level to a new price.
-    DraggingLevel {
-        /// ID of the level being dragged.
-        level_id: u64,
-        /// Y offset (in price units) between cursor and level price at grab time,
-        /// so the level does not jump to the cursor.
-        grab_offset: f64,
-    },
     /// Middle mouse is down but axis not yet determined (dead zone).
     PendingScale { start_x: f32, start_y: f32 },
     /// Horizontal scaling (time axis) via middle-drag.
@@ -60,10 +52,6 @@ pub enum InteractionMode {
         /// Volume scale value at drag start.
         start_scale: f32,
     },
-    /// User activated the level tool — preview line follows cursor Y
-    /// (snapped to nearest OHLC within threshold, unless Alt held).
-    /// Single click places the level. Escape/right-click cancels.
-    PlacingLevel,
 }
 
 /// Momentum state for flick-to-scroll after a pan drag release.
@@ -150,12 +138,8 @@ pub struct ChartState {
     pub volume_scale: f32,
     /// Whether the Volume Profile overlay is visible.
     pub show_volume_profile: bool,
-    /// Whether Alt is held during level placement (disables OHLC snap).
-    pub placing_alt_held: bool,
-    /// Snapped price for level preview (set by compute layer during placement).
-    /// Used by the interaction layer on mouse-up to create the level at the
-    /// visually previewed price rather than the raw cursor position.
-    pub level_preview_snapped_price: Option<f64>,
+    /// Self-contained level tool state machine (Phase 2+).
+    pub level_tool: LevelTool,
     /// Next level ID to assign (monotonically increasing).
     next_level_id: u64,
 }
@@ -180,8 +164,7 @@ impl ChartState {
             timeline_border_ratio: 0.20,
             volume_scale: 1.0,
             show_volume_profile: false,
-            placing_alt_held: false,
-            level_preview_snapped_price: None,
+            level_tool: LevelTool::default(),
             next_level_id: 1,
         }
     }
@@ -386,11 +369,8 @@ impl ChartState {
                 self.dirty.mark_all();
             }
 
-            ChartAction::EnterPlacingLevel => {
-                self.interaction_mode = InteractionMode::PlacingLevel;
-            }
-
             ChartAction::CancelPlacing => {
+                self.level_tool.cancel();
                 self.interaction_mode = InteractionMode::Idle;
                 self.crosshair_pos = None;
                 self.dirty.mark_crosshair();

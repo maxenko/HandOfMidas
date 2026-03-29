@@ -13,12 +13,18 @@ use midas_chart::compute::compute_chart_scene;
 use midas_chart::dirty::DirtyFlags;
 use midas_chart::input::ChartInput;
 use midas_chart::instances::CandleInstance;
+use midas_chart::level_tool::LevelTool;
 use midas_chart::levels::HorizontalLevel;
 use midas_chart::scene::ChartScene;
 use midas_data::binary::{write_midas_file, MmapCandleFile, MIDAS_MAGIC, MIDAS_VERSION};
 use midas_data::candle::CandleBuffer;
 use midas_data::lod::downsample_minmax;
 use midas_feed::import_csv;
+
+// ─── Default LevelTool for tests ────────────────────────────────────────
+
+static DEFAULT_LEVEL_TOOL: std::sync::LazyLock<LevelTool> =
+    std::sync::LazyLock::new(LevelTool::default);
 
 // ─── Default colors (dark theme) ────────────────────────────────────────
 
@@ -62,8 +68,7 @@ fn make_default_chart_input<'a>(
         volume_scale: 1.0,
         show_volume_profile: false,
         dirty,
-        placing_level: false,
-        placing_alt_held: false,
+        level_tool: &DEFAULT_LEVEL_TOOL,
     }
 }
 

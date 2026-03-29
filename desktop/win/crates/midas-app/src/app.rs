@@ -18,57 +18,9 @@ use iced::{window, Task};
 use midas_chart::camera::Camera2D;
 use midas_chart::state::ChartState;
 use midas_core::config::{AppConfig, ChartConfig, LevelConfig};
-use midas_core::{CandleData, ChartId, Timeframe};
+use midas_core::{ChartId, Timeframe};
 use midas_data::CandleBuffer;
 use midas_feed::TestDataProvider;
-
-/// Maximum pixel distance for OHLC snapping during level placement.
-const OHLC_SNAP_THRESHOLD_PX: f32 = 20.0;
-
-/// Snap a price to the nearest OHLC value of candles near the viewport center,
-/// but only if that OHLC point is within the snap threshold.
-fn snap_price_to_ohlc(
-    raw_price: f64,
-    camera: &Camera2D,
-    data: Option<&dyn CandleData>,
-) -> f64 {
-    let data = match data {
-        Some(d) if !d.is_empty() => d,
-        _ => return raw_price,
-    };
-
-    let cursor_y = camera.price_to_y(raw_price);
-    let len = data.len();
-
-    // Search all visible candles for the nearest OHLC value.
-    let search_start = data.find_index_by_time(camera.time_start as i64);
-    let search_end = (data.find_index_by_time(camera.time_end as i64) + 1).min(len);
-
-    let mut best_price = raw_price;
-    let mut best_dist = f32::MAX;
-
-    for i in search_start..search_end {
-        for &p in &[
-            data.open(i) as f64,
-            data.high(i) as f64,
-            data.low(i) as f64,
-            data.close(i) as f64,
-        ] {
-            let py = camera.price_to_y(p);
-            let dist = (py - cursor_y).abs();
-            if dist < best_dist {
-                best_dist = dist;
-                best_price = p;
-            }
-        }
-    }
-
-    if best_dist <= OHLC_SNAP_THRESHOLD_PX {
-        best_price
-    } else {
-        raw_price
-    }
-}
 
 use crate::layout::{LayoutPresetKind, WorkspaceLayout};
 
@@ -904,15 +856,10 @@ impl MidasApp {
                 Task::none()
             }
 
-            Message::ChartCreateLevel(chart_id, raw_price) => {
+            Message::ChartCreateLevel(chart_id, price) => {
                 self.focus_chart(chart_id);
                 if let Some(chart) = self.charts.get_mut(&chart_id) {
-                    // Snap to nearest OHLC if within threshold (unless Alt was held).
-                    let price = if !chart.chart_state.placing_alt_held {
-                        snap_price_to_ohlc(raw_price, &chart.chart_state.camera, chart.data.as_ref().map(|d| d.as_ref() as &dyn CandleData))
-                    } else {
-                        raw_price
-                    };
+                    // Price is already snapped by the interaction layer.
                     let level_id = chart.chart_state.alloc_level_id();
                     chart
                         .chart_state
@@ -927,10 +874,9 @@ impl MidasApp {
                             locked: false,
                         });
                     chart.chart_state.dirty.mark_levels();
-                    // Exit placement mode after creating the level.
-                    chart.chart_state.interaction_mode = midas_chart::InteractionMode::Idle;
-                    chart.chart_state.placing_alt_held = false;
-                    chart.chart_state.level_preview_snapped_price = None;
+                    // Defensively cancel level tool (interaction layer already
+                    // cancelled, but ensures consistency).
+                    chart.chart_state.level_tool.cancel();
                     self.mark_config_dirty();
                 }
                 Task::none()
@@ -938,18 +884,9 @@ impl MidasApp {
 
             Message::ChartDragLevel(chart_id, level_id, new_price) => {
                 if let Some(chart) = self.charts.get_mut(&chart_id) {
-                    // Snap to nearest OHLC (same rules as level placement).
-                    let snapped = if !chart.chart_state.placing_alt_held {
-                        snap_price_to_ohlc(
-                            new_price,
-                            &chart.chart_state.camera,
-                            chart.data.as_ref().map(|d| d.as_ref() as &dyn CandleData),
-                        )
-                    } else {
-                        new_price
-                    };
+                    // Price is already snapped by the interaction layer.
                     if let Some(level) = chart.chart_state.levels.iter_mut().find(|l| l.id == level_id) {
-                        level.price = snapped;
+                        level.price = new_price;
                         chart.chart_state.dirty.mark_levels();
                     }
                 }
@@ -1003,10 +940,7 @@ impl MidasApp {
 
             Message::ChartCancelPlacing(chart_id) => {
                 if let Some(chart) = self.charts.get_mut(&chart_id) {
-                    chart.chart_state.interaction_mode = midas_chart::InteractionMode::Idle;
-                    chart.chart_state.crosshair_pos = None;
-                    chart.chart_state.placing_alt_held = false;
-                    chart.chart_state.level_preview_snapped_price = None;
+                    chart.chart_state.level_tool.cancel();
                     chart.chart_state.dirty.mark_crosshair();
                 }
                 Task::none()
@@ -1201,7 +1135,7 @@ impl MidasApp {
             Message::DrawingPanelCreateLevel(chart_id) => {
                 self.focus_chart(chart_id);
                 if let Some(chart) = self.charts.get_mut(&chart_id) {
-                    chart.chart_state.interaction_mode = midas_chart::InteractionMode::PlacingLevel;
+                    chart.chart_state.level_tool.activate();
                 }
                 Task::none()
             }
@@ -1390,33 +1324,19 @@ impl MidasApp {
                 "h" | "H" => {
                     if let Some(active_id) = self.active_chart_id() {
                         if let Some(chart) = self.charts.get_mut(&active_id) {
-                            if matches!(
-                                chart.chart_state.interaction_mode,
-                                midas_chart::InteractionMode::Idle
-                            ) {
-                                chart.chart_state.interaction_mode =
-                                    midas_chart::InteractionMode::PlacingLevel;
-                            }
+                            chart.chart_state.level_tool.activate();
                         }
                     }
                 }
                 _ => {}
             },
             Key::Named(Named::Escape) => {
-                // Cancel placement mode on the active chart.
+                // Cancel level tool on the active chart.
                 if let Some(active_id) = self.active_chart_id() {
                     if let Some(chart) = self.charts.get_mut(&active_id) {
-                        if matches!(
-                            chart.chart_state.interaction_mode,
-                            midas_chart::InteractionMode::PlacingLevel
-                        ) {
-                            chart.chart_state.interaction_mode =
-                                midas_chart::InteractionMode::Idle;
-                            chart.chart_state.crosshair_pos = None;
-                            chart.chart_state.placing_alt_held = false;
-                            chart.chart_state.level_preview_snapped_price = None;
-                            chart.chart_state.dirty.mark_crosshair();
-                        }
+                        chart.chart_state.level_tool.cancel();
+                        chart.chart_state.crosshair_pos = None;
+                        chart.chart_state.dirty.mark_crosshair();
                     }
                 }
             }

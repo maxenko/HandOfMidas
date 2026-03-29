@@ -6,6 +6,7 @@
 
 use crate::camera::Camera2D;
 use crate::dirty::DirtyFlags;
+use crate::level_tool::LevelTool;
 use crate::levels::HorizontalLevel;
 use midas_core::CandleData;
 
@@ -52,8 +53,6 @@ pub struct ChartInput<'a> {
     pub show_volume_profile: bool,
     /// Current dirty flags for generation tracking.
     pub dirty: &'a DirtyFlags,
-    /// Whether the chart is in level-placement mode (PlacingLevel or PlacingLevelDrag).
-    pub placing_level: bool,
-    /// Whether Alt is held during level placement (disables OHLC snapping).
-    pub placing_alt_held: bool,
+    /// Level tool state for placement/snapping queries.
+    pub level_tool: &'a LevelTool,
 }
