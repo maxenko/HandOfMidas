@@ -150,7 +150,12 @@ impl shader::Program<Message> for ChartProgram {
         chart_state.dirty = self.snapshot.dirty.clone();
         chart_state.data_time_start = self.snapshot.data_time_start;
         chart_state.data_time_end = self.snapshot.data_time_end;
-        chart_state.levels = self.snapshot.levels.clone();
+        // Only sync levels from snapshot when NOT actively dragging a level.
+        // During drag, the widget's local levels have the live dragged position;
+        // overwriting from the stale snapshot would snap the level back.
+        if !matches!(chart_state.interaction_mode, InteractionMode::DraggingLevel { .. }) {
+            chart_state.levels = self.snapshot.levels.clone();
+        }
         chart_state.timeline_border_ratio = self.snapshot.timeline_border_ratio;
         chart_state.volume_scale = self.snapshot.volume_scale;
         chart_state.show_volume_profile = self.snapshot.show_volume_profile;
@@ -261,6 +266,13 @@ impl shader::Program<Message> for ChartProgram {
                 if let midas_chart::ChartAction::SetVolumeScale { scale } = action {
                     chart_state.volume_scale = *scale as f32;
                 }
+                // Apply level drag locally so the line moves immediately
+                // (before the message round-trip through the app).
+                if let midas_chart::ChartAction::DragLevel { id, new_price } = action {
+                    if let Some(level) = chart_state.levels.iter_mut().find(|l| l.id == *id) {
+                        level.price = *new_price;
+                    }
+                }
                 if let Some(msg) = action_to_message(self.chart_id, action, &chart_state.camera) {
                     messages.push(msg);
                 }
@@ -279,7 +291,14 @@ impl shader::Program<Message> for ChartProgram {
         // title bar), we still publish housekeeping messages like
         // ClearCrosshair but must NOT capture — otherwise sibling panes'
         // buttons and controls would be blocked from processing the event.
-        if let Some(msg) = messages.into_iter().next() {
+        // Shader widget can only publish ONE message per update(). Wrap
+        // multiple messages in a ChartBatch so none are dropped.
+        let msg = match messages.len() {
+            0 => None,
+            1 => Some(messages.into_iter().next().unwrap()),
+            _ => Some(Message::ChartBatch(messages)),
+        };
+        if let Some(msg) = msg {
             if cursor_in_bounds {
                 Some(shader::Action::publish(msg).and_capture())
             } else {
@@ -369,7 +388,13 @@ impl shader::Program<Message> for ChartProgram {
                 .as_ref()
                 .and_then(|cs| cs.crosshair_pos)
                 .or(snap.crosshair_pos),
-            levels: &snap.levels,
+            // Use widget's live levels during drag for immediate visual feedback.
+            levels: state
+                .chart_state
+                .as_ref()
+                .filter(|cs| matches!(cs.interaction_mode, InteractionMode::DraggingLevel { .. }))
+                .map(|cs| cs.levels.as_slice())
+                .unwrap_or(&snap.levels),
             collapse_gaps: snap.collapse_gaps,
             timeline_border_ratio: live_timeline_border_ratio,
             volume_scale: live_volume_scale,
@@ -412,13 +437,14 @@ impl shader::Program<Message> for ChartProgram {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> mouse::Interaction {
-        // While actively dragging the volume handle or timeline border,
-        // always show resize cursor.
         if let Some(cs) = &state.chart_state {
+            // While actively dragging a level, volume handle, or timeline border,
+            // always show vertical resize cursor.
             if matches!(
                 cs.interaction_mode,
                 InteractionMode::DraggingVolumeScale { .. }
                     | InteractionMode::DraggingTimelineBorder { .. }
+                    | InteractionMode::DraggingLevel { .. }
             ) {
                 return mouse::Interaction::ResizingVertically;
             }
@@ -447,6 +473,19 @@ impl shader::Program<Message> for ChartProgram {
             let border_y = midas_chart::timeline_border_y(bounds.height as u32, border_ratio);
             if (pos.y - border_y).abs() <= 6.0 {
                 return mouse::Interaction::ResizingVertically;
+            }
+
+            // Check horizontal levels — show resize cursor on non-locked levels.
+            if let Some(cs) = &state.chart_state {
+                for level in &cs.levels {
+                    if level.locked {
+                        continue;
+                    }
+                    let level_y = cs.camera.price_to_y(level.price);
+                    if (pos.y - level_y).abs() <= 6.0 {
+                        return mouse::Interaction::ResizingVertically;
+                    }
+                }
             }
 
             mouse::Interaction::Crosshair

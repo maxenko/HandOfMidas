@@ -238,6 +238,7 @@ fn handle_mouse_moved(state: &mut ChartState, x: f32, y: f32, alt_held: bool) ->
         state.interaction_mode,
         InteractionMode::DraggingVolumeScale { .. }
             | InteractionMode::DraggingTimelineBorder { .. }
+            | InteractionMode::DraggingLevel { .. }
     );
     let in_bounds = x >= 0.0
         && y >= 0.0
@@ -333,6 +334,7 @@ fn handle_mouse_moved(state: &mut ChartState, x: f32, y: f32, alt_held: bool) ->
             level_id,
             grab_offset,
         } => {
+            state.placing_alt_held = alt_held;
             let raw_price = state.camera.y_to_price(y);
             let new_price = raw_price + grab_offset;
             actions.push(ChartAction::DragLevel {

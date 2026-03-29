@@ -38,13 +38,11 @@ fn snap_price_to_ohlc(
     };
 
     let cursor_y = camera.price_to_y(raw_price);
-    let center_time = camera.x_to_time(camera.viewport_width as f32 / 2.0);
-    let nearest_idx = data.find_index_by_time(center_time as i64);
     let len = data.len();
 
-    // Search nearest candle ± 1.
-    let search_start = nearest_idx.saturating_sub(1);
-    let search_end = (nearest_idx + 2).min(len);
+    // Search all visible candles for the nearest OHLC value.
+    let search_start = data.find_index_by_time(camera.time_start as i64);
+    let search_end = (data.find_index_by_time(camera.time_end as i64) + 1).min(len);
 
     let mut best_price = raw_price;
     let mut best_dist = f32::MAX;
@@ -264,6 +262,10 @@ pub enum Message {
     ToggleVolumeProfile(ChartId),
     /// Reset chart to default view (fit all data).
     ResetChart(ChartId),
+
+    // -- Batched messages from shader widget --
+    /// Multiple messages from a single widget event (shader can only publish one).
+    ChartBatch(Vec<Message>),
 
     // -- Keyboard --
     /// A keyboard key was pressed (global shortcut handling).
@@ -936,8 +938,18 @@ impl MidasApp {
 
             Message::ChartDragLevel(chart_id, level_id, new_price) => {
                 if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    // Snap to nearest OHLC (same rules as level placement).
+                    let snapped = if !chart.chart_state.placing_alt_held {
+                        snap_price_to_ohlc(
+                            new_price,
+                            &chart.chart_state.camera,
+                            chart.data.as_ref().map(|d| d.as_ref() as &dyn CandleData),
+                        )
+                    } else {
+                        new_price
+                    };
                     if let Some(level) = chart.chart_state.levels.iter_mut().find(|l| l.id == level_id) {
-                        level.price = new_price;
+                        level.price = snapped;
                         chart.chart_state.dirty.mark_levels();
                     }
                 }
@@ -1261,6 +1273,13 @@ impl MidasApp {
                     self.load_test_data_for_chart(chart_id, &symbol, tf, true);
                 }
                 self.mark_config_dirty();
+                Task::none()
+            }
+
+            Message::ChartBatch(msgs) => {
+                for msg in msgs {
+                    let _ = self.update(msg);
+                }
                 Task::none()
             }
 
