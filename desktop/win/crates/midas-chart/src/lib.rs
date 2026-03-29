@@ -24,6 +24,7 @@ pub mod grid;
 pub mod input;
 pub mod instances;
 pub mod interaction;
+pub mod level_tool;
 pub mod levels;
 pub mod scene;
 pub mod state;
@@ -43,6 +44,7 @@ pub use instances::{
 pub use interaction::{
     handle_event, timeline_border_y, volume_handle_y, ChartAction, ChartEvent, Key, MouseButton,
 };
+pub use level_tool::{LevelTool, LevelToolMode};
 pub use levels::{HorizontalLevel, LevelIcon, price_step_for};
 pub use scene::{ChartScene, SceneGenerations};
 pub use state::{ChartState, InteractionMode, Momentum, YAnimation};
