@@ -942,7 +942,7 @@ pub fn compute_crosshair_labels(
     let (snap_x, snap_ts) = if collapse_gaps {
         // In collapsed mode, camera X axis is index-space.
         let global_idx_f = camera.x_to_time(cx);
-        let idx = (global_idx_f.round() as usize).min(data.len().saturating_sub(1));
+        let idx = (global_idx_f.round().max(0.0) as usize).min(data.len().saturating_sub(1));
         let ts = data.timestamp(idx);
         let sx = camera.snap_to_pixel(camera.time_to_x(idx as f64));
         (sx, ts)
