@@ -225,7 +225,16 @@ fn compute_normal_scene(
     let y_labels = compute_y_labels(camera);
     let x_labels = compute_x_labels(camera, candle_duration);
     let levels = compute_levels(input.levels, camera);
-    let crosshair = compute_crosshair(input.crosshair, data, camera, candle_duration, input.symbol);
+    let crosshair = compute_crosshair_impl(
+        input.crosshair, data, camera, input.symbol,
+        &|cx| {
+            let cursor_time = camera.x_to_time(cx);
+            let idx = data.find_index_by_time(cursor_time as i64);
+            let ts = data.timestamp(idx);
+            let sx = camera.snap_to_pixel(camera.time_to_x(ts as f64));
+            Some((sx, idx))
+        },
+    );
     // Level placement preview: compute Y from snapped price, independent of crosshair.
     let level_preview_y = if input.level_tool.is_placing() {
         input.level_tool.preview_price.map(|p| camera.snap_to_pixel(camera.price_to_y(p)))
@@ -360,14 +369,17 @@ fn compute_collapsed_scene(
     let levels = compute_levels(input.levels, camera);
 
     // Crosshair in collapsed mode: convert cursor X to the nearest candle index.
-    let crosshair = compute_collapsed_crosshair(
-        input.crosshair,
-        data,
-        camera,
-        vis_start,
-        vis_end,
-        input.symbol,
-        &index_to_x,
+    let crosshair = compute_crosshair_impl(
+        input.crosshair, data, camera, input.symbol,
+        &|cx| {
+            let global_idx_f = camera.x_to_time(cx);
+            let idx = (global_idx_f.round().max(0.0) as usize)
+                .max(vis_start)
+                .min(vis_end.saturating_sub(1));
+            let local_idx = idx - vis_start;
+            let sx = index_to_x(local_idx);
+            Some((sx, idx))
+        },
     );
     // Level placement preview: compute Y from snapped price, independent of crosshair.
     let level_preview_y = if input.level_tool.is_placing() {
@@ -710,35 +722,26 @@ fn compute_collapsed_x_labels(
     labels
 }
 
-/// Compute crosshair in gap-collapsed mode.
+/// Compute crosshair render data.
 ///
-/// The cursor X is converted to the nearest candle index via the camera's
-/// index-space mapping, then snapped to that candle's collapsed X position.
-#[allow(clippy::too_many_arguments)]
-fn compute_collapsed_crosshair(
+/// The `snap_fn` closure converts a cursor X pixel coordinate into
+/// `(snap_x, data_idx)` — the snapped X position and the candle index.
+/// This abstracts the difference between normal (timestamp-space) and
+/// collapsed (index-space) modes.
+fn compute_crosshair_impl(
     crosshair: Option<(f32, f32)>,
     data: &dyn CandleData,
     camera: &Camera2D,
-    vis_start: usize,
-    vis_end: usize,
     symbol: &str,
-    index_to_x: &dyn Fn(usize) -> f32,
+    snap_fn: &dyn Fn(f32) -> Option<(f32, usize)>,
 ) -> Option<CrosshairRender> {
     let (cx, cy) = crosshair?;
 
-    let visible_count = vis_end.saturating_sub(vis_start);
-    if visible_count == 0 || data.is_empty() {
+    if data.is_empty() {
         return None;
     }
 
-    // Convert cursor X to a global candle index via the camera's index-space.
-    let global_idx_f = camera.x_to_time(cx);
-    let global_idx = (global_idx_f.round() as usize)
-        .max(vis_start)
-        .min(vis_end.saturating_sub(1));
-    let local_idx = global_idx - vis_start;
-    let data_idx = global_idx;
-    let snap_x = index_to_x(local_idx);
+    let (snap_x, data_idx) = snap_fn(cx)?;
     let snap_y = camera.snap_to_pixel(cy);
     let snap_ts = data.timestamp(data_idx);
 
@@ -1028,35 +1031,6 @@ fn compute_levels(
         .collect()
 }
 
-/// Compute crosshair render data (normal timestamp mode).
-///
-/// The vertical line snaps to the center of the nearest candle. The horizontal
-/// line follows the cursor Y position exactly. Includes OHLCV overlay data
-/// for the candle under the cursor (TC2000-style data box).
-fn compute_crosshair(
-    crosshair: Option<(f32, f32)>,
-    data: &dyn CandleData,
-    camera: &Camera2D,
-    candle_duration: f64,
-    symbol: &str,
-) -> Option<CrosshairRender> {
-    let (cx, cy) = crosshair?;
-
-    if data.is_empty() {
-        return None;
-    }
-
-    let _ = candle_duration;
-
-    // Convert cursor X to time, then find the nearest candle.
-    let cursor_time = camera.x_to_time(cx);
-    let nearest_idx = data.find_index_by_time(cursor_time as i64);
-    let snap_ts = data.timestamp(nearest_idx);
-    let snap_x = camera.snap_to_pixel(camera.time_to_x(snap_ts as f64));
-    let snap_y = camera.snap_to_pixel(cy);
-
-    Some(build_crosshair_data(data, camera, nearest_idx, snap_x, cy, snap_y, snap_ts, symbol))
-}
 
 /// Format a timestamp as a long date/time string (e.g. "Fri 3/27/26 02:40:00 PM").
 pub fn format_datetime_long(ts_ms: i64) -> String {
