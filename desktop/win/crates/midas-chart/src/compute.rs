@@ -138,9 +138,9 @@ fn build_grid_instances(
             ([0.45, 0.45, 0.50, 0.30], 1.0_f32)
         } else {
             match dl.tier {
-                Tier::Month  => ([0.40, 0.40, 0.45, 0.25], 1.0_f32),
-                Tier::Day    => ([0.35, 0.35, 0.40, 0.18], 1.0_f32),
-                Tier::Hour   => ([0.35, 0.35, 0.40, 0.12], 1.0_f32),
+                Tier::Month => ([0.40, 0.40, 0.45, 0.25], 1.0_f32),
+                Tier::Day => ([0.35, 0.35, 0.40, 0.18], 1.0_f32),
+                Tier::Hour => ([0.35, 0.35, 0.40, 0.12], 1.0_f32),
                 Tier::Minute => ([0.30, 0.30, 0.35, 0.08], 1.0_f32),
             }
         };
@@ -225,19 +225,19 @@ fn compute_normal_scene(
     let y_labels = compute_y_labels(camera);
     let x_labels = compute_x_labels(camera, candle_duration);
     let levels = compute_levels(input.levels, camera);
-    let crosshair = compute_crosshair_impl(
-        input.crosshair, data, camera, input.symbol,
-        &|cx| {
-            let cursor_time = camera.x_to_time(cx);
-            let idx = data.find_index_by_time(cursor_time as i64);
-            let ts = data.timestamp(idx);
-            let sx = camera.snap_to_pixel(camera.time_to_x(ts as f64));
-            Some((sx, idx))
-        },
-    );
+    let crosshair = compute_crosshair_impl(input.crosshair, data, camera, input.symbol, &|cx| {
+        let cursor_time = camera.x_to_time(cx);
+        let idx = data.find_index_by_time(cursor_time as i64);
+        let ts = data.timestamp(idx);
+        let sx = camera.snap_to_pixel(camera.time_to_x(ts as f64));
+        Some((sx, idx))
+    });
     // Level placement preview: compute Y from snapped price, independent of crosshair.
     let level_preview_y = if input.level_tool.is_placing() {
-        input.level_tool.preview_price.map(|p| camera.snap_to_pixel(camera.price_to_y(p)))
+        input
+            .level_tool
+            .preview_price
+            .map(|p| camera.snap_to_pixel(camera.price_to_y(p)))
     } else {
         None
     };
@@ -247,7 +247,12 @@ fn compute_normal_scene(
     let projection = camera.projection_matrix();
 
     let grid_instances = build_grid_instances(
-        &price_grid_lines, &date_labels, &[], separator_y, vw, candle_count,
+        &price_grid_lines,
+        &date_labels,
+        &[],
+        separator_y,
+        vw,
+        candle_count,
     );
     let volume_profile_instances = build_volume_profile(input, data, camera, vis_start, vis_end);
 
@@ -369,21 +374,21 @@ fn compute_collapsed_scene(
     let levels = compute_levels(input.levels, camera);
 
     // Crosshair in collapsed mode: convert cursor X to the nearest candle index.
-    let crosshair = compute_crosshair_impl(
-        input.crosshair, data, camera, input.symbol,
-        &|cx| {
-            let global_idx_f = camera.x_to_time(cx);
-            let idx = (global_idx_f.round().max(0.0) as usize)
-                .max(vis_start)
-                .min(vis_end.saturating_sub(1));
-            let local_idx = idx - vis_start;
-            let sx = index_to_x(local_idx);
-            Some((sx, idx))
-        },
-    );
+    let crosshair = compute_crosshair_impl(input.crosshair, data, camera, input.symbol, &|cx| {
+        let global_idx_f = camera.x_to_time(cx);
+        let idx = (global_idx_f.round().max(0.0) as usize)
+            .max(vis_start)
+            .min(vis_end.saturating_sub(1));
+        let local_idx = idx - vis_start;
+        let sx = index_to_x(local_idx);
+        Some((sx, idx))
+    });
     // Level placement preview: compute Y from snapped price, independent of crosshair.
     let level_preview_y = if input.level_tool.is_placing() {
-        input.level_tool.preview_price.map(|p| camera.snap_to_pixel(camera.price_to_y(p)))
+        input
+            .level_tool
+            .preview_price
+            .map(|p| camera.snap_to_pixel(camera.price_to_y(p)))
     } else {
         None
     };
@@ -401,7 +406,12 @@ fn compute_collapsed_scene(
     let projection = camera.projection_matrix();
 
     let grid_instances = build_grid_instances(
-        &grid_lines, &date_labels, &session_boundaries, separator_y, vw, candle_count,
+        &grid_lines,
+        &date_labels,
+        &session_boundaries,
+        separator_y,
+        vw,
+        candle_count,
     );
     let volume_profile_instances = build_volume_profile(input, data, camera, vis_start, vis_end);
 
@@ -745,7 +755,9 @@ fn compute_crosshair_impl(
     let snap_y = camera.snap_to_pixel(cy);
     let snap_ts = data.timestamp(data_idx);
 
-    Some(build_crosshair_data(data, camera, data_idx, snap_x, cy, snap_y, snap_ts, symbol))
+    Some(build_crosshair_data(
+        data, camera, data_idx, snap_x, cy, snap_y, snap_ts, symbol,
+    ))
 }
 
 /// Build the labels and OHLCV overlay for a crosshair at the given
@@ -1030,7 +1042,6 @@ fn compute_levels(
         })
         .collect()
 }
-
 
 /// Format a timestamp as a long date/time string (e.g. "Fri 3/27/26 02:40:00 PM").
 pub fn format_datetime_long(ts_ms: i64) -> String {
@@ -1884,9 +1895,11 @@ mod tests {
 
         // Collapsed mode should produce vertical grid lines (from date labels
         // and/or session boundaries, deduplicated).
-        let vertical_lines = scene.grid_instances.iter().filter(|gl| {
-            (gl.rect[2] - gl.rect[0]) < 2.0 && (gl.rect[3] - gl.rect[1]) > 10.0
-        }).count();
+        let vertical_lines = scene
+            .grid_instances
+            .iter()
+            .filter(|gl| (gl.rect[2] - gl.rect[0]) < 2.0 && (gl.rect[3] - gl.rect[1]) > 10.0)
+            .count();
         assert!(
             vertical_lines > 0,
             "collapsed mode should produce vertical grid lines from date labels"
@@ -2057,7 +2070,10 @@ mod tests {
         let snap_fn = |_cx: f32| -> Option<(f32, usize)> { Some((100.0, 0)) };
 
         let result = compute_crosshair_impl(None, &data, &camera, "TEST", &snap_fn);
-        assert!(result.is_none(), "should return None when crosshair is None");
+        assert!(
+            result.is_none(),
+            "should return None when crosshair is None"
+        );
     }
 
     #[test]
@@ -2066,8 +2082,7 @@ mod tests {
         let camera = make_camera_for_data(&data);
         let snap_fn = |_cx: f32| -> Option<(f32, usize)> { Some((100.0, 0)) };
 
-        let result =
-            compute_crosshair_impl(Some((500.0, 300.0)), &data, &camera, "TEST", &snap_fn);
+        let result = compute_crosshair_impl(Some((500.0, 300.0)), &data, &camera, "TEST", &snap_fn);
         assert!(result.is_none(), "should return None when data is empty");
     }
 
@@ -2126,7 +2141,10 @@ mod tests {
         let ch = result.expect("crosshair should be Some");
 
         // The OHLCV overlay should reflect candle index 2's data.
-        let overlay = ch.ohlcv_overlay.as_ref().expect("OHLCV overlay should exist");
+        let overlay = ch
+            .ohlcv_overlay
+            .as_ref()
+            .expect("OHLCV overlay should exist");
         assert!(
             (overlay.open - 101.0).abs() < f32::EPSILON,
             "open={} should match candle 2 open=101.0",
@@ -2177,7 +2195,10 @@ mod tests {
         let camera = make_camera_for_data(&data);
 
         let result = compute_crosshair_labels(None, &camera, &data, false);
-        assert!(result.is_none(), "should return None when cursor_pos is None");
+        assert!(
+            result.is_none(),
+            "should return None when cursor_pos is None"
+        );
     }
 
     #[test]
@@ -2197,8 +2218,7 @@ mod tests {
         let cursor_y = 540.0;
         let cursor_x = camera.time_to_x(1_060_000.0);
 
-        let result =
-            compute_crosshair_labels(Some((cursor_x, cursor_y)), &camera, &data, false);
+        let result = compute_crosshair_labels(Some((cursor_x, cursor_y)), &camera, &data, false);
         let labels = result.expect("labels should be Some");
 
         let expected_price = camera.y_to_price(cursor_y);
@@ -2218,8 +2238,7 @@ mod tests {
         let cursor_x = camera.time_to_x(1_055_000.0);
         let cursor_y = 540.0;
 
-        let result =
-            compute_crosshair_labels(Some((cursor_x, cursor_y)), &camera, &data, false);
+        let result = compute_crosshair_labels(Some((cursor_x, cursor_y)), &camera, &data, false);
         let labels = result.expect("labels should be Some");
 
         // Time label text should use the nearest candle's timestamp.
@@ -2238,8 +2257,7 @@ mod tests {
         let cursor_x = camera.time_to_x(1_060_000.0);
         let cursor_y = 540.0;
 
-        let result =
-            compute_crosshair_labels(Some((cursor_x, cursor_y)), &camera, &data, false);
+        let result = compute_crosshair_labels(Some((cursor_x, cursor_y)), &camera, &data, false);
         let labels = result.expect("labels should be Some");
 
         let expected_bg = [1.0_f32, 1.0, 1.0, 0.95];
@@ -2262,8 +2280,7 @@ mod tests {
         let cursor_x = camera.time_to_x(3.2);
         let cursor_y = 540.0;
 
-        let result =
-            compute_crosshair_labels(Some((cursor_x, cursor_y)), &camera, &data, true);
+        let result = compute_crosshair_labels(Some((cursor_x, cursor_y)), &camera, &data, true);
         let labels = result.expect("labels should be Some in collapsed mode");
 
         // Price label text should be non-empty and match format_price.
@@ -2297,8 +2314,7 @@ mod tests {
         let cursor_x = camera.time_to_x(1_120_000.0);
         let cursor_y = 540.0;
 
-        let result =
-            compute_crosshair_labels(Some((cursor_x, cursor_y)), &camera, &data, false);
+        let result = compute_crosshair_labels(Some((cursor_x, cursor_y)), &camera, &data, false);
         let labels = result.expect("labels should be Some");
 
         let expected_x = camera.viewport_width as f32;

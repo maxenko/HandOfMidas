@@ -238,7 +238,11 @@ impl shader::Program<Message> for ChartProgram {
         let mut captured = false;
 
         for chart_event in chart_events {
-            let data_ref = self.snapshot.data.as_ref().map(|d| d.as_ref() as &dyn midas_core::CandleData);
+            let data_ref = self
+                .snapshot
+                .data
+                .as_ref()
+                .map(|d| d.as_ref() as &dyn midas_core::CandleData);
             let is_collapsed = self.snapshot.collapse_gaps;
             let actions = handle_event(chart_state, chart_event, data_ref, is_collapsed);
             for action in &actions {
@@ -645,14 +649,24 @@ impl shader::Primitive for ChartPrimitive {
                 let glow_y = y - 2.0;
                 resources.grid_lines.push(GridLineInstance {
                     rect: [0.0, glow_y, vw, glow_y + glow_thickness],
-                    color: [level.color[0], level.color[1], level.color[2], level.color[3] * 0.3],
+                    color: [
+                        level.color[0],
+                        level.color[1],
+                        level.color[2],
+                        level.color[3] * 0.3,
+                    ],
                 });
             }
             // Ghost line during drag (original position).
             if let Some(orig_y) = level.original_screen_y {
                 resources.grid_lines.push(GridLineInstance {
                     rect: [0.0, orig_y, vw, orig_y + 1.0],
-                    color: [level.color[0], level.color[1], level.color[2], level.color[3] * 0.2],
+                    color: [
+                        level.color[0],
+                        level.color[1],
+                        level.color[2],
+                        level.color[3] * 0.2,
+                    ],
                 });
             }
         }
@@ -803,9 +817,7 @@ fn translate_keyboard_event(event: &iced::keyboard::Event) -> Vec<ChartEvent> {
                 iced::keyboard::Key::Named(iced::keyboard::key::Named::End) => {
                     Some(midas_chart::Key::End)
                 }
-                iced::keyboard::Key::Character(c)
-                    if c.as_str() == "h" || c.as_str() == "H" =>
-                {
+                iced::keyboard::Key::Character(c) if c.as_str() == "h" || c.as_str() == "H" => {
                     Some(midas_chart::Key::H)
                 }
                 _ => None,
@@ -842,9 +854,17 @@ fn translate_mouse_event(
         mouse::Event::CursorMoved { .. } => {
             // Use unclamped position so drags continue outside bounds.
             if let Some(p) = pos_unclamped {
-                vec![ChartEvent::MouseMoved { x: p.x, y: p.y, alt_held }]
+                vec![ChartEvent::MouseMoved {
+                    x: p.x,
+                    y: p.y,
+                    alt_held,
+                }]
             } else {
-                vec![ChartEvent::MouseMoved { x: -1.0, y: -1.0, alt_held }]
+                vec![ChartEvent::MouseMoved {
+                    x: -1.0,
+                    y: -1.0,
+                    alt_held,
+                }]
             }
         }
 

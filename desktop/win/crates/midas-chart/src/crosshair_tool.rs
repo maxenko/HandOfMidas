@@ -325,12 +325,20 @@ mod tests {
 
     #[test]
     fn force_hide_from_any_mode() {
-        for initial_mode in [CrosshairMode::Hidden, CrosshairMode::Tracking, CrosshairMode::Preview] {
+        for initial_mode in [
+            CrosshairMode::Hidden,
+            CrosshairMode::Tracking,
+            CrosshairMode::Preview,
+        ] {
             let mut tool = CrosshairTool::new();
             match initial_mode {
                 CrosshairMode::Hidden => {}
-                CrosshairMode::Tracking => { tool.on_left_press(100.0, 200.0); }
-                CrosshairMode::Preview => { tool.enter_preview(100.0, 200.0); }
+                CrosshairMode::Tracking => {
+                    tool.on_left_press(100.0, 200.0);
+                }
+                CrosshairMode::Preview => {
+                    tool.enter_preview(100.0, 200.0);
+                }
             }
             tool.force_hide();
             assert_eq!(*tool.mode(), CrosshairMode::Hidden);

@@ -441,7 +441,10 @@ mod tests {
         };
         let profile = compute_volume_profile(&data, 0, 1, 100.0, 110.0, 10).unwrap();
         let total_in_bins: u64 = profile.bins.iter().map(|b| b.total()).sum();
-        assert_eq!(total_in_bins, 0, "candle below range should contribute zero");
+        assert_eq!(
+            total_in_bins, 0,
+            "candle below range should contribute zero"
+        );
     }
 
     #[test]
@@ -457,7 +460,10 @@ mod tests {
         };
         let profile = compute_volume_profile(&data, 0, 1, 100.0, 110.0, 10).unwrap();
         let total_in_bins: u64 = profile.bins.iter().map(|b| b.total()).sum();
-        assert_eq!(total_in_bins, 0, "candle above range should contribute zero");
+        assert_eq!(
+            total_in_bins, 0,
+            "candle above range should contribute zero"
+        );
     }
 
     #[test]
@@ -477,7 +483,10 @@ mod tests {
         // Effective range is 100..105 out of 95..105 (half the candle).
         // 10 bins over 100..110, so 5 bins touched (100-105).
         // 1000 / 5 = 200 per bin × 5 = 1000 total.
-        assert!(total_in_bins > 0, "partially overlapping candle should contribute");
+        assert!(
+            total_in_bins > 0,
+            "partially overlapping candle should contribute"
+        );
         assert_eq!(
             profile.total_volume, 1000,
             "total_volume tracks original candle volume"
@@ -498,6 +507,9 @@ mod tests {
         // 3 bins of size 1.0 each (100-101, 101-102, 102-103)
         let profile = compute_volume_profile(&data, 0, 1, 100.0, 103.0, 3).unwrap();
         let total_in_bins: u64 = profile.bins.iter().map(|b| b.total()).sum();
-        assert_eq!(total_in_bins, 10, "integer remainder should be fully allocated");
+        assert_eq!(
+            total_in_bins, 10,
+            "integer remainder should be fully allocated"
+        );
     }
 }

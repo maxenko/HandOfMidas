@@ -891,7 +891,12 @@ impl MidasApp {
             Message::ChartDragLevel(chart_id, level_id, new_price) => {
                 if let Some(chart) = self.charts.get_mut(&chart_id) {
                     // Price is already snapped by the interaction layer.
-                    if let Some(level) = chart.chart_state.levels.iter_mut().find(|l| l.id == level_id) {
+                    if let Some(level) = chart
+                        .chart_state
+                        .levels
+                        .iter_mut()
+                        .find(|l| l.id == level_id)
+                    {
                         level.price = new_price;
                         chart.chart_state.dirty.mark_levels();
                     }
@@ -919,7 +924,11 @@ impl MidasApp {
             Message::ChartDeleteSelectedLevel(chart_id) => {
                 if let Some(chart) = self.charts.get_mut(&chart_id) {
                     if let Some(sel_id) = chart.chart_state.selected_level {
-                        let is_locked = chart.chart_state.levels.iter().any(|l| l.id == sel_id && l.locked);
+                        let is_locked = chart
+                            .chart_state
+                            .levels
+                            .iter()
+                            .any(|l| l.id == sel_id && l.locked);
                         if !is_locked {
                             chart.chart_state.selected_level = None;
                             chart.chart_state.levels.retain(|l| l.id != sel_id);
@@ -976,14 +985,9 @@ impl MidasApp {
                     chart.editing_level_id = Some(level_id);
                     chart.editing_level_screen_pos = Some((x, y));
                     // Initialize price input from current level price.
-                    if let Some(level) = chart
-                        .chart_state
-                        .levels
-                        .iter()
-                        .find(|l| l.id == level_id)
+                    if let Some(level) = chart.chart_state.levels.iter().find(|l| l.id == level_id)
                     {
-                        chart.level_editor_price_input =
-                            midas_chart::format_price(level.price);
+                        chart.level_editor_price_input = midas_chart::format_price(level.price);
                     }
                     chart.chart_state.selected_level = Some(level_id);
                     chart.chart_state.dirty.mark_levels();
@@ -1045,8 +1049,7 @@ impl MidasApp {
                         .find(|l| l.id == level_id)
                     {
                         level.price += delta;
-                        chart.level_editor_price_input =
-                            midas_chart::format_price(level.price);
+                        chart.level_editor_price_input = midas_chart::format_price(level.price);
                         chart.chart_state.dirty.mark_levels();
                         self.mark_config_dirty();
                     }

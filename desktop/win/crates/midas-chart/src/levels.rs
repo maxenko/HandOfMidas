@@ -27,10 +27,10 @@ impl LevelIcon {
         match self {
             LevelIcon::None => None,
             LevelIcon::ArrowUp => Some('\u{25B2}'),   // ▲
-            LevelIcon::ArrowDown => Some('\u{25BC}'),  // ▼
-            LevelIcon::Star => Some('\u{2726}'),       // ✦
-            LevelIcon::Flag => Some('\u{2691}'),       // ⚑
-            LevelIcon::Warning => Some('\u{26A0}'),    // ⚠
+            LevelIcon::ArrowDown => Some('\u{25BC}'), // ▼
+            LevelIcon::Star => Some('\u{2726}'),      // ✦
+            LevelIcon::Flag => Some('\u{2691}'),      // ⚑
+            LevelIcon::Warning => Some('\u{26A0}'),   // ⚠
         }
     }
 

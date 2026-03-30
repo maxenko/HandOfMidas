@@ -120,8 +120,7 @@ impl LevelTool {
             (camera.time_end - camera.time_start).max(1.0)
         } else {
             let vis_start = data.find_index_by_time(camera.time_start as i64);
-            let vis_end =
-                (data.find_index_by_time(camera.time_end as i64) + 1).min(len);
+            let vis_end = (data.find_index_by_time(camera.time_end as i64) + 1).min(len);
             (vis_end.saturating_sub(vis_start)).max(1) as f64
         };
         let candle_width_px = camera.viewport_width as f64 / visible_candles;
@@ -419,8 +418,7 @@ mod tests {
                 (175.0, 199.0, 165.0, 180.0), // candle 5 at 1.9M
             ],
             &[
-                1_100_000, 1_200_000, 1_400_000, 1_600_000, 1_800_000,
-                1_900_000,
+                1_100_000, 1_200_000, 1_400_000, 1_600_000, 1_800_000, 1_900_000,
             ],
         );
 
