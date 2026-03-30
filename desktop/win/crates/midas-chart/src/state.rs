@@ -118,9 +118,6 @@ pub struct ChartState {
     pub levels: Vec<HorizontalLevel>,
     /// Self-contained crosshair component.
     pub crosshair: CrosshairTool,
-    /// Current crosshair position in chart-local pixels, or `None` if inactive.
-    #[deprecated(note = "Use `crosshair.render_pos()` instead")]
-    pub crosshair_pos: Option<(f32, f32)>,
     /// Currently selected level ID, or `None` if no level is selected.
     pub selected_level: Option<u64>,
     /// Current interaction mode (state machine state).
@@ -132,10 +129,6 @@ pub struct ChartState {
     pub momentum: Option<Momentum>,
     /// Active Y-axis auto-scale animation, or `None` if not animating.
     pub y_animation: Option<YAnimation>,
-    /// Whether the left mouse button is currently held down.
-    /// Crosshair is only visible when this is true.
-    #[deprecated(note = "Use `crosshair.left_mouse_down()` instead")]
-    pub left_mouse_down: bool,
     /// Data time bounds (first and last candle timestamps in ms).
     /// Used to clamp scroll pan so the user can't scroll past the data edges.
     /// Set by the app when data is loaded.
@@ -169,20 +162,17 @@ pub struct ChartState {
 
 impl ChartState {
     /// Create a new `ChartState` with the given camera and default values.
-    #[allow(deprecated)]
     pub fn new(camera: Camera2D) -> Self {
         Self {
             camera,
             dirty: DirtyFlags::new(),
             levels: Vec::new(),
             crosshair: CrosshairTool::new(),
-            crosshair_pos: None,
             selected_level: None,
             interaction_mode: InteractionMode::Idle,
             drag_start: None,
             momentum: None,
             y_animation: None,
-            left_mouse_down: false,
             data_time_start: 0.0,
             data_time_end: f64::MAX,
             collapse_gaps: false,
@@ -296,17 +286,13 @@ impl ChartState {
                 self.dirty.mark_camera();
             }
 
-            #[allow(deprecated)]
             ChartAction::SetCrosshair { x, y } => {
                 self.crosshair.set_pos(*x, *y);
-                self.crosshair_pos = Some((*x, *y));
                 self.dirty.mark_crosshair();
             }
 
-            #[allow(deprecated)]
             ChartAction::ClearCrosshair => {
                 self.crosshair.force_hide();
-                self.crosshair_pos = None;
                 self.dirty.mark_crosshair();
             }
 
@@ -411,12 +397,10 @@ impl ChartState {
                 self.dirty.mark_all();
             }
 
-            #[allow(deprecated)]
             ChartAction::CancelPlacing => {
                 self.level_tool.cancel();
                 self.crosshair.force_hide();
                 self.interaction_mode = InteractionMode::Idle;
-                self.crosshair_pos = None;
                 self.dirty.mark_crosshair();
             }
         }
@@ -504,7 +488,6 @@ impl ChartState {
 }
 
 #[cfg(test)]
-#[allow(deprecated)]
 mod tests {
     use super::*;
 
@@ -524,7 +507,7 @@ mod tests {
     fn new_state_has_defaults() {
         let state = ChartState::new(test_camera());
         assert!(state.levels.is_empty());
-        assert_eq!(state.crosshair_pos, None);
+        assert_eq!(state.crosshair.render_pos(), None);
         assert_eq!(state.drag_start, None);
         assert_eq!(state.selected_level, None);
         assert_eq!(state.interaction_mode, InteractionMode::Idle);
@@ -689,10 +672,10 @@ mod tests {
     fn apply_set_and_clear_crosshair() {
         let mut state = ChartState::new(test_camera());
         state.apply_action(&ChartAction::SetCrosshair { x: 100.0, y: 200.0 });
-        assert_eq!(state.crosshair_pos, Some((100.0, 200.0)));
+        assert_eq!(state.crosshair.render_pos(), Some((100.0, 200.0)));
 
         state.apply_action(&ChartAction::ClearCrosshair);
-        assert_eq!(state.crosshair_pos, None);
+        assert_eq!(state.crosshair.render_pos(), None);
     }
 
     #[test]

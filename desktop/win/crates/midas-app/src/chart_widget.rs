@@ -189,11 +189,6 @@ impl shader::Program<Message> for ChartProgram {
                 chart_state.level_tool.cancel();
                 chart_state.drag_start = None;
                 chart_state.crosshair.force_hide();
-                #[allow(deprecated)]
-                {
-                    chart_state.left_mouse_down = false;
-                    chart_state.crosshair_pos = None;
-                }
 
                 state.last_viewport = Some(new_vp);
                 return Some(shader::Action::publish(Message::ChartViewportChanged(
