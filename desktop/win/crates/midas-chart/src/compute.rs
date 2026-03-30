@@ -1923,7 +1923,12 @@ mod tests {
         // No session boundary grid lines in normal mode.
         let session_lines = scene.grid_instances.iter().any(|gl| {
             let is_vertical = (gl.rect[2] - gl.rect[0]) < 2.0 && (gl.rect[3] - gl.rect[1]) > 10.0;
-            let is_session_color = (gl.color[2] - 0.5).abs() < 0.1 && gl.color[3] > 0.25;
+            // SESSION_BOUNDARY_COLOR is [0.3, 0.3, 0.5, 0.30].
+            // Date-label boundaries use [0.45, 0.45, 0.50, 0.30].
+            // Distinguish by the R channel (0.3 vs 0.45).
+            let is_session_color = (gl.color[0] - 0.3).abs() < 0.05
+                && (gl.color[2] - 0.5).abs() < 0.1
+                && gl.color[3] > 0.25;
             is_vertical && is_session_color
         });
         assert!(
@@ -2041,5 +2046,267 @@ mod tests {
 
         // OHLCV overlay should be present.
         assert!(ch.ohlcv_overlay.is_some(), "OHLCV overlay should exist");
+    }
+
+    // ── compute_crosshair_impl tests ────────────────────────────────
+
+    #[test]
+    fn crosshair_impl_returns_none_when_crosshair_is_none() {
+        let data = TestCandles::sample();
+        let camera = make_camera_for_data(&data);
+        let snap_fn = |_cx: f32| -> Option<(f32, usize)> { Some((100.0, 0)) };
+
+        let result = compute_crosshair_impl(None, &data, &camera, "TEST", &snap_fn);
+        assert!(result.is_none(), "should return None when crosshair is None");
+    }
+
+    #[test]
+    fn crosshair_impl_returns_none_when_data_is_empty() {
+        let data = TestCandles::empty();
+        let camera = make_camera_for_data(&data);
+        let snap_fn = |_cx: f32| -> Option<(f32, usize)> { Some((100.0, 0)) };
+
+        let result =
+            compute_crosshair_impl(Some((500.0, 300.0)), &data, &camera, "TEST", &snap_fn);
+        assert!(result.is_none(), "should return None when data is empty");
+    }
+
+    #[test]
+    fn crosshair_impl_normal_snap_to_nearest_candle_center() {
+        let data = TestCandles::sample();
+        let camera = make_camera_for_data(&data);
+
+        // Snap function mimics normal mode: find nearest candle by timestamp.
+        let snap_fn = |cx: f32| -> Option<(f32, usize)> {
+            let cursor_time = camera.x_to_time(cx);
+            let idx = data.find_index_by_time(cursor_time as i64);
+            let ts = data.timestamp(idx);
+            let sx = camera.snap_to_pixel(camera.time_to_x(ts as f64));
+            Some((sx, idx))
+        };
+
+        // Place cursor near the 4th candle (index 3, timestamp 1_180_000).
+        let cursor_x = camera.time_to_x(1_175_000.0);
+        let cursor_y = 540.0;
+
+        let result =
+            compute_crosshair_impl(Some((cursor_x, cursor_y)), &data, &camera, "TEST", &snap_fn);
+        let ch = result.expect("crosshair should be Some");
+
+        // vertical_x should snap to candle 3's center.
+        let expected_x = camera.snap_to_pixel(camera.time_to_x(1_180_000.0));
+        assert!(
+            (ch.vertical_x - expected_x).abs() < 1.0,
+            "vertical_x={} should snap to candle center={}",
+            ch.vertical_x,
+            expected_x
+        );
+    }
+
+    #[test]
+    fn crosshair_impl_returns_correct_data_idx() {
+        let data = TestCandles::sample();
+        let camera = make_camera_for_data(&data);
+
+        // Snap function that returns the index it resolves to.
+        let snap_fn = |cx: f32| -> Option<(f32, usize)> {
+            let cursor_time = camera.x_to_time(cx);
+            let idx = data.find_index_by_time(cursor_time as i64);
+            let ts = data.timestamp(idx);
+            let sx = camera.snap_to_pixel(camera.time_to_x(ts as f64));
+            Some((sx, idx))
+        };
+
+        // Place cursor near candle 2 (index 2, timestamp 1_120_000).
+        let cursor_x = camera.time_to_x(1_115_000.0);
+        let cursor_y = 540.0;
+
+        let result =
+            compute_crosshair_impl(Some((cursor_x, cursor_y)), &data, &camera, "TEST", &snap_fn);
+        let ch = result.expect("crosshair should be Some");
+
+        // The OHLCV overlay should reflect candle index 2's data.
+        let overlay = ch.ohlcv_overlay.as_ref().expect("OHLCV overlay should exist");
+        assert!(
+            (overlay.open - 101.0).abs() < f32::EPSILON,
+            "open={} should match candle 2 open=101.0",
+            overlay.open
+        );
+        assert!(
+            (overlay.close - 103.0).abs() < f32::EPSILON,
+            "close={} should match candle 2 close=103.0",
+            overlay.close
+        );
+    }
+
+    #[test]
+    fn crosshair_impl_horizontal_y_matches_pixel_snapped_cursor() {
+        let data = TestCandles::sample();
+        let mut camera = make_camera_for_data(&data);
+        camera.dpi_scale = 2.0;
+
+        let snap_fn = |cx: f32| -> Option<(f32, usize)> {
+            let cursor_time = camera.x_to_time(cx);
+            let idx = data.find_index_by_time(cursor_time as i64);
+            let ts = data.timestamp(idx);
+            let sx = camera.snap_to_pixel(camera.time_to_x(ts as f64));
+            Some((sx, idx))
+        };
+
+        let cursor_x = camera.time_to_x(1_060_000.0);
+        let cursor_y = 543.3; // Non-integer Y to test snapping.
+
+        let result =
+            compute_crosshair_impl(Some((cursor_x, cursor_y)), &data, &camera, "TEST", &snap_fn);
+        let ch = result.expect("crosshair should be Some");
+
+        let expected_y = camera.snap_to_pixel(cursor_y);
+        assert!(
+            (ch.horizontal_y - expected_y).abs() < f32::EPSILON,
+            "horizontal_y={} should equal snap_to_pixel(cursor_y)={}",
+            ch.horizontal_y,
+            expected_y
+        );
+    }
+
+    // ── compute_crosshair_labels tests ──────────────────────────────
+
+    #[test]
+    fn crosshair_labels_returns_none_when_cursor_pos_is_none() {
+        let data = TestCandles::sample();
+        let camera = make_camera_for_data(&data);
+
+        let result = compute_crosshair_labels(None, &camera, &data, false);
+        assert!(result.is_none(), "should return None when cursor_pos is None");
+    }
+
+    #[test]
+    fn crosshair_labels_returns_none_when_data_is_empty() {
+        let data = TestCandles::empty();
+        let camera = make_camera_for_data(&data);
+
+        let result = compute_crosshair_labels(Some((500.0, 300.0)), &camera, &data, false);
+        assert!(result.is_none(), "should return None when data is empty");
+    }
+
+    #[test]
+    fn crosshair_labels_price_text_matches_format_price() {
+        let data = TestCandles::sample();
+        let camera = make_camera_for_data(&data);
+
+        let cursor_y = 540.0;
+        let cursor_x = camera.time_to_x(1_060_000.0);
+
+        let result =
+            compute_crosshair_labels(Some((cursor_x, cursor_y)), &camera, &data, false);
+        let labels = result.expect("labels should be Some");
+
+        let expected_price = camera.y_to_price(cursor_y);
+        let expected_text = format_price(expected_price);
+        assert_eq!(
+            labels.price_label.text, expected_text,
+            "price label text should match format_price(camera.y_to_price(cursor_y))"
+        );
+    }
+
+    #[test]
+    fn crosshair_labels_time_snaps_to_nearest_candle_timestamp() {
+        let data = TestCandles::sample();
+        let camera = make_camera_for_data(&data);
+
+        // Place cursor near candle 1 (timestamp 1_060_000).
+        let cursor_x = camera.time_to_x(1_055_000.0);
+        let cursor_y = 540.0;
+
+        let result =
+            compute_crosshair_labels(Some((cursor_x, cursor_y)), &camera, &data, false);
+        let labels = result.expect("labels should be Some");
+
+        // Time label text should use the nearest candle's timestamp.
+        let expected_text = format_datetime_long(1_060_000);
+        assert_eq!(
+            labels.time_label.text, expected_text,
+            "time label should snap to nearest candle timestamp"
+        );
+    }
+
+    #[test]
+    fn crosshair_labels_white_background_colors() {
+        let data = TestCandles::sample();
+        let camera = make_camera_for_data(&data);
+
+        let cursor_x = camera.time_to_x(1_060_000.0);
+        let cursor_y = 540.0;
+
+        let result =
+            compute_crosshair_labels(Some((cursor_x, cursor_y)), &camera, &data, false);
+        let labels = result.expect("labels should be Some");
+
+        let expected_bg = [1.0_f32, 1.0, 1.0, 0.95];
+        assert_eq!(
+            labels.price_label.bg_color, expected_bg,
+            "price label bg_color should be white [1.0, 1.0, 1.0, 0.95]"
+        );
+        assert_eq!(
+            labels.time_label.bg_color, expected_bg,
+            "time label bg_color should be white [1.0, 1.0, 1.0, 0.95]"
+        );
+    }
+
+    #[test]
+    fn crosshair_labels_collapsed_gaps_produces_valid_labels() {
+        let data = sample_with_gap();
+        let camera = make_collapsed_camera_for_data(&data);
+
+        // Place cursor near candle index 3 in collapsed mode.
+        let cursor_x = camera.time_to_x(3.2);
+        let cursor_y = 540.0;
+
+        let result =
+            compute_crosshair_labels(Some((cursor_x, cursor_y)), &camera, &data, true);
+        let labels = result.expect("labels should be Some in collapsed mode");
+
+        // Price label text should be non-empty and match format_price.
+        let expected_price = camera.y_to_price(cursor_y);
+        let expected_text = format_price(expected_price);
+        assert_eq!(
+            labels.price_label.text, expected_text,
+            "collapsed mode price label should match format_price"
+        );
+
+        // Time label text should be non-empty (formatted datetime of
+        // the nearest candle).
+        assert!(
+            !labels.time_label.text.is_empty(),
+            "time label text should be non-empty in collapsed mode"
+        );
+
+        // Time label should snap to candle index 3's timestamp.
+        let expected_time_text = format_datetime_long(data.timestamp(3));
+        assert_eq!(
+            labels.time_label.text, expected_time_text,
+            "collapsed time label should snap to nearest candle's timestamp"
+        );
+    }
+
+    #[test]
+    fn crosshair_labels_price_screen_x_equals_viewport_width() {
+        let data = TestCandles::sample();
+        let camera = make_camera_for_data(&data);
+
+        let cursor_x = camera.time_to_x(1_120_000.0);
+        let cursor_y = 540.0;
+
+        let result =
+            compute_crosshair_labels(Some((cursor_x, cursor_y)), &camera, &data, false);
+        let labels = result.expect("labels should be Some");
+
+        let expected_x = camera.viewport_width as f32;
+        assert!(
+            (labels.price_label.screen_x - expected_x).abs() < f32::EPSILON,
+            "price label screen_x={} should equal viewport_width={}",
+            labels.price_label.screen_x,
+            expected_x
+        );
     }
 }
