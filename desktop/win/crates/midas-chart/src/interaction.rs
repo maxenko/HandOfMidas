@@ -2279,4 +2279,179 @@ mod tests {
         dispatch(&mut state, left_release(600.0, 200.0));
         assert!(!state.crosshair.should_render());
     }
+
+    #[test]
+    fn sequence_level_tool_activate_place_and_cancel() {
+        // Activate level tool, move mouse to update preview, then Escape.
+        let mut state = test_state();
+
+        // Activate the tool — enters Placing mode
+        state.level_tool.activate();
+        assert!(state.level_tool.is_placing(),
+            "tool should be in Placing mode after activate()");
+
+        // Move mouse to update preview (dispatched through handle_event,
+        // which triggers the Suppress path and sets preview_price)
+        let actions = handle_event(
+            &mut state,
+            ChartEvent::MouseMoved { x: 500.0, y: 400.0, alt_held: false },
+            None,
+            false,
+        );
+        assert!(state.level_tool.preview_price.is_some(),
+            "preview_price should be set after mouse move in Placing mode");
+        assert!(!state.crosshair.should_render(),
+            "crosshair should be hidden during Placing mode");
+        assert!(actions.iter().any(|a| matches!(a, ChartAction::ClearCrosshair)),
+            "expected ClearCrosshair while placing, got {:?}", actions);
+
+        // Press Escape to cancel
+        let actions = handle_event(
+            &mut state,
+            ChartEvent::KeyPressed { key: Key::Escape },
+            None,
+            false,
+        );
+        for a in &actions {
+            state.apply_action(a);
+        }
+
+        assert!(!state.level_tool.is_active(),
+            "tool should be Idle after Escape");
+        assert!(!state.crosshair.should_render(),
+            "crosshair should be hidden after cancellation");
+        assert!(actions.iter().any(|a| matches!(a, ChartAction::CancelPlacing)),
+            "expected CancelPlacing action on Escape, got {:?}", actions);
+    }
+
+    #[test]
+    fn sequence_level_tool_double_click_creates_level() {
+        // Activate level tool, left-click to place — creates level and
+        // deactivates the tool (DoubleClick is the non-tool creation path;
+        // left-click while Placing is the tool placement path).
+        let mut state = test_state();
+        state.level_tool.activate();
+        assert!(state.level_tool.is_placing());
+
+        // Left-click while placing creates the level and cancels placement.
+        let click_y = 400.0;
+        let expected_price = state.camera.y_to_price(click_y);
+        let actions = handle_event(
+            &mut state,
+            ChartEvent::MousePressed {
+                x: 500.0,
+                y: click_y,
+                button: MouseButton::Left,
+                alt_held: false,
+            },
+            None,
+            false,
+        );
+
+        // Verify CreateLevel emitted with the correct price
+        let create = actions.iter().find(|a| matches!(a, ChartAction::CreateLevel { .. }));
+        assert!(create.is_some(),
+            "expected CreateLevel action, got {:?}", actions);
+        if let Some(ChartAction::CreateLevel { price }) = create {
+            assert!(
+                (price - expected_price).abs() < 0.01,
+                "price={}, expected={}", price, expected_price
+            );
+        }
+
+        // Verify CancelPlacing also emitted (tool deactivates after placing)
+        assert!(actions.iter().any(|a| matches!(a, ChartAction::CancelPlacing)),
+            "expected CancelPlacing action, got {:?}", actions);
+
+        // Apply actions and verify final state
+        for a in &actions {
+            state.apply_action(a);
+        }
+        assert!(!state.level_tool.is_active(),
+            "tool should be Idle after placement");
+        assert_eq!(state.levels.len(), 1,
+            "one level should have been created");
+    }
+
+    #[test]
+    fn sequence_locked_level_not_draggable() {
+        // A locked level should not enter drag mode, even past the threshold.
+        let mut state = test_state();
+        state.levels.push(HorizontalLevel {
+            id: 1,
+            price: 150.0,
+            color: [1.0, 0.0, 0.0, 1.0],
+            line_width: 1.0,
+            label: None,
+            icon: crate::levels::LevelIcon::None,
+            locked: true,
+        });
+        let level_y = state.camera.price_to_y(150.0);
+
+        // Press on the locked level
+        dispatch(&mut state, left_press(500.0, level_y));
+        assert_eq!(
+            state.interaction_mode,
+            InteractionMode::PendingDrag {
+                start_x: 500.0,
+                start_y: level_y,
+            },
+            "should enter PendingDrag on press"
+        );
+
+        // Move past drag threshold
+        let actions = dispatch(&mut state, mouse_move(500.0, level_y + 20.0));
+
+        // Verify NO DragLevel action — locked levels cannot be dragged
+        assert!(
+            !actions.iter().any(|a| matches!(a, ChartAction::DragLevel { .. })),
+            "locked level should not produce DragLevel, got {:?}", actions
+        );
+        assert!(
+            !state.level_tool.is_dragging(),
+            "level tool should NOT be in Dragging mode for locked level"
+        );
+
+        // State should return to Idle (left-drag on locked level falls through)
+        assert_eq!(
+            state.interaction_mode,
+            InteractionMode::Idle,
+            "should return to Idle after drag threshold on locked level"
+        );
+
+        // Crosshair IS visible (not suppressed, since no drag started)
+        assert!(
+            state.crosshair.should_render(),
+            "crosshair should be visible since no drag started on locked level"
+        );
+    }
+
+    #[test]
+    fn sequence_delete_selected_level() {
+        // Create a level, select it, then press Delete to remove it.
+        let mut state = test_state_with_level(150.0);
+        assert_eq!(state.levels.len(), 1);
+
+        // Select the level via SelectLevel action
+        state.apply_action(&ChartAction::SelectLevel { id: 1 });
+        assert_eq!(state.selected_level, Some(1));
+
+        // Press Delete key
+        let actions = dispatch(
+            &mut state,
+            ChartEvent::KeyPressed { key: Key::Delete },
+        );
+
+        // Verify DeleteSelectedLevel action emitted
+        assert!(
+            actions.iter().any(|a| matches!(a, ChartAction::DeleteSelectedLevel)),
+            "expected DeleteSelectedLevel action, got {:?}", actions
+        );
+
+        // Verify the level was actually removed by apply_action (via dispatch)
+        assert!(state.levels.is_empty(),
+            "level should have been deleted");
+        assert_eq!(state.selected_level, None,
+            "selection should be cleared after delete");
+    }
 }
