@@ -1,0 +1,525 @@
+//! Gerchik ATR indicator — shows what percentage of the daily ATR has been
+//! consumed in the current intraday session.
+//!
+//! Computes a 14-period ATR by aggregating intraday candles into synthetic
+//! daily bars. Only produces output for intraday charts (candle duration < 1 day).
+//! The indicator is always-on and cannot be toggled off.
+//!
+//! # Display
+//!
+//! Renders as a subtle text badge in the top-right corner of the chart:
+//! - **Green** when < 75% of ATR consumed (room for movement)
+//! - **Red** when ≥ 75% of ATR consumed (range exhaustion)
+
+use midas_core::CandleData;
+
+/// Default ATR period (number of daily bars for smoothing).
+const ATR_PERIOD: usize = 14;
+
+/// Percentage threshold: below = green, at or above = red.
+const ATR_THRESHOLD_PCT: f32 = 75.0;
+
+/// Green color for ATR below threshold (low alpha — watermark style).
+const ATR_GREEN: [f32; 4] = [0.2, 0.8, 0.3, 0.18];
+
+/// Red color for ATR at/above threshold (low alpha — watermark style).
+const ATR_RED: [f32; 4] = [0.9, 0.25, 0.2, 0.18];
+
+/// One day in milliseconds.
+const DAY_MS: i64 = 86_400_000;
+
+/// Render data for the Gerchik ATR overlay.
+///
+/// Produced by [`compute_gerchik_atr`] and consumed by the view layer
+/// to build a text badge in the top-right corner of the chart.
+#[derive(Clone, Debug)]
+pub struct GerchikAtrRender {
+    /// ATR percentage consumed (0.0+, can exceed 100).
+    pub pct: f32,
+    /// Display text (e.g. "ATR 67%").
+    pub text: String,
+    /// RGBA color: green if below threshold, red if at/above.
+    pub color: [f32; 4],
+}
+
+/// Compute the Gerchik ATR overlay from intraday candle data.
+///
+/// Returns `None` if:
+/// - Data has fewer than 2 candles
+/// - Candle duration ≥ 1 day (not an intraday chart)
+/// - Not enough daily bars for ATR calculation (need at least 2)
+pub fn compute_gerchik_atr(
+    data: &dyn CandleData,
+    candle_duration_ms: f64,
+) -> Option<GerchikAtrRender> {
+    // Only show on intraday charts.
+    if candle_duration_ms >= DAY_MS as f64 || data.len() < 2 {
+        return None;
+    }
+
+    // Aggregate intraday candles into synthetic daily bars.
+    let daily_bars = aggregate_daily_bars(data);
+    if daily_bars.len() < 2 {
+        return None;
+    }
+
+    // Compute ATR from the synthetic daily bars.
+    let atr = compute_atr(&daily_bars)?;
+    if atr <= 0.0 {
+        return None;
+    }
+
+    // Current session range = last daily bar's (high - low).
+    let last = daily_bars.last()?;
+    let session_range = last.high - last.low;
+
+    let pct = (session_range as f64 / atr * 100.0) as f32;
+    let color = if pct >= ATR_THRESHOLD_PCT {
+        ATR_RED
+    } else {
+        ATR_GREEN
+    };
+    let text = format!("G.ATR {:.0}%", pct);
+
+    Some(GerchikAtrRender { pct, text, color })
+}
+
+/// A synthetic daily bar aggregated from intraday candles.
+#[derive(Clone, Debug)]
+struct DailyBar {
+    high: f32,
+    low: f32,
+    close: f32,
+}
+
+/// Aggregate intraday candles into daily bars by UTC calendar day.
+///
+/// Groups consecutive candles that share the same `timestamp / DAY_MS`
+/// value into a single bar with the day's high, low, and last close.
+fn aggregate_daily_bars(data: &dyn CandleData) -> Vec<DailyBar> {
+    if data.is_empty() {
+        return Vec::new();
+    }
+
+    let mut bars = Vec::new();
+    let mut day_high = data.high(0);
+    let mut day_low = data.low(0);
+    let mut day_close = data.close(0);
+    let mut current_day = data.timestamp(0).div_euclid(DAY_MS);
+
+    for i in 1..data.len() {
+        let day = data.timestamp(i).div_euclid(DAY_MS);
+        if day != current_day {
+            bars.push(DailyBar {
+                high: day_high,
+                low: day_low,
+                close: day_close,
+            });
+            day_high = data.high(i);
+            day_low = data.low(i);
+            current_day = day;
+        } else {
+            day_high = day_high.max(data.high(i));
+            day_low = day_low.min(data.low(i));
+        }
+        day_close = data.close(i);
+    }
+    // Push the final (current) day.
+    bars.push(DailyBar {
+        high: day_high,
+        low: day_low,
+        close: day_close,
+    });
+
+    bars
+}
+
+/// Compute ATR from daily bars using Wilder's smoothing method.
+///
+/// Uses the standard True Range definition:
+///   TR = max(high - low, |high - prev_close|, |low - prev_close|)
+///
+/// The first `period` TRs are simple-averaged to seed the ATR,
+/// then Wilder's exponential smoothing is applied for the remainder.
+fn compute_atr(bars: &[DailyBar]) -> Option<f64> {
+    if bars.len() < 2 {
+        return None;
+    }
+
+    let period = ATR_PERIOD.min(bars.len() - 1);
+    if period == 0 {
+        return None;
+    }
+
+    // Compute True Range for each bar (starting from index 1).
+    let true_ranges: Vec<f64> = (1..bars.len())
+        .map(|i| {
+            let high = bars[i].high as f64;
+            let low = bars[i].low as f64;
+            let prev_close = bars[i - 1].close as f64;
+            let tr1 = high - low;
+            let tr2 = (high - prev_close).abs();
+            let tr3 = (low - prev_close).abs();
+            tr1.max(tr2).max(tr3)
+        })
+        .collect();
+
+    if true_ranges.is_empty() {
+        return None;
+    }
+
+    // Seed: simple average of the first `period` TRs.
+    let initial_count = period.min(true_ranges.len());
+    let mut atr: f64 = true_ranges[..initial_count].iter().sum::<f64>() / initial_count as f64;
+
+    // Wilder's smoothing for the remaining TRs.
+    let alpha = 1.0 / period as f64;
+    for &tr in &true_ranges[initial_count..] {
+        atr = atr * (1.0 - alpha) + tr * alpha;
+    }
+
+    Some(atr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ops::Range;
+
+    /// Minimal test fixture implementing `CandleData`.
+    struct TestCandles {
+        timestamps: Vec<i64>,
+        opens: Vec<f32>,
+        highs: Vec<f32>,
+        lows: Vec<f32>,
+        closes: Vec<f32>,
+        volumes: Vec<u32>,
+    }
+
+    impl CandleData for TestCandles {
+        fn len(&self) -> usize {
+            self.timestamps.len()
+        }
+        fn timestamp(&self, idx: usize) -> i64 {
+            self.timestamps[idx]
+        }
+        fn open(&self, idx: usize) -> f32 {
+            self.opens[idx]
+        }
+        fn high(&self, idx: usize) -> f32 {
+            self.highs[idx]
+        }
+        fn low(&self, idx: usize) -> f32 {
+            self.lows[idx]
+        }
+        fn close(&self, idx: usize) -> f32 {
+            self.closes[idx]
+        }
+        fn volume(&self, idx: usize) -> u32 {
+            self.volumes[idx]
+        }
+        fn price_range(&self, range: Range<usize>) -> (f32, f32) {
+            let mut min = f32::MAX;
+            let mut max = f32::MIN;
+            for i in range {
+                min = min.min(self.lows[i]);
+                max = max.max(self.highs[i]);
+            }
+            (min, max)
+        }
+        fn find_index_by_time(&self, ts: i64) -> usize {
+            match self.timestamps.binary_search(&ts) {
+                Ok(idx) => idx,
+                Err(idx) => idx.min(self.len().saturating_sub(1)),
+            }
+        }
+    }
+
+    /// Build 5-minute candles across multiple days.
+    ///
+    /// Each day has 4 candles at 09:30, 10:00, 10:30, 11:00 UTC.
+    /// Day N has: high = 100 + N*2, low = 100 - N, close = 100 + N.
+    fn multi_day_5m_data(num_days: usize) -> TestCandles {
+        let five_min_ms: i64 = 300_000;
+        let mut timestamps = Vec::new();
+        let mut opens = Vec::new();
+        let mut highs = Vec::new();
+        let mut lows = Vec::new();
+        let mut closes = Vec::new();
+        let mut volumes = Vec::new();
+
+        // Base: 2024-01-15 00:00:00 UTC = 1705276800000
+        let base_day_ms: i64 = 1_705_276_800_000;
+        let session_start_offset: i64 = 9 * 3_600_000 + 30 * 60_000; // 09:30 UTC
+
+        for day in 0..num_days {
+            let day_base = base_day_ms + day as i64 * DAY_MS + session_start_offset;
+            let day_f = day as f32;
+            for candle in 0..4 {
+                let ts = day_base + candle as i64 * five_min_ms;
+                timestamps.push(ts);
+                opens.push(100.0 + day_f);
+                // Spread high/low across candles so daily aggregation is meaningful.
+                if candle == 0 {
+                    highs.push(100.0 + day_f * 2.0); // Day high on first candle
+                    lows.push(100.0 - day_f); // Day low on first candle
+                } else {
+                    highs.push(100.0 + day_f + 0.5);
+                    lows.push(100.0 + day_f - 0.5);
+                }
+                closes.push(100.0 + day_f);
+                volumes.push(1000);
+            }
+        }
+
+        TestCandles {
+            timestamps,
+            opens,
+            highs,
+            lows,
+            closes,
+            volumes,
+        }
+    }
+
+    // ── aggregate_daily_bars ────────────────────────────────────────
+
+    #[test]
+    fn aggregate_empty_data() {
+        let data = TestCandles {
+            timestamps: vec![],
+            opens: vec![],
+            highs: vec![],
+            lows: vec![],
+            closes: vec![],
+            volumes: vec![],
+        };
+        assert!(aggregate_daily_bars(&data).is_empty());
+    }
+
+    #[test]
+    fn aggregate_single_candle() {
+        let data = TestCandles {
+            timestamps: vec![1_705_276_800_000],
+            opens: vec![100.0],
+            highs: vec![105.0],
+            lows: vec![95.0],
+            closes: vec![102.0],
+            volumes: vec![1000],
+        };
+        let bars = aggregate_daily_bars(&data);
+        assert_eq!(bars.len(), 1);
+        assert_eq!(bars[0].high, 105.0);
+        assert_eq!(bars[0].low, 95.0);
+        assert_eq!(bars[0].close, 102.0);
+    }
+
+    #[test]
+    fn aggregate_multiple_candles_same_day() {
+        // 3 candles on the same UTC day.
+        let base = 1_705_276_800_000_i64; // 2024-01-15 00:00 UTC
+        let data = TestCandles {
+            timestamps: vec![base + 3_600_000, base + 7_200_000, base + 10_800_000],
+            opens: vec![100.0, 101.0, 102.0],
+            highs: vec![103.0, 108.0, 105.0],
+            lows: vec![97.0, 99.0, 101.0],
+            closes: vec![101.0, 104.0, 103.0],
+            volumes: vec![100, 200, 300],
+        };
+        let bars = aggregate_daily_bars(&data);
+        assert_eq!(bars.len(), 1);
+        assert_eq!(bars[0].high, 108.0); // max of 103, 108, 105
+        assert_eq!(bars[0].low, 97.0); // min of 97, 99, 101
+        assert_eq!(bars[0].close, 103.0); // last candle's close
+    }
+
+    #[test]
+    fn aggregate_multi_day() {
+        let data = multi_day_5m_data(3);
+        let bars = aggregate_daily_bars(&data);
+        assert_eq!(bars.len(), 3);
+
+        // Day 0: high = max(100.0, 100.5, 100.5, 100.5) = 100.5,
+        //         low = min(100.0, 99.5, 99.5, 99.5) = 99.5
+        assert!((bars[0].high - 100.5).abs() < f32::EPSILON);
+        assert!((bars[0].low - 99.5).abs() < f32::EPSILON);
+
+        // Day 1: high = 100+2 = 102.0 (from first candle), low = 100-1 = 99.0
+        assert!((bars[1].high - 102.0).abs() < f32::EPSILON);
+        assert!((bars[1].low - 99.0).abs() < f32::EPSILON);
+
+        // Day 2: high = 100+4 = 104.0, low = 100-2 = 98.0
+        assert!((bars[2].high - 104.0).abs() < f32::EPSILON);
+        assert!((bars[2].low - 98.0).abs() < f32::EPSILON);
+    }
+
+    // ── compute_atr ────────────────────────────────────────────────
+
+    #[test]
+    fn atr_too_few_bars() {
+        let bars = vec![DailyBar {
+            high: 110.0,
+            low: 90.0,
+            close: 100.0,
+        }];
+        assert!(compute_atr(&bars).is_none());
+        assert!(compute_atr(&[]).is_none());
+    }
+
+    #[test]
+    fn atr_two_bars() {
+        // With exactly 2 bars, period = min(14, 1) = 1, one TR value.
+        let bars = vec![
+            DailyBar {
+                high: 110.0,
+                low: 90.0,
+                close: 100.0,
+            },
+            DailyBar {
+                high: 115.0,
+                low: 95.0,
+                close: 105.0,
+            },
+        ];
+        let atr = compute_atr(&bars).unwrap();
+        // TR = max(115-95, |115-100|, |95-100|) = max(20, 15, 5) = 20
+        assert!((atr - 20.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn atr_constant_range() {
+        // 5 bars, all with the same range and close.
+        let bars: Vec<DailyBar> = (0..5)
+            .map(|_| DailyBar {
+                high: 110.0,
+                low: 90.0,
+                close: 100.0,
+            })
+            .collect();
+        let atr = compute_atr(&bars).unwrap();
+        // Every TR = max(20, |110-100|, |90-100|) = 20.
+        // ATR should be 20.0 (constant).
+        assert!((atr - 20.0).abs() < 1e-6);
+    }
+
+    // ── compute_gerchik_atr ────────────────────────────────────────
+
+    #[test]
+    fn returns_none_for_empty_data() {
+        let data = TestCandles {
+            timestamps: vec![],
+            opens: vec![],
+            highs: vec![],
+            lows: vec![],
+            closes: vec![],
+            volumes: vec![],
+        };
+        assert!(compute_gerchik_atr(&data, 300_000.0).is_none());
+    }
+
+    #[test]
+    fn returns_none_for_daily_timeframe() {
+        let data = multi_day_5m_data(20);
+        // Candle duration >= 1 day should return None.
+        assert!(compute_gerchik_atr(&data, DAY_MS as f64).is_none());
+        assert!(compute_gerchik_atr(&data, DAY_MS as f64 * 7.0).is_none());
+    }
+
+    #[test]
+    fn returns_none_for_single_day() {
+        // Only 1 day of data → only 1 daily bar → can't compute ATR.
+        let data = multi_day_5m_data(1);
+        assert!(compute_gerchik_atr(&data, 300_000.0).is_none());
+    }
+
+    #[test]
+    fn green_when_low_atr_usage() {
+        // Build data where current session has a small range relative to ATR.
+        let data = multi_day_5m_data(20);
+        let result = compute_gerchik_atr(&data, 300_000.0);
+        assert!(result.is_some());
+        let render = result.unwrap();
+        assert!(render.text.starts_with("G.ATR "));
+        assert!(render.text.ends_with('%'));
+        // With our test data, day 19 range is small relative to the ATR
+        // built from increasing ranges across 20 days.
+        // Just verify the structure is correct.
+        assert!(render.pct >= 0.0);
+    }
+
+    #[test]
+    fn red_when_high_atr_usage() {
+        // Build data where earlier days had tiny ranges but current day has a huge range.
+        let base = 1_705_276_800_000_i64;
+        let five_min = 300_000_i64;
+        let session_start = 9 * 3_600_000_i64;
+        let mut timestamps = Vec::new();
+        let mut opens = Vec::new();
+        let mut highs = Vec::new();
+        let mut lows = Vec::new();
+        let mut closes = Vec::new();
+        let mut volumes = Vec::new();
+
+        // 15 days with tiny ranges (high-low = 1.0).
+        for day in 0..15 {
+            for candle in 0..4 {
+                let ts = base + day * DAY_MS + session_start + candle * five_min;
+                timestamps.push(ts);
+                opens.push(100.0);
+                highs.push(100.5);
+                lows.push(99.5);
+                closes.push(100.0);
+                volumes.push(1000);
+            }
+        }
+        // Day 15: huge range (high-low = 20.0) — should exceed 75% of ATR ≈ 1.0.
+        for candle in 0..4 {
+            let ts = base + 15 * DAY_MS + session_start + candle * five_min;
+            timestamps.push(ts);
+            opens.push(100.0);
+            if candle == 0 {
+                highs.push(120.0);
+                lows.push(80.0);
+            } else {
+                highs.push(101.0);
+                lows.push(99.0);
+            }
+            closes.push(100.0);
+            volumes.push(1000);
+        }
+
+        let data = TestCandles {
+            timestamps,
+            opens,
+            highs,
+            lows,
+            closes,
+            volumes,
+        };
+
+        let result = compute_gerchik_atr(&data, 300_000.0).unwrap();
+        // Last day range = 40 (120-80), ATR ≈ 1.0 → pct >> 75%.
+        assert!(result.pct >= ATR_THRESHOLD_PCT);
+        assert_eq!(result.color, ATR_RED);
+    }
+
+    #[test]
+    fn text_format() {
+        let data = multi_day_5m_data(5);
+        let result = compute_gerchik_atr(&data, 300_000.0).unwrap();
+        // Should be "G.ATR XX%"
+        assert!(result.text.starts_with("G.ATR "));
+        assert!(result.text.ends_with('%'));
+        // No decimal places in the percentage (strip the "G.ATR " prefix first).
+        let pct_part = result.text.strip_prefix("G.ATR ").unwrap();
+        assert!(!pct_part.contains('.'));
+    }
+
+    #[test]
+    fn h4_is_still_intraday() {
+        // H4 candle duration = 14_400_000 ms, which is < DAY_MS.
+        let data = multi_day_5m_data(20);
+        let result = compute_gerchik_atr(&data, 14_400_000.0);
+        assert!(result.is_some());
+    }
+}

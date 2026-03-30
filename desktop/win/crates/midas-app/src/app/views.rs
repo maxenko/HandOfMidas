@@ -81,21 +81,24 @@ impl MidasApp {
                 chart.chart_state.timeline_border_ratio,
             );
 
-            let price_overlay = build_price_label_overlay(
-                camera,
-                chart.chart_state.timeline_border_ratio,
-            );
+            let price_overlay =
+                build_price_label_overlay(camera, chart.chart_state.timeline_border_ratio);
 
             // Build level-related overlays for floating window.
             let floating_chart_id = ChartId::new(0);
             let is_placing = chart.chart_state.level_tool.is_placing();
             let drawing_panel = build_drawing_panel(floating_chart_id, is_placing);
 
-            let mut chart_layers: Vec<Element<'_, Message>> = vec![
-                shader.into(),
-                date_overlay,
-                price_overlay,
-            ];
+            // Gerchik ATR overlay (always-on for intraday charts).
+            let gerchik_atr =
+                midas_chart::gerchik_atr::compute_gerchik_atr(data.as_ref(), candle_duration);
+
+            let mut chart_layers: Vec<Element<'_, Message>> =
+                vec![shader.into(), date_overlay, price_overlay];
+
+            // ATR overlay goes early in the stack (receded behind interactive elements).
+            chart_layers.push(build_gerchik_atr_overlay(gerchik_atr.as_ref()));
+
             if chart.chart_state.show_levels {
                 let level_renders = compute_level_renders(chart);
                 chart_layers.push(build_level_labels_overlay(
@@ -425,9 +428,7 @@ impl MidasApp {
                 .style(button::text)
         };
 
-        let levels_active = chart
-            .map(|c| c.chart_state.show_levels)
-            .unwrap_or(true);
+        let levels_active = chart.map(|c| c.chart_state.show_levels).unwrap_or(true);
         let levels_btn = if levels_active {
             button(text("LV").size(10).color(Color::WHITE))
                 .on_press(Message::ToggleLevels(chart_id))
@@ -445,11 +446,18 @@ impl MidasApp {
             .padding([1, 4])
             .style(button::text);
 
-        row![ticker_input, tf_row, collapse_btn, vp_btn, levels_btn, reset_btn]
-            .spacing(4)
-            .align_y(iced::Alignment::Center)
-            .height(24)
-            .into()
+        row![
+            ticker_input,
+            tf_row,
+            collapse_btn,
+            vp_btn,
+            levels_btn,
+            reset_btn
+        ]
+        .spacing(4)
+        .align_y(iced::Alignment::Center)
+        .height(24)
+        .into()
     }
 
     /// Build the controls (right) area of a pane's TitleBar.
@@ -529,20 +537,23 @@ impl MidasApp {
                 chart.chart_state.timeline_border_ratio,
             );
 
-            let price_overlay = build_price_label_overlay(
-                camera,
-                chart.chart_state.timeline_border_ratio,
-            );
+            let price_overlay =
+                build_price_label_overlay(camera, chart.chart_state.timeline_border_ratio);
 
             // Build level-related overlays.
             let is_placing = chart.chart_state.level_tool.is_placing();
             let drawing_panel = build_drawing_panel(chart_id, is_placing);
 
-            let mut chart_layers: Vec<Element<'_, Message>> = vec![
-                shader.into(),
-                date_overlay,
-                price_overlay,
-            ];
+            // Gerchik ATR overlay (always-on for intraday charts).
+            let gerchik_atr =
+                midas_chart::gerchik_atr::compute_gerchik_atr(data.as_ref(), candle_duration);
+
+            let mut chart_layers: Vec<Element<'_, Message>> =
+                vec![shader.into(), date_overlay, price_overlay];
+
+            // ATR overlay goes early in the stack (receded behind interactive elements).
+            chart_layers.push(build_gerchik_atr_overlay(gerchik_atr.as_ref()));
+
             if chart.chart_state.show_levels {
                 let level_renders = compute_level_renders(chart);
                 chart_layers.push(build_level_labels_overlay(
@@ -830,7 +841,11 @@ fn build_price_label_overlay<'a>(
         .iter()
         .filter(|l| l.screen_y >= label_height / 2.0 && l.screen_y < border_y - label_height / 2.0)
         .collect();
-    visible.sort_by(|a, b| a.screen_y.partial_cmp(&b.screen_y).unwrap_or(std::cmp::Ordering::Equal));
+    visible.sort_by(|a, b| {
+        a.screen_y
+            .partial_cmp(&b.screen_y)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     // Build a column with fixed-height spacers between right-aligned labels.
     let mut col = Column::new();
@@ -853,7 +868,9 @@ fn build_price_label_overlay<'a>(
             container(
                 row![
                     Space::new().width(Fill),
-                    text(label.text.clone()).size(label_font_size).color(label_color),
+                    text(label.text.clone())
+                        .size(label_font_size)
+                        .color(label_color),
                     Space::new().width(Length::Fixed(4.0)),
                 ]
                 .width(Fill),
@@ -1053,8 +1070,12 @@ fn build_crosshair_label_overlay<'a>(
 
         // Right-aligned: flexible spacer on the left, badge, small gap to edge.
         let positioned = container(
-            row![Space::new().width(Fill), badge, Space::new().width(Length::Fixed(4.0))]
-                .width(Fill),
+            row![
+                Space::new().width(Fill),
+                badge,
+                Space::new().width(Length::Fixed(4.0))
+            ]
+            .width(Fill),
         )
         .padding(iced::Padding::ZERO.top(top_pad))
         .width(Fill)
@@ -1182,15 +1203,13 @@ fn build_level_editor<'a>(
     .align_y(iced::Alignment::Center);
 
     // Wrap in mouse_area to capture scroll wheel for price adjustment.
-    let price_row = iced::widget::mouse_area(price_row_inner).on_scroll(
-        move |delta| {
-            let lines = match delta {
-                iced::mouse::ScrollDelta::Lines { y, .. } => y,
-                iced::mouse::ScrollDelta::Pixels { y, .. } => y / 50.0,
-            };
-            Message::LevelEditorPriceStep(chart_id, level_id, coarse_step * lines as f64)
-        },
-    );
+    let price_row = iced::widget::mouse_area(price_row_inner).on_scroll(move |delta| {
+        let lines = match delta {
+            iced::mouse::ScrollDelta::Lines { y, .. } => y,
+            iced::mouse::ScrollDelta::Pixels { y, .. } => y / 50.0,
+        };
+        Message::LevelEditorPriceStep(chart_id, level_id, coarse_step * lines as f64)
+    });
 
     // -- Label input --
     let current_label = level.label.as_deref().unwrap_or("");
@@ -1266,9 +1285,7 @@ fn build_level_editor<'a>(
         let label = format!("{}px", t as u32);
         thickness_buttons = thickness_buttons.push(
             button(text(label).size(9))
-                .on_press(Message::LevelEditorThicknessChanged(
-                    chart_id, level_id, t,
-                ))
+                .on_press(Message::LevelEditorThicknessChanged(chart_id, level_id, t))
                 .padding([2, 6])
                 .style(move |theme: &iced::Theme, status| {
                     let mut s = button::text(theme, status);
@@ -1444,6 +1461,42 @@ fn compute_level_renders(chart: &ChartPanel) -> Vec<midas_chart::LevelRender> {
             locked: lev.locked,
         })
         .collect()
+}
+
+// ── Gerchik ATR overlay ────────────────────────────────────────────
+
+/// Build the Gerchik ATR percentage overlay for the top-right corner.
+///
+/// Always-on for intraday charts, cannot be toggled off. Returns an
+/// invisible zero-size widget when no ATR data is available (daily+ charts
+/// or insufficient data).
+fn build_gerchik_atr_overlay<'a>(
+    data: Option<&midas_chart::GerchikAtrRender>,
+) -> Element<'a, Message> {
+    let data = match data {
+        Some(d) => d,
+        None => return Space::new().width(0).height(0).into(),
+    };
+
+    let color = Color::from_rgba(data.color[0], data.color[1], data.color[2], data.color[3]);
+
+    // Bold watermark-style text, offset from the right edge.
+    let label = text(data.text.clone())
+        .size(20)
+        .color(color)
+        .font(iced::Font {
+            weight: iced::font::Weight::Bold,
+            ..iced::Font::default()
+        });
+
+    container(row![
+        Space::new().width(Fill),
+        label,
+        Space::new().width(Length::Fixed(60.0)),
+    ])
+    .width(Fill)
+    .padding(iced::Padding::ZERO.top(8.0))
+    .into()
 }
 
 // ── Button style helpers ────────────────────────────────────────────
