@@ -109,6 +109,10 @@ pub struct MidasApp {
     /// Used to ghost the preview line on sibling charts and to clear
     /// stale previews on non-source charts (cross-window jumps).
     pub placing_preview: Option<(ChartId, String, f64)>,
+    /// Cross-chart crosshair sync: (source chart, timestamp_ms, symbol).
+    /// When set, sibling charts (same symbol, different chart) render a
+    /// ghost vertical line at the corresponding timestamp.
+    pub crosshair_sync: Option<(ChartId, i64, String)>,
     /// Deterministic test data generator. Any ticker produces instant data.
     test_data: TestDataProvider,
 }
@@ -418,6 +422,7 @@ impl MidasApp {
             level_store,
             level_placing: false,
             placing_preview: None,
+            crosshair_sync: None,
             test_data: TestDataProvider::new(),
         };
 
@@ -897,6 +902,38 @@ impl MidasApp {
                         chart.chart_state.crosshair_pos = pos;
                     }
                     chart.chart_state.dirty.mark_crosshair();
+                }
+                // Cross-chart crosshair sync: compute snapped timestamp.
+                match pos {
+                    Some((x, _)) => {
+                        if let Some(chart) = self.charts.get(&chart_id) {
+                            if let Some(ref data) = chart.data {
+                                let cam = &chart.chart_state.camera;
+                                let ts = if chart.chart_state.collapse_gaps {
+                                    let idx_f = cam.x_to_time(x);
+                                    let idx = (idx_f.round().max(0.0) as usize)
+                                        .min(data.len().saturating_sub(1));
+                                    data.timestamps[idx]
+                                } else {
+                                    let cursor_time = cam.x_to_time(x);
+                                    let idx = data.find_index_by_time(cursor_time as i64);
+                                    data.timestamps[idx]
+                                };
+                                self.crosshair_sync =
+                                    Some((chart_id, ts, chart.symbol.clone()));
+                            }
+                        }
+                    }
+                    None => {
+                        // Clear sync only if this chart was the source.
+                        if self
+                            .crosshair_sync
+                            .as_ref()
+                            .map_or(false, |(src, _, _)| *src == chart_id)
+                        {
+                            self.crosshair_sync = None;
+                        }
+                    }
                 }
                 Task::none()
             }

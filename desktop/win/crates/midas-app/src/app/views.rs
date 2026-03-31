@@ -58,6 +58,13 @@ impl MidasApp {
                 editing_level_id: chart.editing_level_id,
                 level_tool: chart.chart_state.level_tool.clone(),
                 level_placing: self.level_placing,
+                ghost_crosshair_x: compute_ghost_crosshair_x(
+                    &self.crosshair_sync,
+                    ChartId::new(0),
+                    &chart.symbol,
+                    &chart.chart_state,
+                    chart.data.as_deref(),
+                ),
                 ghost_preview_price: self.placing_preview.as_ref().and_then(
                     |(src_id, sym, price)| {
                         if *src_id != ChartId::new(0) && chart.symbol == *sym {
@@ -529,6 +536,13 @@ impl MidasApp {
                 editing_level_id: chart.editing_level_id,
                 level_tool: chart.chart_state.level_tool.clone(),
                 level_placing: self.level_placing,
+                ghost_crosshair_x: compute_ghost_crosshair_x(
+                    &self.crosshair_sync,
+                    chart_id,
+                    &chart.symbol,
+                    &chart.chart_state,
+                    chart.data.as_deref(),
+                ),
                 ghost_preview_price: self.placing_preview.as_ref().and_then(
                     |(src_id, sym, price)| {
                         if *src_id != chart_id && chart.symbol == *sym {
@@ -1337,6 +1351,35 @@ fn build_level_editor<'a>(
         .width(Fill)
         .height(Fill)
         .into()
+}
+
+/// Compute ghost crosshair X for a sibling chart from crosshair sync state.
+///
+/// Returns `Some(pixel_x)` when `sync` points to a different chart with the
+/// same symbol. Handles both normal (timestamp-space) and collapsed
+/// (index-space) X axes.
+fn compute_ghost_crosshair_x(
+    sync: &Option<(ChartId, i64, String)>,
+    this_chart: ChartId,
+    symbol: &str,
+    chart_state: &midas_chart::state::ChartState,
+    data: Option<&midas_data::CandleBuffer>,
+) -> Option<f32> {
+    let (src_id, ts, sym) = sync.as_ref()?;
+    if *src_id == this_chart || sym != symbol {
+        return None;
+    }
+    let data = data?;
+    if data.is_empty() {
+        return None;
+    }
+    let cam = &chart_state.camera;
+    if chart_state.collapse_gaps {
+        let idx = data.find_index_by_time(*ts);
+        Some(cam.time_to_x(idx as f64 + 0.5) as f32)
+    } else {
+        Some(cam.time_to_x(*ts as f64) as f32)
+    }
 }
 
 /// Compute `LevelRender` data from levels and chart state for use in overlays.
