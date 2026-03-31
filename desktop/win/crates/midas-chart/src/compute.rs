@@ -375,10 +375,12 @@ fn compute_collapsed_scene(
 
     // Crosshair in collapsed mode: convert cursor X to the nearest candle index.
     let crosshair = compute_crosshair_impl(input.crosshair, data, camera, input.symbol, &|cx| {
+        if vis_end <= vis_start {
+            return None;
+        }
         let global_idx_f = camera.x_to_time(cx);
         let idx = (global_idx_f.round().max(0.0) as usize)
-            .max(vis_start)
-            .min(vis_end.saturating_sub(1));
+            .clamp(vis_start, vis_end - 1);
         let local_idx = idx - vis_start;
         let sx = index_to_x(local_idx);
         Some((sx, idx))
