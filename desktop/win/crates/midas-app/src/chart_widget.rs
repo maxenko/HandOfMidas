@@ -88,9 +88,9 @@ pub struct ChartRenderSnapshot {
     pub level_tool: LevelTool,
     /// Whether level placement mode is globally active (all charts).
     pub level_placing: bool,
-    /// Ghost crosshair X from a sibling chart (same symbol, different chart).
-    /// Vertical-only dim line at the synced timestamp. `None` if inactive.
-    pub ghost_crosshair_x: Option<f32>,
+    /// Ghost crosshair from a sibling chart (same symbol, different chart).
+    /// `(pixel_x, pixel_y)` — vertical + horizontal dim lines. `None` if inactive.
+    pub ghost_crosshair: Option<(f32, f32)>,
     /// Ghost preview price from a sibling chart (same symbol, different chart).
     /// Rendered as a dim preview line. `None` if not applicable.
     pub ghost_preview_price: Option<f64>,
@@ -369,7 +369,7 @@ impl shader::Program<Message> for ChartProgram {
                     timeline_border_ratio: 0.20,
                     volume_scale: 1.0,
                     ghost_preview_y: None,
-                    ghost_crosshair_x: None,
+                    ghost_crosshair: None,
                 };
             }
         };
@@ -475,10 +475,11 @@ impl shader::Program<Message> for ChartProgram {
             camera.snap_to_pixel(camera.price_to_y(price))
         });
 
-        // Pre-compute ghost crosshair X from sibling chart timestamp.
-        let ghost_crosshair_x = snap.ghost_crosshair_x.and_then(|gx| {
-            if gx >= 0.0 && gx <= camera.viewport_width as f32 {
-                Some(camera.snap_to_pixel(gx))
+        // Pre-compute ghost crosshair from sibling chart. Filter off-screen.
+        let ghost_crosshair = snap.ghost_crosshair.and_then(|(gx, gy)| {
+            let sx = camera.snap_to_pixel(gx);
+            if sx >= 0.0 && sx <= camera.viewport_width as f32 {
+                Some((sx, gy))
             } else {
                 None
             }
@@ -493,7 +494,7 @@ impl shader::Program<Message> for ChartProgram {
             timeline_border_ratio: live_timeline_border_ratio,
             volume_scale: live_volume_scale,
             ghost_preview_y,
-            ghost_crosshair_x,
+            ghost_crosshair,
         }
     }
 
@@ -594,8 +595,8 @@ pub struct ChartPrimitive {
     pub volume_scale: f32,
     /// Ghost preview line Y from a sibling chart (same symbol, different chart).
     pub ghost_preview_y: Option<f32>,
-    /// Ghost crosshair X from a sibling chart (same symbol, different chart).
-    pub ghost_crosshair_x: Option<f32>,
+    /// Ghost crosshair from a sibling chart `(pixel_x, pixel_y)`.
+    pub ghost_crosshair: Option<(f32, f32)>,
 }
 
 impl std::fmt::Debug for ChartPrimitive {
@@ -781,12 +782,21 @@ impl shader::Primitive for ChartPrimitive {
             Vec::new()
         };
 
-        // Ghost crosshair from sibling chart (vertical line only, dim).
-        if let Some(gx) = self.ghost_crosshair_x {
+        // Ghost crosshair from sibling chart (vertical + horizontal, dim).
+        if let Some((gx, gy)) = self.ghost_crosshair {
+            let ghost_color = [0.5, 0.5, 0.6, 0.25];
+            // Vertical ghost line.
             resources.crosshair_lines.push(GridLineInstance {
                 rect: [gx, 0.0, gx + 1.0, vh],
-                color: [0.5, 0.5, 0.6, 0.25],
+                color: ghost_color,
             });
+            // Horizontal ghost line.
+            if gy >= 0.0 && gy <= vh {
+                resources.crosshair_lines.push(GridLineInstance {
+                    rect: [0.0, gy, vw, gy + 1.0],
+                    color: ghost_color,
+                });
+            }
         }
 
         // Render the separator handle triangle on the right edge.
