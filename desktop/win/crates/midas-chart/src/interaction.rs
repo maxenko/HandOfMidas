@@ -9,6 +9,7 @@
 //! or click to select. The `PendingDrag` state resolves this ambiguity once
 //! the mouse has moved past the drag threshold (4px).
 
+use crate::levels::HorizontalLevel;
 use crate::state::{ChartState, CursorClaim, InteractionMode};
 use midas_core::CandleData;
 
@@ -172,6 +173,7 @@ pub fn handle_event(
     event: ChartEvent,
     data: Option<&dyn CandleData>,
     is_collapsed: bool,
+    levels: &[HorizontalLevel],
 ) -> Vec<ChartAction> {
     debug_assert!(
         !(state.level_tool.is_dragging() && state.interaction_mode != InteractionMode::Idle),
@@ -180,7 +182,7 @@ pub fn handle_event(
 
     match event {
         ChartEvent::MouseMoved { x, y, alt_held } => {
-            handle_mouse_moved(state, x, y, alt_held, data, is_collapsed)
+            handle_mouse_moved(state, x, y, alt_held, data, is_collapsed, levels)
         }
 
         ChartEvent::MousePressed {
@@ -188,10 +190,10 @@ pub fn handle_event(
             y,
             button,
             alt_held,
-        } => handle_mouse_pressed(state, x, y, button, alt_held),
+        } => handle_mouse_pressed(state, x, y, button, alt_held, levels),
 
         ChartEvent::MouseReleased { x, y, button, .. } => {
-            handle_mouse_released(state, x, y, button)
+            handle_mouse_released(state, x, y, button, levels)
         }
 
         ChartEvent::MouseWheel { delta, x, .. } => handle_mouse_wheel(state, delta, x),
@@ -254,6 +256,7 @@ fn handle_mouse_moved(
     alt_held: bool,
     data: Option<&dyn CandleData>,
     is_collapsed: bool,
+    levels: &[HorizontalLevel],
 ) -> Vec<ChartAction> {
     let mut actions = Vec::new();
 
@@ -284,6 +287,12 @@ fn handle_mouse_moved(
     }
     let is_visible = state.crosshair.should_render();
 
+    // Keep deprecated field in sync.
+    #[allow(deprecated)]
+    {
+        state.crosshair_pos = state.crosshair.render_pos();
+    }
+
     if is_visible {
         if let Some((rx, ry)) = state.crosshair.render_pos() {
             actions.push(ChartAction::SetCrosshair { x: rx, y: ry });
@@ -307,9 +316,9 @@ fn handle_mouse_moved(
                 // Exceeded threshold. Left-drag only initiates level drag,
                 // never panning (panning is right-mouse only).
                 if let Some((level_id, grab_offset)) =
-                    hit_test_levels(&state.levels, start_y, &state.camera)
+                    hit_test_levels(levels, start_y, &state.camera)
                 {
-                    let is_locked = state.levels.iter().any(|l| l.id == level_id && l.locked);
+                    let is_locked = levels.iter().any(|l| l.id == level_id && l.locked);
                     if !is_locked {
                         // Transition to LevelTool dragging.
                         state.level_tool.mode = crate::level_tool::LevelToolMode::Dragging {
@@ -317,9 +326,13 @@ fn handle_mouse_moved(
                             grab_offset,
                         };
                         state.interaction_mode = InteractionMode::Idle;
-                        // suppress() hides crosshair but preserves the internal
-                        // left_mouse_down flag so on_left_release() works correctly.
+                        // suppress() hides crosshair but preserves left_mouse_down
+                        // so on_left_release() works correctly when the drag ends.
                         state.crosshair.suppress();
+                        #[allow(deprecated)]
+                        {
+                            state.crosshair_pos = None;
+                        }
                         actions.push(ChartAction::SelectLevel { id: level_id });
                         actions.push(ChartAction::ClearCrosshair);
                         state.drag_start = Some((x, y));
@@ -494,6 +507,7 @@ fn handle_mouse_pressed(
     y: f32,
     button: MouseButton,
     _alt_held: bool,
+    levels: &[HorizontalLevel],
 ) -> Vec<ChartAction> {
     // In Placing mode (via LevelTool):
     // - Left-click: place the level at (snapped) cursor price
@@ -508,6 +522,10 @@ fn handle_mouse_pressed(
                     .unwrap_or_else(|| state.camera.y_to_price(y));
                 state.level_tool.cancel();
                 state.crosshair.force_hide();
+                #[allow(deprecated)]
+                {
+                    state.crosshair_pos = None;
+                }
                 return vec![
                     ChartAction::CreateLevel { price },
                     ChartAction::CancelPlacing,
@@ -563,15 +581,27 @@ fn handle_mouse_pressed(
             }
 
             state.crosshair.on_left_press(x, y);
+            #[allow(deprecated)]
+            {
+                state.left_mouse_down = true;
+            }
 
             // Don't show crosshair if pressing on a draggable (unlocked) level —
             // the PendingDrag will resolve to a level drag, not a crosshair.
-            let over_draggable_level = hit_test_levels(&state.levels, y, &state.camera)
-                .map(|(id, _)| !state.levels.iter().any(|l| l.id == id && l.locked))
+            let over_draggable_level = hit_test_levels(levels, y, &state.camera)
+                .map(|(id, _)| !levels.iter().any(|l| l.id == id && l.locked))
                 .unwrap_or(false);
             if over_draggable_level {
                 state.crosshair.suppress();
+                #[allow(deprecated)]
+                {
+                    state.crosshair_pos = None;
+                }
             } else {
+                #[allow(deprecated)]
+                {
+                    state.crosshair_pos = state.crosshair.render_pos();
+                }
                 actions.push(ChartAction::SetCrosshair { x, y });
             }
 
@@ -601,7 +631,7 @@ fn handle_mouse_pressed(
 
         MouseButton::Right => {
             // Hit-test levels first — right-click on a level opens the editor.
-            if let Some((level_id, _offset)) = hit_test_levels(&state.levels, y, &state.camera) {
+            if let Some((level_id, _offset)) = hit_test_levels(levels, y, &state.camera) {
                 vec![ChartAction::RightClickLevel { id: level_id, x, y }]
             } else {
                 // No level hit — right-click starts XY panning.
@@ -618,6 +648,7 @@ fn handle_mouse_released(
     x: f32,
     y: f32,
     button: MouseButton,
+    levels: &[HorizontalLevel],
 ) -> Vec<ChartAction> {
     // Handle middle button release — exit any scaling mode.
     if button == MouseButton::Middle {
@@ -681,6 +712,10 @@ fn handle_mouse_released(
     ) {
         state.interaction_mode = InteractionMode::Idle;
         state.crosshair.on_left_release();
+        #[allow(deprecated)]
+        {
+            state.left_mouse_down = false;
+        }
         return vec![];
     }
 
@@ -688,10 +723,24 @@ fn handle_mouse_released(
     if state.level_tool.is_dragging() {
         state.level_tool.mode = crate::level_tool::LevelToolMode::Idle;
         state.crosshair.on_left_release();
+        #[allow(deprecated)]
+        {
+            state.left_mouse_down = false;
+        }
         return vec![ChartAction::ClearCrosshair];
     }
 
     state.crosshair.on_left_release();
+    #[allow(deprecated)]
+    {
+        state.left_mouse_down = false;
+    }
+
+    // Hide crosshair on release.
+    #[allow(deprecated)]
+    {
+        state.crosshair_pos = state.crosshair.render_pos();
+    }
 
     let mut actions = vec![ChartAction::ClearCrosshair];
     let prev_mode = state.interaction_mode.clone();
@@ -702,7 +751,7 @@ fn handle_mouse_released(
             start_y,
         } => {
             // Released without exceeding drag threshold -- this is a click.
-            if let Some((level_id, _)) = hit_test_levels(&state.levels, start_y, &state.camera) {
+            if let Some((level_id, _)) = hit_test_levels(levels, start_y, &state.camera) {
                 actions.push(ChartAction::SelectLevel { id: level_id });
             } else if state.selected_level.is_some() {
                 actions.push(ChartAction::DeselectLevel);
@@ -771,6 +820,10 @@ fn handle_key_pressed(state: &mut ChartState, key: Key) -> Vec<ChartAction> {
             if state.level_tool.is_active() {
                 state.level_tool.cancel();
                 state.crosshair.force_hide();
+                #[allow(deprecated)]
+                {
+                    state.crosshair_pos = None;
+                }
                 actions.push(ChartAction::CancelPlacing);
                 actions.push(ChartAction::ClearCrosshair);
                 return actions;
@@ -826,6 +879,10 @@ fn handle_suppressed_move(
             state.level_tool.preview_price = Some(price);
         }
         state.crosshair.suppress();
+        #[allow(deprecated)]
+        {
+            state.crosshair_pos = None;
+        }
         return vec![ChartAction::ClearCrosshair];
     }
 
@@ -844,6 +901,10 @@ fn handle_suppressed_move(
             raw_price
         };
         state.crosshair.suppress();
+        #[allow(deprecated)]
+        {
+            state.crosshair_pos = None;
+        }
         return vec![
             ChartAction::DragLevel {
                 id: level_id,
@@ -869,6 +930,10 @@ fn sync_crosshair_to_claim(state: &mut ChartState) {
             state.crosshair.suppress();
         }
         CursorClaim::None => {}
+    }
+    #[allow(deprecated)]
+    {
+        state.crosshair_pos = state.crosshair.render_pos();
     }
 }
 
@@ -941,6 +1006,7 @@ fn hit_test_levels(
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::camera::Camera2D;
@@ -959,18 +1025,16 @@ mod tests {
         })
     }
 
-    fn test_state_with_level(price: f64) -> ChartState {
-        let mut state = test_state();
-        state.levels.push(HorizontalLevel {
-            id: 1,
+    fn test_level(id: u64, price: f64) -> HorizontalLevel {
+        HorizontalLevel {
+            id,
             price,
             color: [1.0, 0.0, 0.0, 1.0],
             line_width: 1.0,
             label: None,
             icon: crate::levels::LevelIcon::None,
             locked: false,
-        });
-        state
+        }
     }
 
     // ── Crosshair tests ──────────────────────────────────────────────
@@ -989,6 +1053,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0], ChartAction::SetCrosshair { x: 500.0, y: 300.0 });
@@ -1007,6 +1072,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         assert!(actions.is_empty());
         assert!(!state.crosshair.should_render());
@@ -1025,6 +1091,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         let actions = handle_event(
             &mut state,
@@ -1035,6 +1102,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0], ChartAction::ClearCrosshair);
@@ -1057,6 +1125,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         assert_eq!(actions.len(), 1);
         match &actions[0] {
@@ -1092,6 +1161,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         assert_eq!(actions.len(), 1);
         match &actions[0] {
@@ -1128,6 +1198,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         assert!(actions.is_empty());
     }
@@ -1146,6 +1217,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         for a in &actions {
             state.apply_action(a);
@@ -1175,12 +1247,13 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         // Left press now also sets crosshair.
         assert!(actions
             .iter()
             .any(|a| *a == ChartAction::SetCrosshair { x: 100.0, y: 200.0 }));
-        assert!(state.crosshair.left_mouse_down());
+        assert!(state.left_mouse_down);
         assert_eq!(
             state.interaction_mode,
             InteractionMode::PendingDrag {
@@ -1204,6 +1277,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         handle_event(
             &mut state,
@@ -1214,6 +1288,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         assert_eq!(
             state.interaction_mode,
@@ -1237,6 +1312,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         handle_event(
             &mut state,
@@ -1247,6 +1323,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         // Left-drag returns to Idle (no panning), not Panning.
         assert_eq!(state.interaction_mode, InteractionMode::Idle);
@@ -1265,6 +1342,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         assert_eq!(state.interaction_mode, InteractionMode::RightPanning);
 
@@ -1278,6 +1356,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         assert_eq!(state.interaction_mode, InteractionMode::Idle);
     }
@@ -1297,6 +1376,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         assert_eq!(state.interaction_mode, InteractionMode::RightPanning);
 
@@ -1310,6 +1390,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         let has_pan = actions.iter().any(|a| matches!(a, ChartAction::Pan { .. }));
         assert!(
@@ -1328,6 +1409,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         assert_eq!(state.interaction_mode, InteractionMode::Idle);
     }
@@ -1350,6 +1432,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         assert_eq!(state.interaction_mode, InteractionMode::RightPanning);
 
@@ -1363,6 +1446,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
 
         let pan_action = actions
@@ -1403,6 +1487,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         handle_event(
             &mut state,
@@ -1413,6 +1498,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
 
         let actions = handle_event(
@@ -1425,6 +1511,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
 
         let has_momentum = actions
@@ -1456,6 +1543,7 @@ mod tests {
                 },
                 None,
                 false,
+                &[],
             );
             if !actions.is_empty() {
                 moved = true;
@@ -1475,6 +1563,7 @@ mod tests {
                 },
                 None,
                 false,
+                &[],
             );
         }
         assert!(
@@ -1512,6 +1601,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         assert!(!actions.is_empty(), "should produce Redraw");
 
@@ -1543,6 +1633,7 @@ mod tests {
                 },
                 None,
                 false,
+                &[],
             );
         }
 
@@ -1572,6 +1663,7 @@ mod tests {
             ChartEvent::DoubleClick { x: 960.0, y: 540.0 },
             None,
             false,
+            &[],
         );
         assert_eq!(actions.len(), 1);
         match &actions[0] {
@@ -1601,6 +1693,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         assert!(actions.is_empty());
         assert_eq!(
@@ -1627,6 +1720,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         // Move less than 6px — should stay in PendingScale.
         let actions = handle_event(
@@ -1638,6 +1732,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         // No scaling actions should be produced in the dead zone.
         let has_zoom = actions
@@ -1671,6 +1766,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         // Move 20px to the right (strongly horizontal).
         handle_event(
@@ -1682,6 +1778,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         assert!(
             matches!(
@@ -1702,6 +1799,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         let has_zoom = actions
             .iter()
@@ -1726,6 +1824,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         // Move 20px upward (strongly vertical).
         handle_event(
@@ -1737,6 +1836,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         assert!(
             matches!(
@@ -1757,6 +1857,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         let has_zoom_y = actions
             .iter()
@@ -1781,6 +1882,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         // Move 20px to the right to lock horizontal.
         handle_event(
@@ -1792,6 +1894,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         assert!(
             matches!(
@@ -1811,6 +1914,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         assert!(
             matches!(
@@ -1835,6 +1939,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         // Move to lock horizontal.
         handle_event(
@@ -1846,6 +1951,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         // Release middle button.
         handle_event(
@@ -1858,6 +1964,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         assert_eq!(
             state.interaction_mode,
@@ -1867,26 +1974,25 @@ mod tests {
     }
 
     #[test]
-    fn create_level_and_apply_adds_to_state() {
+    fn create_level_and_apply_emits_action() {
         let mut state = test_state();
         let actions = handle_event(
             &mut state,
             ChartEvent::DoubleClick { x: 960.0, y: 540.0 },
             None,
             false,
+            &[],
         );
-        for a in &actions {
-            state.apply_action(a);
-        }
-        assert_eq!(state.levels.len(), 1);
-        assert_eq!(state.levels[0].id, 1);
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], ChartAction::CreateLevel { .. }));
     }
 
     // ── Level selection tests ──────────────────────────────────────
 
     #[test]
     fn click_near_level_selects_it() {
-        let mut state = test_state_with_level(150.0);
+        let mut state = test_state();
+        let levels = vec![test_level(1, 150.0)];
         let level_y = state.camera.price_to_y(150.0);
 
         handle_event(
@@ -1899,6 +2005,7 @@ mod tests {
             },
             None,
             false,
+            &levels,
         );
         let actions = handle_event(
             &mut state,
@@ -1910,6 +2017,7 @@ mod tests {
             },
             None,
             false,
+            &levels,
         );
 
         let has_select = actions
@@ -1920,7 +2028,8 @@ mod tests {
 
     #[test]
     fn click_far_from_level_deselects() {
-        let mut state = test_state_with_level(150.0);
+        let mut state = test_state();
+        let levels = vec![test_level(1, 150.0)];
         state.selected_level = Some(1);
 
         handle_event(
@@ -1933,6 +2042,7 @@ mod tests {
             },
             None,
             false,
+            &levels,
         );
         let actions = handle_event(
             &mut state,
@@ -1944,6 +2054,7 @@ mod tests {
             },
             None,
             false,
+            &levels,
         );
 
         let has_deselect = actions
@@ -1960,7 +2071,8 @@ mod tests {
 
     #[test]
     fn drag_near_level_transitions_to_dragging_level() {
-        let mut state = test_state_with_level(150.0);
+        let mut state = test_state();
+        let levels = vec![test_level(1, 150.0)];
         let level_y = state.camera.price_to_y(150.0);
 
         handle_event(
@@ -1973,6 +2085,7 @@ mod tests {
             },
             None,
             false,
+            &levels,
         );
         handle_event(
             &mut state,
@@ -1983,6 +2096,7 @@ mod tests {
             },
             None,
             false,
+            &levels,
         );
 
         assert!(
@@ -1999,7 +2113,8 @@ mod tests {
 
     #[test]
     fn dragging_level_updates_price() {
-        let mut state = test_state_with_level(150.0);
+        let mut state = test_state();
+        let levels = vec![test_level(1, 150.0)];
         let level_y = state.camera.price_to_y(150.0);
 
         handle_event(
@@ -2012,6 +2127,7 @@ mod tests {
             },
             None,
             false,
+            &levels,
         );
         handle_event(
             &mut state,
@@ -2022,6 +2138,7 @@ mod tests {
             },
             None,
             false,
+            &levels,
         );
 
         let new_y = level_y + 50.0;
@@ -2034,29 +2151,20 @@ mod tests {
             },
             None,
             false,
+            &levels,
         );
 
         let has_drag = actions
             .iter()
             .any(|a| matches!(a, ChartAction::DragLevel { id: 1, .. }));
         assert!(has_drag, "expected DragLevel action, got {:?}", actions);
-
-        for a in &actions {
-            state.apply_action(a);
-        }
-
-        assert!(
-            (state.levels[0].price - 150.0).abs() > 0.1,
-            "level price should have changed from 150.0, got {}",
-            state.levels[0].price
-        );
     }
 
     // ── Level delete tests ─────────────────────────────────────────
 
     #[test]
     fn delete_key_removes_selected_level() {
-        let mut state = test_state_with_level(150.0);
+        let mut state = test_state();
         state.selected_level = Some(1);
 
         let actions = handle_event(
@@ -2064,6 +2172,7 @@ mod tests {
             ChartEvent::KeyPressed { key: Key::Delete },
             None,
             false,
+            &[],
         );
 
         let has_delete = actions
@@ -2074,40 +2183,35 @@ mod tests {
             "expected DeleteSelectedLevel, got {:?}",
             actions
         );
-
-        for a in &actions {
-            state.apply_action(a);
-        }
-        assert!(state.levels.is_empty());
-        assert_eq!(state.selected_level, None);
     }
 
     #[test]
     fn delete_key_without_selection_does_nothing() {
-        let mut state = test_state_with_level(150.0);
+        let mut state = test_state();
         let actions = handle_event(
             &mut state,
             ChartEvent::KeyPressed { key: Key::Delete },
             None,
             false,
+            &[],
         );
         assert!(actions.is_empty());
-        assert_eq!(state.levels.len(), 1);
     }
 
     // ── Escape key tests ───────────────────────────────────────────
 
     #[test]
     fn escape_deselects_level_and_clears_crosshair() {
-        let mut state = test_state_with_level(150.0);
+        let mut state = test_state();
         state.selected_level = Some(1);
-        state.crosshair.set_pos(100.0, 200.0);
+        state.crosshair_pos = Some((100.0, 200.0));
 
         let actions = handle_event(
             &mut state,
             ChartEvent::KeyPressed { key: Key::Escape },
             None,
             false,
+            &[],
         );
 
         let has_deselect = actions
@@ -2133,6 +2237,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0], ChartAction::Redraw);
@@ -2150,6 +2255,7 @@ mod tests {
             ChartEvent::KeyPressed { key: Key::Home },
             None,
             false,
+            &[],
         );
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0], ChartAction::JumpToStart);
@@ -2163,6 +2269,7 @@ mod tests {
             ChartEvent::KeyPressed { key: Key::End },
             None,
             false,
+            &[],
         );
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0], ChartAction::JumpToEnd);
@@ -2188,6 +2295,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
 
         let has_stop = actions
@@ -2263,6 +2371,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         let actions = handle_event(
             &mut state,
@@ -2274,6 +2383,7 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
 
         let has_deselect = actions
@@ -2301,497 +2411,9 @@ mod tests {
             },
             None,
             false,
+            &[],
         );
         assert_eq!(state.drag_start, None);
         assert_eq!(state.interaction_mode, InteractionMode::Idle);
-    }
-
-    // ── Integration sequence tests ────────────────────────────────
-
-    /// Helper: dispatch an event and apply resulting actions to state.
-    fn dispatch(state: &mut ChartState, event: ChartEvent) -> Vec<ChartAction> {
-        let actions = handle_event(state, event, None, false);
-        for a in &actions {
-            state.apply_action(a);
-        }
-        actions
-    }
-
-    fn left_press(x: f32, y: f32) -> ChartEvent {
-        ChartEvent::MousePressed {
-            x,
-            y,
-            button: MouseButton::Left,
-            alt_held: false,
-        }
-    }
-
-    fn left_release(x: f32, y: f32) -> ChartEvent {
-        ChartEvent::MouseReleased {
-            x,
-            y,
-            button: MouseButton::Left,
-            alt_held: false,
-        }
-    }
-
-    fn right_press(x: f32, y: f32) -> ChartEvent {
-        ChartEvent::MousePressed {
-            x,
-            y,
-            button: MouseButton::Right,
-            alt_held: false,
-        }
-    }
-
-    fn right_release(x: f32, y: f32) -> ChartEvent {
-        ChartEvent::MouseReleased {
-            x,
-            y,
-            button: MouseButton::Right,
-            alt_held: false,
-        }
-    }
-
-    fn mouse_move(x: f32, y: f32) -> ChartEvent {
-        ChartEvent::MouseMoved {
-            x,
-            y,
-            alt_held: false,
-        }
-    }
-
-    #[test]
-    fn sequence_left_drag_across_level_moves_it() {
-        // Press on a level, drag vertically, release — level should move.
-        let mut state = test_state_with_level(150.0);
-        let level_y = state.camera.price_to_y(150.0);
-
-        // Press on the level
-        dispatch(&mut state, left_press(500.0, level_y));
-        assert_eq!(
-            state.interaction_mode,
-            InteractionMode::PendingDrag {
-                start_x: 500.0,
-                start_y: level_y,
-            }
-        );
-
-        // Move past drag threshold — enters LevelTool::Dragging
-        let drag_y = level_y + 20.0;
-        let actions = dispatch(&mut state, mouse_move(500.0, drag_y));
-        assert!(
-            actions
-                .iter()
-                .any(|a| matches!(a, ChartAction::SelectLevel { .. })),
-            "exceeding drag threshold on a level should select it, got {:?}",
-            actions
-        );
-        assert!(
-            state.level_tool.is_dragging(),
-            "level tool should be in dragging mode"
-        );
-
-        // Continue dragging — now DragLevel actions are emitted
-        let drag_y2 = drag_y + 30.0;
-        let actions = dispatch(&mut state, mouse_move(500.0, drag_y2));
-        assert!(
-            actions
-                .iter()
-                .any(|a| matches!(a, ChartAction::DragLevel { .. })),
-            "expected DragLevel during active drag, got {:?}",
-            actions
-        );
-
-        // Crosshair should be suppressed during drag
-        assert!(
-            !state.crosshair.should_render(),
-            "crosshair should be hidden during level drag"
-        );
-
-        // Release — drag ends
-        let actions = dispatch(&mut state, left_release(500.0, drag_y2));
-        assert!(
-            actions
-                .iter()
-                .any(|a| matches!(a, ChartAction::ClearCrosshair)),
-            "expected ClearCrosshair on release"
-        );
-        assert!(!state.level_tool.is_dragging());
-    }
-
-    #[test]
-    fn sequence_crosshair_leaves_and_reenters_bounds() {
-        // Press to activate crosshair, move out of bounds, move back in.
-        let mut state = test_state();
-
-        // Press to enter Tracking mode
-        dispatch(&mut state, left_press(500.0, 400.0));
-        assert!(state.crosshair.should_render());
-
-        // Move within bounds — crosshair tracks
-        dispatch(&mut state, mouse_move(600.0, 400.0));
-        assert_eq!(state.crosshair.render_pos(), Some((600.0, 400.0)));
-
-        // Move out of bounds — crosshair hides but mode stays Tracking
-        handle_event(
-            &mut state,
-            ChartEvent::MouseMoved {
-                x: -10.0,
-                y: 400.0,
-                alt_held: false,
-            },
-            None,
-            false,
-        );
-        assert_eq!(
-            state.crosshair.render_pos(),
-            None,
-            "crosshair should hide when out of bounds"
-        );
-
-        // Move back in bounds — crosshair restores without re-pressing
-        dispatch(&mut state, mouse_move(700.0, 400.0));
-        assert_eq!(
-            state.crosshair.render_pos(),
-            Some((700.0, 400.0)),
-            "crosshair should restore when re-entering bounds"
-        );
-
-        // Release — crosshair fully hidden
-        dispatch(&mut state, left_release(700.0, 400.0));
-        assert!(!state.crosshair.should_render());
-    }
-
-    #[test]
-    fn sequence_right_pan_then_scroll_pan() {
-        // Right-click pan, release, then scroll pan — two independent pans.
-        let mut state = test_state();
-        let orig_start = state.camera.time_start;
-
-        // Right-click drag to pan
-        dispatch(&mut state, right_press(500.0, 400.0));
-        assert_eq!(state.interaction_mode, InteractionMode::RightPanning);
-
-        dispatch(&mut state, mouse_move(600.0, 400.0));
-        dispatch(&mut state, right_release(600.0, 400.0));
-        assert_eq!(state.interaction_mode, InteractionMode::Idle);
-        let after_drag = state.camera.time_start;
-        assert!(
-            after_drag != orig_start,
-            "right-drag should have panned the camera"
-        );
-
-        // Scroll up to pan forward in time (independent of the drag)
-        dispatch(
-            &mut state,
-            ChartEvent::MouseWheel {
-                delta: 3.0,
-                x: 960.0,
-                y: 540.0,
-            },
-        );
-        assert!(
-            state.camera.time_start > after_drag,
-            "scroll up should pan forward: {} vs {}",
-            state.camera.time_start,
-            after_drag
-        );
-    }
-
-    #[test]
-    fn sequence_click_selects_then_escape_deselects_level() {
-        // Click on a level (no drag) to select, then Escape to deselect.
-        let mut state = test_state_with_level(150.0);
-        let level_y = state.camera.price_to_y(150.0);
-
-        // Press and release without exceeding drag threshold → click
-        dispatch(&mut state, left_press(500.0, level_y));
-        let actions = dispatch(&mut state, left_release(500.0, level_y));
-        assert!(
-            actions
-                .iter()
-                .any(|a| matches!(a, ChartAction::SelectLevel { id: 1 })),
-            "click on level should select it"
-        );
-        assert_eq!(state.selected_level, Some(1));
-
-        // Escape to deselect
-        let actions = dispatch(&mut state, ChartEvent::KeyPressed { key: Key::Escape });
-        assert!(
-            actions
-                .iter()
-                .any(|a| matches!(a, ChartAction::DeselectLevel)),
-            "Escape should deselect level"
-        );
-        assert_eq!(state.selected_level, None);
-    }
-
-    #[test]
-    fn sequence_crosshair_suppressed_during_level_drag_restores_after() {
-        // Verify crosshair lifecycle around a full level drag cycle.
-        let mut state = test_state_with_level(150.0);
-        let level_y = state.camera.price_to_y(150.0);
-
-        // Press — crosshair should NOT appear (over draggable level)
-        dispatch(&mut state, left_press(500.0, level_y));
-        assert!(
-            !state.crosshair.should_render(),
-            "crosshair should be suppressed when pressing on a draggable level"
-        );
-
-        // Drag past threshold
-        dispatch(&mut state, mouse_move(500.0, level_y + 20.0));
-        assert!(
-            !state.crosshair.should_render(),
-            "crosshair should stay suppressed during level drag"
-        );
-
-        // Release the drag
-        dispatch(&mut state, left_release(500.0, level_y + 20.0));
-        assert!(
-            !state.crosshair.should_render(),
-            "crosshair should be hidden after release"
-        );
-        assert!(
-            !state.crosshair.left_mouse_down(),
-            "left_mouse_down should be cleared after release"
-        );
-    }
-
-    #[test]
-    fn sequence_press_away_from_level_shows_crosshair() {
-        // Press away from any level — crosshair should appear.
-        let mut state = test_state_with_level(150.0);
-        // Press far from the level (level at Y=540, press at Y=100)
-        dispatch(&mut state, left_press(500.0, 100.0));
-        assert!(
-            state.crosshair.should_render(),
-            "crosshair should show when pressing away from levels"
-        );
-
-        // Drag around — crosshair follows
-        dispatch(&mut state, mouse_move(600.0, 200.0));
-        assert_eq!(state.crosshair.render_pos(), Some((600.0, 200.0)));
-
-        // Release — crosshair hides
-        dispatch(&mut state, left_release(600.0, 200.0));
-        assert!(!state.crosshair.should_render());
-    }
-
-    #[test]
-    fn sequence_level_tool_activate_place_and_cancel() {
-        // Activate level tool, move mouse to update preview, then Escape.
-        let mut state = test_state();
-
-        // Activate the tool — enters Placing mode
-        state.level_tool.activate();
-        assert!(
-            state.level_tool.is_placing(),
-            "tool should be in Placing mode after activate()"
-        );
-
-        // Move mouse to update preview (dispatched through handle_event,
-        // which triggers the Suppress path and sets preview_price)
-        let actions = handle_event(
-            &mut state,
-            ChartEvent::MouseMoved {
-                x: 500.0,
-                y: 400.0,
-                alt_held: false,
-            },
-            None,
-            false,
-        );
-        assert!(
-            state.level_tool.preview_price.is_some(),
-            "preview_price should be set after mouse move in Placing mode"
-        );
-        assert!(
-            !state.crosshair.should_render(),
-            "crosshair should be hidden during Placing mode"
-        );
-        assert!(
-            actions
-                .iter()
-                .any(|a| matches!(a, ChartAction::ClearCrosshair)),
-            "expected ClearCrosshair while placing, got {:?}",
-            actions
-        );
-
-        // Press Escape to cancel
-        let actions = handle_event(
-            &mut state,
-            ChartEvent::KeyPressed { key: Key::Escape },
-            None,
-            false,
-        );
-        for a in &actions {
-            state.apply_action(a);
-        }
-
-        assert!(
-            !state.level_tool.is_active(),
-            "tool should be Idle after Escape"
-        );
-        assert!(
-            !state.crosshair.should_render(),
-            "crosshair should be hidden after cancellation"
-        );
-        assert!(
-            actions
-                .iter()
-                .any(|a| matches!(a, ChartAction::CancelPlacing)),
-            "expected CancelPlacing action on Escape, got {:?}",
-            actions
-        );
-    }
-
-    #[test]
-    fn sequence_level_tool_double_click_creates_level() {
-        // Activate level tool, left-click to place — creates level and
-        // deactivates the tool (DoubleClick is the non-tool creation path;
-        // left-click while Placing is the tool placement path).
-        let mut state = test_state();
-        state.level_tool.activate();
-        assert!(state.level_tool.is_placing());
-
-        // Left-click while placing creates the level and cancels placement.
-        let click_y = 400.0;
-        let expected_price = state.camera.y_to_price(click_y);
-        let actions = handle_event(
-            &mut state,
-            ChartEvent::MousePressed {
-                x: 500.0,
-                y: click_y,
-                button: MouseButton::Left,
-                alt_held: false,
-            },
-            None,
-            false,
-        );
-
-        // Verify CreateLevel emitted with the correct price
-        let create = actions
-            .iter()
-            .find(|a| matches!(a, ChartAction::CreateLevel { .. }));
-        assert!(
-            create.is_some(),
-            "expected CreateLevel action, got {:?}",
-            actions
-        );
-        if let Some(ChartAction::CreateLevel { price }) = create {
-            assert!(
-                (price - expected_price).abs() < 0.01,
-                "price={}, expected={}",
-                price,
-                expected_price
-            );
-        }
-
-        // Verify CancelPlacing also emitted (tool deactivates after placing)
-        assert!(
-            actions
-                .iter()
-                .any(|a| matches!(a, ChartAction::CancelPlacing)),
-            "expected CancelPlacing action, got {:?}",
-            actions
-        );
-
-        // Apply actions and verify final state
-        for a in &actions {
-            state.apply_action(a);
-        }
-        assert!(
-            !state.level_tool.is_active(),
-            "tool should be Idle after placement"
-        );
-        assert_eq!(state.levels.len(), 1, "one level should have been created");
-    }
-
-    #[test]
-    fn sequence_locked_level_not_draggable() {
-        // A locked level should not enter drag mode, even past the threshold.
-        let mut state = test_state();
-        state.levels.push(HorizontalLevel {
-            id: 1,
-            price: 150.0,
-            color: [1.0, 0.0, 0.0, 1.0],
-            line_width: 1.0,
-            label: None,
-            icon: crate::levels::LevelIcon::None,
-            locked: true,
-        });
-        let level_y = state.camera.price_to_y(150.0);
-
-        // Press on the locked level
-        dispatch(&mut state, left_press(500.0, level_y));
-        assert_eq!(
-            state.interaction_mode,
-            InteractionMode::PendingDrag {
-                start_x: 500.0,
-                start_y: level_y,
-            },
-            "should enter PendingDrag on press"
-        );
-
-        // Move past drag threshold
-        let actions = dispatch(&mut state, mouse_move(500.0, level_y + 20.0));
-
-        // Verify NO DragLevel action — locked levels cannot be dragged
-        assert!(
-            !actions
-                .iter()
-                .any(|a| matches!(a, ChartAction::DragLevel { .. })),
-            "locked level should not produce DragLevel, got {:?}",
-            actions
-        );
-        assert!(
-            !state.level_tool.is_dragging(),
-            "level tool should NOT be in Dragging mode for locked level"
-        );
-
-        // State should return to Idle (left-drag on locked level falls through)
-        assert_eq!(
-            state.interaction_mode,
-            InteractionMode::Idle,
-            "should return to Idle after drag threshold on locked level"
-        );
-
-        // Crosshair IS visible (not suppressed, since no drag started)
-        assert!(
-            state.crosshair.should_render(),
-            "crosshair should be visible since no drag started on locked level"
-        );
-    }
-
-    #[test]
-    fn sequence_delete_selected_level() {
-        // Create a level, select it, then press Delete to remove it.
-        let mut state = test_state_with_level(150.0);
-        assert_eq!(state.levels.len(), 1);
-
-        // Select the level via SelectLevel action
-        state.apply_action(&ChartAction::SelectLevel { id: 1 });
-        assert_eq!(state.selected_level, Some(1));
-
-        // Press Delete key
-        let actions = dispatch(&mut state, ChartEvent::KeyPressed { key: Key::Delete });
-
-        // Verify DeleteSelectedLevel action emitted
-        assert!(
-            actions
-                .iter()
-                .any(|a| matches!(a, ChartAction::DeleteSelectedLevel)),
-            "expected DeleteSelectedLevel action, got {:?}",
-            actions
-        );
-
-        // Verify the level was actually removed by apply_action (via dispatch)
-        assert!(state.levels.is_empty(), "level should have been deleted");
-        assert_eq!(
-            state.selected_level, None,
-            "selection should be cleared after delete"
-        );
     }
 }

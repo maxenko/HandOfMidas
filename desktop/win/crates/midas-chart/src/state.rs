@@ -10,7 +10,6 @@ use crate::crosshair_tool::CrosshairTool;
 use crate::dirty::DirtyFlags;
 use crate::interaction::ChartAction;
 use crate::level_tool::LevelTool;
-use crate::levels::HorizontalLevel;
 
 /// What the active tool needs from the crosshair.
 ///
@@ -114,10 +113,11 @@ pub struct ChartState {
     pub camera: Camera2D,
     /// Generation-counter dirty flags.
     pub dirty: DirtyFlags,
-    /// User-defined horizontal price levels.
-    pub levels: Vec<HorizontalLevel>,
     /// Self-contained crosshair component.
     pub crosshair: CrosshairTool,
+    /// Current crosshair position in chart-local pixels, or `None` if inactive.
+    #[deprecated(note = "Use `crosshair.render_pos()` instead")]
+    pub crosshair_pos: Option<(f32, f32)>,
     /// Currently selected level ID, or `None` if no level is selected.
     pub selected_level: Option<u64>,
     /// Current interaction mode (state machine state).
@@ -129,6 +129,10 @@ pub struct ChartState {
     pub momentum: Option<Momentum>,
     /// Active Y-axis auto-scale animation, or `None` if not animating.
     pub y_animation: Option<YAnimation>,
+    /// Whether the left mouse button is currently held down.
+    /// Crosshair is only visible when this is true.
+    #[deprecated(note = "Use `crosshair.left_mouse_down()` instead")]
+    pub left_mouse_down: bool,
     /// Data time bounds (first and last candle timestamps in ms).
     /// Used to clamp scroll pan so the user can't scroll past the data edges.
     /// Set by the app when data is loaded.
@@ -156,23 +160,23 @@ pub struct ChartState {
     pub show_levels: bool,
     /// Self-contained level tool state machine (Phase 2+).
     pub level_tool: LevelTool,
-    /// Next level ID to assign (monotonically increasing).
-    next_level_id: u64,
 }
 
 impl ChartState {
     /// Create a new `ChartState` with the given camera and default values.
+    #[allow(deprecated)]
     pub fn new(camera: Camera2D) -> Self {
         Self {
             camera,
             dirty: DirtyFlags::new(),
-            levels: Vec::new(),
             crosshair: CrosshairTool::new(),
+            crosshair_pos: None,
             selected_level: None,
             interaction_mode: InteractionMode::Idle,
             drag_start: None,
             momentum: None,
             y_animation: None,
+            left_mouse_down: false,
             data_time_start: 0.0,
             data_time_end: f64::MAX,
             collapse_gaps: false,
@@ -181,15 +185,7 @@ impl ChartState {
             show_volume_profile: false,
             show_levels: true,
             level_tool: LevelTool::default(),
-            next_level_id: 1,
         }
-    }
-
-    /// Allocate and return the next unique level ID.
-    pub fn alloc_level_id(&mut self) -> u64 {
-        let id = self.next_level_id;
-        self.next_level_id += 1;
-        id
     }
 
     /// Query the collective cursor requirement of all active tools.
@@ -286,13 +282,17 @@ impl ChartState {
                 self.dirty.mark_camera();
             }
 
+            #[allow(deprecated)]
             ChartAction::SetCrosshair { x, y } => {
                 self.crosshair.set_pos(*x, *y);
+                self.crosshair_pos = Some((*x, *y));
                 self.dirty.mark_crosshair();
             }
 
+            #[allow(deprecated)]
             ChartAction::ClearCrosshair => {
                 self.crosshair.force_hide();
+                self.crosshair_pos = None;
                 self.dirty.mark_crosshair();
             }
 
@@ -324,40 +324,20 @@ impl ChartState {
                 self.momentum = None;
             }
 
-            ChartAction::CreateLevel { price } => {
-                let id = self.alloc_level_id();
-                self.levels.push(HorizontalLevel {
-                    id,
-                    price: *price,
-                    color: [0.85, 0.85, 0.85, 0.8], // gray (last palette color)
-                    line_width: 1.0,
-                    label: None,
-                    icon: crate::levels::LevelIcon::None,
-                    locked: false,
-                });
-                self.dirty.mark_levels();
+            ChartAction::CreateLevel { .. } => {
+                // Handled by the app layer via LevelStore.
             }
 
             ChartAction::SelectLevel { id } => {
                 self.selected_level = Some(*id);
             }
 
-            ChartAction::DragLevel { id, new_price } => {
-                if let Some(level) = self.levels.iter_mut().find(|l| l.id == *id) {
-                    level.price = *new_price;
-                    self.dirty.mark_levels();
-                }
+            ChartAction::DragLevel { .. } => {
+                // Handled by the app layer via LevelStore.
             }
 
             ChartAction::DeleteSelectedLevel => {
-                if let Some(sel_id) = self.selected_level {
-                    let is_locked = self.levels.iter().any(|l| l.id == sel_id && l.locked);
-                    if !is_locked {
-                        self.selected_level = None;
-                        self.levels.retain(|l| l.id != sel_id);
-                        self.dirty.mark_levels();
-                    }
-                }
+                // Handled by the app layer via LevelStore.
             }
 
             ChartAction::DeselectLevel => {
@@ -397,10 +377,12 @@ impl ChartState {
                 self.dirty.mark_all();
             }
 
+            #[allow(deprecated)]
             ChartAction::CancelPlacing => {
                 self.level_tool.cancel();
                 self.crosshair.force_hide();
                 self.interaction_mode = InteractionMode::Idle;
+                self.crosshair_pos = None;
                 self.dirty.mark_crosshair();
             }
         }
@@ -488,6 +470,7 @@ impl ChartState {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
 
@@ -506,8 +489,7 @@ mod tests {
     #[test]
     fn new_state_has_defaults() {
         let state = ChartState::new(test_camera());
-        assert!(state.levels.is_empty());
-        assert_eq!(state.crosshair.render_pos(), None);
+        assert_eq!(state.crosshair_pos, None);
         assert_eq!(state.drag_start, None);
         assert_eq!(state.selected_level, None);
         assert_eq!(state.interaction_mode, InteractionMode::Idle);
@@ -531,14 +513,6 @@ mod tests {
         assert_eq!(state.camera.viewport_height, 1080);
         assert!((state.camera.price_low - 100.0).abs() < f64::EPSILON);
         assert!((state.camera.price_high - 200.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn alloc_level_id_increments() {
-        let mut state = ChartState::new(test_camera());
-        assert_eq!(state.alloc_level_id(), 1);
-        assert_eq!(state.alloc_level_id(), 2);
-        assert_eq!(state.alloc_level_id(), 3);
     }
 
     // --- apply_action tests ---
@@ -623,45 +597,8 @@ mod tests {
     }
 
     #[test]
-    fn apply_create_level() {
+    fn apply_select_and_deselect_level() {
         let mut state = ChartState::new(test_camera());
-        state.apply_action(&ChartAction::CreateLevel { price: 150.0 });
-        assert_eq!(state.levels.len(), 1);
-        assert_eq!(state.levels[0].id, 1);
-        assert!((state.levels[0].price - 150.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn apply_select_and_delete_level() {
-        let mut state = ChartState::new(test_camera());
-        state.apply_action(&ChartAction::CreateLevel { price: 150.0 });
-        state.apply_action(&ChartAction::CreateLevel { price: 175.0 });
-        assert_eq!(state.levels.len(), 2);
-
-        state.apply_action(&ChartAction::SelectLevel { id: 1 });
-        assert_eq!(state.selected_level, Some(1));
-
-        state.apply_action(&ChartAction::DeleteSelectedLevel);
-        assert_eq!(state.levels.len(), 1);
-        assert_eq!(state.levels[0].id, 2);
-        assert_eq!(state.selected_level, None);
-    }
-
-    #[test]
-    fn apply_drag_level() {
-        let mut state = ChartState::new(test_camera());
-        state.apply_action(&ChartAction::CreateLevel { price: 150.0 });
-        state.apply_action(&ChartAction::DragLevel {
-            id: 1,
-            new_price: 160.0,
-        });
-        assert!((state.levels[0].price - 160.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn apply_deselect_level() {
-        let mut state = ChartState::new(test_camera());
-        state.apply_action(&ChartAction::CreateLevel { price: 150.0 });
         state.apply_action(&ChartAction::SelectLevel { id: 1 });
         assert_eq!(state.selected_level, Some(1));
         state.apply_action(&ChartAction::DeselectLevel);
@@ -672,10 +609,10 @@ mod tests {
     fn apply_set_and_clear_crosshair() {
         let mut state = ChartState::new(test_camera());
         state.apply_action(&ChartAction::SetCrosshair { x: 100.0, y: 200.0 });
-        assert_eq!(state.crosshair.render_pos(), Some((100.0, 200.0)));
+        assert_eq!(state.crosshair_pos, Some((100.0, 200.0)));
 
         state.apply_action(&ChartAction::ClearCrosshair);
-        assert_eq!(state.crosshair.render_pos(), None);
+        assert_eq!(state.crosshair_pos, None);
     }
 
     #[test]

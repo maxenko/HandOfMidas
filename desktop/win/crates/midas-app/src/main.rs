@@ -6,6 +6,7 @@
 mod app;
 mod chart_widget;
 mod layout;
+mod level_store;
 mod theme;
 
 use app::{Message, MidasApp};

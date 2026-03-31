@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use iced::Task;
 
-use midas_core::config::{AppConfig, ChartConfig, LevelConfig};
+use midas_core::config::{AppConfig, ChartConfig};
 
 use super::{Message, MidasApp, CONFIG_SAVE_DEBOUNCE_SECS};
 
@@ -18,23 +18,10 @@ impl MidasApp {
             .filter_map(|id| self.charts.get(id))
             .map(|panel| {
                 let cam = &panel.chart_state.camera;
-                let levels = panel
-                    .chart_state
-                    .levels
-                    .iter()
-                    .map(|l| LevelConfig {
-                        price: l.price,
-                        color: l.color,
-                        line_width: l.line_width,
-                        label: l.label.clone(),
-                        icon: l.icon.to_str_id().to_string(),
-                        locked: l.locked,
-                    })
-                    .collect();
                 ChartConfig {
                     symbol: panel.symbol.clone(),
                     timeframe: panel.timeframe.display_name().to_string(),
-                    levels,
+                    levels: vec![], // deprecated — now in top-level levels map
                     camera_time_start: Some(cam.time_start),
                     camera_time_end: Some(cam.time_end),
                     camera_price_low: Some(cam.price_low),
@@ -67,6 +54,7 @@ impl MidasApp {
                 mode: "dark".into(),
             },
             charts: chart_configs,
+            levels: self.level_store.to_config(),
         }
     }
 

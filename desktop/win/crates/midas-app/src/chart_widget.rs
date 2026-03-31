@@ -121,6 +121,10 @@ pub struct ChartWidgetState {
     /// Prevents the snapshot sync from reverting the cancel before the
     /// message round-trips to the app.
     tool_cancelled_this_frame: bool,
+    /// Level price override during drag for immediate visual feedback.
+    /// `(level_id, new_price)` — applied to the snapshot levels copy
+    /// when building ChartInput. Cleared when drag ends.
+    drag_price_override: Option<(u64, f64)>,
 }
 
 impl shader::Program<Message> for ChartProgram {
@@ -151,11 +155,6 @@ impl shader::Program<Message> for ChartProgram {
         chart_state.dirty = self.snapshot.dirty.clone();
         chart_state.data_time_start = self.snapshot.data_time_start;
         chart_state.data_time_end = self.snapshot.data_time_end;
-        // Sync levels from snapshot unless actively dragging (drag needs
-        // local positions for immediate visual feedback).
-        if !chart_state.level_tool.is_dragging() {
-            chart_state.levels = self.snapshot.levels.clone();
-        }
         // Sync level_tool from snapshot when the local tool is idle,
         // UNLESS the widget just cancelled the tool this frame (the
         // snapshot hasn't caught up yet and would revert the cancel).
@@ -189,6 +188,11 @@ impl shader::Program<Message> for ChartProgram {
                 chart_state.level_tool.cancel();
                 chart_state.drag_start = None;
                 chart_state.crosshair.force_hide();
+                #[allow(deprecated)]
+                {
+                    chart_state.left_mouse_down = false;
+                    chart_state.crosshair_pos = None;
+                }
 
                 state.last_viewport = Some(new_vp);
                 return Some(shader::Action::publish(Message::ChartViewportChanged(
@@ -244,7 +248,13 @@ impl shader::Program<Message> for ChartProgram {
                 .as_ref()
                 .map(|d| d.as_ref() as &dyn midas_core::CandleData);
             let is_collapsed = self.snapshot.collapse_gaps;
-            let actions = handle_event(chart_state, chart_event, data_ref, is_collapsed);
+            let actions = handle_event(
+                chart_state,
+                chart_event,
+                data_ref,
+                is_collapsed,
+                &self.snapshot.levels,
+            );
             for action in &actions {
                 // Apply volume scale locally so the triangle moves
                 // immediately during drag (before the message round-trip
@@ -260,12 +270,14 @@ impl shader::Program<Message> for ChartProgram {
                 if matches!(action, midas_chart::ChartAction::CancelPlacing) {
                     state.tool_cancelled_this_frame = true;
                 }
-                // Apply level drag locally so the line moves immediately
+                // Store drag price override for immediate visual feedback
                 // (before the message round-trip through the app).
                 if let midas_chart::ChartAction::DragLevel { id, new_price } = action {
-                    if let Some(level) = chart_state.levels.iter_mut().find(|l| l.id == *id) {
-                        level.price = *new_price;
-                    }
+                    state.drag_price_override = Some((*id, *new_price));
+                }
+                // Clear drag override when drag ends.
+                if !chart_state.level_tool.is_dragging() {
+                    state.drag_price_override = None;
                 }
                 if let Some(msg) = action_to_message(self.chart_id, action, &chart_state.camera) {
                     messages.push(msg);
@@ -373,6 +385,28 @@ impl shader::Program<Message> for ChartProgram {
             dirty.crosshair += 1;
         }
 
+        // Build levels with drag override applied for immediate visual feedback.
+        let effective_levels: Vec<midas_chart::HorizontalLevel> = if snap.show_levels {
+            if let Some((drag_id, drag_price)) = state.drag_price_override {
+                snap.levels
+                    .iter()
+                    .map(|l| {
+                        if l.id == drag_id {
+                            let mut clone = l.clone();
+                            clone.price = drag_price;
+                            clone
+                        } else {
+                            l.clone()
+                        }
+                    })
+                    .collect()
+            } else {
+                snap.levels.clone()
+            }
+        } else {
+            Vec::new()
+        };
+
         // Build the clean input contract for chart scene computation.
         let default_level_tool = LevelTool::default();
         let input = ChartInput {
@@ -393,18 +427,7 @@ impl shader::Program<Message> for ChartProgram {
                 .as_ref()
                 .and_then(|cs| cs.crosshair.render_pos())
                 .or(snap.crosshair_pos),
-            // Use widget's live levels during drag for immediate visual feedback.
-            // Pass empty slice when levels are hidden.
-            levels: if snap.show_levels {
-                state
-                    .chart_state
-                    .as_ref()
-                    .filter(|cs| cs.level_tool.is_dragging())
-                    .map(|cs| cs.levels.as_slice())
-                    .unwrap_or(&snap.levels)
-            } else {
-                &[]
-            },
+            levels: &effective_levels,
             collapse_gaps: snap.collapse_gaps,
             timeline_border_ratio: live_timeline_border_ratio,
             volume_scale: live_volume_scale,
@@ -476,7 +499,7 @@ impl shader::Program<Message> for ChartProgram {
 
             // Check horizontal levels — show resize cursor on non-locked levels.
             if let Some(cs) = &state.chart_state {
-                for level in &cs.levels {
+                for level in &self.snapshot.levels {
                     if level.locked {
                         continue;
                     }

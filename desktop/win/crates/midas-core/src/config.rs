@@ -8,6 +8,7 @@
 //! Writes use atomic file replacement via `tempfile::NamedTempFile` to
 //! prevent corruption if the process is interrupted mid-save.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -41,6 +42,12 @@ pub struct AppConfig {
     /// Per-chart configuration, persisted across sessions.
     #[serde(default)]
     pub charts: Vec<ChartConfig>,
+    /// Per-ticker horizontal levels, keyed by symbol.
+    ///
+    /// Each key is a ticker symbol (e.g. `"AAPL"`) and the value is the
+    /// list of levels for that ticker. Serialized as `[[levels.AAPL]]` etc.
+    #[serde(default)]
+    pub levels: HashMap<String, Vec<LevelConfig>>,
 }
 
 /// Window geometry configuration.
@@ -81,8 +88,9 @@ pub struct ChartConfig {
     pub symbol: String,
     /// Timeframe display name (e.g. `"1D"`, `"5m"`).
     pub timeframe: String,
-    /// User-defined horizontal price levels on this chart.
-    #[serde(default)]
+    /// DEPRECATED: Levels migrated to top-level `[levels]` table.
+    /// Retained for one-time migration from old config format.
+    #[serde(default, skip_serializing)]
     pub levels: Vec<LevelConfig>,
     /// Camera time-axis start (restored on load so user sees same view).
     #[serde(default)]
@@ -179,6 +187,7 @@ impl Default for AppConfig {
                 mode: "dark".into(),
             },
             charts: Vec::new(),
+            levels: HashMap::new(),
         }
     }
 }
@@ -209,7 +218,8 @@ impl AppConfig {
             return Ok(Self::default());
         }
 
-        let config: Self = toml::from_str(&content)?;
+        let mut config: Self = toml::from_str(&content)?;
+        migrate_levels(&mut config);
         Ok(config)
     }
 
@@ -228,6 +238,38 @@ impl AppConfig {
         std::io::Write::write_all(&mut tmp, content.as_bytes())?;
         tmp.persist(path).map_err(std::io::Error::from)?;
         Ok(())
+    }
+}
+
+// ── Migration ───────────────────────────────────────────────────────
+
+/// One-time migration: move levels from per-chart `[[charts]].levels`
+/// to the top-level `[levels.SYMBOL]` table.
+///
+/// If `config.levels` already has entries, the migration is skipped
+/// (config is already in the new format or was freshly created).
+fn migrate_levels(config: &mut AppConfig) {
+    if !config.levels.is_empty() {
+        return; // already migrated or new config
+    }
+    // Collect chart data first to avoid borrow conflict
+    // (&config.charts immutable vs &mut config.levels).
+    let chart_data: Vec<_> = config
+        .charts
+        .iter()
+        .filter(|c| !c.levels.is_empty())
+        .map(|c| (c.symbol.clone(), c.levels.clone()))
+        .collect();
+    for (symbol, levels) in chart_data {
+        let ticker_levels = config.levels.entry(symbol).or_default();
+        for level in &levels {
+            let is_dup = ticker_levels
+                .iter()
+                .any(|existing| (existing.price - level.price).abs() < 0.0001);
+            if !is_dup {
+                ticker_levels.push(level.clone());
+            }
+        }
     }
 }
 
@@ -281,6 +323,28 @@ mod tests {
         let dir = temp_dir();
         let path = dir.join("roundtrip.toml");
 
+        let mut msft_levels = HashMap::new();
+        msft_levels.insert(
+            "MSFT".into(),
+            vec![
+                LevelConfig {
+                    price: 420.50,
+                    color: [1.0, 0.0, 0.0, 1.0],
+                    line_width: 2.0,
+                    label: None,
+                    icon: "none".into(),
+                    locked: false,
+                },
+                LevelConfig {
+                    price: 380.25,
+                    color: [0.0, 1.0, 0.5, 0.8],
+                    line_width: 1.5,
+                    label: None,
+                    icon: "none".into(),
+                    locked: false,
+                },
+            ],
+        );
         let config = AppConfig {
             window: WindowConfig {
                 width: 1920,
@@ -294,24 +358,7 @@ mod tests {
             charts: vec![ChartConfig {
                 symbol: "MSFT".into(),
                 timeframe: "4H".into(),
-                levels: vec![
-                    LevelConfig {
-                        price: 420.50,
-                        color: [1.0, 0.0, 0.0, 1.0],
-                        line_width: 2.0,
-                        label: None,
-                        icon: "none".into(),
-                        locked: false,
-                    },
-                    LevelConfig {
-                        price: 380.25,
-                        color: [0.0, 1.0, 0.5, 0.8],
-                        line_width: 1.5,
-                        label: None,
-                        icon: "none".into(),
-                        locked: false,
-                    },
-                ],
+                levels: vec![],
                 camera_time_start: Some(1_000_000.0),
                 camera_time_end: Some(2_000_000.0),
                 camera_price_low: Some(350.0),
@@ -324,6 +371,7 @@ mod tests {
                 viewport_width: None,
                 viewport_height: None,
             }],
+            levels: msft_levels,
         };
 
         config.save(&path).expect("save config");
@@ -336,13 +384,14 @@ mod tests {
         assert_eq!(loaded.charts.len(), 1);
         assert_eq!(loaded.charts[0].symbol, "MSFT");
         assert_eq!(loaded.charts[0].timeframe, "4H");
-        assert_eq!(loaded.charts[0].levels.len(), 2);
-        assert!((loaded.charts[0].levels[0].price - 420.50).abs() < f64::EPSILON);
-        assert_eq!(loaded.charts[0].levels[0].color, [1.0, 0.0, 0.0, 1.0]);
-        assert_eq!(loaded.charts[0].levels[0].line_width, 2.0);
-        assert!((loaded.charts[0].levels[1].price - 380.25).abs() < f64::EPSILON);
-        assert_eq!(loaded.charts[0].levels[1].color, [0.0, 1.0, 0.5, 0.8]);
-        assert_eq!(loaded.charts[0].levels[1].line_width, 1.5);
+        // Levels are in the top-level map, not per-chart.
+        assert_eq!(loaded.levels["MSFT"].len(), 2);
+        assert!((loaded.levels["MSFT"][0].price - 420.50).abs() < f64::EPSILON);
+        assert_eq!(loaded.levels["MSFT"][0].color, [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(loaded.levels["MSFT"][0].line_width, 2.0);
+        assert!((loaded.levels["MSFT"][1].price - 380.25).abs() < f64::EPSILON);
+        assert_eq!(loaded.levels["MSFT"][1].color, [0.0, 1.0, 0.5, 0.8]);
+        assert_eq!(loaded.levels["MSFT"][1].line_width, 1.5);
         // Camera fields
         assert_eq!(loaded.charts[0].camera_time_start, Some(1_000_000.0));
         assert_eq!(loaded.charts[0].camera_time_end, Some(2_000_000.0));
@@ -404,6 +453,28 @@ mod tests {
         let dir = temp_dir();
         let path = dir.join("levels.toml");
 
+        let mut aapl_levels = HashMap::new();
+        aapl_levels.insert(
+            "AAPL".into(),
+            vec![
+                LevelConfig {
+                    price: 150.0,
+                    color: [1.0, 0.843, 0.0, 1.0],
+                    line_width: 1.0,
+                    label: None,
+                    icon: "none".into(),
+                    locked: false,
+                },
+                LevelConfig {
+                    price: 175.50,
+                    color: [0.0, 1.0, 0.0, 1.0],
+                    line_width: 3.0,
+                    label: None,
+                    icon: "none".into(),
+                    locked: false,
+                },
+            ],
+        );
         let config = AppConfig {
             window: WindowConfig {
                 width: 1280,
@@ -417,24 +488,7 @@ mod tests {
                 ChartConfig {
                     symbol: "AAPL".into(),
                     timeframe: "1D".into(),
-                    levels: vec![
-                        LevelConfig {
-                            price: 150.0,
-                            color: [1.0, 0.843, 0.0, 1.0],
-                            line_width: 1.0,
-                            label: None,
-                            icon: "none".into(),
-                            locked: false,
-                        },
-                        LevelConfig {
-                            price: 175.50,
-                            color: [0.0, 1.0, 0.0, 1.0],
-                            line_width: 3.0,
-                            label: None,
-                            icon: "none".into(),
-                            locked: false,
-                        },
-                    ],
+                    levels: vec![],
                     camera_time_start: None,
                     camera_time_end: None,
                     camera_price_low: None,
@@ -464,6 +518,7 @@ mod tests {
                     viewport_height: None,
                 },
             ],
+            levels: aapl_levels,
         };
 
         config.save(&path).expect("save config");
@@ -471,16 +526,19 @@ mod tests {
 
         assert_eq!(loaded.charts.len(), 2);
 
-        // First chart with levels.
+        // First chart (no per-chart levels anymore).
         assert_eq!(loaded.charts[0].symbol, "AAPL");
         assert_eq!(loaded.charts[0].timeframe, "1D");
-        assert_eq!(loaded.charts[0].levels.len(), 2);
-        assert!((loaded.charts[0].levels[0].price - 150.0).abs() < f64::EPSILON);
-        assert_eq!(loaded.charts[0].levels[0].line_width, 1.0);
-        assert!((loaded.charts[0].levels[1].price - 175.50).abs() < f64::EPSILON);
-        assert_eq!(loaded.charts[0].levels[1].line_width, 3.0);
+        assert!(loaded.charts[0].levels.is_empty());
         assert!(!loaded.charts[0].collapse_gaps);
         assert_eq!(loaded.charts[0].camera_time_start, None);
+
+        // Levels are in the top-level map.
+        assert_eq!(loaded.levels["AAPL"].len(), 2);
+        assert!((loaded.levels["AAPL"][0].price - 150.0).abs() < f64::EPSILON);
+        assert_eq!(loaded.levels["AAPL"][0].line_width, 1.0);
+        assert!((loaded.levels["AAPL"][1].price - 175.50).abs() < f64::EPSILON);
+        assert_eq!(loaded.levels["AAPL"][1].line_width, 3.0);
 
         // Second chart without levels, with camera.
         assert_eq!(loaded.charts[1].symbol, "TSLA");
@@ -626,6 +684,7 @@ color = [1.0, 0.843, 0.0, 1.0]
                 viewport_width: None,
                 viewport_height: None,
             }],
+            levels: HashMap::new(),
         };
 
         // Write multiple times to ensure atomic replacement works.
@@ -664,6 +723,28 @@ color = [1.0, 0.843, 0.0, 1.0]
         let dir = temp_dir();
         let path = dir.join("full_roundtrip.toml");
 
+        let mut spy_levels = HashMap::new();
+        spy_levels.insert(
+            "SPY".into(),
+            vec![
+                LevelConfig {
+                    price: 500.0,
+                    color: [1.0, 0.0, 0.0, 1.0],
+                    line_width: 2.5,
+                    label: None,
+                    icon: "none".into(),
+                    locked: false,
+                },
+                LevelConfig {
+                    price: 480.0,
+                    color: [0.0, 1.0, 0.0, 0.7],
+                    line_width: 0.5,
+                    label: None,
+                    icon: "none".into(),
+                    locked: false,
+                },
+            ],
+        );
         let config = AppConfig {
             window: WindowConfig {
                 width: 2560,
@@ -678,24 +759,7 @@ color = [1.0, 0.843, 0.0, 1.0]
                 ChartConfig {
                     symbol: "SPY".into(),
                     timeframe: "5m".into(),
-                    levels: vec![
-                        LevelConfig {
-                            price: 500.0,
-                            color: [1.0, 0.0, 0.0, 1.0],
-                            line_width: 2.5,
-                            label: None,
-                            icon: "none".into(),
-                            locked: false,
-                        },
-                        LevelConfig {
-                            price: 480.0,
-                            color: [0.0, 1.0, 0.0, 0.7],
-                            line_width: 0.5,
-                            label: None,
-                            icon: "none".into(),
-                            locked: false,
-                        },
-                    ],
+                    levels: vec![],
                     camera_time_start: Some(1_700_000_000.0),
                     camera_time_end: Some(1_700_100_000.0),
                     camera_price_low: Some(470.0),
@@ -725,6 +789,7 @@ color = [1.0, 0.843, 0.0, 1.0]
                     viewport_height: None,
                 },
             ],
+            levels: spy_levels,
         };
 
         config.save(&path).expect("save full config");
@@ -735,7 +800,7 @@ color = [1.0, 0.843, 0.0, 1.0]
         assert_eq!(loaded.window.height, 1440);
         assert!(loaded.window.maximized);
 
-        // First chart: all fields populated
+        // First chart: camera fields populated
         let c0 = &loaded.charts[0];
         assert_eq!(c0.symbol, "SPY");
         assert_eq!(c0.timeframe, "5m");
@@ -744,16 +809,204 @@ color = [1.0, 0.843, 0.0, 1.0]
         assert_eq!(c0.camera_time_end, Some(1_700_100_000.0));
         assert_eq!(c0.camera_price_low, Some(470.0));
         assert_eq!(c0.camera_price_high, Some(510.0));
-        assert_eq!(c0.levels.len(), 2);
-        assert_eq!(c0.levels[0].line_width, 2.5);
-        assert_eq!(c0.levels[1].line_width, 0.5);
+        // Levels are in top-level map, not per-chart.
+        assert_eq!(loaded.levels["SPY"].len(), 2);
+        assert_eq!(loaded.levels["SPY"][0].line_width, 2.5);
+        assert_eq!(loaded.levels["SPY"][1].line_width, 0.5);
 
         // Second chart: no camera, no levels
         let c1 = &loaded.charts[1];
         assert_eq!(c1.symbol, "QQQ");
         assert!(!c1.collapse_gaps);
         assert_eq!(c1.camera_time_start, None);
-        assert!(c1.levels.is_empty());
+        assert!(!loaded.levels.contains_key("QQQ"));
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn migrate_levels_from_old_per_chart_format() {
+        let dir = temp_dir();
+        let path = dir.join("old_levels.toml");
+
+        // Old format: levels are inside [[charts]].
+        std::fs::write(
+            &path,
+            r#"
+[window]
+width = 1280
+height = 800
+
+[theme]
+mode = "dark"
+
+[[charts]]
+symbol = "AAPL"
+timeframe = "1D"
+
+[[charts.levels]]
+price = 185.50
+color = [0.0, 0.8, 0.0, 1.0]
+line_width = 1.0
+icon = "arrow_up"
+locked = false
+
+[[charts]]
+symbol = "AAPL"
+timeframe = "5m"
+
+[[charts.levels]]
+price = 185.50
+color = [0.0, 0.8, 0.0, 1.0]
+line_width = 1.0
+icon = "arrow_up"
+locked = false
+
+[[charts.levels]]
+price = 192.30
+color = [0.85, 0.85, 0.85, 0.8]
+line_width = 1.0
+icon = "none"
+locked = false
+"#,
+        )
+        .expect("write old format");
+
+        let config = AppConfig::load(&path).expect("load old format");
+
+        // Levels should have been migrated to top-level map.
+        assert!(config.levels.contains_key("AAPL"));
+        let aapl = &config.levels["AAPL"];
+        // 185.50 appears in both charts but should be deduplicated.
+        assert_eq!(aapl.len(), 2); // 185.50 + 192.30
+        assert!((aapl[0].price - 185.50).abs() < 0.001);
+        assert!((aapl[1].price - 192.30).abs() < 0.001);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn new_format_levels_round_trip() {
+        let dir = temp_dir();
+        let path = dir.join("new_levels.toml");
+
+        let mut levels = HashMap::new();
+        levels.insert(
+            "AAPL".into(),
+            vec![LevelConfig {
+                price: 185.50,
+                color: [0.0, 0.8, 0.0, 1.0],
+                line_width: 1.0,
+                label: Some("Support".into()),
+                icon: "arrow_up".into(),
+                locked: true,
+            }],
+        );
+
+        let config = AppConfig {
+            levels,
+            ..Default::default()
+        };
+        config.save(&path).expect("save new format");
+
+        let loaded = AppConfig::load(&path).expect("load new format");
+        assert_eq!(loaded.levels.len(), 1);
+        assert!(loaded.levels.contains_key("AAPL"));
+        let aapl = &loaded.levels["AAPL"];
+        assert_eq!(aapl.len(), 1);
+        assert!((aapl[0].price - 185.50).abs() < f64::EPSILON);
+        assert_eq!(aapl[0].label.as_deref(), Some("Support"));
+        assert_eq!(aapl[0].icon, "arrow_up");
+        assert!(aapl[0].locked);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn migration_skipped_when_new_format_already_has_levels() {
+        let dir = temp_dir();
+        let path = dir.join("already_migrated.toml");
+
+        // Config with both old per-chart levels and new top-level levels.
+        // Migration should be skipped because top-level levels exist.
+        std::fs::write(
+            &path,
+            r#"
+[window]
+width = 1280
+height = 800
+
+[theme]
+mode = "dark"
+
+[[charts]]
+symbol = "AAPL"
+timeframe = "1D"
+
+[[charts.levels]]
+price = 999.0
+color = [1.0, 0.0, 0.0, 1.0]
+line_width = 1.0
+icon = "none"
+locked = false
+
+[[levels.AAPL]]
+price = 185.50
+color = [0.0, 0.8, 0.0, 1.0]
+line_width = 1.0
+icon = "arrow_up"
+locked = false
+"#,
+        )
+        .expect("write mixed format");
+
+        let config = AppConfig::load(&path).expect("load mixed format");
+        // Top-level levels should be preserved (not overwritten by migration).
+        assert_eq!(config.levels["AAPL"].len(), 1);
+        assert!((config.levels["AAPL"][0].price - 185.50).abs() < 0.001);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn chart_config_levels_not_serialized() {
+        let dir = temp_dir();
+        let path = dir.join("no_chart_levels.toml");
+
+        let config = AppConfig {
+            charts: vec![ChartConfig {
+                symbol: "AAPL".into(),
+                timeframe: "1D".into(),
+                levels: vec![LevelConfig {
+                    price: 100.0,
+                    color: [1.0, 0.0, 0.0, 1.0],
+                    line_width: 1.0,
+                    label: None,
+                    icon: "none".into(),
+                    locked: false,
+                }],
+                camera_time_start: None,
+                camera_time_end: None,
+                camera_price_low: None,
+                camera_price_high: None,
+                collapse_gaps: false,
+                timeline_border_ratio: 0.20,
+                volume_scale: 1.0,
+                show_volume_profile: false,
+                show_levels: true,
+                viewport_width: None,
+                viewport_height: None,
+            }],
+            ..Default::default()
+        };
+
+        config.save(&path).expect("save");
+        // Read raw TOML to verify no per-chart levels serialized.
+        let raw = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            !raw.contains("charts.levels"),
+            "per-chart levels should not be serialized"
+        );
 
         cleanup(&dir);
     }
