@@ -109,10 +109,10 @@ pub struct MidasApp {
     /// Used to ghost the preview line on sibling charts and to clear
     /// stale previews on non-source charts (cross-window jumps).
     pub placing_preview: Option<(ChartId, String, f64)>,
-    /// Cross-chart crosshair sync: (source chart, timestamp_ms, symbol).
-    /// When set, sibling charts (same symbol, different chart) render a
-    /// ghost vertical line at the corresponding timestamp.
-    pub crosshair_sync: Option<(ChartId, i64, String)>,
+    /// Cross-chart crosshair sync: (source chart, timestamp_ms, price, symbol).
+    /// When set, sibling charts (same symbol, different chart) render
+    /// ghost crosshair lines at the corresponding timestamp and price.
+    pub crosshair_sync: Option<(ChartId, i64, f64, String)>,
     /// Deterministic test data generator. Any ticker produces instant data.
     test_data: TestDataProvider,
 }
@@ -903,9 +903,9 @@ impl MidasApp {
                     }
                     chart.chart_state.dirty.mark_crosshair();
                 }
-                // Cross-chart crosshair sync: compute snapped timestamp.
+                // Cross-chart crosshair sync: compute snapped timestamp + price.
                 match pos {
-                    Some((x, _)) => {
+                    Some((x, y)) => {
                         if let Some(chart) = self.charts.get(&chart_id) {
                             if let Some(ref data) = chart.data {
                                 let cam = &chart.chart_state.camera;
@@ -919,8 +919,9 @@ impl MidasApp {
                                     let idx = data.find_index_by_time(cursor_time as i64);
                                     data.timestamps[idx]
                                 };
+                                let price = cam.y_to_price(y);
                                 self.crosshair_sync =
-                                    Some((chart_id, ts, chart.symbol.clone()));
+                                    Some((chart_id, ts, price, chart.symbol.clone()));
                             }
                         }
                     }
@@ -929,7 +930,7 @@ impl MidasApp {
                         if self
                             .crosshair_sync
                             .as_ref()
-                            .map_or(false, |(src, _, _)| *src == chart_id)
+                            .map_or(false, |(src, _, _, _)| *src == chart_id)
                         {
                             self.crosshair_sync = None;
                         }

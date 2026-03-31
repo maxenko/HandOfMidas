@@ -1356,16 +1356,17 @@ fn build_level_editor<'a>(
 /// Compute ghost crosshair position for a sibling chart from crosshair sync.
 ///
 /// Returns `Some((pixel_x, pixel_y))` when `sync` points to a different chart
-/// with the same symbol. `pixel_y` is the close price of the nearest candle
-/// at the synced timestamp, converted to screen Y.
+/// with the same symbol. The Y position uses the source chart's raw cursor
+/// price (same ticker = same price axis) so the horizontal arm tracks
+/// smoothly instead of jumping between candle closes.
 fn compute_ghost_crosshair(
-    sync: &Option<(ChartId, i64, String)>,
+    sync: &Option<(ChartId, i64, f64, String)>,
     this_chart: ChartId,
     symbol: &str,
     chart_state: &midas_chart::state::ChartState,
     data: Option<&midas_data::CandleBuffer>,
 ) -> Option<(f32, f32)> {
-    let (src_id, ts, sym) = sync.as_ref()?;
+    let (src_id, ts, price, sym) = sync.as_ref()?;
     if *src_id == this_chart || sym != symbol {
         return None;
     }
@@ -1374,10 +1375,9 @@ fn compute_ghost_crosshair(
         return None;
     }
     let cam = &chart_state.camera;
-    let idx = data.find_index_by_time(*ts);
-    let close = data.closes[idx];
-    let gy = cam.snap_to_pixel(cam.price_to_y(close as f64));
+    let gy = cam.snap_to_pixel(cam.price_to_y(*price));
     let gx = if chart_state.collapse_gaps {
+        let idx = data.find_index_by_time(*ts);
         cam.time_to_x(idx as f64 + 0.5) as f32
     } else {
         cam.time_to_x(*ts as f64) as f32
