@@ -103,6 +103,8 @@ pub struct MidasApp {
     pub monitor_size: Option<(u32, u32)>,
     /// Centralized per-ticker level store, shared across all charts.
     pub level_store: LevelStore,
+    /// Whether level placement mode is globally active across all charts.
+    pub level_placing: bool,
     /// Deterministic test data generator. Any ticker produces instant data.
     test_data: TestDataProvider,
 }
@@ -408,6 +410,7 @@ impl MidasApp {
             window_size: initial_size,
             monitor_size: None,
             level_store,
+            level_placing: false,
             test_data: TestDataProvider::new(),
         };
 
@@ -920,11 +923,7 @@ impl MidasApp {
                         self.level_store.levels_for(&ticker).len()
                     );
                     self.mark_levels_dirty_for_ticker(&ticker);
-                    // Defensively cancel level tool (interaction layer already
-                    // cancelled, but ensures consistency).
-                    if let Some(chart) = self.charts.get_mut(&chart_id) {
-                        chart.chart_state.level_tool.cancel();
-                    }
+                    self.level_placing = false;
                     self.mark_config_dirty();
                 }
                 Task::none()
@@ -996,11 +995,8 @@ impl MidasApp {
                 Task::none()
             }
 
-            Message::ChartCancelPlacing(chart_id) => {
-                if let Some(chart) = self.charts.get_mut(&chart_id) {
-                    chart.chart_state.level_tool.cancel();
-                    chart.chart_state.dirty.mark_crosshair();
-                }
+            Message::ChartCancelPlacing(_chart_id) => {
+                self.level_placing = false;
                 Task::none()
             }
 
@@ -1169,19 +1165,7 @@ impl MidasApp {
 
             Message::DrawingPanelCreateLevel(chart_id) => {
                 self.focus_chart(chart_id);
-                if let Some(chart) = self.charts.get_mut(&chart_id) {
-                    if chart.chart_state.level_tool.is_placing() {
-                        chart.chart_state.level_tool.cancel();
-                        chart.chart_state.crosshair.force_hide();
-                        #[allow(deprecated)]
-                        {
-                            chart.chart_state.crosshair_pos = None;
-                        }
-                        chart.chart_state.dirty.mark_crosshair();
-                    } else {
-                        chart.chart_state.level_tool.activate();
-                    }
-                }
+                self.level_placing = !self.level_placing;
                 Task::none()
             }
 
@@ -1377,27 +1361,12 @@ impl MidasApp {
                 "6" => self.set_active_timeframe(Timeframe::D1),
                 "7" => self.set_active_timeframe(Timeframe::W1),
                 "h" | "H" => {
-                    if let Some(active_id) = self.active_chart_id() {
-                        if let Some(chart) = self.charts.get_mut(&active_id) {
-                            chart.chart_state.level_tool.activate();
-                        }
-                    }
+                    self.level_placing = !self.level_placing;
                 }
                 _ => {}
             },
             Key::Named(Named::Escape) => {
-                // Cancel level tool on the active chart.
-                if let Some(active_id) = self.active_chart_id() {
-                    if let Some(chart) = self.charts.get_mut(&active_id) {
-                        chart.chart_state.level_tool.cancel();
-                        chart.chart_state.crosshair.force_hide();
-                        #[allow(deprecated)]
-                        {
-                            chart.chart_state.crosshair_pos = None;
-                        }
-                        chart.chart_state.dirty.mark_crosshair();
-                    }
-                }
+                self.level_placing = false;
             }
             Key::Named(Named::F11) => {
                 self.show_frame_overlay = !self.show_frame_overlay;

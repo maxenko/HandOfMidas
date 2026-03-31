@@ -57,6 +57,7 @@ impl MidasApp {
                 data_time_end: chart.chart_state.data_time_end,
                 editing_level_id: chart.editing_level_id,
                 level_tool: chart.chart_state.level_tool.clone(),
+                level_placing: self.level_placing,
             };
             // Use ChartId(0) for floating windows -- they don't participate
             // in the pane_grid's chart map.
@@ -86,8 +87,7 @@ impl MidasApp {
 
             // Build level-related overlays for floating window.
             let floating_chart_id = ChartId::new(0);
-            let is_placing = chart.chart_state.level_tool.is_placing();
-            let drawing_panel = build_drawing_panel(floating_chart_id, is_placing);
+            let drawing_panel = build_drawing_panel(floating_chart_id, self.level_placing);
 
             // Gerchik ATR overlay (always-on for intraday charts).
             let gerchik_atr =
@@ -518,6 +518,7 @@ impl MidasApp {
                 data_time_end: chart.chart_state.data_time_end,
                 editing_level_id: chart.editing_level_id,
                 level_tool: chart.chart_state.level_tool.clone(),
+                level_placing: self.level_placing,
             };
             let program = crate::chart_widget::ChartProgram { chart_id, snapshot };
             let shader = crate::chart_widget::chart_shader(program);
@@ -542,8 +543,7 @@ impl MidasApp {
                 build_price_label_overlay(camera, chart.chart_state.timeline_border_ratio);
 
             // Build level-related overlays.
-            let is_placing = chart.chart_state.level_tool.is_placing();
-            let drawing_panel = build_drawing_panel(chart_id, is_placing);
+            let drawing_panel = build_drawing_panel(chart_id, self.level_placing);
 
             // Gerchik ATR overlay (always-on for intraday charts).
             let gerchik_atr =

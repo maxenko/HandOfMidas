@@ -877,6 +877,8 @@ fn handle_suppressed_move(
                 raw_price
             };
             state.level_tool.preview_price = Some(price);
+        } else {
+            state.level_tool.preview_price = None;
         }
         state.crosshair.suppress();
         #[allow(deprecated)]

@@ -86,6 +86,8 @@ pub struct ChartRenderSnapshot {
     pub editing_level_id: Option<u64>,
     /// Self-contained level tool state (placement, drag, OHLC snap).
     pub level_tool: LevelTool,
+    /// Whether level placement mode is globally active (all charts).
+    pub level_placing: bool,
 }
 
 // ── ChartProgram ─────────────────────────────────────────────────────
@@ -155,14 +157,20 @@ impl shader::Program<Message> for ChartProgram {
         chart_state.dirty = self.snapshot.dirty.clone();
         chart_state.data_time_start = self.snapshot.data_time_start;
         chart_state.data_time_end = self.snapshot.data_time_end;
-        // Sync level_tool from snapshot when the local tool is idle,
-        // UNLESS the widget just cancelled the tool this frame (the
-        // snapshot hasn't caught up yet and would revert the cancel).
-        if !chart_state.level_tool.is_active() && !state.tool_cancelled_this_frame {
-            chart_state.level_tool = self.snapshot.level_tool.clone();
+        // Sync global placement state → per-widget level tool.
+        // Don't interfere with dragging (drag is always local).
+        if !chart_state.level_tool.is_dragging() {
+            if self.snapshot.level_placing
+                && !chart_state.level_tool.is_placing()
+                && !state.tool_cancelled_this_frame
+            {
+                chart_state.level_tool.activate();
+            } else if !self.snapshot.level_placing && chart_state.level_tool.is_placing() {
+                chart_state.level_tool.cancel();
+            }
         }
-        // Clear the flag once the snapshot has caught up.
-        if !self.snapshot.level_tool.is_active() {
+        // Clear cancel-guard once the app has caught up.
+        if !self.snapshot.level_placing {
             state.tool_cancelled_this_frame = false;
         }
         chart_state.timeline_border_ratio = self.snapshot.timeline_border_ratio;
