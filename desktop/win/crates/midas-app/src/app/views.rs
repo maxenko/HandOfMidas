@@ -58,6 +58,16 @@ impl MidasApp {
                 editing_level_id: chart.editing_level_id,
                 level_tool: chart.chart_state.level_tool.clone(),
                 level_placing: self.level_placing,
+                ghost_preview_price: self.placing_preview.as_ref().and_then(
+                    |(src_id, sym, price)| {
+                        if *src_id != ChartId::new(0) && chart.symbol == *sym {
+                            Some(*price)
+                        } else {
+                            None
+                        }
+                    },
+                ),
+                placing_cursor_chart: self.placing_preview.as_ref().map(|(id, _, _)| *id),
             };
             // Use ChartId(0) for floating windows -- they don't participate
             // in the pane_grid's chart map.
@@ -519,6 +529,16 @@ impl MidasApp {
                 editing_level_id: chart.editing_level_id,
                 level_tool: chart.chart_state.level_tool.clone(),
                 level_placing: self.level_placing,
+                ghost_preview_price: self.placing_preview.as_ref().and_then(
+                    |(src_id, sym, price)| {
+                        if *src_id != chart_id && chart.symbol == *sym {
+                            Some(*price)
+                        } else {
+                            None
+                        }
+                    },
+                ),
+                placing_cursor_chart: self.placing_preview.as_ref().map(|(id, _, _)| *id),
             };
             let program = crate::chart_widget::ChartProgram { chart_id, snapshot };
             let shader = crate::chart_widget::chart_shader(program);

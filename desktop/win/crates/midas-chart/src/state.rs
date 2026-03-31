@@ -385,6 +385,10 @@ impl ChartState {
                 self.crosshair_pos = None;
                 self.dirty.mark_crosshair();
             }
+
+            ChartAction::PlacingPreview { .. } => {
+                // Handled by the app layer (ghost preview propagation).
+            }
         }
     }
 

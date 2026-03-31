@@ -105,6 +105,10 @@ pub struct MidasApp {
     pub level_store: LevelStore,
     /// Whether level placement mode is globally active across all charts.
     pub level_placing: bool,
+    /// Active placement preview: (source chart, ticker, price).
+    /// Used to ghost the preview line on sibling charts and to clear
+    /// stale previews on non-source charts (cross-window jumps).
+    pub placing_preview: Option<(ChartId, String, f64)>,
     /// Deterministic test data generator. Any ticker produces instant data.
     test_data: TestDataProvider,
 }
@@ -183,6 +187,8 @@ pub enum Message {
     ChartClearAllLevels(ChartId),
     /// Cancel level placement mode (from widget Escape/right-click).
     ChartCancelPlacing(ChartId),
+    /// Report cursor position during level placement (for ghost preview).
+    PlacingCursorMoved(ChartId, f64),
     /// Set the timeline border position for a chart.
     ChartSetTimelineBorderRatio(ChartId, f64),
     /// Set the volume bar height multiplier for a chart.
@@ -411,6 +417,7 @@ impl MidasApp {
             monitor_size: None,
             level_store,
             level_placing: false,
+            placing_preview: None,
             test_data: TestDataProvider::new(),
         };
 
@@ -924,6 +931,7 @@ impl MidasApp {
                     );
                     self.mark_levels_dirty_for_ticker(&ticker);
                     self.level_placing = false;
+                    self.placing_preview = None;
                     self.mark_config_dirty();
                 }
                 Task::none()
@@ -997,6 +1005,14 @@ impl MidasApp {
 
             Message::ChartCancelPlacing(_chart_id) => {
                 self.level_placing = false;
+                self.placing_preview = None;
+                Task::none()
+            }
+
+            Message::PlacingCursorMoved(chart_id, price) => {
+                if let Some(ticker) = self.chart_ticker(chart_id) {
+                    self.placing_preview = Some((chart_id, ticker.to_owned(), price));
+                }
                 Task::none()
             }
 
@@ -1166,6 +1182,9 @@ impl MidasApp {
             Message::DrawingPanelCreateLevel(chart_id) => {
                 self.focus_chart(chart_id);
                 self.level_placing = !self.level_placing;
+                if !self.level_placing {
+                    self.placing_preview = None;
+                }
                 Task::none()
             }
 
@@ -1367,6 +1386,7 @@ impl MidasApp {
             },
             Key::Named(Named::Escape) => {
                 self.level_placing = false;
+                self.placing_preview = None;
             }
             Key::Named(Named::F11) => {
                 self.show_frame_overlay = !self.show_frame_overlay;

@@ -88,6 +88,12 @@ pub struct ChartRenderSnapshot {
     pub level_tool: LevelTool,
     /// Whether level placement mode is globally active (all charts).
     pub level_placing: bool,
+    /// Ghost preview price from a sibling chart (same symbol, different chart).
+    /// Rendered as a dim preview line. `None` if not applicable.
+    pub ghost_preview_price: Option<f64>,
+    /// Which chart currently has the placing cursor. Used to clear stale
+    /// previews on non-source charts (handles cross-window cursor jumps).
+    pub placing_cursor_chart: Option<ChartId>,
 }
 
 // ── ChartProgram ─────────────────────────────────────────────────────
@@ -359,6 +365,7 @@ impl shader::Program<Message> for ChartProgram {
                     background_color: dark_theme().background,
                     timeline_border_ratio: 0.20,
                     volume_scale: 1.0,
+                    ghost_preview_y: None,
                 };
             }
         };
@@ -415,8 +422,21 @@ impl shader::Program<Message> for ChartProgram {
             Vec::new()
         };
 
-        // Build the clean input contract for chart scene computation.
-        let default_level_tool = LevelTool::default();
+        // Build the level tool for chart scene computation.
+        // If this chart is NOT the source of the placing cursor, clear
+        // preview_price to avoid stale previews (handles cross-window jumps).
+        let is_placing_source = snap
+            .placing_cursor_chart
+            .map_or(true, |src| src == self.chart_id);
+        let mut effective_level_tool = state
+            .chart_state
+            .as_ref()
+            .map(|cs| cs.level_tool.clone())
+            .unwrap_or_default();
+        if !is_placing_source {
+            effective_level_tool.preview_price = None;
+        }
+
         let input = ChartInput {
             symbol: &snap.symbol,
             data: data.as_ref(),
@@ -441,14 +461,15 @@ impl shader::Program<Message> for ChartProgram {
             volume_scale: live_volume_scale,
             show_volume_profile: snap.show_volume_profile,
             dirty: &dirty,
-            level_tool: state
-                .chart_state
-                .as_ref()
-                .map(|cs| &cs.level_tool)
-                .unwrap_or(&default_level_tool),
+            level_tool: &effective_level_tool,
         };
 
         let scene = compute_chart_scene(&input);
+
+        // Pre-compute ghost preview Y from sibling chart price.
+        let ghost_preview_y = snap.ghost_preview_price.map(|price| {
+            camera.snap_to_pixel(camera.price_to_y(price))
+        });
 
         ChartPrimitive {
             chart_id: self.chart_id,
@@ -458,6 +479,7 @@ impl shader::Program<Message> for ChartProgram {
             background_color: theme.background,
             timeline_border_ratio: live_timeline_border_ratio,
             volume_scale: live_volume_scale,
+            ghost_preview_y,
         }
     }
 
@@ -556,6 +578,8 @@ pub struct ChartPrimitive {
     pub timeline_border_ratio: f32,
     /// Volume scale for handle position in prepare().
     pub volume_scale: f32,
+    /// Ghost preview line Y from a sibling chart (same symbol, different chart).
+    pub ghost_preview_y: Option<f32>,
 }
 
 impl std::fmt::Debug for ChartPrimitive {
@@ -717,6 +741,21 @@ impl shader::Primitive for ChartPrimitive {
                 rect: [0.0, preview_y - 3.0, vw, preview_y + 3.0],
                 color: [0.22, 0.55, 0.95, 0.2],
             });
+        }
+
+        // Ghost preview line on sibling charts (same symbol, different chart).
+        // Dimmer than the active preview to distinguish source from ghost.
+        if let Some(ghost_y) = self.ghost_preview_y {
+            if ghost_y >= 0.0 && ghost_y <= vh {
+                resources.grid_lines.push(GridLineInstance {
+                    rect: [0.0, ghost_y - 0.5, vw, ghost_y + 0.5],
+                    color: [0.22, 0.55, 0.95, 0.35],
+                });
+                resources.grid_lines.push(GridLineInstance {
+                    rect: [0.0, ghost_y - 2.0, vw, ghost_y + 2.0],
+                    color: [0.22, 0.55, 0.95, 0.1],
+                });
+            }
         }
 
         // Convert crosshair into two full-width GridLineInstance rectangles.
@@ -1016,6 +1055,9 @@ fn action_to_message(
         ChartAction::DeselectLevel => Some(Message::ChartDeselectLevel(chart_id)),
         ChartAction::DeleteSelectedLevel => Some(Message::ChartDeleteSelectedLevel(chart_id)),
         ChartAction::CancelPlacing => Some(Message::ChartCancelPlacing(chart_id)),
+        ChartAction::PlacingPreview { price } => {
+            Some(Message::PlacingCursorMoved(chart_id, *price))
+        }
         ChartAction::Redraw => None,
         _ => None,
     }

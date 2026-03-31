@@ -103,6 +103,9 @@ pub enum ChartAction {
     Redraw,
     /// Cancel the active drawing/placement mode.
     CancelPlacing,
+    /// Report the current preview price during level placement.
+    /// Emitted on each in-bounds mouse move while Placing.
+    PlacingPreview { price: f64 },
 }
 
 /// Mouse button discriminant.
@@ -877,6 +880,15 @@ fn handle_suppressed_move(
                 raw_price
             };
             state.level_tool.preview_price = Some(price);
+            state.crosshair.suppress();
+            #[allow(deprecated)]
+            {
+                state.crosshair_pos = None;
+            }
+            return vec![
+                ChartAction::PlacingPreview { price },
+                ChartAction::ClearCrosshair,
+            ];
         } else {
             state.level_tool.preview_price = None;
         }
