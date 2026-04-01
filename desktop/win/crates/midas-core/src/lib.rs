@@ -6,6 +6,7 @@
 pub mod candle_data;
 pub mod config;
 pub mod id;
+pub mod link;
 pub mod timeframe;
 
 // ── Planned modules (uncomment as implemented) ──────────────────────
@@ -16,5 +17,6 @@ pub use candle_data::CandleData;
 pub use config::AppConfig;
 /// Re-export common types at crate root for ergonomic imports.
 /// Example: `use midas_core::{Timeframe, CandleData, AppConfig};`
-pub use id::{ChartId, PaneId, SymbolId};
+pub use id::{ChartId, PaneId, SymbolId, WatchlistId};
+pub use link::{LinkColor, LinkMode};
 pub use timeframe::Timeframe;

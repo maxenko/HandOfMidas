@@ -25,6 +25,12 @@ pub struct PaneId(pub u64);
 )]
 pub struct SymbolId(pub u32);
 
+/// Unique identifier for a watchlist panel within the workspace layout.
+#[derive(
+    Copy, Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
+pub struct WatchlistId(pub u32);
+
 impl ChartId {
     /// Create a new `ChartId` from a raw `u32` value.
     pub const fn new(id: u32) -> Self {
@@ -46,6 +52,13 @@ impl SymbolId {
     }
 }
 
+impl WatchlistId {
+    /// Create a new `WatchlistId` from a raw `u32` value.
+    pub const fn new(id: u32) -> Self {
+        Self(id)
+    }
+}
+
 impl fmt::Display for ChartId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Chart({})", self.0)
@@ -61,6 +74,12 @@ impl fmt::Display for PaneId {
 impl fmt::Display for SymbolId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Symbol({})", self.0)
+    }
+}
+
+impl fmt::Display for WatchlistId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Watchlist({})", self.0)
     }
 }
 
@@ -130,10 +149,31 @@ mod tests {
     }
 
     #[test]
+    fn watchlist_id_equality() {
+        assert_eq!(WatchlistId::new(1), WatchlistId::new(1));
+        assert_ne!(WatchlistId::new(1), WatchlistId::new(2));
+    }
+
+    #[test]
+    fn watchlist_id_hash() {
+        let mut set = HashSet::new();
+        set.insert(WatchlistId::new(3));
+        set.insert(WatchlistId::new(4));
+        set.insert(WatchlistId::new(3)); // duplicate
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn watchlist_id_display() {
+        assert_eq!(WatchlistId::new(5).to_string(), "Watchlist(5)");
+    }
+
+    #[test]
     fn ordering() {
         assert!(ChartId::new(1) < ChartId::new(2));
         assert!(PaneId::new(10) < PaneId::new(20));
         assert!(SymbolId::new(0) < SymbolId::new(1));
+        assert!(WatchlistId::new(1) < WatchlistId::new(2));
     }
 
     #[test]
@@ -141,6 +181,10 @@ mod tests {
         let a = ChartId::new(5);
         let b = a; // Copy
         assert_eq!(a, b); // `a` is still valid
+
+        let w = WatchlistId::new(3);
+        let w2 = w;
+        assert_eq!(w, w2);
     }
 
     #[test]
@@ -159,5 +203,10 @@ mod tests {
         let json = serde_json::to_string(&sid).unwrap();
         let back: SymbolId = serde_json::from_str(&json).unwrap();
         assert_eq!(sid, back);
+
+        let wid = WatchlistId::new(11);
+        let json = serde_json::to_string(&wid).unwrap();
+        let back: WatchlistId = serde_json::from_str(&json).unwrap();
+        assert_eq!(wid, back);
     }
 }

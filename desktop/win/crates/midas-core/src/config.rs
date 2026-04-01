@@ -14,6 +14,8 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::link::LinkMode;
+
 // ── Error type ───────────────────────────────────────────────────────
 
 /// Errors that can occur during config load/save operations.
@@ -48,6 +50,19 @@ pub struct AppConfig {
     /// list of levels for that ticker. Serialized as `[[levels.AAPL]]` etc.
     #[serde(default)]
     pub levels: HashMap<String, Vec<LevelConfig>>,
+    /// Watchlist configurations, persisted across sessions.
+    #[serde(default)]
+    pub watchlists: Vec<WatchlistConfig>,
+    /// Ordered list of panel types in the pane grid, in BTreeMap key order
+    /// (pane creation order — NOT spatial position). Save and restore both
+    /// use the same iteration order, so the mapping is self-consistent.
+    /// Full spatial layout topology is not preserved (same as chart-only restore).
+    /// If absent or empty, falls back to charts-only restoration (backward compat).
+    #[serde(default)]
+    pub panel_order: Vec<PanelSlot>,
+    /// DuckDB persistent cache configuration.
+    #[serde(default)]
+    pub store: StoreConfig,
 }
 
 /// Window geometry configuration.
@@ -125,6 +140,12 @@ pub struct ChartConfig {
     /// Viewport height at save time.
     #[serde(default)]
     pub viewport_height: Option<u32>,
+    /// Symbol link mode for cross-chart symbol synchronization.
+    #[serde(default, skip_serializing_if = "LinkMode::is_unlinked")]
+    pub symbol_link: LinkMode,
+    /// Timeframe link mode for cross-chart timeframe synchronization.
+    #[serde(default, skip_serializing_if = "LinkMode::is_unlinked")]
+    pub timeframe_link: LinkMode,
 }
 
 /// Serde default for bool fields that should default to `true`.
@@ -163,6 +184,89 @@ pub struct LevelConfig {
     pub locked: bool,
 }
 
+/// Watchlist configuration for session persistence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WatchlistConfig {
+    /// User-defined name for the watchlist.
+    pub name: String,
+    /// Tickers in the watchlist.
+    #[serde(default)]
+    pub tickers: Vec<WatchlistTickerConfig>,
+}
+
+/// A single ticker entry within a watchlist.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WatchlistTickerConfig {
+    /// Ticker symbol (e.g. `"AAPL"`).
+    pub symbol: String,
+    /// Whether this ticker is marked as a favorite.
+    #[serde(default)]
+    pub favorite: bool,
+}
+
+/// Records the type of panel in a pane position for layout restoration.
+///
+/// Used in `AppConfig::panel_order` to reconstruct the pane grid with
+/// the correct mix of chart and watchlist panels.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum PanelSlot {
+    /// A chart panel — index into `AppConfig::charts`.
+    Chart {
+        /// Index into `AppConfig::charts`.
+        chart_index: usize,
+    },
+    /// A watchlist panel — index into `AppConfig::watchlists`.
+    Watchlist {
+        /// Index into `AppConfig::watchlists`.
+        watchlist_index: usize,
+    },
+}
+
+/// Configuration for the DuckDB persistent cache store.
+///
+/// Serialized as the `[store]` section in `config.toml`. Existing configs
+/// without `[store]` get defaults via `#[serde(default)]` on `AppConfig.store`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoreConfig {
+    /// Whether the DuckDB cache is enabled.
+    #[serde(default = "default_store_enabled")]
+    pub enabled: bool,
+    /// Path to the DuckDB database file, relative to the data directory.
+    #[serde(default = "default_store_path")]
+    pub path: String,
+    /// Maximum memory DuckDB may use for query processing (MB).
+    #[serde(default = "default_store_memory_limit")]
+    pub memory_limit_mb: u32,
+    /// Number of DuckDB internal threads.
+    #[serde(default = "default_store_threads")]
+    pub threads: u8,
+}
+
+fn default_store_enabled() -> bool {
+    true
+}
+fn default_store_path() -> String {
+    "cache.duckdb".into()
+}
+fn default_store_memory_limit() -> u32 {
+    256
+}
+fn default_store_threads() -> u8 {
+    2
+}
+
+impl Default for StoreConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_store_enabled(),
+            path: default_store_path(),
+            memory_limit_mb: default_store_memory_limit(),
+            threads: default_store_threads(),
+        }
+    }
+}
+
 /// Default line width for levels missing the field (backward compat).
 fn default_line_width() -> f32 {
     1.0
@@ -188,6 +292,9 @@ impl Default for AppConfig {
             },
             charts: Vec::new(),
             levels: HashMap::new(),
+            watchlists: Vec::new(),
+            panel_order: Vec::new(),
+            store: StoreConfig::default(),
         }
     }
 }
@@ -370,8 +477,13 @@ mod tests {
                 show_levels: true,
                 viewport_width: None,
                 viewport_height: None,
+                symbol_link: LinkMode::default(),
+                timeframe_link: LinkMode::default(),
             }],
             levels: msft_levels,
+            watchlists: Vec::new(),
+            panel_order: Vec::new(),
+            store: StoreConfig::default(),
         };
 
         config.save(&path).expect("save config");
@@ -500,6 +612,8 @@ mod tests {
                     show_levels: true,
                     viewport_width: None,
                     viewport_height: None,
+                    symbol_link: LinkMode::default(),
+                    timeframe_link: LinkMode::default(),
                 },
                 ChartConfig {
                     symbol: "TSLA".into(),
@@ -516,9 +630,14 @@ mod tests {
                     show_levels: true,
                     viewport_width: None,
                     viewport_height: None,
+                    symbol_link: LinkMode::default(),
+                    timeframe_link: LinkMode::default(),
                 },
             ],
             levels: aapl_levels,
+            watchlists: Vec::new(),
+            panel_order: Vec::new(),
+            store: StoreConfig::default(),
         };
 
         config.save(&path).expect("save config");
@@ -650,6 +769,9 @@ color = [1.0, 0.843, 0.0, 1.0]
         assert!(!config.charts[0].collapse_gaps);
         // line_width defaults to 1.0.
         assert_eq!(config.charts[0].levels[0].line_width, 1.0);
+        // Link modes default to Unlinked.
+        assert_eq!(config.charts[0].symbol_link, LinkMode::Unlinked);
+        assert_eq!(config.charts[0].timeframe_link, LinkMode::Unlinked);
 
         cleanup(&dir);
     }
@@ -683,8 +805,13 @@ color = [1.0, 0.843, 0.0, 1.0]
                 show_levels: true,
                 viewport_width: None,
                 viewport_height: None,
+                symbol_link: LinkMode::default(),
+                timeframe_link: LinkMode::default(),
             }],
             levels: HashMap::new(),
+            watchlists: Vec::new(),
+            panel_order: Vec::new(),
+            store: StoreConfig::default(),
         };
 
         // Write multiple times to ensure atomic replacement works.
@@ -771,6 +898,8 @@ color = [1.0, 0.843, 0.0, 1.0]
                     show_levels: true,
                     viewport_width: None,
                     viewport_height: None,
+                    symbol_link: LinkMode::default(),
+                    timeframe_link: LinkMode::default(),
                 },
                 ChartConfig {
                     symbol: "QQQ".into(),
@@ -787,9 +916,14 @@ color = [1.0, 0.843, 0.0, 1.0]
                     show_levels: true,
                     viewport_width: None,
                     viewport_height: None,
+                    symbol_link: LinkMode::default(),
+                    timeframe_link: LinkMode::default(),
                 },
             ],
             levels: spy_levels,
+            watchlists: Vec::new(),
+            panel_order: Vec::new(),
+            store: StoreConfig::default(),
         };
 
         config.save(&path).expect("save full config");
@@ -996,6 +1130,8 @@ locked = false
                 show_levels: true,
                 viewport_width: None,
                 viewport_height: None,
+                symbol_link: LinkMode::default(),
+                timeframe_link: LinkMode::default(),
             }],
             ..Default::default()
         };
@@ -1006,6 +1142,129 @@ locked = false
         assert!(
             !raw.contains("charts.levels"),
             "per-chart levels should not be serialized"
+        );
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn watchlist_config_roundtrip() {
+        let dir = temp_dir();
+        let path = dir.join("watchlist.toml");
+
+        let config = AppConfig {
+            watchlists: vec![WatchlistConfig {
+                name: "Main".into(),
+                tickers: vec![
+                    WatchlistTickerConfig {
+                        symbol: "AAPL".into(),
+                        favorite: true,
+                    },
+                    WatchlistTickerConfig {
+                        symbol: "MSFT".into(),
+                        favorite: false,
+                    },
+                ],
+            }],
+            panel_order: vec![
+                PanelSlot::Chart { chart_index: 0 },
+                PanelSlot::Watchlist {
+                    watchlist_index: 0,
+                },
+            ],
+            ..Default::default()
+        };
+
+        config.save(&path).expect("save watchlist config");
+        let loaded = AppConfig::load(&path).expect("load watchlist config");
+
+        assert_eq!(loaded.watchlists.len(), 1);
+        assert_eq!(loaded.watchlists[0].name, "Main");
+        assert_eq!(loaded.watchlists[0].tickers.len(), 2);
+        assert_eq!(loaded.watchlists[0].tickers[0].symbol, "AAPL");
+        assert!(loaded.watchlists[0].tickers[0].favorite);
+        assert_eq!(loaded.watchlists[0].tickers[1].symbol, "MSFT");
+        assert!(!loaded.watchlists[0].tickers[1].favorite);
+
+        assert_eq!(loaded.panel_order.len(), 2);
+        match &loaded.panel_order[0] {
+            PanelSlot::Chart { chart_index } => assert_eq!(*chart_index, 0),
+            _ => panic!("expected Chart"),
+        }
+        match &loaded.panel_order[1] {
+            PanelSlot::Watchlist { watchlist_index } => assert_eq!(*watchlist_index, 0),
+            _ => panic!("expected Watchlist"),
+        }
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn old_config_without_watchlist_fields_loads_with_defaults() {
+        let dir = temp_dir();
+        let path = dir.join("no_watchlists.toml");
+
+        std::fs::write(
+            &path,
+            r#"
+[window]
+width = 1280
+height = 800
+
+[theme]
+mode = "dark"
+"#,
+        )
+        .expect("write config without watchlist fields");
+
+        let config = AppConfig::load(&path).expect("load old config");
+        assert!(config.watchlists.is_empty());
+        assert!(config.panel_order.is_empty());
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn non_default_link_modes_roundtrip() {
+        use crate::link::LinkColor;
+
+        let dir = temp_dir();
+        let path = dir.join("link_modes.toml");
+
+        let config = AppConfig {
+            charts: vec![ChartConfig {
+                symbol: "AAPL".into(),
+                timeframe: "D1".into(),
+                levels: vec![],
+                camera_time_start: None,
+                camera_time_end: None,
+                camera_price_low: None,
+                camera_price_high: None,
+                collapse_gaps: false,
+                timeline_border_ratio: 0.20,
+                volume_scale: 1.0,
+                show_volume_profile: false,
+                show_levels: true,
+                viewport_width: None,
+                viewport_height: None,
+                symbol_link: LinkMode::Color(LinkColor::Blue),
+                timeframe_link: LinkMode::ListenAll,
+            }],
+            ..Default::default()
+        };
+
+        config.save(&path).expect("save");
+        let loaded = AppConfig::load(&path).expect("load");
+
+        assert_eq!(loaded.charts[0].symbol_link, LinkMode::Color(LinkColor::Blue));
+        assert_eq!(loaded.charts[0].timeframe_link, LinkMode::ListenAll);
+
+        // Verify the TOML contains the flat string representation.
+        let raw = std::fs::read_to_string(&path).expect("read");
+        assert!(raw.contains("symbol_link = \"blue\""), "expected flat string, got:\n{raw}");
+        assert!(
+            raw.contains("timeframe_link = \"listen_all\""),
+            "expected flat string, got:\n{raw}"
         );
 
         cleanup(&dir);
