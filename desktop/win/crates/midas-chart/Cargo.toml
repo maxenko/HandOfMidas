@@ -5,8 +5,9 @@ edition = "2021"
 publish = false
 
 [dependencies]
-midas-core = { path = "../midas-core" }
-midas-data = { path = "../midas-data" }
+midas-core       = { path = "../midas-core" }
+midas-data       = { path = "../midas-data" }
+midas-indicators = { path = "../midas-indicators" }
 
 bytemuck  = { workspace = true }
 chrono    = { workspace = true }
