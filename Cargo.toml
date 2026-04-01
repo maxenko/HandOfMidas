@@ -4,3 +4,4 @@ members = [
     "crates/midas-core",
     "crates/midas-broker",
 ]
+exclude = ["desktop/win/duckdb-spike"]

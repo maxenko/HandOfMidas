@@ -10,6 +10,7 @@ midas-data   = { path = "../midas-data" }
 midas-chart  = { path = "../midas-chart" }
 midas-render = { path = "../midas-render" }
 midas-feed   = { path = "../midas-feed" }
+midas-store  = { path = "../midas-store" }
 
 iced       = { workspace = true }
 wgpu       = { workspace = true }

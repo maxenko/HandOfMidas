@@ -1,5 +1,5 @@
 # ── Rust build artifacts ────────────────────────────────────────────
-/target/
+**/target/
 **/*.rs.bk
 
 # ── Cargo lock — included for binaries, but this is a workspace ────
@@ -28,7 +28,7 @@ Desktop.ini
 credentials.json
 
 # ── Runtime data ───────────────────────────────────────────────────
-/data/
+**/data/
 *.candles
 
 # ── SQLite databases ──────────────────────────────────────────────
@@ -36,8 +36,15 @@ credentials.json
 *.db-wal
 *.db-shm
 
+# ── DuckDB databases ─────────────────────────────────────────────
+*.duckdb
+*.duckdb.wal
+
+# ── Build spikes (throwaway crates) ──────────────────────────────
+desktop/win/duckdb-spike/
+
 # ── Benchmark / profiling output ───────────────────────────────────
-/target/criterion/
+**/criterion/
 perf.data
 perf.data.old
 flamegraph.svg

@@ -17,8 +17,11 @@ members = [
     "crates/midas-feed",
     "crates/midas-ui",
     "crates/midas-app",
+    "crates/mailbox_processor",
+    "crates/midas-store",
 ]
 default-members = ["crates/midas-app"]
+exclude = ["duckdb-spike"]
 
 [dependencies]
 midas-core  = { path = "crates/midas-core" }
