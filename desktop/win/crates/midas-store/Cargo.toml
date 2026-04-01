@@ -1,0 +1,18 @@
+[package]
+name = "midas-store"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+midas-core = { path = "../midas-core" }
+midas-data = { path = "../midas-data" }
+mailbox_processor = { path = "../mailbox_processor" }
+duckdb = { version = "1", features = ["bundled"] }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tempfile = { workspace = true }
