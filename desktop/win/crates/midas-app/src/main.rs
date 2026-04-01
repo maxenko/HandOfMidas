@@ -10,7 +10,9 @@ mod app;
 mod chart_widget;
 mod layout;
 mod level_store;
+mod link;
 mod theme;
+mod watchlist;
 
 use app::{Message, MidasApp};
 use iced::keyboard;
