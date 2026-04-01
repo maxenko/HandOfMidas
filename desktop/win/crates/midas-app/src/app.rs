@@ -19,9 +19,9 @@ use midas_chart::camera::Camera2D;
 use midas_chart::state::ChartState;
 use midas_chart::AnnotationId;
 use midas_core::config::{AppConfig, ChartConfig, PanelSlot};
-use midas_core::{ChartId, LinkMode, Timeframe, WatchlistId};
-use midas_data::CandleBuffer;
-use midas_feed::TestDataProvider;
+use midas_core::{CandleBuffer, ChartId, DataProvider, LinkMode, Timeframe, WatchlistId};
+
+use crate::registry::ProviderRegistry;
 
 use crate::layout::{LayoutPresetKind, PanelContent, WorkspaceLayout};
 use crate::level_store::LevelStore;
@@ -120,8 +120,8 @@ pub struct MidasApp {
     /// When set, sibling charts (same symbol, different chart) render
     /// ghost crosshair lines at the corresponding timestamp and price.
     pub crosshair_sync: Option<(ChartId, i64, f64, String)>,
-    /// Deterministic test data generator. Any ticker produces instant data.
-    test_data: TestDataProvider,
+    /// Registry of all available data providers and order brokers.
+    pub providers: ProviderRegistry,
     /// DuckDB persistent cache handle. None if disabled or failed to open.
     pub store: Option<midas_store::DbHandle>,
     /// All watchlist panels keyed by stable WatchlistId.
@@ -157,8 +157,17 @@ pub enum Message {
     PanelSymbolSubmitted(ChartId),
 
     // -- Data loading --
-    /// Async CSV data load completed for a chart.
+    /// Async data load completed for a chart.
     DataLoaded(ChartId, Result<Arc<CandleBuffer>, String>),
+
+    /// Data loaded during startup restore (does not reset camera).
+    DataRestoredFromStartup(ChartId, Result<Arc<CandleBuffer>, String>),
+
+    // -- Provider selection --
+    /// User selected a data provider from the toolbar dropdown.
+    DataProviderSelected(String),
+    /// User selected an order broker from the toolbar dropdown.
+    OrderBrokerSelected(String),
 
     // -- Chart management --
     /// Add a new empty chart panel to the workspace.
@@ -561,25 +570,35 @@ impl MidasApp {
             level_placing: false,
             placing_preview: None,
             crosshair_sync: None,
-            test_data: TestDataProvider::new(),
+            providers: Self::build_provider_registry(&config),
             store,
             watchlists,
             dragging_ticker: None,
             link_picker_open: None,
         };
 
-        // Auto-load test data for all restored charts that have a symbol.
-        let chart_ids: Vec<(ChartId, String, Timeframe)> = app
+        // Async-load data for all restored charts that have a symbol.
+        let mut load_tasks: Vec<Task<Message>> = Vec::new();
+        let charts_to_load: Vec<(ChartId, String, Timeframe)> = app
             .charts
             .iter()
             .filter(|(_, panel)| !panel.symbol.is_empty())
             .map(|(&id, panel)| (id, panel.symbol.clone(), panel.timeframe))
             .collect();
-        for (id, symbol, tf) in chart_ids {
-            app.load_test_data_for_chart(id, &symbol, tf, false);
+        for (id, symbol, tf) in &charts_to_load {
+            if let Some(chart) = app.charts.get_mut(id) {
+                chart.load_state = LoadState::Loading;
+            }
+            load_tasks.push(app.load_chart_async_restore(*id, symbol, *tf));
         }
+        let startup_task = if load_tasks.is_empty() {
+            open_task
+        } else {
+            load_tasks.push(open_task);
+            Task::batch(load_tasks)
+        };
 
-        (app, open_task)
+        (app, startup_task)
     }
 
     /// Restore a single chart panel from config.
@@ -685,10 +704,9 @@ impl MidasApp {
         }
     }
 
-    /// Generate test data for a symbol and apply it to a chart panel.
+    /// Set a chart's symbol and asynchronously load data for it.
     ///
-    /// The [`TestDataProvider`] generates deterministic data instantly for
-    /// any ticker string. No file lookup is needed.
+    /// Returns a `Task` that will produce `Message::DataLoaded` when complete.
     fn load_symbol_for_chart(&mut self, chart_id: ChartId, symbol: &str) -> Task<Message> {
         let symbol = symbol.trim().to_uppercase();
         if symbol.is_empty() {
@@ -704,10 +722,11 @@ impl MidasApp {
         if let Some(chart) = self.charts.get_mut(&chart_id) {
             chart.symbol = symbol.clone();
             chart.symbol_input = symbol.clone();
+            chart.load_state = LoadState::Loading;
+            chart.chart_state.dirty.mark_data();
         }
 
-        self.load_test_data_for_chart(chart_id, &symbol, tf, true);
-        Task::none()
+        self.load_chart_async(chart_id, &symbol, tf)
     }
 
     /// Propagate a symbol change from source chart to all linked charts
@@ -752,8 +771,10 @@ impl MidasApp {
             if let Some(chart) = self.floating_charts.get_mut(&wid) {
                 chart.symbol = symbol.clone();
                 chart.symbol_input = symbol.clone();
+                chart.load_state = LoadState::Loading;
+                chart.chart_state.dirty.mark_data();
             }
-            self.load_data_for_floating_chart(wid, &symbol, tf);
+            tasks.push(self.load_floating_chart_async(wid, &symbol, tf));
         }
 
         if tasks.is_empty() {
@@ -765,7 +786,11 @@ impl MidasApp {
 
     /// Propagate a timeframe change from source chart to all linked charts
     /// (both docked and floating).
-    fn propagate_timeframe_change(&mut self, source_id: ChartId, new_tf: Timeframe) {
+    fn propagate_timeframe_change(
+        &mut self,
+        source_id: ChartId,
+        new_tf: Timeframe,
+    ) -> Task<Message> {
         use crate::link::find_link_targets;
 
         let source_link = self
@@ -773,6 +798,8 @@ impl MidasApp {
             .get(&source_id)
             .map(|c| c.timeframe_link)
             .unwrap_or(LinkMode::Unlinked);
+
+        let mut tasks: Vec<Task<Message>> = Vec::new();
 
         // Docked charts.
         let pane_targets: Vec<ChartId> = find_link_targets(
@@ -793,7 +820,11 @@ impl MidasApp {
                 chart.chart_state.dirty.mark_camera();
             }
             if !symbol.is_empty() {
-                self.load_test_data_for_chart(id, &symbol, new_tf, true);
+                if let Some(chart) = self.charts.get_mut(&id) {
+                    chart.load_state = LoadState::Loading;
+                    chart.chart_state.dirty.mark_data();
+                }
+                tasks.push(self.load_chart_async(id, &symbol, new_tf));
             }
         }
 
@@ -814,150 +845,183 @@ impl MidasApp {
                 chart.timeframe = new_tf;
             }
             if !symbol.is_empty() {
-                self.load_data_for_floating_chart(wid, &symbol, new_tf);
+                if let Some(chart) = self.floating_charts.get_mut(&wid) {
+                    chart.load_state = LoadState::Loading;
+                    chart.chart_state.dirty.mark_data();
+                }
+                tasks.push(self.load_floating_chart_async(wid, &symbol, new_tf));
             }
+        }
+
+        if tasks.is_empty() {
+            Task::none()
+        } else {
+            Task::batch(tasks)
         }
     }
 
-    /// How many calendar days of test data to generate for a timeframe.
+    /// Build the provider registry, registering all available providers
+    /// and restoring the active selection from config.
+    fn build_provider_registry(config: &AppConfig) -> ProviderRegistry {
+        let mut registry = ProviderRegistry::new();
+        let test_provider: Arc<dyn DataProvider> =
+            Arc::new(midas_feed::TestProvider::new());
+        registry.register_data_provider(test_provider);
+        if let Some(ref prov_cfg) = config.providers {
+            if let Some(ref saved_name) = prov_cfg.active_data {
+                let names = registry.data_provider_names();
+                if let Some(idx) = names.iter().position(|n| n == saved_name) {
+                    registry.set_active_data(idx);
+                    tracing::info!(provider = %saved_name, "restored active data provider");
+                } else {
+                    tracing::warn!(
+                        saved = %saved_name,
+                        available = ?names,
+                        "saved provider not found, using default"
+                    );
+                }
+            }
+        }
+        registry
+    }
+
+    /// How many calendar days of data to request for a timeframe.
     fn days_for_timeframe(tf: Timeframe) -> u32 {
         match tf.as_secs() {
             s if s >= Timeframe::W1.as_secs() => 3650, // ~10 years
             s if s >= Timeframe::D1.as_secs() => 730,  // ~2 years
             s if s >= Timeframe::H1.as_secs() => 90,   // ~3 months
             s if s >= Timeframe::M15.as_secs() => 30,  // ~1 month
-            _ => 10,                                   // <=M5: ~10 days
+            _ => 10,                                    // <=M5: ~10 days
         }
     }
 
-    /// Generate test data at the given timeframe and install it in the chart.
-    ///
-    /// Called from symbol submit, timeframe change, and config restore.
-    /// Load test data for a chart and optionally reset its camera.
-    ///
-    /// When `reset_camera` is `true` (user changed symbol or timeframe), the
-    /// camera is positioned to show the last 200 candles.  When `false`
-    /// (restoring from config), the camera is left untouched — only
-    /// `data_time_start/end` are set for scroll clamping.
-    fn load_test_data_for_chart(
-        &mut self,
+    /// Core async data loader. Calls the active provider and wraps the
+    /// result in the message variant produced by `make_msg`.
+    fn load_chart_with<F>(
+        &self,
         chart_id: ChartId,
         symbol: &str,
         tf: Timeframe,
+        make_msg: F,
+    ) -> Task<Message>
+    where
+        F: FnOnce(ChartId, Result<Arc<CandleBuffer>, String>) -> Message + Send + 'static,
+    {
+        let provider = match self.providers.active_data_provider() {
+            Some(p) => p,
+            None => return Task::none(),
+        };
+        let symbol = symbol.to_uppercase();
+        let days = Self::days_for_timeframe(tf);
+        Task::perform(
+            async move { provider.get_candles(&symbol, tf, days).await },
+            move |result| make_msg(chart_id, result.map(Arc::new).map_err(|e| e.to_string())),
+        )
+    }
+
+    /// Async-load chart data. On completion, sends `Message::DataLoaded`
+    /// which resets the camera to show the last 200 candles.
+    fn load_chart_async(
+        &self,
+        chart_id: ChartId,
+        symbol: &str,
+        tf: Timeframe,
+    ) -> Task<Message> {
+        self.load_chart_with(chart_id, symbol, tf, Message::DataLoaded)
+    }
+
+    /// Async-load chart data for startup restore. On completion, sends
+    /// `Message::DataRestoredFromStartup` which preserves the saved camera.
+    fn load_chart_async_restore(
+        &self,
+        chart_id: ChartId,
+        symbol: &str,
+        tf: Timeframe,
+    ) -> Task<Message> {
+        self.load_chart_with(chart_id, symbol, tf, Message::DataRestoredFromStartup)
+    }
+
+    /// Apply loaded candle data to a chart panel, optionally resetting
+    /// the camera to show the last 200 candles.
+    fn apply_candle_data(
+        chart: &mut ChartPanel,
+        buffer: Arc<CandleBuffer>,
         reset_camera: bool,
     ) {
-        tracing::debug!("Loading data for chart {chart_id} symbol={symbol} tf={tf}");
-        let days = Self::days_for_timeframe(tf);
-
-        let buffer = self.test_data.get_candles(symbol, tf, days);
-        let count = buffer.len();
-        let buffer = Arc::new(buffer);
-
-        if let Some(chart) = self.charts.get_mut(&chart_id) {
-            chart.data = Some(Arc::clone(&buffer));
-            chart.load_state = LoadState::Loaded;
-            chart.chart_state.dirty.mark_data();
-
-            if !buffer.is_empty() {
-                let len = buffer.len();
-
-                // Always set data bounds for scroll clamping.
-                if chart.chart_state.collapse_gaps {
-                    chart.chart_state.data_time_start = 0.0;
-                    chart.chart_state.data_time_end = len as f64;
-                } else {
-                    let first_ts = buffer.timestamps[0] as f64;
-                    let last_ts = buffer.timestamps[len - 1] as f64;
-                    chart.chart_state.data_time_start = first_ts;
-                    chart.chart_state.data_time_end = last_ts;
-                }
-
-                // Only reset camera to default view when the user changed
-                // symbol/timeframe. On config restore, the saved camera
-                // position is already in place.
-                if reset_camera {
-                    let visible_count = 200.min(len);
-
-                    if chart.chart_state.collapse_gaps {
-                        let start_idx = (len - visible_count) as f64;
-                        let end_idx = len as f64 + (visible_count as f64 * 0.05);
-                        chart.chart_state.camera.time_start = start_idx;
-                        chart.chart_state.camera.time_end = end_idx;
-                    } else {
-                        let last_ts = buffer.timestamps[len - 1] as f64;
-                        let first_visible_ts = buffer.timestamps[len - visible_count] as f64;
-                        chart.chart_state.camera.time_start = first_visible_ts;
-                        chart.chart_state.camera.time_end =
-                            last_ts + (last_ts - first_visible_ts) * 0.05;
-                    }
-
-                    let range = (len - visible_count)..len;
-                    let (low, high) = buffer.price_range(range);
-                    let padding = (high - low) as f64 * 0.05;
-                    chart.chart_state.camera.price_low = low as f64 - padding;
-                    chart.chart_state.camera.price_high = high as f64 + padding;
-                }
-
-                chart.chart_state.dirty.mark_camera();
+        chart.data = Some(Arc::clone(&buffer));
+        chart.load_state = LoadState::Loaded;
+        chart.chart_state.dirty.mark_data();
+        if buffer.is_empty() {
+            return;
+        }
+        let len = buffer.len();
+        if chart.chart_state.collapse_gaps {
+            chart.chart_state.data_time_start = 0.0;
+            chart.chart_state.data_time_end = len as f64;
+        } else {
+            let first_ts = buffer.timestamps[0] as f64;
+            let last_ts = buffer.timestamps[len - 1] as f64;
+            chart.chart_state.data_time_start = first_ts;
+            chart.chart_state.data_time_end = last_ts;
+        }
+        if reset_camera {
+            let visible_count = 200.min(len);
+            if chart.chart_state.collapse_gaps {
+                let start_idx = (len - visible_count) as f64;
+                let end_idx = len as f64 + (visible_count as f64 * 0.05);
+                chart.chart_state.camera.time_start = start_idx;
+                chart.chart_state.camera.time_end = end_idx;
+            } else {
+                let last_ts = buffer.timestamps[len - 1] as f64;
+                let first_visible_ts = buffer.timestamps[len - visible_count] as f64;
+                chart.chart_state.camera.time_start = first_visible_ts;
+                chart.chart_state.camera.time_end =
+                    last_ts + (last_ts - first_visible_ts) * 0.05;
             }
+            let range = (len - visible_count)..len;
+            let (low, high) = buffer.price_range(range);
+            let padding = (high - low) as f64 * 0.05;
+            chart.chart_state.camera.price_low = low as f64 - padding;
+            chart.chart_state.camera.price_high = high as f64 + padding;
+        }
+        chart.chart_state.dirty.mark_camera();
+    }
 
-            self.status_message = format!("{}: {} candles at {}", symbol, count, tf.display_name());
+    /// Reload all charts that currently have data (e.g. after provider switch).
+    fn reload_all_charts(&mut self) -> Task<Message> {
+        let charts_to_reload: Vec<(ChartId, String, Timeframe)> = self
+            .charts
+            .iter()
+            .filter(|(_, panel)| !panel.symbol.is_empty() && panel.data.is_some())
+            .map(|(&id, panel)| (id, panel.symbol.clone(), panel.timeframe))
+            .collect();
+        let mut tasks: Vec<Task<Message>> = Vec::new();
+        for (chart_id, symbol, tf) in &charts_to_reload {
+            if let Some(chart) = self.charts.get_mut(chart_id) {
+                chart.load_state = LoadState::Loading;
+                chart.chart_state.dirty.mark_data();
+            }
+            tasks.push(self.load_chart_async(*chart_id, symbol, *tf));
+        }
+        if tasks.is_empty() {
+            Task::none()
+        } else {
+            Task::batch(tasks)
         }
     }
 
-    /// Load test data for a floating chart window. Mirrors `load_test_data_for_chart`
-    /// but operates on `self.floating_charts`.
-    fn load_data_for_floating_chart(
-        &mut self,
-        wid: window::Id,
+    /// Async-load data for a floating chart window.
+    fn load_floating_chart_async(
+        &self,
+        _wid: window::Id,
         symbol: &str,
         tf: Timeframe,
-    ) {
-        let days = Self::days_for_timeframe(tf);
-        let buffer = self.test_data.get_candles(symbol, tf, days);
-        let buffer = Arc::new(buffer);
-
-        if let Some(chart) = self.floating_charts.get_mut(&wid) {
-            chart.data = Some(Arc::clone(&buffer));
-            chart.load_state = LoadState::Loaded;
-            chart.chart_state.dirty.mark_data();
-
-            if !buffer.is_empty() {
-                let len = buffer.len();
-
-                if chart.chart_state.collapse_gaps {
-                    chart.chart_state.data_time_start = 0.0;
-                    chart.chart_state.data_time_end = len as f64;
-                } else {
-                    let first_ts = buffer.timestamps[0] as f64;
-                    let last_ts = buffer.timestamps[len - 1] as f64;
-                    chart.chart_state.data_time_start = first_ts;
-                    chart.chart_state.data_time_end = last_ts;
-                }
-
-                let visible_count = 200.min(len);
-                if chart.chart_state.collapse_gaps {
-                    let start_idx = (len - visible_count) as f64;
-                    let end_idx = len as f64 + (visible_count as f64 * 0.05);
-                    chart.chart_state.camera.time_start = start_idx;
-                    chart.chart_state.camera.time_end = end_idx;
-                } else {
-                    let last_ts = buffer.timestamps[len - 1] as f64;
-                    let first_visible_ts = buffer.timestamps[len - visible_count] as f64;
-                    chart.chart_state.camera.time_start = first_visible_ts;
-                    chart.chart_state.camera.time_end =
-                        last_ts + (last_ts - first_visible_ts) * 0.05;
-                }
-
-                let range = (len - visible_count)..len;
-                let (low, high) = buffer.price_range(range);
-                let padding = (high - low) as f64 * 0.05;
-                chart.chart_state.camera.price_low = low as f64 - padding;
-                chart.chart_state.camera.price_high = high as f64 + padding;
-
-                chart.chart_state.dirty.mark_camera();
-            }
-        }
+    ) -> Task<Message> {
+        // Floating charts use ChartId(0) as sentinel. They receive the
+        // same DataLoaded message and are handled in the update loop
+        // by matching on the floating_charts map.
+        self.load_chart_with(ChartId::new(0), symbol, tf, Message::DataLoaded)
     }
 
     /// Get the active chart's ChartId (from workspace focus).
@@ -1026,18 +1090,100 @@ impl MidasApp {
                     chart.chart_state.dirty.mark_camera();
                 }
 
+                let mut tasks: Vec<Task<Message>> = Vec::new();
                 if !symbol.is_empty() {
-                    self.load_test_data_for_chart(chart_id, &symbol, tf, true);
+                    if let Some(chart) = self.charts.get_mut(&chart_id) {
+                        chart.load_state = LoadState::Loading;
+                        chart.chart_state.dirty.mark_data();
+                    }
+                    tasks.push(self.load_chart_async(chart_id, &symbol, tf));
                 }
 
-                self.propagate_timeframe_change(chart_id, tf);
+                tasks.push(self.propagate_timeframe_change(chart_id, tf));
                 self.mark_config_dirty();
+                Task::batch(tasks)
+            }
+
+            Message::DataLoaded(chart_id, result) => {
+                match result {
+                    Ok(buffer) => {
+                        // Try docked charts first, then floating charts.
+                        if let Some(chart) = self.charts.get_mut(&chart_id) {
+                            let sym = chart.symbol.clone();
+                            let count = buffer.len();
+                            let tf = chart.timeframe;
+                            Self::apply_candle_data(chart, buffer, true);
+                            self.status_message = format!(
+                                "{}: {} candles at {}",
+                                sym,
+                                count,
+                                tf.display_name()
+                            );
+                        } else if chart_id == ChartId::new(0) {
+                            // Floating chart sentinel: apply to the first
+                            // floating chart that is in Loading state.
+                            for chart in self.floating_charts.values_mut() {
+                                if matches!(chart.load_state, LoadState::Loading) {
+                                    Self::apply_candle_data(chart, buffer, true);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if let Some(chart) = self.charts.get_mut(&chart_id) {
+                            chart.load_state = LoadState::Error(e.clone());
+                            chart.chart_state.dirty.mark_data();
+                        }
+                        tracing::warn!(chart = %chart_id, error = %e, "data load failed");
+                        self.status_message = format!("Load error: {e}");
+                    }
+                }
                 Task::none()
             }
 
-            Message::DataLoaded(_chart_id, _result) => {
-                // Data is now loaded synchronously via TestDataProvider.
-                // This message is retained for future async data sources.
+            Message::DataRestoredFromStartup(chart_id, result) => {
+                match result {
+                    Ok(buffer) => {
+                        if let Some(chart) = self.charts.get_mut(&chart_id) {
+                            Self::apply_candle_data(chart, buffer, false);
+                        }
+                    }
+                    Err(e) => {
+                        if let Some(chart) = self.charts.get_mut(&chart_id) {
+                            chart.load_state = LoadState::Error(e.clone());
+                            chart.chart_state.dirty.mark_data();
+                        }
+                        tracing::warn!(
+                            chart = %chart_id, error = %e,
+                            "startup data restore failed"
+                        );
+                    }
+                }
+                Task::none()
+            }
+
+            Message::DataProviderSelected(name) => {
+                if let Some(idx) = self.providers.find_data_provider_index(&name) {
+                    if self.providers.set_active_data(idx) {
+                        tracing::info!(provider = %name, "switched data provider");
+                        self.mark_config_dirty();
+                        return self.reload_all_charts();
+                    }
+                }
+                Task::none()
+            }
+
+            Message::OrderBrokerSelected(name) => {
+                let idx = if name == "None" {
+                    None
+                } else {
+                    self.providers.find_broker_index(&name)
+                };
+                if self.providers.set_active_broker(idx) {
+                    tracing::info!(broker = %name, "switched order broker");
+                    self.mark_config_dirty();
+                }
                 Task::none()
             }
 
@@ -1048,6 +1194,7 @@ impl MidasApp {
                     {
                         self.charts.insert(new_id, Self::make_empty_panel());
                         self.status_message = format!("Added {new_id}");
+                        self.mark_config_dirty();
                     }
                 }
                 Task::none()
@@ -1062,6 +1209,7 @@ impl MidasApp {
                             self.link_picker_open = None;
                         }
                         self.status_message = format!("Closed {closed_id}");
+                        return self.flush_config();
                     }
                 }
                 Task::none()
@@ -1085,6 +1233,19 @@ impl MidasApp {
                 let active_ids: std::collections::HashSet<ChartId> =
                     self.workspace.chart_ids().into_iter().collect();
                 self.charts.retain(|id, _| active_ids.contains(id));
+                // Clean up orphaned watchlist panels (presets create chart-only layouts).
+                let active_wl_ids: std::collections::HashSet<WatchlistId> = self
+                    .workspace
+                    .panes
+                    .panes
+                    .values()
+                    .filter_map(|s| match &s.content {
+                        PanelContent::Watchlist(id) => Some(*id),
+                        _ => None,
+                    })
+                    .collect();
+                self.watchlists
+                    .retain(|id, _| active_wl_ids.contains(id));
                 self.mark_config_dirty();
                 Task::none()
             }
@@ -1144,6 +1305,7 @@ impl MidasApp {
                 if let Some((new_id, _new_pane)) = self.workspace.split(axis, pane) {
                     self.charts.insert(new_id, Self::make_empty_panel());
                     self.status_message = format!("Split pane, added {new_id}");
+                    self.mark_config_dirty();
                 }
                 Task::none()
             }
@@ -1658,10 +1820,14 @@ impl MidasApp {
                     .get(&chart_id)
                     .map(|c| c.timeframe)
                     .unwrap_or(midas_core::Timeframe::D1);
-                if !symbol.is_empty() {
-                    self.load_test_data_for_chart(chart_id, &symbol, tf, true);
-                }
                 self.mark_config_dirty();
+                if !symbol.is_empty() {
+                    if let Some(chart) = self.charts.get_mut(&chart_id) {
+                        chart.load_state = LoadState::Loading;
+                        chart.chart_state.dirty.mark_data();
+                    }
+                    return self.load_chart_async(chart_id, &symbol, tf);
+                }
                 Task::none()
             }
 
@@ -1670,10 +1836,7 @@ impl MidasApp {
                 Task::batch(tasks)
             }
 
-            Message::KeyPressed(key) => {
-                self.handle_key_press(key);
-                Task::none()
-            }
+            Message::KeyPressed(key) => self.handle_key_press(key),
 
             Message::ConfigSaved(result) => {
                 match result {
@@ -1816,20 +1979,31 @@ impl MidasApp {
                 if let Some(chart) = self.charts.get_mut(&chart_id) {
                     chart.symbol_link = mode;
                 }
-                // Adopt group symbol when joining a color group.
+                // Adopt group symbol when joining a link group.
                 let mut adopt_task = Task::none();
-                if let LinkMode::Color(color) = mode {
-                    let group_symbol = self
-                        .charts
+                let siblings = || {
+                    self.charts
                         .iter()
                         .filter(|(id, _)| **id != chart_id)
                         .map(|(_, panel)| panel)
                         .chain(self.floating_charts.values())
-                        .find(|panel| {
-                            matches!(panel.symbol_link, LinkMode::Color(c) if c == color)
-                                && !panel.symbol.is_empty()
+                };
+                if let LinkMode::Color(color) = mode {
+                    let group_symbol = siblings()
+                        .find(|p| {
+                            matches!(p.symbol_link, LinkMode::Color(c) if c == color)
+                                && !p.symbol.is_empty()
                         })
-                        .map(|panel| panel.symbol.clone());
+                        .map(|p| p.symbol.clone());
+                    if let Some(symbol) = group_symbol {
+                        adopt_task = self.load_symbol_for_chart(chart_id, &symbol);
+                    }
+                } else if mode == LinkMode::ListenAll {
+                    let group_symbol = siblings()
+                        .find(|p| {
+                            matches!(p.symbol_link, LinkMode::Color(_)) && !p.symbol.is_empty()
+                        })
+                        .map(|p| p.symbol.clone());
                     if let Some(symbol) = group_symbol {
                         adopt_task = self.load_symbol_for_chart(chart_id, &symbol);
                     }
@@ -1843,30 +2017,41 @@ impl MidasApp {
                 if let Some(chart) = self.charts.get_mut(&chart_id) {
                     chart.timeframe_link = mode;
                 }
-                // Adopt group timeframe when joining a color group.
-                if let LinkMode::Color(color) = mode {
-                    let group_tf = self
-                        .charts
+                // Adopt group timeframe when joining a link group.
+                let siblings = || {
+                    self.charts
                         .iter()
                         .filter(|(id, _)| **id != chart_id)
                         .map(|(_, panel)| panel)
                         .chain(self.floating_charts.values())
-                        .find(|panel| {
-                            matches!(panel.timeframe_link, LinkMode::Color(c) if c == color)
-                        })
-                        .map(|panel| panel.timeframe);
-                    if let Some(tf) = group_tf {
-                        let symbol = self
-                            .charts
-                            .get(&chart_id)
-                            .map(|c| c.symbol.clone())
-                            .unwrap_or_default();
+                };
+                let group_tf = if let LinkMode::Color(color) = mode {
+                    siblings()
+                        .find(|p| matches!(p.timeframe_link, LinkMode::Color(c) if c == color))
+                        .map(|p| p.timeframe)
+                } else if mode == LinkMode::ListenAll {
+                    siblings()
+                        .find(|p| matches!(p.timeframe_link, LinkMode::Color(_)))
+                        .map(|p| p.timeframe)
+                } else {
+                    None
+                };
+                if let Some(tf) = group_tf {
+                    let symbol = self
+                        .charts
+                        .get(&chart_id)
+                        .map(|c| c.symbol.clone())
+                        .unwrap_or_default();
+                    if let Some(chart) = self.charts.get_mut(&chart_id) {
+                        chart.timeframe = tf;
+                    }
+                    if !symbol.is_empty() {
                         if let Some(chart) = self.charts.get_mut(&chart_id) {
-                            chart.timeframe = tf;
+                            chart.load_state = LoadState::Loading;
+                            chart.chart_state.dirty.mark_data();
                         }
-                        if !symbol.is_empty() {
-                            self.load_test_data_for_chart(chart_id, &symbol, tf, true);
-                        }
+                        self.mark_config_dirty();
+                        return self.load_chart_async(chart_id, &symbol, tf);
                     }
                 }
                 self.mark_config_dirty();
@@ -1878,10 +2063,9 @@ impl MidasApp {
                 if let Some(chart) = self.floating_charts.get_mut(&wid) {
                     chart.symbol_link = mode;
                 }
-                // Adopt group symbol when joining a color group.
-                if let LinkMode::Color(color) = mode {
-                    let group_symbol = self
-                        .charts
+                // Adopt group symbol when joining a link group.
+                let siblings = || {
+                    self.charts
                         .values()
                         .chain(
                             self.floating_charts
@@ -1889,23 +2073,36 @@ impl MidasApp {
                                 .filter(|(id, _)| **id != wid)
                                 .map(|(_, p)| p),
                         )
-                        .find(|panel| {
-                            matches!(panel.symbol_link, LinkMode::Color(c) if c == color)
-                                && !panel.symbol.is_empty()
+                };
+                let group_symbol = if let LinkMode::Color(color) = mode {
+                    siblings()
+                        .find(|p| {
+                            matches!(p.symbol_link, LinkMode::Color(c) if c == color)
+                                && !p.symbol.is_empty()
                         })
-                        .map(|panel| panel.symbol.clone());
-                    if let Some(symbol) = group_symbol {
-                        let tf = self
-                            .floating_charts
-                            .get(&wid)
-                            .map(|c| c.timeframe)
-                            .unwrap_or(Timeframe::D1);
-                        if let Some(chart) = self.floating_charts.get_mut(&wid) {
-                            chart.symbol = symbol.clone();
-                            chart.symbol_input = symbol.clone();
-                        }
-                        self.load_data_for_floating_chart(wid, &symbol, tf);
+                        .map(|p| p.symbol.clone())
+                } else if mode == LinkMode::ListenAll {
+                    siblings()
+                        .find(|p| {
+                            matches!(p.symbol_link, LinkMode::Color(_)) && !p.symbol.is_empty()
+                        })
+                        .map(|p| p.symbol.clone())
+                } else {
+                    None
+                };
+                if let Some(symbol) = group_symbol {
+                    let tf = self
+                        .floating_charts
+                        .get(&wid)
+                        .map(|c| c.timeframe)
+                        .unwrap_or(Timeframe::D1);
+                    if let Some(chart) = self.floating_charts.get_mut(&wid) {
+                        chart.symbol = symbol.clone();
+                        chart.symbol_input = symbol.clone();
+                        chart.load_state = LoadState::Loading;
+                        chart.chart_state.dirty.mark_data();
                     }
+                    return self.load_floating_chart_async(wid, &symbol, tf);
                 }
                 // Floating charts are not persisted — no mark_config_dirty needed.
                 Task::none()
@@ -1916,10 +2113,9 @@ impl MidasApp {
                 if let Some(chart) = self.floating_charts.get_mut(&wid) {
                     chart.timeframe_link = mode;
                 }
-                // Adopt group timeframe when joining a color group.
-                if let LinkMode::Color(color) = mode {
-                    let group_tf = self
-                        .charts
+                // Adopt group timeframe when joining a link group.
+                let siblings = || {
+                    self.charts
                         .values()
                         .chain(
                             self.floating_charts
@@ -1927,22 +2123,33 @@ impl MidasApp {
                                 .filter(|(id, _)| **id != wid)
                                 .map(|(_, p)| p),
                         )
-                        .find(|panel| {
-                            matches!(panel.timeframe_link, LinkMode::Color(c) if c == color)
-                        })
-                        .map(|panel| panel.timeframe);
-                    if let Some(tf) = group_tf {
-                        let symbol = self
-                            .floating_charts
-                            .get(&wid)
-                            .map(|c| c.symbol.clone())
-                            .unwrap_or_default();
+                };
+                let group_tf = if let LinkMode::Color(color) = mode {
+                    siblings()
+                        .find(|p| matches!(p.timeframe_link, LinkMode::Color(c) if c == color))
+                        .map(|p| p.timeframe)
+                } else if mode == LinkMode::ListenAll {
+                    siblings()
+                        .find(|p| matches!(p.timeframe_link, LinkMode::Color(_)))
+                        .map(|p| p.timeframe)
+                } else {
+                    None
+                };
+                if let Some(tf) = group_tf {
+                    let symbol = self
+                        .floating_charts
+                        .get(&wid)
+                        .map(|c| c.symbol.clone())
+                        .unwrap_or_default();
+                    if let Some(chart) = self.floating_charts.get_mut(&wid) {
+                        chart.timeframe = tf;
+                    }
+                    if !symbol.is_empty() {
                         if let Some(chart) = self.floating_charts.get_mut(&wid) {
-                            chart.timeframe = tf;
+                            chart.load_state = LoadState::Loading;
+                            chart.chart_state.dirty.mark_data();
                         }
-                        if !symbol.is_empty() {
-                            self.load_data_for_floating_chart(wid, &symbol, tf);
-                        }
+                        return self.load_floating_chart_async(wid, &symbol, tf);
                     }
                 }
                 // Floating charts are not persisted — no mark_config_dirty needed.
@@ -1990,18 +2197,18 @@ impl MidasApp {
     }
 
     /// Handle keyboard shortcut actions.
-    fn handle_key_press(&mut self, key: iced::keyboard::Key) {
+    fn handle_key_press(&mut self, key: iced::keyboard::Key) -> Task<Message> {
         use iced::keyboard::key::Named;
         use iced::keyboard::Key;
         match key {
             Key::Character(ref c) => match c.as_str() {
-                "1" => self.set_active_timeframe(Timeframe::M1),
-                "2" => self.set_active_timeframe(Timeframe::M5),
-                "3" => self.set_active_timeframe(Timeframe::M15),
-                "4" => self.set_active_timeframe(Timeframe::H1),
-                "5" => self.set_active_timeframe(Timeframe::H4),
-                "6" => self.set_active_timeframe(Timeframe::D1),
-                "7" => self.set_active_timeframe(Timeframe::W1),
+                "1" => return self.set_active_timeframe(Timeframe::M1),
+                "2" => return self.set_active_timeframe(Timeframe::M5),
+                "3" => return self.set_active_timeframe(Timeframe::M15),
+                "4" => return self.set_active_timeframe(Timeframe::H1),
+                "5" => return self.set_active_timeframe(Timeframe::H4),
+                "6" => return self.set_active_timeframe(Timeframe::D1),
+                "7" => return self.set_active_timeframe(Timeframe::W1),
                 "h" | "H" => {
                     self.level_placing = !self.level_placing;
                 }
@@ -2021,10 +2228,11 @@ impl MidasApp {
             }
             _ => {}
         }
+        Task::none()
     }
 
     /// Set the timeframe on the active chart and regenerate data.
-    fn set_active_timeframe(&mut self, tf: Timeframe) {
+    fn set_active_timeframe(&mut self, tf: Timeframe) -> Task<Message> {
         if let Some(id) = self.active_chart_id() {
             let symbol = self
                 .charts
@@ -2037,13 +2245,20 @@ impl MidasApp {
                 chart.chart_state.dirty.mark_camera();
             }
 
+            let mut tasks: Vec<Task<Message>> = Vec::new();
             if !symbol.is_empty() {
-                self.load_test_data_for_chart(id, &symbol, tf, true);
+                if let Some(chart) = self.charts.get_mut(&id) {
+                    chart.load_state = LoadState::Loading;
+                    chart.chart_state.dirty.mark_data();
+                }
+                tasks.push(self.load_chart_async(id, &symbol, tf));
             }
 
-            self.propagate_timeframe_change(id, tf);
+            tasks.push(self.propagate_timeframe_change(id, tf));
             self.mark_config_dirty();
+            return Task::batch(tasks);
         }
+        Task::none()
     }
 }
 

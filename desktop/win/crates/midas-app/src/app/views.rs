@@ -8,7 +8,8 @@ use std::sync::Arc;
 
 use iced::widget::pane_grid::{self, PaneGrid};
 use iced::widget::{
-    button, column, container, row, scrollable, stack, text, text_input, Column, Row, Space,
+    button, column, container, pick_list, row, scrollable, stack, text, text_input, Column, Row,
+    Space,
 };
 use iced::{window, Color, Element, Fill, Length};
 
@@ -385,10 +386,36 @@ impl MidasApp {
             .padding([4, 10])
             .style(hover_text_button_style);
 
-        let toolbar_row = row![layout_buttons, split_buttons, add_btn, wl_btn,]
-            .spacing(8)
-            .padding(6)
-            .align_y(iced::Alignment::Center);
+        // Provider dropdowns (pushed to the right).
+        let data_names = self.providers.data_provider_names();
+        let active_data = self.providers.active_data_provider_name();
+        let data_picker = pick_list(data_names, Some(active_data), Message::DataProviderSelected)
+            .text_size(11)
+            .padding([3, 6])
+            .style(dark_pick_list_style);
+
+        let broker_names = self.providers.order_broker_names();
+        let active_broker = self.providers.active_broker_display_name();
+        let broker_picker =
+            pick_list(broker_names, Some(active_broker), Message::OrderBrokerSelected)
+                .text_size(11)
+                .padding([3, 6])
+                .style(dark_pick_list_style);
+
+        let toolbar_row = row![
+            layout_buttons,
+            split_buttons,
+            add_btn,
+            wl_btn,
+            Space::new().width(Fill),
+            text("Data:").size(11).color(theme::TEXT_SECONDARY),
+            data_picker,
+            text("Broker:").size(11).color(theme::TEXT_SECONDARY),
+            broker_picker,
+        ]
+        .spacing(8)
+        .padding(6)
+        .align_y(iced::Alignment::Center);
 
         container(toolbar_row)
             .width(Fill)
@@ -1255,7 +1282,13 @@ impl MidasApp {
         } else {
             ""
         };
+
+        // Connection indicator: green dot + provider name.
+        let conn = self.connection_indicator();
+
         let status_row = row![
+            conn,
+            text(" | ").size(12).color(theme::TEXT_MUTED),
             text(&self.status_message)
                 .size(12)
                 .color(theme::TEXT_SECONDARY),
@@ -1277,6 +1310,30 @@ impl MidasApp {
                 ..Default::default()
             })
             .into()
+    }
+
+    /// Build a small connection status indicator for the status bar.
+    ///
+    /// Shows a colored dot and the active provider name.
+    fn connection_indicator(&self) -> Element<'_, Message> {
+        let provider_name = self.providers.active_data_provider_name();
+        let is_connected = self
+            .providers
+            .active_data_provider()
+            .map_or(false, |p| p.is_connected());
+        let dot_color = if is_connected {
+            Color::from_rgb(0.2, 0.8, 0.2) // green
+        } else {
+            Color::from_rgb(0.6, 0.6, 0.6) // grey
+        };
+        row![
+            text("\u{25CF}").size(10).color(dot_color),
+            text(format!(" {provider_name}"))
+                .size(12)
+                .color(theme::TEXT_SECONDARY),
+        ]
+        .align_y(iced::Alignment::Center)
+        .into()
     }
 }
 
@@ -1911,7 +1968,7 @@ fn compute_ghost_crosshair(
     this_chart: ChartId,
     symbol: &str,
     chart_state: &midas_chart::state::ChartState,
-    data: Option<&midas_data::CandleBuffer>,
+    data: Option<&midas_core::CandleBuffer>,
 ) -> Option<(f32, f32)> {
     let (src_id, ts, price, sym) = sync.as_ref()?;
     if *src_id == this_chart || sym != symbol {
@@ -2113,5 +2170,29 @@ fn hover_text_button_style(_theme: &iced::Theme, status: button::Status) -> butt
         text_color,
         background,
         ..Default::default()
+    }
+}
+
+/// Dark-themed pick_list style matching the toolbar background.
+fn dark_pick_list_style(
+    theme: &iced::Theme,
+    status: pick_list::Status,
+) -> pick_list::Style {
+    let _ = theme;
+    let bg = match status {
+        pick_list::Status::Hovered => Color::from_rgba(1.0, 1.0, 1.0, 0.12),
+        pick_list::Status::Opened { .. } => Color::from_rgba(1.0, 1.0, 1.0, 0.08),
+        _ => Color::from_rgba(1.0, 1.0, 1.0, 0.05),
+    };
+    pick_list::Style {
+        text_color: theme::TEXT_SECONDARY,
+        placeholder_color: theme::TEXT_MUTED,
+        handle_color: theme::TEXT_MUTED,
+        background: iced::Background::Color(bg),
+        border: iced::Border {
+            color: Color::from_rgba(1.0, 1.0, 1.0, 0.15),
+            width: 1.0,
+            radius: 3.0.into(),
+        },
     }
 }

@@ -14,6 +14,8 @@ chrono    = { workspace = true }
 thiserror = { workspace = true }
 anyhow    = { workspace = true }
 tracing   = { workspace = true }
+parking_lot = { workspace = true }
+async-trait = { workspace = true }
 
 # CSV parsing — not in workspace deps since only this crate needs it
 csv = "1"

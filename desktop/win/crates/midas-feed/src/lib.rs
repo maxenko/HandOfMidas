@@ -2,15 +2,15 @@
 //!
 //! Depends on: midas-core, midas-data
 //!
-//! Currently supports CSV import and deterministic test data generation.
-//! Future: WebSocket streaming from market data providers.
+//! Currently supports CSV import, deterministic test data generation,
+//! and the TestProvider (DataProvider trait wrapper).
 
 pub mod csv;
 pub mod error;
+pub mod test_provider;
 pub mod testdata;
 
 // ── Planned modules (uncomment as implemented) ──────────────────────
-// pub mod provider;   // DataProvider trait
 // pub mod aggregator; // Tick-to-candle aggregation
 // pub mod replay;     // Historical data replay for testing
 
@@ -21,4 +21,5 @@ pub mod testdata;
 /// ```
 pub use csv::import_csv;
 pub use error::CsvError;
+pub use test_provider::TestProvider;
 pub use testdata::TestDataProvider;

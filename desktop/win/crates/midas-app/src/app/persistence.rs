@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use iced::Task;
 
-use midas_core::config::{AppConfig, ChartConfig, PanelSlot};
+use midas_core::config::{AppConfig, ChartConfig, PanelSlot, ProviderConfig};
 
 use crate::layout::PanelContent;
 
@@ -46,6 +46,8 @@ impl MidasApp {
                             timeframe_link: panel.timeframe_link,
                         });
                         panel_order.push(PanelSlot::Chart { chart_index: idx });
+                    } else {
+                        tracing::warn!("Pane references missing {chart_id}, skipping in config");
                     }
                 }
                 PanelContent::Watchlist(wl_id) => {
@@ -55,6 +57,8 @@ impl MidasApp {
                         panel_order.push(PanelSlot::Watchlist {
                             watchlist_index: idx,
                         });
+                    } else {
+                        tracing::warn!("Pane references missing {wl_id}, skipping in config");
                     }
                 }
             }
@@ -81,6 +85,13 @@ impl MidasApp {
             watchlists: watchlist_configs,
             panel_order,
             store: midas_core::config::StoreConfig::default(),
+            providers: Some(ProviderConfig {
+                active_data: Some(self.providers.active_data_provider_name()),
+                active_broker: self
+                    .providers
+                    .active_broker()
+                    .map(|b| b.name().to_string()),
+            }),
         }
     }
 

@@ -11,6 +11,7 @@ mod chart_widget;
 mod layout;
 mod level_store;
 mod link;
+mod registry;
 mod theme;
 mod watchlist;
 

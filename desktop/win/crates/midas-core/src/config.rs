@@ -63,6 +63,9 @@ pub struct AppConfig {
     /// DuckDB persistent cache configuration.
     #[serde(default)]
     pub store: StoreConfig,
+    /// Active data provider and broker selections.
+    #[serde(default)]
+    pub providers: Option<ProviderConfig>,
 }
 
 /// Window geometry configuration.
@@ -267,6 +270,20 @@ impl Default for StoreConfig {
     }
 }
 
+/// Saved provider and broker selections.
+///
+/// Serialized as the `[providers]` section in `config.toml`. Existing configs
+/// without `[providers]` get `None` via `#[serde(default)]` on `AppConfig.providers`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderConfig {
+    /// Name of the last-active data provider (e.g. `"Test Data"`).
+    #[serde(default)]
+    pub active_data: Option<String>,
+    /// Name of the last-active order broker (e.g. `"IB Paper"`), or `None`.
+    #[serde(default)]
+    pub active_broker: Option<String>,
+}
+
 /// Default line width for levels missing the field (backward compat).
 fn default_line_width() -> f32 {
     1.0
@@ -295,6 +312,7 @@ impl Default for AppConfig {
             watchlists: Vec::new(),
             panel_order: Vec::new(),
             store: StoreConfig::default(),
+            providers: None,
         }
     }
 }
@@ -484,6 +502,7 @@ mod tests {
             watchlists: Vec::new(),
             panel_order: Vec::new(),
             store: StoreConfig::default(),
+            providers: None,
         };
 
         config.save(&path).expect("save config");
@@ -638,6 +657,7 @@ mod tests {
             watchlists: Vec::new(),
             panel_order: Vec::new(),
             store: StoreConfig::default(),
+            providers: None,
         };
 
         config.save(&path).expect("save config");
@@ -812,6 +832,7 @@ color = [1.0, 0.843, 0.0, 1.0]
             watchlists: Vec::new(),
             panel_order: Vec::new(),
             store: StoreConfig::default(),
+            providers: None,
         };
 
         // Write multiple times to ensure atomic replacement works.
@@ -924,6 +945,7 @@ color = [1.0, 0.843, 0.0, 1.0]
             watchlists: Vec::new(),
             panel_order: Vec::new(),
             store: StoreConfig::default(),
+            providers: None,
         };
 
         config.save(&path).expect("save full config");
