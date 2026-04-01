@@ -18,13 +18,15 @@ use iced::{window, Task};
 use midas_chart::camera::Camera2D;
 use midas_chart::state::ChartState;
 use midas_chart::AnnotationId;
-use midas_core::config::{AppConfig, ChartConfig};
-use midas_core::{ChartId, Timeframe};
+use midas_core::config::{AppConfig, ChartConfig, PanelSlot};
+use midas_core::{ChartId, LinkMode, Timeframe, WatchlistId};
 use midas_data::CandleBuffer;
 use midas_feed::TestDataProvider;
 
-use crate::layout::{LayoutPresetKind, WorkspaceLayout};
+use crate::layout::{LayoutPresetKind, PanelContent, WorkspaceLayout};
 use crate::level_store::LevelStore;
+use crate::link::{LinkDimension, PickerTarget};
+use crate::watchlist::WatchlistPanel;
 
 // ── Load state ────────────────────────────────────────────────────────
 
@@ -69,6 +71,10 @@ pub struct ChartPanel {
     pub editing_level_screen_pos: Option<(f32, f32)>,
     /// Temporary string for the price input field in the level editor.
     pub level_editor_price_input: String,
+    /// Symbol link group for cross-chart symbol synchronization.
+    pub symbol_link: LinkMode,
+    /// Timeframe link group for cross-chart timeframe synchronization.
+    pub timeframe_link: LinkMode,
 }
 
 // ── Application state ─────────────────────────────────────────────────
@@ -116,6 +122,22 @@ pub struct MidasApp {
     pub crosshair_sync: Option<(ChartId, i64, f64, String)>,
     /// Deterministic test data generator. Any ticker produces instant data.
     test_data: TestDataProvider,
+    /// DuckDB persistent cache handle. None if disabled or failed to open.
+    pub store: Option<midas_store::DbHandle>,
+    /// All watchlist panels keyed by stable WatchlistId.
+    pub watchlists: HashMap<WatchlistId, WatchlistPanel>,
+    /// Active drag-drop state: when set, the user has clicked a ticker
+    /// grip and is choosing a chart pane to drop it onto.
+    pub dragging_ticker: Option<DragTickerState>,
+    /// Which link picker dropdown is currently open, if any.
+    pub link_picker_open: Option<(PickerTarget, LinkDimension)>,
+}
+
+/// State for an in-progress ticker drag from a watchlist to a chart.
+#[derive(Debug, Clone)]
+pub struct DragTickerState {
+    /// The ticker symbol being dragged.
+    pub symbol: String,
 }
 
 /// Minimum interval between debounced config saves (in seconds).
@@ -263,6 +285,36 @@ pub enum Message {
     /// Monitor size query result.
     MonitorSizeResult(Option<iced::Size>),
 
+    // -- Watchlist --
+    /// Add a new watchlist panel to the workspace.
+    AddWatchlist,
+    /// Text changed in a watchlist's "add ticker" input.
+    WatchlistTickerInputChanged(WatchlistId, String),
+    /// User pressed Enter or clicked Add in a watchlist's ticker input.
+    WatchlistAddTicker(WatchlistId),
+    /// Remove a ticker from a watchlist.
+    WatchlistRemoveTicker(WatchlistId, String),
+    /// Toggle the favorite status of a ticker in a watchlist.
+    WatchlistToggleFavorite(WatchlistId, String),
+    /// User clicked the drag grip on a watchlist ticker row.
+    WatchlistDragStart(WatchlistId, String),
+    /// User cancelled the drag (Escape or cancel button).
+    WatchlistDragCancel,
+
+    // -- Chart linking --
+    /// Set the symbol link mode for a docked chart.
+    SetSymbolLink(ChartId, LinkMode),
+    /// Set the timeframe link mode for a docked chart.
+    SetTimeframeLink(ChartId, LinkMode),
+    /// Set the symbol link mode for a floating chart.
+    FloatingSetSymbolLink(window::Id, LinkMode),
+    /// Set the timeframe link mode for a floating chart.
+    FloatingSetTimeframeLink(window::Id, LinkMode),
+    /// Toggle the link color picker for any panel.
+    ToggleLinkPicker(PickerTarget, LinkDimension),
+    /// Dismiss any open link picker.
+    DismissLinkPicker,
+
     // -- Window --
     /// Periodic tick for animations and status bar clock.
     Tick,
@@ -375,36 +427,121 @@ impl MidasApp {
 
         let open_task = open_task.map(Message::MainWindowOpened);
 
-        // Build workspace and charts from config (or empty defaults).
-        let (workspace, charts, status_message) = if config.charts.is_empty() {
-            let (ws, first_id) = WorkspaceLayout::single();
-            let mut charts = HashMap::new();
-            charts.insert(first_id, Self::make_empty_panel());
-            (ws, charts, "Ready".to_string())
-        } else {
+        // Build workspace, charts, and watchlists from config.
+        let (workspace, charts, watchlists, status_message);
+
+        if !config.panel_order.is_empty() {
+            // panel_order-driven restoration (supports mixed chart + watchlist layouts).
+            let (mut ws, first_chart_id) = WorkspaceLayout::single();
+            let mut ch = HashMap::new();
+            let mut wl = HashMap::new();
+            let first_pane = ws.focus.unwrap();
+            let mut is_first = true;
+
+            for slot in &config.panel_order {
+                match slot {
+                    PanelSlot::Chart { chart_index } => {
+                        let chart_cfg = match config.charts.get(*chart_index) {
+                            Some(cfg) => cfg,
+                            None => continue,
+                        };
+                        let panel = Self::restore_panel(chart_cfg);
+                        if is_first {
+                            ch.insert(first_chart_id, panel);
+                            is_first = false;
+                        } else if let Some((new_id, _)) =
+                            ws.split(pane_grid::Axis::Vertical, first_pane)
+                        {
+                            ch.insert(new_id, panel);
+                        }
+                    }
+                    PanelSlot::Watchlist { watchlist_index } => {
+                        let wl_cfg = match config.watchlists.get(*watchlist_index) {
+                            Some(cfg) => cfg,
+                            None => continue,
+                        };
+                        let wl_id = ws.next_watchlist_id();
+                        let panel = WatchlistPanel::from_config(wl_id, wl_cfg);
+                        if is_first {
+                            // First slot is a watchlist: replace the default chart pane.
+                            if let Some(state) = ws.panes.get_mut(first_pane) {
+                                state.content = PanelContent::Watchlist(wl_id);
+                            }
+                            wl.insert(wl_id, panel);
+                            is_first = false;
+                        } else if let Some((_dummy_id, new_pane)) =
+                            ws.split(pane_grid::Axis::Vertical, first_pane)
+                        {
+                            if let Some(state) = ws.panes.get_mut(new_pane) {
+                                state.content = PanelContent::Watchlist(wl_id);
+                            }
+                            wl.insert(wl_id, panel);
+                        }
+                    }
+                }
+            }
+
+            // If all panel_order entries were invalid, create a default panel.
+            if is_first {
+                ch.insert(first_chart_id, Self::make_empty_panel());
+            }
+
+            ws.set_focus(first_pane);
+            let n = ch.len() + wl.len();
+            workspace = ws;
+            charts = ch;
+            watchlists = wl;
+            status_message = format!("Restored {n} panel(s) from config");
+        } else if !config.charts.is_empty() {
+            // Legacy path: charts only (backward compat, no panel_order).
             let (mut ws, first_id) = WorkspaceLayout::single();
-            let mut charts = HashMap::new();
+            let mut ch = HashMap::new();
 
-            // First chart goes into the initial pane.
             let first_cfg = &config.charts[0];
-            let mut panel = Self::restore_panel(first_cfg);
-            charts.insert(first_id, panel);
+            ch.insert(first_id, Self::restore_panel(first_cfg));
 
-            // Additional charts split vertically from the first pane.
             let first_pane = ws.focus.unwrap();
             for chart_cfg in config.charts.iter().skip(1) {
-                panel = Self::restore_panel(chart_cfg);
+                let panel = Self::restore_panel(chart_cfg);
                 if let Some((new_id, _)) = ws.split(pane_grid::Axis::Vertical, first_pane) {
-                    charts.insert(new_id, panel);
+                    ch.insert(new_id, panel);
                 }
             }
             ws.set_focus(first_pane);
 
-            let n = charts.len();
-            (ws, charts, format!("Restored {n} chart(s) from config"))
+            let n = ch.len();
+            workspace = ws;
+            charts = ch;
+            watchlists = HashMap::new();
+            status_message = format!("Restored {n} chart(s) from config");
+        } else {
+            let (ws, first_id) = WorkspaceLayout::single();
+            let mut ch = HashMap::new();
+            ch.insert(first_id, Self::make_empty_panel());
+            workspace = ws;
+            charts = ch;
+            watchlists = HashMap::new();
+            status_message = "Ready".to_string();
         };
 
         let level_store = LevelStore::from_config(&config.levels);
+
+        // Initialize DuckDB store.
+        let store = if config.store.enabled {
+            let data_dir = config_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."));
+            let db_path = data_dir.join(&config.store.path);
+            tracing::info!("DuckDB store enabled: {}", db_path.display());
+            Some(midas_store::DbHandle::open(midas_store::StoreConfig {
+                path: Some(db_path),
+                memory_limit_mb: config.store.memory_limit_mb,
+                threads: config.store.threads,
+            }))
+        } else {
+            tracing::info!("DuckDB store disabled in config");
+            None
+        };
 
         let mut app = Self {
             charts,
@@ -425,6 +562,10 @@ impl MidasApp {
             placing_preview: None,
             crosshair_sync: None,
             test_data: TestDataProvider::new(),
+            store,
+            watchlists,
+            dragging_ticker: None,
+            link_picker_open: None,
         };
 
         // Auto-load test data for all restored charts that have a symbol.
@@ -450,6 +591,8 @@ impl MidasApp {
         panel.symbol = cfg.symbol.clone();
         panel.symbol_input = cfg.symbol.clone();
         panel.timeframe = tf;
+        panel.symbol_link = cfg.symbol_link;
+        panel.timeframe_link = cfg.timeframe_link;
         Self::restore_camera(cfg, &mut panel);
         panel
     }
@@ -504,6 +647,8 @@ impl MidasApp {
             editing_level_id: None,
             editing_level_screen_pos: None,
             level_editor_price_input: String::new(),
+            symbol_link: LinkMode::Unlinked,
+            timeframe_link: LinkMode::Unlinked,
         }
     }
 
@@ -565,6 +710,126 @@ impl MidasApp {
         Task::none()
     }
 
+    /// Propagate a symbol change from source chart to all linked charts
+    /// (both docked and floating).
+    fn propagate_symbol_change(&mut self, source_id: ChartId, new_symbol: &str) -> Task<Message> {
+        use crate::link::find_link_targets;
+
+        let source_link = self
+            .charts
+            .get(&source_id)
+            .map(|c| c.symbol_link)
+            .unwrap_or(LinkMode::Unlinked);
+
+        // Docked charts.
+        let pane_targets: Vec<ChartId> = find_link_targets(
+            source_link,
+            self.charts
+                .iter()
+                .filter(|(id, _)| **id != source_id)
+                .map(|(id, panel)| (*id, panel.symbol_link)),
+        );
+
+        let mut tasks: Vec<Task<Message>> = Vec::new();
+        for id in pane_targets {
+            tasks.push(self.load_symbol_for_chart(id, new_symbol));
+        }
+
+        // Floating charts.
+        let floating_targets: Vec<window::Id> = find_link_targets(
+            source_link,
+            self.floating_charts
+                .iter()
+                .map(|(wid, panel)| (*wid, panel.symbol_link)),
+        );
+        let symbol = new_symbol.trim().to_uppercase();
+        for wid in floating_targets {
+            let tf = self
+                .floating_charts
+                .get(&wid)
+                .map(|c| c.timeframe)
+                .unwrap_or(Timeframe::D1);
+            if let Some(chart) = self.floating_charts.get_mut(&wid) {
+                chart.symbol = symbol.clone();
+                chart.symbol_input = symbol.clone();
+            }
+            self.load_data_for_floating_chart(wid, &symbol, tf);
+        }
+
+        if tasks.is_empty() {
+            Task::none()
+        } else {
+            Task::batch(tasks)
+        }
+    }
+
+    /// Propagate a timeframe change from source chart to all linked charts
+    /// (both docked and floating).
+    fn propagate_timeframe_change(&mut self, source_id: ChartId, new_tf: Timeframe) {
+        use crate::link::find_link_targets;
+
+        let source_link = self
+            .charts
+            .get(&source_id)
+            .map(|c| c.timeframe_link)
+            .unwrap_or(LinkMode::Unlinked);
+
+        // Docked charts.
+        let pane_targets: Vec<ChartId> = find_link_targets(
+            source_link,
+            self.charts
+                .iter()
+                .filter(|(id, _)| **id != source_id)
+                .map(|(id, panel)| (*id, panel.timeframe_link)),
+        );
+        for id in pane_targets {
+            let symbol = self
+                .charts
+                .get(&id)
+                .map(|c| c.symbol.clone())
+                .unwrap_or_default();
+            if let Some(chart) = self.charts.get_mut(&id) {
+                chart.timeframe = new_tf;
+                chart.chart_state.dirty.mark_camera();
+            }
+            if !symbol.is_empty() {
+                self.load_test_data_for_chart(id, &symbol, new_tf, true);
+            }
+        }
+
+        // Floating charts.
+        let floating_targets: Vec<window::Id> = find_link_targets(
+            source_link,
+            self.floating_charts
+                .iter()
+                .map(|(wid, panel)| (*wid, panel.timeframe_link)),
+        );
+        for wid in floating_targets {
+            let symbol = self
+                .floating_charts
+                .get(&wid)
+                .map(|c| c.symbol.clone())
+                .unwrap_or_default();
+            if let Some(chart) = self.floating_charts.get_mut(&wid) {
+                chart.timeframe = new_tf;
+            }
+            if !symbol.is_empty() {
+                self.load_data_for_floating_chart(wid, &symbol, new_tf);
+            }
+        }
+    }
+
+    /// How many calendar days of test data to generate for a timeframe.
+    fn days_for_timeframe(tf: Timeframe) -> u32 {
+        match tf.as_secs() {
+            s if s >= Timeframe::W1.as_secs() => 3650, // ~10 years
+            s if s >= Timeframe::D1.as_secs() => 730,  // ~2 years
+            s if s >= Timeframe::H1.as_secs() => 90,   // ~3 months
+            s if s >= Timeframe::M15.as_secs() => 30,  // ~1 month
+            _ => 10,                                   // <=M5: ~10 days
+        }
+    }
+
     /// Generate test data at the given timeframe and install it in the chart.
     ///
     /// Called from symbol submit, timeframe change, and config restore.
@@ -582,15 +847,7 @@ impl MidasApp {
         reset_camera: bool,
     ) {
         tracing::debug!("Loading data for chart {chart_id} symbol={symbol} tf={tf}");
-        // Choose how many calendar days of data to generate based on
-        // timeframe: more for coarser timeframes so the chart isn't empty.
-        let days = match tf.as_secs() {
-            s if s >= Timeframe::W1.as_secs() => 3650, // ~10 years
-            s if s >= Timeframe::D1.as_secs() => 730,  // ~2 years
-            s if s >= Timeframe::H1.as_secs() => 90,   // ~3 months
-            s if s >= Timeframe::M15.as_secs() => 30,  // ~1 month
-            _ => 10,                                   // <=M5: ~10 days
-        };
+        let days = Self::days_for_timeframe(tf);
 
         let buffer = self.test_data.get_candles(symbol, tf, days);
         let count = buffer.len();
@@ -648,6 +905,61 @@ impl MidasApp {
         }
     }
 
+    /// Load test data for a floating chart window. Mirrors `load_test_data_for_chart`
+    /// but operates on `self.floating_charts`.
+    fn load_data_for_floating_chart(
+        &mut self,
+        wid: window::Id,
+        symbol: &str,
+        tf: Timeframe,
+    ) {
+        let days = Self::days_for_timeframe(tf);
+        let buffer = self.test_data.get_candles(symbol, tf, days);
+        let buffer = Arc::new(buffer);
+
+        if let Some(chart) = self.floating_charts.get_mut(&wid) {
+            chart.data = Some(Arc::clone(&buffer));
+            chart.load_state = LoadState::Loaded;
+            chart.chart_state.dirty.mark_data();
+
+            if !buffer.is_empty() {
+                let len = buffer.len();
+
+                if chart.chart_state.collapse_gaps {
+                    chart.chart_state.data_time_start = 0.0;
+                    chart.chart_state.data_time_end = len as f64;
+                } else {
+                    let first_ts = buffer.timestamps[0] as f64;
+                    let last_ts = buffer.timestamps[len - 1] as f64;
+                    chart.chart_state.data_time_start = first_ts;
+                    chart.chart_state.data_time_end = last_ts;
+                }
+
+                let visible_count = 200.min(len);
+                if chart.chart_state.collapse_gaps {
+                    let start_idx = (len - visible_count) as f64;
+                    let end_idx = len as f64 + (visible_count as f64 * 0.05);
+                    chart.chart_state.camera.time_start = start_idx;
+                    chart.chart_state.camera.time_end = end_idx;
+                } else {
+                    let last_ts = buffer.timestamps[len - 1] as f64;
+                    let first_visible_ts = buffer.timestamps[len - visible_count] as f64;
+                    chart.chart_state.camera.time_start = first_visible_ts;
+                    chart.chart_state.camera.time_end =
+                        last_ts + (last_ts - first_visible_ts) * 0.05;
+                }
+
+                let range = (len - visible_count)..len;
+                let (low, high) = buffer.price_range(range);
+                let padding = (high - low) as f64 * 0.05;
+                chart.chart_state.camera.price_low = low as f64 - padding;
+                chart.chart_state.camera.price_high = high as f64 + padding;
+
+                chart.chart_state.dirty.mark_camera();
+            }
+        }
+    }
+
     /// Get the active chart's ChartId (from workspace focus).
     fn active_chart_id(&self) -> Option<ChartId> {
         self.workspace.focused_chart_id()
@@ -696,7 +1008,8 @@ impl MidasApp {
                 }
                 let task = self.load_symbol_for_chart(chart_id, &symbol);
                 self.mark_config_dirty();
-                task
+                let propagate = self.propagate_symbol_change(chart_id, &symbol);
+                Task::batch([task, propagate])
             }
 
             Message::PanelTimeframeSelected(chart_id, tf) => {
@@ -717,6 +1030,7 @@ impl MidasApp {
                     self.load_test_data_for_chart(chart_id, &symbol, tf, true);
                 }
 
+                self.propagate_timeframe_change(chart_id, tf);
                 self.mark_config_dirty();
                 Task::none()
             }
@@ -741,8 +1055,12 @@ impl MidasApp {
 
             Message::CloseChart(id) => {
                 if let Some(pane) = self.workspace.find_pane(id) {
-                    if let Some(closed_id) = self.workspace.close(pane) {
+                    if let Some(PanelContent::Chart(closed_id)) = self.workspace.close(pane) {
                         self.charts.remove(&closed_id);
+                        if matches!(self.link_picker_open, Some((PickerTarget::Docked(pid), _)) if pid == closed_id)
+                        {
+                            self.link_picker_open = None;
+                        }
                         self.status_message = format!("Closed {closed_id}");
                     }
                 }
@@ -757,6 +1075,7 @@ impl MidasApp {
             }
 
             Message::LayoutPreset(preset) => {
+                self.link_picker_open = None;
                 let new_ids = self.workspace.apply_preset(&preset);
                 for id in &new_ids {
                     self.charts
@@ -771,6 +1090,27 @@ impl MidasApp {
             }
 
             Message::PaneFocused(pane) => {
+                self.link_picker_open = None;
+                // If in drag-drop mode, treat the click as a drop target.
+                if let Some(drag) = self.dragging_ticker.take() {
+                    if let Some(pane_state) = self.workspace.panes.get(pane) {
+                        if let Some(chart_id) = pane_state.chart_id() {
+                            self.status_message =
+                                format!("Loaded {} into {chart_id}", drag.symbol);
+                            self.workspace.set_focus(pane);
+                            let load = self.load_symbol_for_chart(chart_id, &drag.symbol);
+                            let propagate =
+                                self.propagate_symbol_change(chart_id, &drag.symbol);
+                            self.mark_config_dirty();
+                            return Task::batch([load, propagate]);
+                        }
+                        // Dropped on a non-chart pane — restore drag state.
+                        self.dragging_ticker = Some(drag);
+                        self.status_message =
+                            "Drop on a chart pane, not a watchlist".into();
+                        return Task::none();
+                    }
+                }
                 self.workspace.set_focus(pane);
                 Task::none()
             }
@@ -786,11 +1126,19 @@ impl MidasApp {
             }
 
             Message::PaneDragged(pane_grid::DragEvent::Dropped { pane, target }) => {
+                if self.dragging_ticker.is_some() {
+                    self.dragging_ticker = None;
+                }
                 self.workspace.panes.drop(pane, target);
                 Task::none()
             }
 
-            Message::PaneDragged(_) => Task::none(),
+            Message::PaneDragged(_) => {
+                if self.dragging_ticker.is_some() {
+                    self.dragging_ticker = None;
+                }
+                Task::none()
+            }
 
             Message::PaneSplit(axis, pane) => {
                 if let Some((new_id, _new_pane)) = self.workspace.split(axis, pane) {
@@ -801,12 +1149,22 @@ impl MidasApp {
             }
 
             Message::PaneClose(pane) => {
-                if let Some(closed_id) = self.workspace.close(pane) {
-                    self.charts.remove(&closed_id);
-                    self.status_message = format!("Closed {closed_id}");
+                match self.workspace.close(pane) {
+                    Some(PanelContent::Chart(closed_id)) => {
+                        self.charts.remove(&closed_id);
+                        if matches!(self.link_picker_open, Some((PickerTarget::Docked(pid), _)) if pid == closed_id)
+                        {
+                            self.link_picker_open = None;
+                        }
+                        self.status_message = format!("Closed {closed_id}");
+                    }
+                    Some(PanelContent::Watchlist(wl_id)) => {
+                        self.watchlists.remove(&wl_id);
+                        self.status_message = format!("Closed {wl_id}");
+                    }
+                    None => return Task::none(),
                 }
-                self.mark_config_dirty();
-                Task::none()
+                self.flush_config()
             }
 
             Message::ChartViewportChanged(chart_id, old_w, old_h, new_w, new_h) => {
@@ -1308,10 +1666,8 @@ impl MidasApp {
             }
 
             Message::ChartBatch(msgs) => {
-                for msg in msgs {
-                    let _ = self.update(msg);
-                }
-                Task::none()
+                let tasks: Vec<_> = msgs.into_iter().map(|msg| self.update(msg)).collect();
+                Task::batch(tasks)
             }
 
             Message::KeyPressed(key) => {
@@ -1336,25 +1692,26 @@ impl MidasApp {
 
             Message::PopOut(pane) => {
                 if let Some(pane_state) = self.workspace.panes.get(pane) {
-                    let chart_id = pane_state.chart_id;
-                    if let Some(chart) = self.charts.get(&chart_id) {
-                        let floating_chart = chart.clone();
-                        let title = if floating_chart.symbol.is_empty() {
-                            "Hand of Midas".to_string()
-                        } else {
-                            format!(
-                                "{} - {}",
-                                floating_chart.symbol,
-                                floating_chart.timeframe.display_name()
-                            )
-                        };
-                        let (win_id, open_task) = window::open(window::Settings {
-                            size: iced::Size::new(800.0, 500.0),
-                            ..window::Settings::default()
-                        });
-                        self.floating_charts.insert(win_id, floating_chart);
-                        self.status_message = format!("Popped out {title} to new window");
-                        return open_task.map(|_id| Message::Tick);
+                    if let Some(chart_id) = pane_state.chart_id() {
+                        if let Some(chart) = self.charts.get(&chart_id) {
+                            let floating_chart = chart.clone();
+                            let title = if floating_chart.symbol.is_empty() {
+                                "Hand of Midas".to_string()
+                            } else {
+                                format!(
+                                    "{} - {}",
+                                    floating_chart.symbol,
+                                    floating_chart.timeframe.display_name()
+                                )
+                            };
+                            let (win_id, open_task) = window::open(window::Settings {
+                                size: iced::Size::new(800.0, 500.0),
+                                ..window::Settings::default()
+                            });
+                            self.floating_charts.insert(win_id, floating_chart);
+                            self.status_message = format!("Popped out {title} to new window");
+                            return open_task.map(|_id| Message::Tick);
+                        }
                     }
                 }
                 Task::none()
@@ -1383,6 +1740,229 @@ impl MidasApp {
                 Task::none()
             }
 
+            // -- Watchlist --
+            Message::AddWatchlist => {
+                if let Some(focused) = self.workspace.focus {
+                    let wl_id = self.workspace.next_watchlist_id();
+                    if let Some((chart_id, new_pane)) =
+                        self.workspace.split(pane_grid::Axis::Vertical, focused)
+                    {
+                        // split() always creates a chart pane — replace it with a watchlist.
+                        if let Some(state) = self.workspace.panes.get_mut(new_pane) {
+                            state.content = PanelContent::Watchlist(wl_id);
+                        }
+                        // Remove the chart entry that split() created.
+                        self.charts.remove(&chart_id);
+                        self.watchlists.insert(
+                            wl_id,
+                            WatchlistPanel::new(wl_id, "Watchlist".into()),
+                        );
+                        self.status_message = format!("Added {wl_id}");
+                        return self.flush_config();
+                    }
+                }
+                Task::none()
+            }
+
+            Message::WatchlistTickerInputChanged(wl_id, value) => {
+                if let Some(wl) = self.watchlists.get_mut(&wl_id) {
+                    wl.add_ticker_input = value;
+                }
+                Task::none()
+            }
+
+            Message::WatchlistAddTicker(wl_id) => {
+                if let Some(wl) = self.watchlists.get_mut(&wl_id) {
+                    let input = wl.add_ticker_input.clone();
+                    if wl.add_ticker(&input) {
+                        wl.add_ticker_input.clear();
+                        return self.flush_config();
+                    }
+                }
+                Task::none()
+            }
+
+            Message::WatchlistRemoveTicker(wl_id, symbol) => {
+                if let Some(wl) = self.watchlists.get_mut(&wl_id) {
+                    wl.remove_ticker(&symbol);
+                    return self.flush_config();
+                }
+                Task::none()
+            }
+
+            Message::WatchlistToggleFavorite(wl_id, symbol) => {
+                if let Some(wl) = self.watchlists.get_mut(&wl_id) {
+                    wl.toggle_favorite(&symbol);
+                    return self.flush_config();
+                }
+                Task::none()
+            }
+
+            Message::WatchlistDragStart(_wl_id, symbol) => {
+                self.dragging_ticker = Some(DragTickerState { symbol });
+                self.status_message = "Click a chart pane to drop the ticker".into();
+                Task::none()
+            }
+
+            Message::WatchlistDragCancel => {
+                self.dragging_ticker = None;
+                self.status_message = "Drag cancelled".into();
+                Task::none()
+            }
+
+            // -- Chart linking --
+            Message::SetSymbolLink(chart_id, mode) => {
+                self.link_picker_open = None;
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    chart.symbol_link = mode;
+                }
+                // Adopt group symbol when joining a color group.
+                let mut adopt_task = Task::none();
+                if let LinkMode::Color(color) = mode {
+                    let group_symbol = self
+                        .charts
+                        .iter()
+                        .filter(|(id, _)| **id != chart_id)
+                        .map(|(_, panel)| panel)
+                        .chain(self.floating_charts.values())
+                        .find(|panel| {
+                            matches!(panel.symbol_link, LinkMode::Color(c) if c == color)
+                                && !panel.symbol.is_empty()
+                        })
+                        .map(|panel| panel.symbol.clone());
+                    if let Some(symbol) = group_symbol {
+                        adopt_task = self.load_symbol_for_chart(chart_id, &symbol);
+                    }
+                }
+                self.mark_config_dirty();
+                adopt_task
+            }
+
+            Message::SetTimeframeLink(chart_id, mode) => {
+                self.link_picker_open = None;
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    chart.timeframe_link = mode;
+                }
+                // Adopt group timeframe when joining a color group.
+                if let LinkMode::Color(color) = mode {
+                    let group_tf = self
+                        .charts
+                        .iter()
+                        .filter(|(id, _)| **id != chart_id)
+                        .map(|(_, panel)| panel)
+                        .chain(self.floating_charts.values())
+                        .find(|panel| {
+                            matches!(panel.timeframe_link, LinkMode::Color(c) if c == color)
+                        })
+                        .map(|panel| panel.timeframe);
+                    if let Some(tf) = group_tf {
+                        let symbol = self
+                            .charts
+                            .get(&chart_id)
+                            .map(|c| c.symbol.clone())
+                            .unwrap_or_default();
+                        if let Some(chart) = self.charts.get_mut(&chart_id) {
+                            chart.timeframe = tf;
+                        }
+                        if !symbol.is_empty() {
+                            self.load_test_data_for_chart(chart_id, &symbol, tf, true);
+                        }
+                    }
+                }
+                self.mark_config_dirty();
+                Task::none()
+            }
+
+            Message::FloatingSetSymbolLink(wid, mode) => {
+                self.link_picker_open = None;
+                if let Some(chart) = self.floating_charts.get_mut(&wid) {
+                    chart.symbol_link = mode;
+                }
+                // Adopt group symbol when joining a color group.
+                if let LinkMode::Color(color) = mode {
+                    let group_symbol = self
+                        .charts
+                        .values()
+                        .chain(
+                            self.floating_charts
+                                .iter()
+                                .filter(|(id, _)| **id != wid)
+                                .map(|(_, p)| p),
+                        )
+                        .find(|panel| {
+                            matches!(panel.symbol_link, LinkMode::Color(c) if c == color)
+                                && !panel.symbol.is_empty()
+                        })
+                        .map(|panel| panel.symbol.clone());
+                    if let Some(symbol) = group_symbol {
+                        let tf = self
+                            .floating_charts
+                            .get(&wid)
+                            .map(|c| c.timeframe)
+                            .unwrap_or(Timeframe::D1);
+                        if let Some(chart) = self.floating_charts.get_mut(&wid) {
+                            chart.symbol = symbol.clone();
+                            chart.symbol_input = symbol.clone();
+                        }
+                        self.load_data_for_floating_chart(wid, &symbol, tf);
+                    }
+                }
+                // Floating charts are not persisted — no mark_config_dirty needed.
+                Task::none()
+            }
+
+            Message::FloatingSetTimeframeLink(wid, mode) => {
+                self.link_picker_open = None;
+                if let Some(chart) = self.floating_charts.get_mut(&wid) {
+                    chart.timeframe_link = mode;
+                }
+                // Adopt group timeframe when joining a color group.
+                if let LinkMode::Color(color) = mode {
+                    let group_tf = self
+                        .charts
+                        .values()
+                        .chain(
+                            self.floating_charts
+                                .iter()
+                                .filter(|(id, _)| **id != wid)
+                                .map(|(_, p)| p),
+                        )
+                        .find(|panel| {
+                            matches!(panel.timeframe_link, LinkMode::Color(c) if c == color)
+                        })
+                        .map(|panel| panel.timeframe);
+                    if let Some(tf) = group_tf {
+                        let symbol = self
+                            .floating_charts
+                            .get(&wid)
+                            .map(|c| c.symbol.clone())
+                            .unwrap_or_default();
+                        if let Some(chart) = self.floating_charts.get_mut(&wid) {
+                            chart.timeframe = tf;
+                        }
+                        if !symbol.is_empty() {
+                            self.load_data_for_floating_chart(wid, &symbol, tf);
+                        }
+                    }
+                }
+                // Floating charts are not persisted — no mark_config_dirty needed.
+                Task::none()
+            }
+
+            Message::ToggleLinkPicker(target, dim) => {
+                if self.link_picker_open == Some((target, dim)) {
+                    self.link_picker_open = None;
+                } else {
+                    self.link_picker_open = Some((target, dim));
+                }
+                Task::none()
+            }
+
+            Message::DismissLinkPicker => {
+                self.link_picker_open = None;
+                Task::none()
+            }
+
             Message::MainWindowOpened(id) => {
                 tracing::info!("Main window opened: {id}");
                 self.main_window = Some(id);
@@ -1391,6 +1971,10 @@ impl MidasApp {
             }
 
             Message::FloatingWindowClosed(id) => {
+                if matches!(self.link_picker_open, Some((PickerTarget::Floating(wid), _)) if wid == id)
+                {
+                    self.link_picker_open = None;
+                }
                 if let Some(chart) = self.floating_charts.remove(&id) {
                     tracing::info!("Floating window closed for {}", chart.symbol);
                 }
@@ -1424,8 +2008,13 @@ impl MidasApp {
                 _ => {}
             },
             Key::Named(Named::Escape) => {
+                self.link_picker_open = None;
                 self.level_placing = false;
                 self.placing_preview = None;
+                if self.dragging_ticker.is_some() {
+                    self.dragging_ticker = None;
+                    self.status_message = "Drag cancelled".into();
+                }
             }
             Key::Named(Named::F11) => {
                 self.show_frame_overlay = !self.show_frame_overlay;
@@ -1451,6 +2040,9 @@ impl MidasApp {
             if !symbol.is_empty() {
                 self.load_test_data_for_chart(id, &symbol, tf, true);
             }
+
+            self.propagate_timeframe_change(id, tf);
+            self.mark_config_dirty();
         }
     }
 }

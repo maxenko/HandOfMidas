@@ -3,15 +3,20 @@
 //! Builds the widget tree: toolbar, pane grid, title bars, chart body,
 //! status bar, and floating chart windows.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use iced::widget::pane_grid::{self, PaneGrid};
-use iced::widget::{button, column, container, row, stack, text, text_input, Column, Row, Space};
+use iced::widget::{
+    button, column, container, row, scrollable, stack, text, text_input, Column, Row, Space,
+};
 use iced::{window, Color, Element, Fill, Length};
 
 use midas_chart::AnnotationId;
-use midas_core::{ChartId, Timeframe};
+use midas_core::{ChartId, LinkColor, LinkMode, Timeframe, WatchlistId};
 
+use crate::layout::PanelContent;
+use crate::link::{link_color_rgba, link_mode_indicator_rgba, LinkDimension, PickerTarget};
 use crate::theme;
 
 use super::{ChartPanel, LoadState, Message, MidasApp};
@@ -26,18 +31,47 @@ impl MidasApp {
     pub fn view(&self, window_id: window::Id) -> Element<'_, Message> {
         // Check if this is a floating chart window.
         if let Some(chart) = self.floating_charts.get(&window_id) {
-            return self.view_floating_chart(chart);
+            return self.view_floating_chart(window_id, chart);
         }
 
         // Main window (or fallback for unknown windows).
         let toolbar = self.view_toolbar();
         let content = self.view_content();
         let status_bar = self.view_status_bar();
+
+        // Drag banner: shown when a ticker drag is active.
+        if let Some(ref drag) = self.dragging_ticker {
+            let banner = container(
+                row![
+                    text(format!("Drop {} on a chart panel", drag.symbol)).size(13),
+                    Space::new().width(10),
+                    button(text("Cancel").size(12))
+                        .on_press(Message::WatchlistDragCancel)
+                        .padding([3, 8])
+                        .style(hover_text_button_style),
+                ]
+                .align_y(iced::Alignment::Center),
+            )
+            .padding([4, 12])
+            .width(Fill)
+            .style(|_theme| container::Style {
+                background: Some(iced::Background::Color(Color::from_rgb(
+                    0.15, 0.25, 0.45,
+                ))),
+                ..Default::default()
+            });
+            return column![toolbar, banner, content, status_bar].into();
+        }
+
         column![toolbar, content, status_bar].into()
     }
 
     /// Build the view for a floating (pop-out) chart window.
-    fn view_floating_chart<'a>(&'a self, chart: &'a ChartPanel) -> Element<'a, Message> {
+    fn view_floating_chart<'a>(
+        &'a self,
+        wid: window::Id,
+        chart: &'a ChartPanel,
+    ) -> Element<'a, Message> {
         // If data is loaded, render via GPU Shader widget.
         if let (LoadState::Loaded, Some(ref data)) = (&chart.load_state, &chart.data) {
             let snapshot = crate::chart_widget::ChartRenderSnapshot {
@@ -158,12 +192,97 @@ impl MidasApp {
                 }
             }
 
+            // Link color picker overlay (when open for this floating chart).
+            if let Some((PickerTarget::Floating(picker_wid), dim)) = self.link_picker_open {
+                if picker_wid == wid {
+                    // Backdrop to dismiss picker on click outside.
+                    chart_layers.push(
+                        iced::widget::mouse_area(
+                            Space::new().width(Fill).height(Fill),
+                        )
+                        .on_press(Message::DismissLinkPicker)
+                        .into(),
+                    );
+                    let picker = self.build_link_picker(dim, move |mode| match dim {
+                        LinkDimension::Symbol => Message::FloatingSetSymbolLink(wid, mode),
+                        LinkDimension::Timeframe => {
+                            Message::FloatingSetTimeframeLink(wid, mode)
+                        }
+                    });
+                    chart_layers.push(
+                        container(picker)
+                            .align_x(iced::alignment::Horizontal::Left)
+                            .align_y(iced::alignment::Vertical::Top)
+                            .padding([4, 4])
+                            .width(Fill)
+                            .height(Fill)
+                            .into(),
+                    );
+                }
+            }
+
             let chart_area = stack(chart_layers).width(Fill).height(Fill);
 
-            // Header bar with symbol and timeframe.
+            // Symbol link button for floating chart.
+            let sym_link = chart.symbol_link;
+            let sym_color = link_mode_indicator_rgba(sym_link);
+            let float_s_btn = button(text("S").size(9).color(Color::WHITE))
+                .on_press(Message::ToggleLinkPicker(
+                    PickerTarget::Floating(wid),
+                    LinkDimension::Symbol,
+                ))
+                .padding([1, 3])
+                .style(move |_theme, _status| button::Style {
+                    background: Some(
+                        Color::from_rgba(
+                            sym_color[0],
+                            sym_color[1],
+                            sym_color[2],
+                            sym_color[3],
+                        )
+                        .into(),
+                    ),
+                    text_color: Color::WHITE,
+                    border: iced::Border {
+                        radius: 2.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                });
+
+            // Timeframe link button for floating chart.
+            let tf_link = chart.timeframe_link;
+            let tf_color = link_mode_indicator_rgba(tf_link);
+            let float_t_btn = button(text("T").size(9).color(Color::WHITE))
+                .on_press(Message::ToggleLinkPicker(
+                    PickerTarget::Floating(wid),
+                    LinkDimension::Timeframe,
+                ))
+                .padding([1, 3])
+                .style(move |_theme, _status| button::Style {
+                    background: Some(
+                        Color::from_rgba(
+                            tf_color[0],
+                            tf_color[1],
+                            tf_color[2],
+                            tf_color[3],
+                        )
+                        .into(),
+                    ),
+                    text_color: Color::WHITE,
+                    border: iced::Border {
+                        radius: 2.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                });
+
+            // Header bar with symbol, link buttons, and timeframe.
             let header = container(
                 row![
+                    float_s_btn,
                     text(&chart.symbol).size(13).color(Color::WHITE),
+                    float_t_btn,
                     text(chart.timeframe.display_name())
                         .size(11)
                         .color(theme::TEXT_SECONDARY),
@@ -261,7 +380,12 @@ impl MidasApp {
             .padding([4, 10])
             .style(hover_text_button_style);
 
-        let toolbar_row = row![layout_buttons, split_buttons, add_btn,]
+        let wl_btn = button(text("Watchlist").size(12))
+            .on_press(Message::AddWatchlist)
+            .padding([4, 10])
+            .style(hover_text_button_style);
+
+        let toolbar_row = row![layout_buttons, split_buttons, add_btn, wl_btn,]
             .spacing(8)
             .padding(6)
             .align_y(iced::Alignment::Center);
@@ -287,11 +411,33 @@ impl MidasApp {
         let pane_grid_widget =
             PaneGrid::new(&self.workspace.panes, |pane, pane_state, _is_maximized| {
                 let is_focused = focused_pane == Some(pane);
-                let chart_id = pane_state.chart_id;
 
-                let title_bar = self.view_pane_title_bar(chart_id, pane, pane_count);
+                let (title_bar, body) = match pane_state.content {
+                    PanelContent::Chart(chart_id) => {
+                        let tb = self.view_pane_title_bar(chart_id, pane, pane_count);
+                        let bd = self.view_pane_body(chart_id);
+                        (tb, bd)
+                    }
+                    PanelContent::Watchlist(wl_id) => {
+                        let tb = pane_grid::TitleBar::new(
+                            row![
+                                text("Watchlist").size(14),
+                                Space::new().width(Fill),
+                                button(text("X").size(10))
+                                    .on_press(Message::PaneClose(pane))
+                                    .padding([2, 6])
+                                    .style(hover_text_button_style),
+                            ]
+                            .align_y(iced::Alignment::Center),
+                        )
+                        .padding([2, 4])
+                        .always_show_controls()
+                        .style(|_theme| container::Style::default());
+                        let bd = self.view_watchlist_body(wl_id);
+                        (tb, bd)
+                    }
+                };
 
-                let body = self.view_pane_body(chart_id);
                 // Content style: dark background (serves as title bar bg
                 // since TitleBar is transparent) + focus border.
                 pane_grid::Content::new(body)
@@ -465,9 +611,55 @@ impl MidasApp {
             .padding([1, 4])
             .style(button::text);
 
+        // Symbol link button.
+        let sym_link = chart.map(|c| c.symbol_link).unwrap_or(LinkMode::Unlinked);
+        let sym_color = link_mode_indicator_rgba(sym_link);
+        let s_btn = button(text("S").size(9).color(Color::WHITE))
+            .on_press(Message::ToggleLinkPicker(
+                PickerTarget::Docked(chart_id),
+                LinkDimension::Symbol,
+            ))
+            .padding([1, 3])
+            .style(move |_theme, _status| button::Style {
+                background: Some(
+                    Color::from_rgba(sym_color[0], sym_color[1], sym_color[2], sym_color[3])
+                        .into(),
+                ),
+                text_color: Color::WHITE,
+                border: iced::Border {
+                    radius: 2.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+
+        // Timeframe link button.
+        let tf_link = chart.map(|c| c.timeframe_link).unwrap_or(LinkMode::Unlinked);
+        let tf_color = link_mode_indicator_rgba(tf_link);
+        let t_btn = button(text("T").size(9).color(Color::WHITE))
+            .on_press(Message::ToggleLinkPicker(
+                PickerTarget::Docked(chart_id),
+                LinkDimension::Timeframe,
+            ))
+            .padding([1, 3])
+            .style(move |_theme, _status| button::Style {
+                background: Some(
+                    Color::from_rgba(tf_color[0], tf_color[1], tf_color[2], tf_color[3])
+                        .into(),
+                ),
+                text_color: Color::WHITE,
+                border: iced::Border {
+                    radius: 2.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+
         row![
             ticker_input,
+            s_btn,
             tf_row,
+            t_btn,
             collapse_btn,
             vp_btn,
             levels_btn,
@@ -631,6 +823,35 @@ impl MidasApp {
                 }
             }
 
+            // Link color picker overlay (when open for this chart).
+            if let Some((PickerTarget::Docked(picker_id), dim)) = self.link_picker_open {
+                if picker_id == chart_id {
+                    // Backdrop to dismiss picker on click outside.
+                    chart_layers.push(
+                        iced::widget::mouse_area(
+                            Space::new().width(Fill).height(Fill),
+                        )
+                        .on_press(Message::DismissLinkPicker)
+                        .into(),
+                    );
+                    let picker = self.build_link_picker(dim, move |mode| match dim {
+                        LinkDimension::Symbol => Message::SetSymbolLink(chart_id, mode),
+                        LinkDimension::Timeframe => {
+                            Message::SetTimeframeLink(chart_id, mode)
+                        }
+                    });
+                    chart_layers.push(
+                        container(picker)
+                            .align_x(iced::alignment::Horizontal::Left)
+                            .align_y(iced::alignment::Vertical::Top)
+                            .padding([4, 4])
+                            .width(Fill)
+                            .height(Fill)
+                            .into(),
+                    );
+                }
+            }
+
             return container(stack(chart_layers).width(Fill).height(Fill))
                 .width(Fill)
                 .height(Fill)
@@ -682,6 +903,331 @@ impl MidasApp {
         })
         .into()
     }
+}
+
+// ── Link picker ────────────────────────────────────────────────────
+
+impl MidasApp {
+    /// Build the link color picker dropdown overlay.
+    ///
+    /// Shows 8 color options, a "Listen for any changes" option, and
+    /// a "Not Linked" option. The `msg_builder` closure creates the
+    /// appropriate `Message` for each option.
+    fn build_link_picker(
+        &self,
+        dimension: LinkDimension,
+        msg_builder: impl Fn(LinkMode) -> Message,
+    ) -> Element<'_, Message> {
+        let dim_label = match dimension {
+            LinkDimension::Symbol => "Symbol",
+            LinkDimension::Timeframe => "TimeFrame",
+        };
+
+        let mut items: Vec<Element<'_, Message>> = Vec::with_capacity(10);
+
+        // 8 color options.
+        for color in LinkColor::ALL {
+            let mode = LinkMode::Color(color);
+            let rgba = link_color_rgba(color);
+            let label = format!("{} {} Link", color.display_name(), dim_label);
+            let msg = msg_builder(mode);
+
+            let color_swatch = container(Space::new().width(12).height(12)).style(
+                move |_| container::Style {
+                    background: Some(
+                        Color::from_rgba(rgba[0], rgba[1], rgba[2], rgba[3]).into(),
+                    ),
+                    border: iced::Border {
+                        radius: 2.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            );
+
+            items.push(
+                button(
+                    row![color_swatch, text(label).size(11)]
+                        .spacing(6)
+                        .align_y(iced::Alignment::Center),
+                )
+                .on_press(msg)
+                .padding([3, 8])
+                .width(Fill)
+                .style(button::text)
+                .into(),
+            );
+        }
+
+        // "Listen for any changes" option.
+        let listen_msg = msg_builder(LinkMode::ListenAll);
+        let listen_rgba = link_mode_indicator_rgba(LinkMode::ListenAll);
+        let listen_swatch = container(Space::new().width(12).height(12)).style(
+            move |_| container::Style {
+                background: Some(
+                    Color::from_rgba(
+                        listen_rgba[0],
+                        listen_rgba[1],
+                        listen_rgba[2],
+                        listen_rgba[3],
+                    )
+                    .into(),
+                ),
+                border: iced::Border {
+                    radius: 2.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        items.push(
+            button(
+                row![
+                    listen_swatch,
+                    text(format!("Listen For any {} Changes", dim_label)).size(11)
+                ]
+                .spacing(6)
+                .align_y(iced::Alignment::Center),
+            )
+            .on_press(listen_msg)
+            .padding([3, 8])
+            .width(Fill)
+            .style(button::text)
+            .into(),
+        );
+
+        // "Not Linked" option.
+        let unlinked_msg = msg_builder(LinkMode::Unlinked);
+        let gray_rgba = link_mode_indicator_rgba(LinkMode::Unlinked);
+        let gray_swatch = container(Space::new().width(12).height(12)).style(
+            move |_| container::Style {
+                background: Some(
+                    Color::from_rgba(gray_rgba[0], gray_rgba[1], gray_rgba[2], gray_rgba[3])
+                        .into(),
+                ),
+                border: iced::Border {
+                    radius: 2.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        items.push(
+            button(
+                row![gray_swatch, text("Not Linked").size(11)]
+                    .spacing(6)
+                    .align_y(iced::Alignment::Center),
+            )
+            .on_press(unlinked_msg)
+            .padding([3, 8])
+            .width(Fill)
+            .style(button::text)
+            .into(),
+        );
+
+        container(column(items).spacing(1).width(220))
+            .style(|_| container::Style {
+                background: Some(Color::from_rgb(0.15, 0.15, 0.18).into()),
+                border: iced::Border {
+                    color: Color::from_rgb(0.3, 0.3, 0.35),
+                    width: 1.0,
+                    radius: 4.0.into(),
+                },
+                ..Default::default()
+            })
+            .padding(4)
+            .into()
+    }
+}
+
+// ── Watchlist ──────────────────────────────────────────────────────
+
+impl MidasApp {
+    /// Build the body of a watchlist panel.
+    fn view_watchlist_body(&self, wl_id: WatchlistId) -> Element<'_, Message> {
+        let wl = match self.watchlists.get(&wl_id) {
+            Some(wl) => wl,
+            None => {
+                return container(text("Watchlist not found").size(14))
+                    .center_x(Fill)
+                    .center_y(Fill)
+                    .into();
+            }
+        };
+
+        // Header row.
+        let header = row![
+            Space::new().width(26), // drag grip column
+            text("\u{2605}").size(12).width(30),
+            text("Ticker").size(12).width(70),
+            text("Price").size(12).width(80),
+            text("Chg%").size(12).width(65),
+            text("G.ATR").size(12).width(70),
+            Space::new().width(30), // delete button column
+        ]
+        .spacing(4)
+        .padding([4, 8]);
+
+        // Compute market data for all tickers in one pass.
+        let market_data = self.compute_all_market_data();
+
+        // Ticker rows.
+        let mut rows = Column::new().spacing(1);
+        if wl.tickers.is_empty() {
+            rows = rows.push(
+                container(text("Add tickers to get started").size(13))
+                    .padding(20)
+                    .center_x(Fill),
+            );
+        } else {
+            // Sort: favorites first, maintaining insertion order within each group.
+            let mut sorted: Vec<&crate::watchlist::WatchlistTicker> =
+                wl.tickers.iter().collect();
+            sorted.sort_by_key(|t| !t.favorite);
+
+            let empty_mkt = TickerMarketData::default();
+            for ticker in sorted {
+                let mkt = market_data.get(&ticker.symbol).unwrap_or(&empty_mkt);
+
+                let fav_label = if ticker.favorite { "\u{2605}" } else { "\u{2606}" };
+                let fav_btn = button(text(fav_label).size(12))
+                    .on_press(Message::WatchlistToggleFavorite(
+                        wl_id,
+                        ticker.symbol.clone(),
+                    ))
+                    .padding([2, 4])
+                    .width(30)
+                    .style(hover_text_button_style);
+
+                let price_text = match mkt.last_price {
+                    Some(p) => format!("{p:.2}"),
+                    None => "--".into(),
+                };
+                let change_text = match mkt.change_pct {
+                    Some(c) => format!("{c:+.2}%"),
+                    None => "--".into(),
+                };
+                let gatr_text: String =
+                    mkt.gatr_text.as_deref().unwrap_or("--").to_owned();
+
+                let sym_for_del = ticker.symbol.clone();
+                let del_btn = button(text("\u{00D7}").size(12))
+                    .on_press(Message::WatchlistRemoveTicker(wl_id, sym_for_del))
+                    .padding([2, 4])
+                    .width(30)
+                    .style(hover_text_button_style);
+
+                let sym_for_drag = ticker.symbol.clone();
+                let drag_btn = button(text("\u{2807}").size(12))
+                    .on_press(Message::WatchlistDragStart(wl_id, sym_for_drag))
+                    .padding([2, 4])
+                    .width(26)
+                    .style(hover_text_button_style);
+
+                let change_color = match mkt.change_pct {
+                    Some(c) if c > 0.0 => Color::from_rgb(0.2, 0.8, 0.3),
+                    Some(c) if c < 0.0 => Color::from_rgb(0.9, 0.25, 0.2),
+                    _ => Color::from_rgb(0.6, 0.6, 0.6),
+                };
+
+                let gatr_color = mkt
+                    .gatr_color
+                    .map(|c| Color::from_rgba(c[0], c[1], c[2], c[3]))
+                    .unwrap_or(Color::from_rgb(0.6, 0.6, 0.6));
+
+                let ticker_row = row![
+                    drag_btn,
+                    fav_btn,
+                    text(&ticker.symbol).size(13).width(70),
+                    text(price_text).size(13).width(80),
+                    text(change_text).size(13).width(65).color(change_color),
+                    text(gatr_text).size(13).width(70).color(gatr_color),
+                    del_btn,
+                ]
+                .spacing(4)
+                .padding([2, 8])
+                .align_y(iced::Alignment::Center);
+
+                rows = rows.push(ticker_row);
+            }
+        }
+
+        // Add ticker input row.
+        let add_input = text_input("Add ticker...", &wl.add_ticker_input)
+            .on_input(move |val| Message::WatchlistTickerInputChanged(wl_id, val))
+            .on_submit(Message::WatchlistAddTicker(wl_id))
+            .size(13)
+            .width(200);
+
+        let add_btn = button(text("Add").size(12))
+            .on_press(Message::WatchlistAddTicker(wl_id))
+            .padding([4, 8])
+            .style(hover_text_button_style);
+
+        let add_row = row![add_input, add_btn]
+            .spacing(4)
+            .padding([6, 8])
+            .align_y(iced::Alignment::Center);
+
+        let content = column![header, scrollable(rows).height(Fill), add_row];
+
+        container(content).width(Fill).height(Fill).into()
+    }
+
+    /// Compute market data for all symbols that have loaded chart data.
+    ///
+    /// Returns a map from symbol to market snapshot, computed in a single
+    /// pass over all charts. Avoids redundant per-ticker linear scans.
+    fn compute_all_market_data(&self) -> HashMap<String, TickerMarketData> {
+        let mut result = HashMap::new();
+        for chart in self.charts.values().chain(self.floating_charts.values()) {
+            if chart.symbol.is_empty() || result.contains_key(&chart.symbol) {
+                continue;
+            }
+            if let Some(ref data) = chart.data {
+                let len = data.len();
+                if len == 0 {
+                    continue;
+                }
+                let last_close = data.closes[len - 1] as f64;
+                let prev_close = if len >= 2 {
+                    data.closes[len - 2] as f64
+                } else {
+                    last_close
+                };
+                let change_pct = if prev_close != 0.0 {
+                    ((last_close - prev_close) / prev_close) * 100.0
+                } else {
+                    0.0
+                };
+                let candle_duration =
+                    midas_chart::estimate_candle_duration(data.as_ref());
+                let gatr = midas_chart::gerchik_atr::compute_gerchik_atr(
+                    data.as_ref(),
+                    candle_duration,
+                );
+                result.insert(
+                    chart.symbol.clone(),
+                    TickerMarketData {
+                        last_price: Some(last_close),
+                        change_pct: Some(change_pct),
+                        gatr_text: gatr.as_ref().map(|g| g.text.clone()),
+                        gatr_color: gatr.as_ref().map(|g| g.color),
+                    },
+                );
+            }
+        }
+        result
+    }
+}
+
+/// Market data snapshot for one watchlist ticker, derived from loaded chart data.
+#[derive(Default)]
+struct TickerMarketData {
+    last_price: Option<f64>,
+    change_pct: Option<f64>,
+    gatr_text: Option<String>,
+    gatr_color: Option<[f32; 4]>,
 }
 
 // ── Status bar ──────────────────────────────────────────────────────
@@ -1262,7 +1808,7 @@ fn build_level_editor<'a>(
     .align_y(iced::Alignment::Center);
 
     // -- Lock toggle + Delete --
-    let lock_label = if level.locked { "Lock" } else { "Unlock" };
+    let lock_label = if level.locked { "Unlock" } else { "Lock" };
     let is_locked = level.locked;
     let lock_btn = button(text(lock_label).size(10))
         .on_press(Message::LevelEditorToggleLock(chart_id, level_id))

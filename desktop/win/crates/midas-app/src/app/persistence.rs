@@ -4,38 +4,61 @@ use std::time::Instant;
 
 use iced::Task;
 
-use midas_core::config::{AppConfig, ChartConfig};
+use midas_core::config::{AppConfig, ChartConfig, PanelSlot};
+
+use crate::layout::PanelContent;
 
 use super::{Message, MidasApp, CONFIG_SAVE_DEBOUNCE_SECS};
 
 impl MidasApp {
     /// Build an `AppConfig` from the current application state.
+    ///
+    /// Uses a single pass over workspace panes so that `panel_order` indices
+    /// are always consistent with the `charts` and `watchlists` vectors,
+    /// even if a pane references a chart/watchlist that no longer exists.
     pub(crate) fn build_config(&self) -> AppConfig {
-        let chart_configs: Vec<ChartConfig> = self
-            .workspace
-            .chart_ids()
-            .iter()
-            .filter_map(|id| self.charts.get(id))
-            .map(|panel| {
-                let cam = &panel.chart_state.camera;
-                ChartConfig {
-                    symbol: panel.symbol.clone(),
-                    timeframe: panel.timeframe.display_name().to_string(),
-                    levels: vec![], // deprecated — now in top-level levels map
-                    camera_time_start: Some(cam.time_start),
-                    camera_time_end: Some(cam.time_end),
-                    camera_price_low: Some(cam.price_low),
-                    camera_price_high: Some(cam.price_high),
-                    collapse_gaps: panel.chart_state.collapse_gaps,
-                    timeline_border_ratio: panel.chart_state.timeline_border_ratio,
-                    volume_scale: panel.chart_state.volume_scale,
-                    show_volume_profile: panel.chart_state.show_volume_profile,
-                    show_levels: panel.chart_state.show_levels,
-                    viewport_width: Some(cam.viewport_width),
-                    viewport_height: Some(cam.viewport_height),
+        let mut chart_configs: Vec<ChartConfig> = Vec::new();
+        let mut watchlist_configs = Vec::new();
+        let mut panel_order: Vec<PanelSlot> = Vec::new();
+
+        for ps in self.workspace.panes.panes.values() {
+            match &ps.content {
+                PanelContent::Chart(chart_id) => {
+                    if let Some(panel) = self.charts.get(chart_id) {
+                        let cam = &panel.chart_state.camera;
+                        let idx = chart_configs.len();
+                        chart_configs.push(ChartConfig {
+                            symbol: panel.symbol.clone(),
+                            timeframe: panel.timeframe.display_name().to_string(),
+                            levels: vec![], // deprecated — now in top-level levels map
+                            camera_time_start: Some(cam.time_start),
+                            camera_time_end: Some(cam.time_end),
+                            camera_price_low: Some(cam.price_low),
+                            camera_price_high: Some(cam.price_high),
+                            collapse_gaps: panel.chart_state.collapse_gaps,
+                            timeline_border_ratio: panel.chart_state.timeline_border_ratio,
+                            volume_scale: panel.chart_state.volume_scale,
+                            show_volume_profile: panel.chart_state.show_volume_profile,
+                            show_levels: panel.chart_state.show_levels,
+                            viewport_width: Some(cam.viewport_width),
+                            viewport_height: Some(cam.viewport_height),
+                            symbol_link: panel.symbol_link,
+                            timeframe_link: panel.timeframe_link,
+                        });
+                        panel_order.push(PanelSlot::Chart { chart_index: idx });
+                    }
                 }
-            })
-            .collect();
+                PanelContent::Watchlist(wl_id) => {
+                    if let Some(wl) = self.watchlists.get(wl_id) {
+                        let idx = watchlist_configs.len();
+                        watchlist_configs.push(wl.to_config());
+                        panel_order.push(PanelSlot::Watchlist {
+                            watchlist_index: idx,
+                        });
+                    }
+                }
+            }
+        }
 
         let (win_w, win_h) = self.window_size;
         let (win_x, win_y) = self.window_position.unzip();
@@ -55,6 +78,9 @@ impl MidasApp {
             },
             charts: chart_configs,
             levels: self.level_store.to_config(),
+            watchlists: watchlist_configs,
+            panel_order,
+            store: midas_core::config::StoreConfig::default(),
         }
     }
 
