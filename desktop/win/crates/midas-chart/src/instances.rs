@@ -138,8 +138,8 @@ pub struct AxisLabel {
 /// pipeline. Contains both the geometric data and display state.
 #[derive(Clone, Debug)]
 pub struct LevelRender {
-    /// Unique ID of this level (for interaction targeting).
-    pub id: u64,
+    /// Annotation ID of this level (for interaction targeting).
+    pub id: crate::widget::AnnotationId,
     /// Price value of this level.
     pub price: f64,
     /// Screen Y position in logical pixels.

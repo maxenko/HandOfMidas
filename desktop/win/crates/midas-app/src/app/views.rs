@@ -9,6 +9,7 @@ use iced::widget::pane_grid::{self, PaneGrid};
 use iced::widget::{button, column, container, row, stack, text, text_input, Column, Row, Space};
 use iced::{window, Color, Element, Fill, Length};
 
+use midas_chart::AnnotationId;
 use midas_core::{ChartId, Timeframe};
 
 use crate::theme;
@@ -1394,12 +1395,12 @@ fn compute_level_renders(
     levels
         .iter()
         .map(|lev| midas_chart::LevelRender {
-            id: lev.id,
+            id: AnnotationId(lev.id),
             price: lev.price,
             screen_y: cam.price_to_y(lev.price),
             color: lev.color,
             line_width: lev.line_width,
-            is_selected: chart.chart_state.selected_level == Some(lev.id),
+            is_selected: chart.chart_state.selected_level == Some(AnnotationId(lev.id)),
             is_being_dragged: false,
             original_screen_y: None,
             label_text: midas_chart::format_price(lev.price),

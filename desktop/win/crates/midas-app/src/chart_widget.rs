@@ -32,8 +32,10 @@ use midas_chart::level_tool::LevelTool;
 use midas_chart::levels::HorizontalLevel;
 use midas_chart::scene::ChartScene;
 use midas_chart::state::{ChartState, InteractionMode};
+use midas_chart::widget::{Annotation, AnnotationKind, Presence};
 use midas_chart::{
-    compute_chart_scene, CandleInstance, CrosshairRender, GridLineInstance, VolumeInstance,
+    compute_chart_scene, AnnotationId, CandleInstance, CrosshairRender, GridLineInstance,
+    VolumeInstance,
 };
 use midas_core::ChartId;
 use midas_data::CandleBuffer;
@@ -258,6 +260,10 @@ impl shader::Program<Message> for ChartProgram {
         let mut messages: Vec<Message> = Vec::new();
         let mut captured = false;
 
+        // Convert old HorizontalLevel snapshots to Annotation for handle_event.
+        let event_annotations: Vec<Annotation> =
+            old_levels_to_annotations(&self.snapshot.levels);
+
         for chart_event in chart_events {
             let data_ref = self
                 .snapshot
@@ -270,7 +276,7 @@ impl shader::Program<Message> for ChartProgram {
                 chart_event,
                 data_ref,
                 is_collapsed,
-                &self.snapshot.levels,
+                &event_annotations,
             );
             for action in &actions {
                 // Apply volume scale locally so the triangle moves
@@ -290,7 +296,7 @@ impl shader::Program<Message> for ChartProgram {
                 // Store drag price override for immediate visual feedback
                 // (before the message round-trip through the app).
                 if let midas_chart::ChartAction::DragLevel { id, new_price } = action {
-                    state.drag_price_override = Some((*id, *new_price));
+                    state.drag_price_override = Some((id.0, *new_price));
                 }
                 // Clear drag override when drag ends.
                 if !chart_state.level_tool.is_dragging() {
@@ -441,6 +447,10 @@ impl shader::Program<Message> for ChartProgram {
             effective_level_tool.preview_price = None;
         }
 
+        // Convert effective old-style levels to Annotation for ChartInput.
+        let effective_annotations: Vec<Annotation> =
+            old_levels_to_annotations(&effective_levels);
+
         let input = ChartInput {
             symbol: &snap.symbol,
             data: data.as_ref(),
@@ -459,7 +469,7 @@ impl shader::Program<Message> for ChartProgram {
                 .as_ref()
                 .and_then(|cs| cs.crosshair.render_pos())
                 .or(snap.crosshair_pos),
-            levels: &effective_levels,
+            annotations: &effective_annotations,
             collapse_gaps: snap.collapse_gaps,
             timeline_border_ratio: live_timeline_border_ratio,
             volume_scale: live_volume_scale,
@@ -1080,12 +1090,12 @@ fn action_to_message(
             Some(Message::ChartSetVolumeScale(chart_id, *scale))
         }
         ChartAction::RightClickLevel { id, x, y } => {
-            Some(Message::ChartRightClickLevel(chart_id, *id, *x, *y))
+            Some(Message::ChartRightClickLevel(chart_id, id.0, *x, *y))
         }
         ChartAction::DragLevel { id, new_price } => {
-            Some(Message::ChartDragLevel(chart_id, *id, *new_price))
+            Some(Message::ChartDragLevel(chart_id, id.0, *new_price))
         }
-        ChartAction::SelectLevel { id } => Some(Message::ChartSelectLevel(chart_id, *id)),
+        ChartAction::SelectLevel { id } => Some(Message::ChartSelectLevel(chart_id, id.0)),
         ChartAction::DeselectLevel => Some(Message::ChartDeselectLevel(chart_id)),
         ChartAction::DeleteSelectedLevel => Some(Message::ChartDeleteSelectedLevel(chart_id)),
         ChartAction::CancelPlacing => Some(Message::ChartCancelPlacing(chart_id)),
@@ -1095,6 +1105,37 @@ fn action_to_message(
         ChartAction::Redraw => None,
         _ => None,
     }
+}
+
+// ── Old-level-to-annotation bridge ───────────────────────────────────
+
+/// Convert a slice of old `HorizontalLevel` (from `midas_chart::levels`)
+/// into `Annotation` values for the new widget system. Used during the
+/// migration period while the app still stores levels in `LevelStore`.
+fn old_levels_to_annotations(levels: &[HorizontalLevel]) -> Vec<Annotation> {
+    use midas_chart::widget::level::{
+        HorizontalLevel as WidgetLevel, LevelExtend, LineStyle,
+    };
+    levels
+        .iter()
+        .map(|l| Annotation {
+            id: AnnotationId(l.id),
+            kind: AnnotationKind::Level(WidgetLevel {
+                price: l.price,
+                color: l.color,
+                line_width: l.line_width,
+                style: LineStyle::Solid,
+                label: l.label.clone(),
+                extend: LevelExtend::default(),
+                icon: l.icon.clone(),
+            }),
+            presence: Presence::Active,
+            visible_timeframes: None,
+            locked: l.locked,
+            created_at: 0,
+            modified_at: 0,
+        })
+        .collect()
 }
 
 // ── Crosshair line conversion ─────────────────────────────────────────

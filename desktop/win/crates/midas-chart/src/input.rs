@@ -7,7 +7,7 @@
 use crate::camera::Camera2D;
 use crate::dirty::DirtyFlags;
 use crate::level_tool::LevelTool;
-use crate::levels::HorizontalLevel;
+use crate::widget::Annotation;
 use midas_core::CandleData;
 
 /// Clean input contract for chart scene computation.
@@ -41,8 +41,8 @@ pub struct ChartInput<'a> {
     pub grid_color: [f32; 4],
     /// Crosshair position in chart pixel coords (`None` if inactive).
     pub crosshair: Option<(f32, f32)>,
-    /// Horizontal price levels to render.
-    pub levels: &'a [HorizontalLevel],
+    /// Annotations to render (levels, brackets, etc.).
+    pub annotations: &'a [Annotation],
     /// Whether session gaps are collapsed (index-based X positioning).
     pub collapse_gaps: bool,
     /// Fraction of viewport height at which the timeline border line sits (0.0–1.0).

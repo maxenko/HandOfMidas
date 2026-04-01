@@ -10,6 +10,7 @@ use crate::crosshair_tool::CrosshairTool;
 use crate::dirty::DirtyFlags;
 use crate::interaction::ChartAction;
 use crate::level_tool::LevelTool;
+use crate::widget::AnnotationId;
 
 /// What the active tool needs from the crosshair.
 ///
@@ -118,8 +119,8 @@ pub struct ChartState {
     /// Current crosshair position in chart-local pixels, or `None` if inactive.
     #[deprecated(note = "Use `crosshair.render_pos()` instead")]
     pub crosshair_pos: Option<(f32, f32)>,
-    /// Currently selected level ID, or `None` if no level is selected.
-    pub selected_level: Option<u64>,
+    /// Currently selected annotation ID, or `None` if no level is selected.
+    pub selected_level: Option<AnnotationId>,
     /// Current interaction mode (state machine state).
     pub interaction_mode: InteractionMode,
     /// Last known mouse position for drag delta computation. Set on mouse press,
@@ -603,8 +604,8 @@ mod tests {
     #[test]
     fn apply_select_and_deselect_level() {
         let mut state = ChartState::new(test_camera());
-        state.apply_action(&ChartAction::SelectLevel { id: 1 });
-        assert_eq!(state.selected_level, Some(1));
+        state.apply_action(&ChartAction::SelectLevel { id: AnnotationId(1) });
+        assert_eq!(state.selected_level, Some(AnnotationId(1)));
         state.apply_action(&ChartAction::DeselectLevel);
         assert_eq!(state.selected_level, None);
     }

@@ -224,7 +224,7 @@ fn compute_normal_scene(
     let price_grid_lines = compute_grid_lines(camera, &input.grid_color);
     let y_labels = compute_y_labels(camera);
     let x_labels = compute_x_labels(camera, candle_duration);
-    let levels = compute_levels(input.levels, camera);
+    let levels = compute_levels(input.annotations, camera);
     let crosshair = compute_crosshair_impl(input.crosshair, data, camera, input.symbol, &|cx| {
         let cursor_time = camera.x_to_time(cx);
         let idx = data.find_index_by_time(cursor_time as i64);
@@ -371,7 +371,7 @@ fn compute_collapsed_scene(
         &index_to_x,
     );
 
-    let levels = compute_levels(input.levels, camera);
+    let levels = compute_levels(input.annotations, camera);
 
     // Crosshair in collapsed mode: convert cursor X to the nearest candle index.
     let crosshair = compute_crosshair_impl(input.crosshair, data, camera, input.symbol, &|cx| {
@@ -1018,28 +1018,37 @@ fn compute_x_labels(camera: &Camera2D, candle_duration: f64) -> Vec<AxisLabel> {
     labels
 }
 
-/// Compute render data for horizontal levels.
+/// Compute render data for horizontal levels from annotations.
 fn compute_levels(
-    levels: &[crate::levels::HorizontalLevel],
+    annotations: &[crate::widget::Annotation],
     camera: &Camera2D,
 ) -> Vec<LevelRender> {
-    levels
+    annotations
         .iter()
-        .map(|lev| {
-            let y = camera.snap_to_pixel(camera.price_to_y(lev.price));
-            LevelRender {
-                id: lev.id,
-                price: lev.price,
-                screen_y: y,
-                color: lev.color,
-                line_width: lev.line_width,
-                is_selected: false,
-                is_being_dragged: false,
-                original_screen_y: None,
-                label_text: format_price(lev.price),
-                label: lev.label.clone(),
-                icon: lev.icon.clone(),
-                locked: lev.locked,
+        .filter_map(|ann| {
+            if !ann.presence.is_visible() {
+                return None;
+            }
+            match &ann.kind {
+                crate::widget::AnnotationKind::Level(level) => {
+                    let y = camera.snap_to_pixel(camera.price_to_y(level.price));
+                    Some(LevelRender {
+                        id: ann.id,
+                        price: level.price,
+                        screen_y: y,
+                        color: level.color,
+                        line_width: level.line_width,
+                        is_selected: false,
+                        is_being_dragged: false,
+                        original_screen_y: None,
+                        label_text: format_price(level.price),
+                        label: level.label.clone(),
+                        icon: level.icon.clone(),
+                        locked: ann.locked,
+                    })
+                }
+                // Non-level annotations are not rendered as LevelRender.
+                _ => None,
             }
         })
         .collect()
@@ -1205,7 +1214,10 @@ mod tests {
     use crate::dirty::DirtyFlags;
     use crate::input::ChartInput;
     use crate::level_tool::LevelTool;
-    use crate::levels::HorizontalLevel;
+    use crate::widget::{
+        Annotation, AnnotationId, AnnotationKind, Presence,
+        level::{LevelExtend, LineStyle},
+    };
     use midas_core::CandleData;
     use std::ops::Range;
 
@@ -1345,7 +1357,7 @@ mod tests {
         data: &'a dyn CandleData,
         camera: &'a Camera2D,
         dirty: &'a DirtyFlags,
-        levels: &'a [HorizontalLevel],
+        annotations: &'a [Annotation],
         crosshair: Option<(f32, f32)>,
     ) -> ChartInput<'a> {
         ChartInput {
@@ -1362,7 +1374,7 @@ mod tests {
             volume_bear_color: [0.5, 0.0, 0.0, 0.3],
             grid_color: [0.3, 0.3, 0.3, 0.2],
             crosshair,
-            levels,
+            annotations,
             collapse_gaps: false,
             timeline_border_ratio: 0.20,
             volume_scale: 1.0,
@@ -1377,7 +1389,7 @@ mod tests {
         data: &'a dyn CandleData,
         camera: &'a Camera2D,
         dirty: &'a DirtyFlags,
-        levels: &'a [HorizontalLevel],
+        annotations: &'a [Annotation],
         crosshair: Option<(f32, f32)>,
         collapse_gaps: bool,
     ) -> ChartInput<'a> {
@@ -1395,7 +1407,7 @@ mod tests {
             volume_bear_color: [0.5, 0.0, 0.0, 0.3],
             grid_color: [0.3, 0.3, 0.3, 0.2],
             crosshair,
-            levels,
+            annotations,
             collapse_gaps,
             timeline_border_ratio: 0.20,
             volume_scale: 1.0,
@@ -1683,16 +1695,24 @@ mod tests {
         let data = TestCandles::sample();
         let camera = make_camera_for_data(&data);
         let dirty = DirtyFlags::new();
-        let levels = vec![HorizontalLevel {
-            id: 1,
-            price: 105.0,
-            color: [1.0, 0.0, 0.0, 1.0],
-            line_width: 1.0,
-            label: None,
-            icon: crate::levels::LevelIcon::None,
+        let annotations = vec![Annotation {
+            id: AnnotationId(1),
+            kind: AnnotationKind::Level(crate::widget::HorizontalLevel {
+                price: 105.0,
+                color: [1.0, 0.0, 0.0, 1.0],
+                line_width: 1.0,
+                style: LineStyle::default(),
+                label: None,
+                extend: LevelExtend::default(),
+                icon: crate::levels::LevelIcon::None,
+            }),
+            presence: Presence::Active,
+            visible_timeframes: None,
             locked: false,
+            created_at: 0,
+            modified_at: 0,
         }];
-        let input = make_input(&data, &camera, &dirty, &levels, None);
+        let input = make_input(&data, &camera, &dirty, &annotations, None);
 
         let scene = compute_chart_scene(&input);
 

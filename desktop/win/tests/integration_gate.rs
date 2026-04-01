@@ -14,7 +14,7 @@ use midas_chart::dirty::DirtyFlags;
 use midas_chart::input::ChartInput;
 use midas_chart::instances::CandleInstance;
 use midas_chart::level_tool::LevelTool;
-use midas_chart::levels::HorizontalLevel;
+use midas_chart::widget::Annotation;
 use midas_chart::scene::ChartScene;
 use midas_data::binary::{write_midas_file, MmapCandleFile, MIDAS_MAGIC, MIDAS_VERSION};
 use midas_data::candle::CandleBuffer;
@@ -46,7 +46,7 @@ fn make_default_chart_input<'a>(
     data: &'a CandleBuffer,
     camera: &'a Camera2D,
     dirty: &'a DirtyFlags,
-    levels: &'a [HorizontalLevel],
+    annotations: &'a [Annotation],
 ) -> ChartInput<'a> {
     ChartInput {
         symbol: "TEST",
@@ -62,7 +62,7 @@ fn make_default_chart_input<'a>(
         volume_bear_color: VOLUME_BEAR_COLOR,
         grid_color: GRID_COLOR,
         crosshair: None,
-        levels,
+        annotations,
         collapse_gaps: false,
         timeline_border_ratio: 0.20,
         volume_scale: 1.0,

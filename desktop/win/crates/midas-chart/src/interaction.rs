@@ -9,8 +9,8 @@
 //! or click to select. The `PendingDrag` state resolves this ambiguity once
 //! the mouse has moved past the drag threshold (4px).
 
-use crate::levels::HorizontalLevel;
 use crate::state::{ChartState, CursorClaim, InteractionMode};
+use crate::widget::AnnotationId;
 use midas_core::CandleData;
 
 /// A raw input event delivered to the chart.
@@ -81,16 +81,16 @@ pub enum ChartAction {
     StopMomentum,
     /// Create a new horizontal level at the given price.
     CreateLevel { price: f64 },
-    /// Select a horizontal level by its ID.
-    SelectLevel { id: u64 },
+    /// Select a horizontal level by its annotation ID.
+    SelectLevel { id: AnnotationId },
     /// Drag a horizontal level to a new price.
-    DragLevel { id: u64, new_price: f64 },
+    DragLevel { id: AnnotationId, new_price: f64 },
     /// Delete the currently selected horizontal level.
     DeleteSelectedLevel,
     /// Deselect any selected horizontal level.
     DeselectLevel,
     /// Right-click on a horizontal level — opens context menu / level editor.
-    RightClickLevel { id: u64, x: f32, y: f32 },
+    RightClickLevel { id: AnnotationId, x: f32, y: f32 },
     /// Jump the camera to show the most recent data.
     JumpToEnd,
     /// Jump the camera to show the oldest data.
@@ -176,7 +176,7 @@ pub fn handle_event(
     event: ChartEvent,
     data: Option<&dyn CandleData>,
     is_collapsed: bool,
-    levels: &[HorizontalLevel],
+    annotations: &[crate::widget::Annotation],
 ) -> Vec<ChartAction> {
     debug_assert!(
         !(state.level_tool.is_dragging() && state.interaction_mode != InteractionMode::Idle),
@@ -185,7 +185,7 @@ pub fn handle_event(
 
     match event {
         ChartEvent::MouseMoved { x, y, alt_held } => {
-            handle_mouse_moved(state, x, y, alt_held, data, is_collapsed, levels)
+            handle_mouse_moved(state, x, y, alt_held, data, is_collapsed, annotations)
         }
 
         ChartEvent::MousePressed {
@@ -193,10 +193,10 @@ pub fn handle_event(
             y,
             button,
             alt_held,
-        } => handle_mouse_pressed(state, x, y, button, alt_held, levels),
+        } => handle_mouse_pressed(state, x, y, button, alt_held, annotations),
 
         ChartEvent::MouseReleased { x, y, button, .. } => {
-            handle_mouse_released(state, x, y, button, levels)
+            handle_mouse_released(state, x, y, button, annotations)
         }
 
         ChartEvent::MouseWheel { delta, x, .. } => handle_mouse_wheel(state, delta, x),
@@ -259,7 +259,7 @@ fn handle_mouse_moved(
     alt_held: bool,
     data: Option<&dyn CandleData>,
     is_collapsed: bool,
-    levels: &[HorizontalLevel],
+    annotations: &[crate::widget::Annotation],
 ) -> Vec<ChartAction> {
     let mut actions = Vec::new();
 
@@ -319,9 +319,9 @@ fn handle_mouse_moved(
                 // Exceeded threshold. Left-drag only initiates level drag,
                 // never panning (panning is right-mouse only).
                 if let Some((level_id, grab_offset)) =
-                    hit_test_levels(levels, start_y, &state.camera)
+                    hit_test_levels(annotations, start_y, &state.camera)
                 {
-                    let is_locked = levels.iter().any(|l| l.id == level_id && l.locked);
+                    let is_locked = annotations.iter().any(|a| a.id == level_id && a.locked);
                     if !is_locked {
                         // Transition to LevelTool dragging.
                         state.level_tool.mode = crate::level_tool::LevelToolMode::Dragging {
@@ -510,7 +510,7 @@ fn handle_mouse_pressed(
     y: f32,
     button: MouseButton,
     _alt_held: bool,
-    levels: &[HorizontalLevel],
+    annotations: &[crate::widget::Annotation],
 ) -> Vec<ChartAction> {
     // In Placing mode (via LevelTool):
     // - Left-click: place the level at (snapped) cursor price
@@ -591,8 +591,8 @@ fn handle_mouse_pressed(
 
             // Don't show crosshair if pressing on a draggable (unlocked) level —
             // the PendingDrag will resolve to a level drag, not a crosshair.
-            let over_draggable_level = hit_test_levels(levels, y, &state.camera)
-                .map(|(id, _)| !levels.iter().any(|l| l.id == id && l.locked))
+            let over_draggable_level = hit_test_levels(annotations, y, &state.camera)
+                .map(|(id, _)| !annotations.iter().any(|a| a.id == id && a.locked))
                 .unwrap_or(false);
             if over_draggable_level {
                 state.crosshair.suppress();
@@ -634,7 +634,7 @@ fn handle_mouse_pressed(
 
         MouseButton::Right => {
             // Hit-test levels first — right-click on a level opens the editor.
-            if let Some((level_id, _offset)) = hit_test_levels(levels, y, &state.camera) {
+            if let Some((level_id, _offset)) = hit_test_levels(annotations, y, &state.camera) {
                 vec![ChartAction::RightClickLevel { id: level_id, x, y }]
             } else {
                 // No level hit — right-click starts XY panning.
@@ -651,7 +651,7 @@ fn handle_mouse_released(
     x: f32,
     y: f32,
     button: MouseButton,
-    levels: &[HorizontalLevel],
+    annotations: &[crate::widget::Annotation],
 ) -> Vec<ChartAction> {
     // Handle middle button release — exit any scaling mode.
     if button == MouseButton::Middle {
@@ -754,7 +754,7 @@ fn handle_mouse_released(
             start_y,
         } => {
             // Released without exceeding drag threshold -- this is a click.
-            if let Some((level_id, _)) = hit_test_levels(levels, start_y, &state.camera) {
+            if let Some((level_id, _)) = hit_test_levels(annotations, start_y, &state.camera) {
                 actions.push(ChartAction::SelectLevel { id: level_id });
             } else if state.selected_level.is_some() {
                 actions.push(ChartAction::DeselectLevel);
@@ -988,20 +988,28 @@ fn is_over_timeline_border(y: f32, viewport_height: u32, timeline_border_ratio: 
     (y - border_y).abs() <= TIMELINE_BORDER_HIT_TOLERANCE
 }
 
-/// Returns `Some((level_id, grab_offset))` if a level is within
-/// `LEVEL_HIT_TOLERANCE_PX` of `cursor_y`. The `grab_offset` is the
-/// price difference between the level and the cursor, so the level
+/// Returns `Some((annotation_id, grab_offset))` if an annotation level is
+/// within `LEVEL_HIT_TOLERANCE_PX` of `cursor_y`. The `grab_offset` is
+/// the price difference between the level and the cursor, so the level
 /// does not jump to the cursor when dragging starts.
 fn hit_test_levels(
-    levels: &[crate::levels::HorizontalLevel],
+    annotations: &[crate::widget::Annotation],
     cursor_y: f32,
     camera: &crate::camera::Camera2D,
-) -> Option<(u64, f64)> {
+) -> Option<(AnnotationId, f64)> {
     let cursor_price = camera.y_to_price(cursor_y);
-    let mut closest: Option<(u64, f32, f64)> = None;
+    let mut closest: Option<(AnnotationId, f32, f64)> = None;
 
-    for level in levels {
-        let level_y = camera.price_to_y(level.price);
+    for ann in annotations {
+        if !ann.presence.is_interactive() {
+            continue;
+        }
+        let price = match &ann.kind {
+            crate::widget::AnnotationKind::Level(level) => level.price,
+            // Only levels participate in level hit-testing.
+            _ => continue,
+        };
+        let level_y = camera.price_to_y(price);
         let dist = (cursor_y - level_y).abs();
 
         if dist <= LEVEL_HIT_TOLERANCE_PX {
@@ -1010,8 +1018,8 @@ fn hit_test_levels(
                 Some((_, prev_dist, _)) => dist < prev_dist,
             };
             if better {
-                let price_offset = level.price - cursor_price;
-                closest = Some((level.id, dist, price_offset));
+                let price_offset = price - cursor_price;
+                closest = Some((ann.id, dist, price_offset));
             }
         }
     }
@@ -1024,8 +1032,11 @@ fn hit_test_levels(
 mod tests {
     use super::*;
     use crate::camera::Camera2D;
-    use crate::levels::HorizontalLevel;
     use crate::state::{ChartState, InteractionMode, Momentum, YAnimation};
+    use crate::widget::{
+        Annotation, AnnotationId, AnnotationKind, Presence,
+        level::{LevelExtend, LineStyle},
+    };
 
     fn test_state() -> ChartState {
         ChartState::new(Camera2D {
@@ -1039,15 +1050,23 @@ mod tests {
         })
     }
 
-    fn test_level(id: u64, price: f64) -> HorizontalLevel {
-        HorizontalLevel {
-            id,
-            price,
-            color: [1.0, 0.0, 0.0, 1.0],
-            line_width: 1.0,
-            label: None,
-            icon: crate::levels::LevelIcon::None,
+    fn test_level(id: u64, price: f64) -> Annotation {
+        Annotation {
+            id: AnnotationId(id),
+            kind: AnnotationKind::Level(crate::widget::HorizontalLevel {
+                price,
+                color: [1.0, 0.0, 0.0, 1.0],
+                line_width: 1.0,
+                style: LineStyle::default(),
+                label: None,
+                extend: LevelExtend::default(),
+                icon: crate::levels::LevelIcon::None,
+            }),
+            presence: Presence::Active,
+            visible_timeframes: None,
             locked: false,
+            created_at: 0,
+            modified_at: 0,
         }
     }
 
@@ -2036,7 +2055,7 @@ mod tests {
 
         let has_select = actions
             .iter()
-            .any(|a| matches!(a, ChartAction::SelectLevel { id: 1 }));
+            .any(|a| matches!(a, ChartAction::SelectLevel { id } if *id == AnnotationId(1)));
         assert!(has_select, "expected SelectLevel action, got {:?}", actions);
     }
 
@@ -2044,7 +2063,7 @@ mod tests {
     fn click_far_from_level_deselects() {
         let mut state = test_state();
         let levels = vec![test_level(1, 150.0)];
-        state.selected_level = Some(1);
+        state.selected_level = Some(AnnotationId(1));
 
         handle_event(
             &mut state,
@@ -2170,7 +2189,7 @@ mod tests {
 
         let has_drag = actions
             .iter()
-            .any(|a| matches!(a, ChartAction::DragLevel { id: 1, .. }));
+            .any(|a| matches!(a, ChartAction::DragLevel { id, .. } if *id == AnnotationId(1)));
         assert!(has_drag, "expected DragLevel action, got {:?}", actions);
     }
 
@@ -2179,7 +2198,7 @@ mod tests {
     #[test]
     fn delete_key_removes_selected_level() {
         let mut state = test_state();
-        state.selected_level = Some(1);
+        state.selected_level = Some(AnnotationId(1));
 
         let actions = handle_event(
             &mut state,
@@ -2217,7 +2236,7 @@ mod tests {
     #[test]
     fn escape_deselects_level_and_clears_crosshair() {
         let mut state = test_state();
-        state.selected_level = Some(1);
+        state.selected_level = Some(AnnotationId(1));
         state.crosshair_pos = Some((100.0, 200.0));
 
         let actions = handle_event(
@@ -2336,33 +2355,17 @@ mod tests {
             dpi_scale: 1.0,
         };
         let levels = vec![
-            HorizontalLevel {
-                id: 1,
-                price: 50.0,
-                color: [1.0, 0.0, 0.0, 1.0],
-                line_width: 1.0,
-                label: None,
-                icon: crate::levels::LevelIcon::None,
-                locked: false,
-            },
-            HorizontalLevel {
-                id: 2,
-                price: 55.0,
-                color: [0.0, 1.0, 0.0, 1.0],
-                line_width: 1.0,
-                label: None,
-                icon: crate::levels::LevelIcon::None,
-                locked: false,
-            },
+            test_level(1, 50.0),
+            test_level(2, 55.0),
         ];
 
         let result = hit_test_levels(&levels, 500.0, &camera);
         assert!(result.is_some());
-        assert_eq!(result.unwrap().0, 1);
+        assert_eq!(result.unwrap().0, AnnotationId(1));
 
         let result = hit_test_levels(&levels, 450.0, &camera);
         assert!(result.is_some());
-        assert_eq!(result.unwrap().0, 2);
+        assert_eq!(result.unwrap().0, AnnotationId(2));
 
         let result = hit_test_levels(&levels, 200.0, &camera);
         assert!(result.is_none());
@@ -2373,7 +2376,7 @@ mod tests {
     #[test]
     fn click_on_empty_deselects() {
         let mut state = test_state();
-        state.selected_level = Some(42);
+        state.selected_level = Some(AnnotationId(42));
 
         handle_event(
             &mut state,

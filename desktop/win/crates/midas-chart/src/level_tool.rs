@@ -5,6 +5,7 @@
 //! level-related event handling to this struct.
 
 use crate::camera::Camera2D;
+use crate::widget::AnnotationId;
 use midas_core::CandleData;
 
 // ── Constants ─────────────────────────────────────────────────────
@@ -26,8 +27,8 @@ pub enum LevelToolMode {
     Placing,
     /// User is dragging an existing level to a new price.
     Dragging {
-        /// ID of the level being dragged.
-        level_id: u64,
+        /// ID of the annotation being dragged.
+        level_id: AnnotationId,
         /// Price offset between level and cursor at grab time
         /// (so the level doesn't jump to the cursor).
         grab_offset: f64,
@@ -451,7 +452,7 @@ mod tests {
     fn activate_noop_during_drag() {
         let mut tool = LevelTool::default();
         tool.mode = LevelToolMode::Dragging {
-            level_id: 1,
+            level_id: AnnotationId(1),
             grab_offset: 0.0,
         };
         tool.activate();
@@ -522,7 +523,7 @@ mod tests {
 
         // Dragging
         tool.mode = LevelToolMode::Dragging {
-            level_id: 42,
+            level_id: AnnotationId(42),
             grab_offset: 1.5,
         };
         assert!(tool.is_active());

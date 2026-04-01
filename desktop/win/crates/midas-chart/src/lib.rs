@@ -23,6 +23,7 @@ pub mod date_labels;
 pub mod dirty;
 pub mod gerchik_atr;
 pub mod grid;
+pub mod indicators;
 pub mod input;
 pub mod instances;
 pub mod interaction;
@@ -31,6 +32,7 @@ pub mod levels;
 pub mod scene;
 pub mod state;
 pub mod volume_profile;
+pub mod widget;
 
 // ── Re-exports ─────────────────────────────────────────────────────
 pub use camera::Camera2D;
@@ -51,6 +53,7 @@ pub use instances::{
 pub use interaction::{
     handle_event, timeline_border_y, volume_handle_y, ChartAction, ChartEvent, Key, MouseButton,
 };
+pub use widget::{Annotation, AnnotationId, AnnotationKind};
 pub use level_tool::{LevelTool, LevelToolMode};
 pub use levels::{price_step_for, HorizontalLevel, LevelIcon};
 pub use scene::{ChartScene, SceneGenerations};

@@ -17,6 +17,7 @@ use iced::{window, Task};
 
 use midas_chart::camera::Camera2D;
 use midas_chart::state::ChartState;
+use midas_chart::AnnotationId;
 use midas_core::config::{AppConfig, ChartConfig};
 use midas_core::{ChartId, Timeframe};
 use midas_data::CandleBuffer;
@@ -989,7 +990,7 @@ impl MidasApp {
 
             Message::ChartSelectLevel(chart_id, level_id) => {
                 if let Some(chart) = self.charts.get_mut(&chart_id) {
-                    chart.chart_state.selected_level = Some(level_id);
+                    chart.chart_state.selected_level = Some(AnnotationId(level_id));
                     chart.chart_state.dirty.mark_levels();
                 }
                 Task::none()
@@ -1011,10 +1012,10 @@ impl MidasApp {
                             .level_store
                             .levels_for(&ticker)
                             .iter()
-                            .any(|l| l.id == sel_id && l.locked);
+                            .any(|l| l.id == sel_id.0 && l.locked);
                         if !is_locked {
                             chart.chart_state.selected_level = None;
-                            self.level_store.remove_level(&ticker, sel_id);
+                            self.level_store.remove_level(&ticker, sel_id.0);
                             self.mark_levels_dirty_for_ticker(&ticker);
                             self.mark_config_dirty();
                         }
@@ -1085,7 +1086,7 @@ impl MidasApp {
                     if let Some(ps) = price_str {
                         chart.level_editor_price_input = ps;
                     }
-                    chart.chart_state.selected_level = Some(level_id);
+                    chart.chart_state.selected_level = Some(AnnotationId(level_id));
                     chart.chart_state.dirty.mark_levels();
                 }
                 Task::none()
