@@ -131,6 +131,8 @@ pub struct MidasApp {
     pub dragging_ticker: Option<DragTickerState>,
     /// Which link picker dropdown is currently open, if any.
     pub link_picker_open: Option<(PickerTarget, LinkDimension)>,
+    /// Active column resize: (watchlist_id, column_index, start_x, original_width).
+    pub resizing_column: Option<(WatchlistId, usize, f32, f32)>,
 }
 
 /// State for an in-progress ticker drag from a watchlist to a chart.
@@ -309,6 +311,16 @@ pub enum Message {
     WatchlistDragStart(WatchlistId, String),
     /// User cancelled the drag (Escape or cancel button).
     WatchlistDragCancel,
+    /// User clicked a ticker row in a watchlist.
+    WatchlistTickerSelected(WatchlistId, String),
+    /// Set the symbol link mode for a watchlist panel.
+    WatchlistSetSymbolLink(WatchlistId, LinkMode),
+    /// User started dragging a column divider in a watchlist header.
+    WatchlistColumnResizeStart(WatchlistId, usize, f32),
+    /// User is dragging a column divider — cursor at this x position.
+    WatchlistColumnResizing(f32),
+    /// User released the column divider drag.
+    WatchlistColumnResizeEnd,
 
     // -- Chart linking --
     /// Set the symbol link mode for a docked chart.
@@ -575,6 +587,7 @@ impl MidasApp {
             watchlists,
             dragging_ticker: None,
             link_picker_open: None,
+            resizing_column: None,
         };
 
         // Async-load data for all restored charts that have a symbol.
@@ -1971,6 +1984,97 @@ impl MidasApp {
                 self.dragging_ticker = None;
                 self.status_message = "Drag cancelled".into();
                 Task::none()
+            }
+
+            Message::WatchlistTickerSelected(wl_id, symbol) => {
+                if let Some(wl) = self.watchlists.get_mut(&wl_id) {
+                    wl.selected_symbol = Some(symbol.clone());
+                }
+
+                // Propagate to linked charts using watchlist's own link mode.
+                use crate::link::find_link_targets;
+                let wl_link = self
+                    .watchlists
+                    .get(&wl_id)
+                    .map(|wl| wl.symbol_link)
+                    .unwrap_or(LinkMode::Unlinked);
+
+                let mut tasks = Vec::new();
+
+                let targets: Vec<ChartId> = find_link_targets(
+                    wl_link,
+                    self.charts.iter().map(|(id, p)| (*id, p.symbol_link)),
+                );
+                for id in targets {
+                    tasks.push(self.load_symbol_for_chart(id, &symbol));
+                }
+
+                let floating_targets: Vec<window::Id> = find_link_targets(
+                    wl_link,
+                    self.floating_charts
+                        .iter()
+                        .map(|(wid, p)| (*wid, p.symbol_link)),
+                );
+                for wid in floating_targets {
+                    let tf = self
+                        .floating_charts
+                        .get(&wid)
+                        .map(|c| c.timeframe)
+                        .unwrap_or(Timeframe::D1);
+                    if let Some(chart) = self.floating_charts.get_mut(&wid) {
+                        chart.symbol = symbol.clone();
+                        chart.symbol_input = symbol.clone();
+                        chart.load_state = LoadState::Loading;
+                        chart.chart_state.dirty.mark_data();
+                    }
+                    tasks.push(self.load_floating_chart_async(wid, &symbol, tf));
+                }
+
+                if tasks.is_empty() {
+                    Task::none()
+                } else {
+                    Task::batch(tasks)
+                }
+            }
+
+            Message::WatchlistSetSymbolLink(wl_id, mode) => {
+                self.link_picker_open = None;
+                if let Some(wl) = self.watchlists.get_mut(&wl_id) {
+                    wl.symbol_link = mode;
+                }
+                self.flush_config()
+            }
+
+            Message::WatchlistColumnResizeStart(wl_id, col, _) => {
+                let width = self
+                    .watchlists
+                    .get(&wl_id)
+                    .map(|wl| wl.column_widths[col])
+                    .unwrap_or(70.0);
+                // start_x is NaN until the first on_move event provides cursor position.
+                self.resizing_column = Some((wl_id, col, f32::NAN, width));
+                Task::none()
+            }
+
+            Message::WatchlistColumnResizing(current_x) => {
+                if let Some((wl_id, col, ref mut start_x, orig_w)) =
+                    self.resizing_column
+                {
+                    if start_x.is_nan() {
+                        *start_x = current_x;
+                    }
+                    let delta = current_x - *start_x;
+                    let new_w = (orig_w + delta).max(20.0);
+                    if let Some(wl) = self.watchlists.get_mut(&wl_id) {
+                        wl.column_widths[col] = new_w;
+                    }
+                }
+                Task::none()
+            }
+
+            Message::WatchlistColumnResizeEnd => {
+                self.resizing_column = None;
+                self.flush_config()
             }
 
             // -- Chart linking --

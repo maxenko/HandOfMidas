@@ -5,7 +5,7 @@
 //! via the TOML config file.
 
 use midas_core::config::{WatchlistConfig, WatchlistTickerConfig};
-use midas_core::WatchlistId;
+use midas_core::{LinkMode, WatchlistId};
 
 // ── Per-ticker data ─────────────────────────────────────────────────
 
@@ -31,7 +31,16 @@ pub struct WatchlistPanel {
     pub tickers: Vec<WatchlistTicker>,
     /// Text in the "add ticker" input field (transient, not persisted).
     pub add_ticker_input: String,
+    /// Currently selected ticker symbol (transient, not persisted).
+    pub selected_symbol: Option<String>,
+    /// Symbol link group for watchlist→chart symbol propagation.
+    pub symbol_link: LinkMode,
+    /// Column widths in logical pixels.
+    pub column_widths: [f32; 7],
 }
+
+/// Default column widths: [drag, fav, ticker, price, chg%, G.ATR, delete].
+pub const DEFAULT_COLUMN_WIDTHS: [f32; 7] = [26.0, 30.0, 70.0, 80.0, 65.0, 70.0, 30.0];
 
 impl WatchlistPanel {
     /// Create an empty watchlist with the given ID and name.
@@ -41,11 +50,23 @@ impl WatchlistPanel {
             name,
             tickers: Vec::new(),
             add_ticker_input: String::new(),
+            selected_symbol: None,
+            symbol_link: LinkMode::Unlinked,
+            column_widths: DEFAULT_COLUMN_WIDTHS,
         }
     }
 
     /// Restore a watchlist from persisted config.
     pub fn from_config(id: WatchlistId, config: &WatchlistConfig) -> Self {
+        let column_widths = if config.column_widths.len() == 7 {
+            let mut arr = DEFAULT_COLUMN_WIDTHS;
+            for (i, &w) in config.column_widths.iter().enumerate() {
+                arr[i] = w.max(20.0);
+            }
+            arr
+        } else {
+            DEFAULT_COLUMN_WIDTHS
+        };
         Self {
             id,
             name: config.name.clone(),
@@ -58,6 +79,9 @@ impl WatchlistPanel {
                 })
                 .collect(),
             add_ticker_input: String::new(),
+            selected_symbol: None,
+            symbol_link: config.symbol_link,
+            column_widths,
         }
     }
 
@@ -73,6 +97,8 @@ impl WatchlistPanel {
                     favorite: t.favorite,
                 })
                 .collect(),
+            symbol_link: self.symbol_link,
+            column_widths: self.column_widths.to_vec(),
         }
     }
 
@@ -210,6 +236,16 @@ mod tests {
         assert!(!restored.tickers[1].favorite);
         // Transient state is not persisted.
         assert!(restored.add_ticker_input.is_empty());
+        assert!(restored.selected_symbol.is_none());
+    }
+
+    #[test]
+    fn symbol_link_roundtrip() {
+        let mut wl = WatchlistPanel::new(WatchlistId::new(1), "Linked".into());
+        wl.symbol_link = LinkMode::Color(midas_core::LinkColor::Blue);
+        let config = wl.to_config();
+        let restored = WatchlistPanel::from_config(WatchlistId::new(2), &config);
+        assert_eq!(restored.symbol_link, LinkMode::Color(midas_core::LinkColor::Blue));
     }
 
     #[test]
@@ -217,9 +253,36 @@ mod tests {
         let config = WatchlistConfig {
             name: "Empty".into(),
             tickers: Vec::new(),
+            symbol_link: LinkMode::Unlinked,
+            column_widths: vec![],
         };
         let wl = WatchlistPanel::from_config(WatchlistId::new(1), &config);
         assert_eq!(wl.name, "Empty");
         assert!(wl.tickers.is_empty());
+        assert_eq!(wl.column_widths, DEFAULT_COLUMN_WIDTHS);
+    }
+
+    #[test]
+    fn column_widths_roundtrip() {
+        let mut wl = WatchlistPanel::new(WatchlistId::new(1), "Test".into());
+        wl.column_widths[2] = 120.0; // widen ticker column
+        let config = wl.to_config();
+        let restored = WatchlistPanel::from_config(WatchlistId::new(2), &config);
+        assert_eq!(restored.column_widths[2], 120.0);
+        assert_eq!(restored.column_widths[0], DEFAULT_COLUMN_WIDTHS[0]); // unchanged
+    }
+
+    #[test]
+    fn column_widths_minimum_enforced() {
+        let config = WatchlistConfig {
+            name: "Narrow".into(),
+            tickers: vec![],
+            symbol_link: LinkMode::Unlinked,
+            column_widths: vec![5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0],
+        };
+        let wl = WatchlistPanel::from_config(WatchlistId::new(1), &config);
+        for &w in &wl.column_widths {
+            assert!(w >= 20.0, "column width {w} should be >= 20.0");
+        }
     }
 }

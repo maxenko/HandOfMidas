@@ -195,6 +195,12 @@ pub struct WatchlistConfig {
     /// Tickers in the watchlist.
     #[serde(default)]
     pub tickers: Vec<WatchlistTickerConfig>,
+    /// Symbol link mode for cross-chart symbol synchronization.
+    #[serde(default)]
+    pub symbol_link: LinkMode,
+    /// Column widths in logical pixels (persisted for session restore).
+    #[serde(default)]
+    pub column_widths: Vec<f32>,
 }
 
 /// A single ticker entry within a watchlist.
@@ -1187,6 +1193,8 @@ locked = false
                         favorite: false,
                     },
                 ],
+                symbol_link: LinkMode::default(),
+                column_widths: vec![],
             }],
             panel_order: vec![
                 PanelSlot::Chart { chart_index: 0 },

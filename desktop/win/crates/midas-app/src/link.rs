@@ -5,15 +5,16 @@
 //! target-matching function used by propagation logic.
 
 use iced::window;
-use midas_core::{ChartId, LinkColor, LinkMode};
+use midas_core::{ChartId, LinkColor, LinkMode, WatchlistId};
 
 // ── Picker target ──────────────────────────────────────────────────
 
-/// Identifies which panel's link picker is open — docked or floating.
+/// Identifies which panel's link picker is open — docked, floating, or watchlist.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum PickerTarget {
     Docked(ChartId),
     Floating(window::Id),
+    Watchlist(WatchlistId),
 }
 
 // ── Link dimension ──────────────────────────────────────────────────
