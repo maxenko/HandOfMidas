@@ -4,43 +4,44 @@
 //! chart panels in the workspace pane grid. It persists across sessions
 //! via the TOML config file.
 
+use std::collections::HashMap;
+
 use midas_core::config::{WatchlistConfig, WatchlistTickerConfig};
 use midas_core::{LinkMode, WatchlistId};
 
-// ── Sorting ─────────────────────────────────────────────────────────
+// ── Column ID constants ────────────────────────────────────────────
 
-/// Which column to sort the watchlist by.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SortColumn {
-    Ticker,
-    Price,
-    ChangePercent,
-    GATR,
-}
+/// Column ID for the drag grip column.
+pub const COL_DRAG: midas_grid::ColumnId = midas_grid::ColumnId("drag");
+/// Column ID for the favorite star column.
+pub const COL_FAV: midas_grid::ColumnId = midas_grid::ColumnId("fav");
+/// Column ID for the ticker symbol column.
+pub const COL_TICKER: midas_grid::ColumnId = midas_grid::ColumnId("ticker");
+/// Column ID for the last price column.
+pub const COL_PRICE: midas_grid::ColumnId = midas_grid::ColumnId("price");
+/// Column ID for the change-percent column.
+pub const COL_CHANGE: midas_grid::ColumnId = midas_grid::ColumnId("change");
+/// Column ID for the GATR column.
+pub const COL_GATR: midas_grid::ColumnId = midas_grid::ColumnId("gatr");
+/// Column ID for the delete button column.
+pub const COL_DELETE: midas_grid::ColumnId = midas_grid::ColumnId("delete");
 
-/// Sort direction for the watchlist column sort.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SortDirection {
-    Ascending,
-    Descending,
-}
+/// Default column order for the watchlist grid.
+pub const WATCHLIST_COLUMN_ORDER: [midas_grid::ColumnId; 7] = [
+    COL_DRAG, COL_FAV, COL_TICKER, COL_PRICE, COL_CHANGE, COL_GATR, COL_DELETE,
+];
 
-impl SortDirection {
-    /// Return the opposite direction.
-    pub fn toggle(self) -> Self {
-        match self {
-            Self::Ascending => Self::Descending,
-            Self::Descending => Self::Ascending,
-        }
-    }
-
-    /// Unicode arrow indicator for the current direction.
-    pub fn indicator(self) -> &'static str {
-        match self {
-            Self::Ascending => " \u{25B2}",
-            Self::Descending => " \u{25BC}",
-        }
-    }
+/// Build the default column widths for the watchlist grid.
+pub fn default_column_widths() -> HashMap<midas_grid::ColumnId, f32> {
+    let mut m = HashMap::new();
+    m.insert(COL_DRAG, 26.0);
+    m.insert(COL_FAV, 30.0);
+    m.insert(COL_TICKER, 70.0);
+    m.insert(COL_PRICE, 80.0);
+    m.insert(COL_CHANGE, 65.0);
+    m.insert(COL_GATR, 70.0);
+    m.insert(COL_DELETE, 30.0);
+    m
 }
 
 // ── Per-ticker data ─────────────────────────────────────────────────
@@ -71,16 +72,9 @@ pub struct WatchlistPanel {
     pub selected_symbol: Option<String>,
     /// Symbol link group for watchlist→chart symbol propagation.
     pub symbol_link: LinkMode,
-    /// Column widths in logical pixels.
-    pub column_widths: [f32; 7],
-    /// Active sort column, or `None` for default insertion order.
-    pub sort_column: Option<SortColumn>,
-    /// Sort direction (only meaningful when `sort_column` is `Some`).
-    pub sort_direction: SortDirection,
+    /// Grid UI state (column widths, sort, selection, scroll).
+    pub grid_state: midas_grid::GridState,
 }
-
-/// Default column widths: [drag, fav, ticker, price, chg%, G.ATR, delete].
-pub const DEFAULT_COLUMN_WIDTHS: [f32; 7] = [26.0, 30.0, 70.0, 80.0, 65.0, 70.0, 30.0];
 
 impl WatchlistPanel {
     /// Create an empty watchlist with the given ID and name.
@@ -92,23 +86,22 @@ impl WatchlistPanel {
             add_ticker_input: String::new(),
             selected_symbol: None,
             symbol_link: LinkMode::Unlinked,
-            column_widths: DEFAULT_COLUMN_WIDTHS,
-            sort_column: None,
-            sort_direction: SortDirection::Ascending,
+            grid_state: midas_grid::GridState::new(
+                WATCHLIST_COLUMN_ORDER.to_vec(),
+                default_column_widths(),
+            ),
         }
     }
 
     /// Restore a watchlist from persisted config.
     pub fn from_config(id: WatchlistId, config: &WatchlistConfig) -> Self {
-        let column_widths = if config.column_widths.len() == 7 {
-            let mut arr = DEFAULT_COLUMN_WIDTHS;
+        let mut widths = default_column_widths();
+        if config.column_widths.len() == 7 {
+            let ids = WATCHLIST_COLUMN_ORDER;
             for (i, &w) in config.column_widths.iter().enumerate() {
-                arr[i] = w.max(20.0);
+                widths.insert(ids[i], w.max(20.0));
             }
-            arr
-        } else {
-            DEFAULT_COLUMN_WIDTHS
-        };
+        }
         Self {
             id,
             name: config.name.clone(),
@@ -123,9 +116,7 @@ impl WatchlistPanel {
             add_ticker_input: String::new(),
             selected_symbol: None,
             symbol_link: config.symbol_link,
-            column_widths,
-            sort_column: None,
-            sort_direction: SortDirection::Ascending,
+            grid_state: midas_grid::GridState::new(WATCHLIST_COLUMN_ORDER.to_vec(), widths),
         }
     }
 
@@ -142,7 +133,10 @@ impl WatchlistPanel {
                 })
                 .collect(),
             symbol_link: self.symbol_link,
-            column_widths: self.column_widths.to_vec(),
+            column_widths: WATCHLIST_COLUMN_ORDER
+                .iter()
+                .map(|id| self.grid_state.column_width(*id))
+                .collect(),
         }
     }
 
@@ -303,17 +297,24 @@ mod tests {
         let wl = WatchlistPanel::from_config(WatchlistId::new(1), &config);
         assert_eq!(wl.name, "Empty");
         assert!(wl.tickers.is_empty());
-        assert_eq!(wl.column_widths, DEFAULT_COLUMN_WIDTHS);
+        // Grid state should have default widths.
+        let defaults = default_column_widths();
+        for (&id, &expected) in defaults.iter() {
+            assert_eq!(wl.grid_state.column_width(id), expected);
+        }
     }
 
     #[test]
     fn column_widths_roundtrip() {
         let mut wl = WatchlistPanel::new(WatchlistId::new(1), "Test".into());
-        wl.column_widths[2] = 120.0; // widen ticker column
+        wl.grid_state.set_column_width(COL_TICKER, 120.0, 20.0, None); // widen ticker column
         let config = wl.to_config();
         let restored = WatchlistPanel::from_config(WatchlistId::new(2), &config);
-        assert_eq!(restored.column_widths[2], 120.0);
-        assert_eq!(restored.column_widths[0], DEFAULT_COLUMN_WIDTHS[0]); // unchanged
+        assert_eq!(restored.grid_state.column_width(COL_TICKER), 120.0);
+        assert_eq!(
+            restored.grid_state.column_width(COL_DRAG),
+            default_column_widths()[&COL_DRAG],
+        ); // unchanged
     }
 
     #[test]
@@ -325,8 +326,9 @@ mod tests {
             column_widths: vec![5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0],
         };
         let wl = WatchlistPanel::from_config(WatchlistId::new(1), &config);
-        for &w in &wl.column_widths {
-            assert!(w >= 20.0, "column width {w} should be >= 20.0");
+        for &id in &WATCHLIST_COLUMN_ORDER {
+            let w = wl.grid_state.column_width(id);
+            assert!(w >= 20.0, "column width {w} for {id} should be >= 20.0");
         }
     }
 }

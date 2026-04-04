@@ -1183,66 +1183,16 @@ impl MidasApp {
             }
         };
 
-        // Column widths from state.
-        let cw = wl.column_widths;
-        let header_labels: Vec<Element<'_, Message>> = vec![
-            grid_header_cell(Space::new(), cw[0]),
-            grid_header_cell(text("\u{2605}").size(12), cw[1]),
-            grid_header_cell(text("Ticker").size(12), cw[2]),
-            grid_header_cell(text("Price").size(12), cw[3]),
-            grid_header_cell(text("Chg%").size(12), cw[4]),
-            grid_header_cell(text("G.ATR").size(12), cw[5]),
-            grid_header_cell(Space::new(), cw[6]),
-        ];
-        // Interleave resize handles between header cells.
-        let mut header_children: Vec<Element<'_, Message>> = Vec::with_capacity(13);
-        for (i, cell) in header_labels.into_iter().enumerate() {
-            header_children.push(cell);
-            if i < 6 {
-                // 4px drag handle between columns.
-                let col_idx = i;
-                header_children.push(
-                    iced::widget::mouse_area(Space::new().width(4).height(Fill))
-                        .interaction(iced::mouse::Interaction::ResizingHorizontally)
-                        .on_press(Message::WatchlistColumnResizeStart(
-                            wl_id, col_idx, 0.0,
-                        ))
-                        .into(),
-                );
-            }
-        }
-        let header = Row::with_children(header_children).padding([0, 4]);
-
         // Compute market data for all tickers in one pass.
         let market_data = self.compute_all_market_data();
 
-        // Ticker rows.
-        let mut rows = Column::new();
-        if wl.tickers.is_empty() {
-            rows = rows.push(
-                container(text("Add tickers to get started").size(13))
-                    .padding(20)
-                    .center_x(Fill),
-            );
-        } else {
-            // Sort: favorites first, maintaining insertion order within each group.
-            let mut sorted: Vec<&crate::watchlist::WatchlistTicker> =
-                wl.tickers.iter().collect();
-            sorted.sort_by_key(|t| !t.favorite);
-
-            let empty_mkt = TickerMarketData::default();
-            for ticker in sorted {
+        // Build WatchlistRow structs from tickers + market data.
+        let empty_mkt = TickerMarketData::default();
+        let mut grid_rows: Vec<crate::watchlist_columns::WatchlistRow> = wl
+            .tickers
+            .iter()
+            .map(|ticker| {
                 let mkt = market_data.get(&ticker.symbol).unwrap_or(&empty_mkt);
-
-                let fav_label = if ticker.favorite { "\u{2605}" } else { "\u{2606}" };
-                let fav_btn = button(text(fav_label).size(12))
-                    .on_press(Message::WatchlistToggleFavorite(
-                        wl_id,
-                        ticker.symbol.clone(),
-                    ))
-                    .padding([2, 4])
-                    .style(hover_text_button_style);
-
                 let price_text = match mkt.last_price {
                     Some(p) => format!("{p:.2}"),
                     None => "--".into(),
@@ -1251,64 +1201,245 @@ impl MidasApp {
                     Some(c) => format!("{c:+.2}%"),
                     None => "--".into(),
                 };
-                let gatr_text: String =
-                    mkt.gatr_text.as_deref().unwrap_or("--").to_owned();
-
-                let sym_for_del = ticker.symbol.clone();
-                let del_btn = button(text("\u{00D7}").size(12))
-                    .on_press(Message::WatchlistRemoveTicker(wl_id, sym_for_del))
-                    .padding([2, 4])
-                    .style(hover_text_button_style);
-
-                let sym_for_drag = ticker.symbol.clone();
-                let drag_btn = button(text("\u{2807}").size(12))
-                    .on_press(Message::WatchlistDragStart(wl_id, sym_for_drag))
-                    .padding([2, 4])
-                    .style(hover_text_button_style);
-
                 let change_color = match mkt.change_pct {
                     Some(c) if c > 0.0 => Color::from_rgb(0.2, 0.8, 0.3),
                     Some(c) if c < 0.0 => Color::from_rgb(0.9, 0.25, 0.2),
                     _ => Color::from_rgb(0.6, 0.6, 0.6),
                 };
-
+                let gatr_text: String =
+                    mkt.gatr_text.as_deref().unwrap_or("--").to_owned();
                 let gatr_color = mkt
                     .gatr_color
                     .map(|c| Color::from_rgba(c[0], c[1], c[2], c[3]))
                     .unwrap_or(Color::from_rgb(0.6, 0.6, 0.6));
+                crate::watchlist_columns::WatchlistRow {
+                    symbol: ticker.symbol.clone(),
+                    favorite: ticker.favorite,
+                    price_text,
+                    change_text,
+                    change_color,
+                    gatr_text,
+                    gatr_color,
+                    wl_id,
+                    price_value: mkt.last_price,
+                    change_value: mkt.change_pct,
+                }
+            })
+            .collect();
 
-                let is_selected =
-                    wl.selected_symbol.as_deref() == Some(ticker.symbol.as_str());
+        // Sort: favorites first, then by grid sort spec.
+        grid_rows.sort_by(|a, b| {
+            let fav = b.favorite.cmp(&a.favorite);
+            if fav != std::cmp::Ordering::Equal {
+                return fav;
+            }
+            if let Some(sort) = &wl.grid_state.sort {
+                let columns = crate::watchlist_columns::WatchlistColumn::all();
+                if let Some(col) = columns.iter().find(|c| {
+                    use midas_grid::GridColumn;
+                    c.id() == sort.column_id
+                }) {
+                    use midas_grid::GridColumn;
+                    let ord = col.compare(a, b);
+                    return match sort.direction {
+                        midas_grid::SortDirection::Ascending => ord,
+                        midas_grid::SortDirection::Descending => ord.reverse(),
+                    };
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+
+        // Update selection to match selected_symbol (bridge index-based selection).
+        // Find the index of the selected symbol in the sorted rows.
+        let selected_idx = wl.selected_symbol.as_ref().and_then(|sym| {
+            grid_rows.iter().position(|r| r.symbol == *sym)
+        });
+
+        // Build a temporary GridState copy with the correct selection index.
+        let mut view_state = wl.grid_state.clone();
+        if let Some(idx) = selected_idx {
+            view_state.selection.select(idx);
+        } else {
+            view_state.selection.clear();
+        }
+
+        // Build grid header + body inline.
+        // (The Grid builder can't be used here because columns/rows are local
+        // variables whose borrows can't escape the function. The Grid API works
+        // when data lives on &self — see Phase 2.)
+        use crate::watchlist::{
+            COL_CHANGE, COL_DELETE, COL_DRAG, COL_FAV, COL_GATR, COL_PRICE, COL_TICKER,
+        };
+
+        // Column definitions: (id, header_label, sortable, width).
+        let col_defs: [(midas_grid::ColumnId, &str, bool); 7] = [
+            (COL_DRAG, "", false),
+            (COL_FAV, "\u{2605}", false),
+            (COL_TICKER, "Ticker", true),
+            (COL_PRICE, "Price", true),
+            (COL_CHANGE, "Chg%", true),
+            (COL_GATR, "G.ATR", true),
+            (COL_DELETE, "", false),
+        ];
+
+        // Header row.
+        let mut header_cells: Vec<Element<'_, Message>> = Vec::with_capacity(13);
+        for (i, &(col_id, label, sortable)) in col_defs.iter().enumerate() {
+            let width = view_state.column_width(col_id);
+
+            let header_content: Element<'_, Message> = if sortable {
+                let sort_indicator = view_state
+                    .sort
+                    .filter(|s| s.column_id == col_id)
+                    .map(|s| s.direction.indicator())
+                    .unwrap_or("");
+
+                let msg = Message::WatchlistGrid(
+                    wl_id,
+                    midas_grid::GridMessage::SortToggled(col_id),
+                );
+                iced::widget::mouse_area(
+                    container(row![text(label).size(12), text(sort_indicator).size(12)])
+                        .width(width)
+                        .padding([2, 4])
+                        .style(|_| container::Style {
+                            border: iced::Border {
+                                color: midas_grid::GRID_HEADER_BORDER_COLOR,
+                                width: 1.0,
+                                radius: 0.0.into(),
+                            },
+                            ..Default::default()
+                        }),
+                )
+                .on_release(msg)
+                .into()
+            } else if label.is_empty() {
+                container(Space::new())
+                    .width(width)
+                    .padding([2, 4])
+                    .style(|_| container::Style {
+                        border: iced::Border {
+                            color: midas_grid::GRID_HEADER_BORDER_COLOR,
+                            width: 1.0,
+                            radius: 0.0.into(),
+                        },
+                        ..Default::default()
+                    })
+                    .into()
+            } else {
+                container(text(label).size(12))
+                    .width(width)
+                    .padding([2, 4])
+                    .style(|_| container::Style {
+                        border: iced::Border {
+                            color: midas_grid::GRID_HEADER_BORDER_COLOR,
+                            width: 1.0,
+                            radius: 0.0.into(),
+                        },
+                        ..Default::default()
+                    })
+                    .into()
+            };
+
+            header_cells.push(header_content);
+
+            // 4px resize handle between columns (Phase 0 width).
+            if i < col_defs.len() - 1 {
+                let col_idx = i;
+                header_cells.push(
+                    iced::widget::mouse_area(Space::new().width(4).height(Fill))
+                        .interaction(iced::mouse::Interaction::ResizingHorizontally)
+                        .on_press(Message::WatchlistColumnResizeStart(wl_id, col_idx, 0.0))
+                        .into(),
+                );
+            }
+        }
+        let header = Row::with_children(header_cells).padding([0, 4]);
+
+        // Body rows.
+        let mut body_rows = Column::new();
+        if grid_rows.is_empty() {
+            body_rows = body_rows.push(
+                container(text("Add tickers to get started").size(13))
+                    .padding(20)
+                    .center_x(Fill),
+            );
+        } else {
+            for (row_idx, row_data) in grid_rows.iter().enumerate() {
+                let is_selected = view_state.selection.is_selected(row_idx);
                 let row_bg = if is_selected {
                     Color::from_rgba(0.2, 0.35, 0.55, 0.6)
                 } else {
                     Color::TRANSPARENT
                 };
 
+                // Build cells matching column order.
+                let fav_label = if row_data.favorite { "\u{2605}" } else { "\u{2606}" };
+                let sym = row_data.symbol.clone();
+                let sym_del = row_data.symbol.clone();
+                let sym_drag = row_data.symbol.clone();
+
+                let drag_btn = button(text("\u{2807}").size(12))
+                    .on_press(Message::WatchlistDragStart(wl_id, sym_drag))
+                    .padding([2, 4])
+                    .style(hover_text_button_style);
+
+                let fav_btn = button(text(fav_label).size(12))
+                    .on_press(Message::WatchlistToggleFavorite(wl_id, sym))
+                    .padding([2, 4])
+                    .style(hover_text_button_style);
+
+                let del_btn = button(text("\u{00D7}").size(12))
+                    .on_press(Message::WatchlistRemoveTicker(wl_id, sym_del))
+                    .padding([2, 4])
+                    .style(hover_text_button_style);
+
+                let w = |col_id| view_state.column_width(col_id);
+
                 let inner_row = Row::with_children(vec![
-                    grid_cell(drag_btn, cw[0]),
-                    grid_cell(fav_btn, cw[1]),
-                    grid_cell(text(&ticker.symbol).size(13), cw[2]),
-                    grid_cell(text(price_text).size(13), cw[3]),
-                    grid_cell(text(change_text).size(13).color(change_color), cw[4]),
-                    grid_cell(text(gatr_text).size(13).color(gatr_color), cw[5]),
-                    grid_cell(del_btn, cw[6]),
+                    grid_data_cell(drag_btn.into(), w(COL_DRAG)),
+                    grid_data_cell(fav_btn.into(), w(COL_FAV)),
+                    grid_data_cell(text(row_data.symbol.clone()).size(13).into(), w(COL_TICKER)),
+                    grid_data_cell(text(row_data.price_text.clone()).size(13).into(), w(COL_PRICE)),
+                    grid_data_cell(
+                        text(row_data.change_text.clone())
+                            .size(13)
+                            .color(row_data.change_color)
+                            .into(),
+                        w(COL_CHANGE),
+                    ),
+                    grid_data_cell(
+                        text(row_data.gatr_text.clone())
+                            .size(13)
+                            .color(row_data.gatr_color)
+                            .into(),
+                        w(COL_GATR),
+                    ),
+                    grid_data_cell(del_btn.into(), w(COL_DELETE)),
                 ])
                 .padding([0, 4])
                 .align_y(iced::Alignment::Center);
 
-                let sym_for_select = ticker.symbol.clone();
+                // Emit WatchlistTickerSelected directly with the symbol.
+                // This avoids the sorted-index mismatch: the view knows the
+                // correct symbol at each visual row position.
+                let sym_for_select = row_data.symbol.clone();
+                let msg = Message::WatchlistTickerSelected(wl_id, sym_for_select);
                 let ticker_row = iced::widget::mouse_area(
                     container(inner_row).style(move |_| container::Style {
                         background: Some(row_bg.into()),
                         ..Default::default()
                     }),
                 )
-                .on_release(Message::WatchlistTickerSelected(wl_id, sym_for_select));
+                .on_release(msg);
 
-                rows = rows.push(ticker_row);
+                body_rows = body_rows.push(ticker_row);
             }
         }
+
+        let grid_element: Element<'_, Message> =
+            column![header, scrollable(body_rows).height(Fill)].into();
 
         // Add ticker input row.
         let add_input = text_input("Add ticker...", &wl.add_ticker_input)
@@ -1328,7 +1459,7 @@ impl MidasApp {
             .align_y(iced::Alignment::Center);
 
         let mut body_layers: Vec<Element<'_, Message>> =
-            vec![column![header, scrollable(rows).height(Fill), add_row].into()];
+            vec![column![grid_element, add_row].into()];
 
         // Global resize overlay (when actively dragging a column divider).
         if let Some((resize_wl_id, _, _, _)) = self.resizing_column {
@@ -2709,47 +2840,25 @@ fn build_gerchik_atr_overlay<'a>(
     .into()
 }
 
+// ── Grid cell helpers ──────────────────────────────────────────────
+
+/// Wrap content in a grid data cell with border styling.
+fn grid_data_cell<'a>(content: Element<'a, Message>, width: f32) -> Element<'a, Message> {
+    container(content)
+        .width(width)
+        .padding([2, 4])
+        .style(|_| container::Style {
+            border: iced::Border {
+                color: midas_grid::GRID_BORDER_COLOR,
+                width: 1.0,
+                radius: 0.0.into(),
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
 // ── Button style helpers ────────────────────────────────────────────
-
-// ── Watchlist grid cell helpers ─────────────────────────────────────
-
-/// Subtle grid cell border for watchlist data rows.
-const GRID_BORDER_COLOR: Color = Color::from_rgba(1.0, 1.0, 1.0, 0.06);
-/// Slightly stronger border for the header row.
-const GRID_HEADER_BORDER_COLOR: Color = Color::from_rgba(1.0, 1.0, 1.0, 0.12);
-
-fn grid_cell<'a>(content: impl Into<Element<'a, Message>>, width: f32) -> Element<'a, Message> {
-    container(content)
-        .width(width)
-        .padding([2, 4])
-        .style(|_| container::Style {
-            border: iced::Border {
-                color: GRID_BORDER_COLOR,
-                width: 1.0,
-                radius: 0.0.into(),
-            },
-            ..Default::default()
-        })
-        .into()
-}
-
-fn grid_header_cell<'a>(
-    content: impl Into<Element<'a, Message>>,
-    width: f32,
-) -> Element<'a, Message> {
-    container(content)
-        .width(width)
-        .padding([2, 4])
-        .style(|_| container::Style {
-            border: iced::Border {
-                color: GRID_HEADER_BORDER_COLOR,
-                width: 1.0,
-                radius: 0.0.into(),
-            },
-            ..Default::default()
-        })
-        .into()
-}
 
 /// Button style: muted text by default, white text + subtle bg on hover.
 fn hover_text_button_style(_theme: &iced::Theme, status: button::Status) -> button::Style {

@@ -336,6 +336,8 @@ pub enum Message {
     WatchlistColumnResizing(f32),
     /// User released the column divider drag.
     WatchlistColumnResizeEnd,
+    /// Grid chrome event from a watchlist.
+    WatchlistGrid(WatchlistId, midas_grid::GridMessage),
 
     // -- Chart linking --
     /// Set the symbol link mode for a docked chart.
@@ -2072,6 +2074,9 @@ impl MidasApp {
 
             Message::WatchlistRemoveTicker(wl_id, symbol) => {
                 if let Some(wl) = self.watchlists.get_mut(&wl_id) {
+                    if wl.selected_symbol.as_deref() == Some(symbol.as_str()) {
+                        wl.selected_symbol = None;
+                    }
                     wl.remove_ticker(&symbol);
                     return self.flush_config();
                 }
@@ -2158,10 +2163,14 @@ impl MidasApp {
             }
 
             Message::WatchlistColumnResizeStart(wl_id, col, _) => {
+                let ids = crate::watchlist::WATCHLIST_COLUMN_ORDER;
+                if col >= ids.len() {
+                    return Task::none();
+                }
                 let width = self
                     .watchlists
                     .get(&wl_id)
-                    .map(|wl| wl.column_widths[col])
+                    .map(|wl| wl.grid_state.column_width(ids[col]))
                     .unwrap_or(70.0);
                 // start_x is NaN until the first on_move event provides cursor position.
                 self.resizing_column = Some((wl_id, col, f32::NAN, width));
@@ -2177,8 +2186,11 @@ impl MidasApp {
                     }
                     let delta = current_x - *start_x;
                     let new_w = (orig_w + delta).max(20.0);
-                    if let Some(wl) = self.watchlists.get_mut(&wl_id) {
-                        wl.column_widths[col] = new_w;
+                    let ids = crate::watchlist::WATCHLIST_COLUMN_ORDER;
+                    if col < ids.len() {
+                        if let Some(wl) = self.watchlists.get_mut(&wl_id) {
+                            wl.grid_state.set_column_width(ids[col], new_w, 20.0, None);
+                        }
                     }
                 }
                 Task::none()
@@ -2187,6 +2199,31 @@ impl MidasApp {
             Message::WatchlistColumnResizeEnd => {
                 self.resizing_column = None;
                 self.flush_config()
+            }
+
+            Message::WatchlistGrid(wl_id, grid_msg) => {
+                if let Some(wl) = self.watchlists.get_mut(&wl_id) {
+                    match grid_msg {
+                        midas_grid::GridMessage::SortToggled(col_id) => {
+                            // Per-column default direction: numeric columns start Descending.
+                            let default_dir = match col_id {
+                                crate::watchlist::COL_PRICE
+                                | crate::watchlist::COL_CHANGE
+                                | crate::watchlist::COL_GATR => {
+                                    midas_grid::SortDirection::Descending
+                                }
+                                _ => midas_grid::SortDirection::Ascending,
+                            };
+                            wl.grid_state.toggle_sort(col_id, default_dir);
+                        }
+                        midas_grid::GridMessage::RowSelected(_) => {
+                            // Row clicks emit WatchlistTickerSelected directly from
+                            // the view (with the correct symbol from sorted order).
+                            // This arm is reserved for Phase 2 keyboard navigation.
+                        }
+                    }
+                }
+                Task::none()
             }
 
             // -- Chart linking --

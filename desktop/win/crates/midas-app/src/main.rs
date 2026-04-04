@@ -15,6 +15,7 @@ mod order_panel;
 mod registry;
 mod theme;
 mod watchlist;
+mod watchlist_columns;
 
 use app::{Message, MidasApp};
 use iced::keyboard;
