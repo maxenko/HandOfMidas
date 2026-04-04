@@ -1342,17 +1342,25 @@ impl MidasApp {
                     .into()
             };
 
-            header_cells.push(header_content);
-
-            // 4px resize handle between columns (Phase 0 width).
+            // Wrap header cell with a resize handle on the right edge.
+            // The handle is layered on top via stack so it doesn't add width.
             if i < col_defs.len() - 1 {
                 let col_idx = i;
-                header_cells.push(
+                let resize_handle = container(
                     iced::widget::mouse_area(Space::new().width(4).height(26))
                         .interaction(iced::mouse::Interaction::ResizingHorizontally)
-                        .on_press(Message::WatchlistColumnResizeStart(wl_id, col_idx, 0.0))
+                        .on_press(Message::WatchlistColumnResizeStart(wl_id, col_idx, 0.0)),
+                )
+                .width(Fill)
+                .align_x(iced::alignment::Horizontal::Right);
+
+                header_cells.push(
+                    stack![header_content, resize_handle]
+                        .width(width)
                         .into(),
                 );
+            } else {
+                header_cells.push(header_content);
             }
         }
         let header = Row::with_children(header_cells).padding([0, 4]);
