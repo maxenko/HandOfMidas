@@ -11,6 +11,7 @@ mod chart_widget;
 mod layout;
 mod level_store;
 mod link;
+mod market_cache;
 mod order_panel;
 mod registry;
 mod theme;
@@ -93,5 +94,15 @@ fn subscription(_state: &MidasApp) -> Subscription<Message> {
         _ => Message::Tick,
     });
 
-    Subscription::batch([keyboard_sub, tick_sub, close_sub, window_events_sub])
+    // Refresh watchlist market data every 60 seconds.
+    let market_refresh = iced::time::every(std::time::Duration::from_secs(60))
+        .map(|_| Message::RefreshMarketData);
+
+    Subscription::batch([
+        keyboard_sub,
+        tick_sub,
+        close_sub,
+        window_events_sub,
+        market_refresh,
+    ])
 }
