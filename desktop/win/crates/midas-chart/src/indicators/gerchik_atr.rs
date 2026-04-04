@@ -26,13 +26,8 @@ const DEFAULT_UPPER_COEFF: f64 = 2.0;
 const DEFAULT_LOWER_COEFF: f64 = 0.5;
 
 /// Percentage threshold: below = green, at or above = red.
-const ATR_THRESHOLD_PCT: f32 = 75.0;
-
-/// Green color for ATR below threshold (low alpha -- watermark style).
-const ATR_GREEN: [f32; 4] = [0.2, 0.8, 0.3, 0.18];
-
-/// Red color for ATR at/above threshold (low alpha -- watermark style).
-const ATR_RED: [f32; 4] = [0.9, 0.25, 0.2, 0.18];
+/// Re-exported from `midas_core::GATR_THRESHOLD_PCT` for custom config default.
+const ATR_THRESHOLD_PCT: f32 = midas_core::GATR_THRESHOLD_PCT;
 
 // ── Config ──────────────────────────────────────────────────────────
 
@@ -166,9 +161,9 @@ pub fn compute(
 
     let pct = (session_range / atr * 100.0) as f32;
     let color = if pct >= config.threshold_pct {
-        ATR_RED
+        midas_core::GATR_COLOR_RED
     } else {
-        ATR_GREEN
+        midas_core::GATR_COLOR_GREEN
     };
     let text = format!("G.ATR {:.0}%", pct);
 
@@ -422,7 +417,7 @@ mod tests {
         let output = compute(&data, 300_000.0, &default_cfg()).unwrap();
         match output {
             IndicatorOutput::TextBadge { text: _, color } => {
-                assert_eq!(color, ATR_RED, "should be red for high ATR usage");
+                assert_eq!(color, midas_core::GATR_COLOR_RED, "should be red for high ATR usage");
             }
             _ => panic!("expected TextBadge variant"),
         }
@@ -446,7 +441,7 @@ mod tests {
         let output = compute(&data, 300_000.0, &cfg).unwrap();
         match output {
             IndicatorOutput::TextBadge { text: _, color } => {
-                assert_eq!(color, ATR_RED, "near-zero threshold should produce red");
+                assert_eq!(color, midas_core::GATR_COLOR_RED, "near-zero threshold should produce red");
             }
             _ => panic!("expected TextBadge variant"),
         }
