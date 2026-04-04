@@ -4,15 +4,16 @@ Professional-grade, headless grid/table widget for Hand of Midas.
 Built on iced 0.14, designed for trading workflows (watchlists, blotters, scanners).
 
 **Date**: 2026-04-01
-**Status**: Planning complete, all eval issues resolved, ready for implementation
+**Status**: Planning complete, all eval issues resolved (3 passes, 4-agent review), ready for implementation
 **Research**: [`research/grid-component/`](../../../../research/grid-component/README.md)
 
 ---
 
 ## Motivation
 
-The current watchlist grid is implemented inline in `views.rs` (~400 lines of layout,
-styling, resize, sort, and selection logic) with no reuse path. As the application grows
+The current watchlist grid is implemented inline across `views.rs`, `app.rs`, and
+`watchlist.rs` (~400 lines of layout, styling, resize, sort, and selection logic,
+distributed across non-contiguous sections) with no reuse path. As the application grows
 to include order blotters, scanner results, position tables, and trade history views,
 duplicating this code per panel is unsustainable. This plan extracts a generic, trait-based
 grid component into its own crate (`midas-grid`) that any panel can consume.
@@ -59,7 +60,7 @@ grid component into its own crate (`midas-grid`) that any panel can consume.
 4. **Trait-based columns** — `GridColumn<T, M>` trait with `header()`, `cell()`, `compare()`
 5. **Cell = any iced widget** — `cell()` returns `Element<'a, M>`, hosting text/buttons/inputs/canvas
 6. **Hybrid rendering** — iced widgets for cell content, custom overlays for drag/flash/resize
-7. **Message mapping** — Grid emits `GridMessage`, app maps via `on_message` closure
+7. **Message mapping** — Cells emit app's `M` directly; grid chrome maps via `on_grid` callback (`Fn(GridMessage) -> M`)
 8. **Three-state sort cycle** — Phase 1 introduces Asc -> Desc -> None (clear), replacing the current two-state toggle so users can return a column to its unsorted state
 
 ## Implementation Phases

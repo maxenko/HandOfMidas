@@ -533,7 +533,9 @@ pub enum GridMessage {
 
     // -- Column resize --
     /// User started dragging a column resize handle.
-    ResizeStarted(ColumnId, f32),
+    /// No cursor position — iced 0.14's mouse_area::on_press does not provide it.
+    /// The first cursor_x arrives via Resizing(f32) on the first mouse move.
+    ResizeStarted(ColumnId),
     /// User is dragging a resize handle (current x position).
     Resizing(f32),
     /// User released the resize handle.
@@ -567,7 +569,7 @@ pub enum GridMessage {
 
 ### 4.2 Application-Side Message Mapping
 
-The grid widget accepts a closure that maps `GridMessage` into the application's `Message` type:
+The `on_grid` callback is a required constructor parameter that maps `GridMessage` into the application's `Message` type. Cell content elements emit `Message` directly (bypassing the callback):
 
 ```rust
 // In midas-app's Message enum:
@@ -578,8 +580,7 @@ pub enum Message {
 
 // In view code:
 let wl_id = wl.id;
-midas_grid::grid(&columns, &rows, &wl.grid_state)
-    .on_message(move |msg| Message::WatchlistGrid(wl_id, msg))
+midas_grid::grid(&columns, &rows, &wl.grid_state, move |gm| Message::WatchlistGrid(wl_id, gm))
 ```
 
 ### 4.3 Application-Side Update Handler
@@ -598,8 +599,8 @@ Message::WatchlistGrid(wl_id, grid_msg) => {
                 self.propagate_symbol_link(wl.symbol_link, symbol);
             }
         }
-        GridMessage::ResizeStarted(col_id, x) => {
-            wl.grid_state.begin_resize(col_id, x);
+        GridMessage::ResizeStarted(col_id) => {
+            wl.grid_state.begin_resize(col_id);
         }
         GridMessage::Resizing(x) => {
             wl.grid_state.update_resize(x);
@@ -697,7 +698,14 @@ Self::Price => {
 
 Cell widgets emit the application's message type `M` directly, not `GridMessage`. A favorite toggle button emits `Message::ToggleFavorite(symbol)`, which the application handles in its own update logic. The grid is transparent — it passes cell messages through without interception.
 
-The grid's own interactions (resize handles, header clicks, row selection areas) emit `GridMessage` values that are mapped via the `on_message` closure. Cell content messages bypass this mapping entirely because they are already of type `M`.
+The grid's own interactions (resize handles, header clicks, row selection areas) need to emit `GridMessage` values, but the element tree is typed as `Element<'a, M>` (the app's message type). The grid resolves this through a required `on_grid` callback (`Fn(GridMessage) -> M`) provided by the app at construction time. Grid chrome elements call `(on_grid)(GridMessage::SortToggled(col))` to produce `M` values. Cell content elements emit `M` directly — they bypass the callback entirely because they are already typed correctly.
+
+This two-path design keeps the grid generic over `M`:
+- **Cell content path**: `column.cell(&row, idx)` returns `Element<'a, M>` → emits `M` directly
+- **Grid chrome path**: sort buttons, resize handles, selection areas → call `on_grid(GridMessage::...)` → emits `M`
+
+In Phase 0-1 (composition function), `on_grid` is `&dyn Fn(GridMessage) -> M`.
+In Phase 2+ (custom Widget), the `Widget<M>` stores `on_grid` as `Box<dyn Fn(GridMessage) -> M + 'a>` and calls it in `update()` via `shell.publish((self.on_grid)(grid_msg))`.
 
 ---
 
@@ -865,7 +873,7 @@ fn view_watchlist_body(&self, wl_id: WatchlistId) -> Element<'_, Message> {
 
     let columns = WatchlistColumn::all(wl_id);
 
-    grid(&columns, &sorted_rows, &wl.grid_state)
+    grid(&columns, &sorted_rows, &wl.grid_state, move |gm| Message::WatchlistGrid(wl_id, gm))
         .row_height(28.0)
         .header_height(26.0)
         .cell_padding([2, 4])
@@ -878,18 +886,27 @@ fn view_watchlist_body(&self, wl_id: WatchlistId) -> Element<'_, Message> {
                 Color::from_rgba(1.0, 1.0, 1.0, 0.02)
             }
         })
-        .on_message(move |msg| Message::WatchlistGrid(wl_id, msg))
-        .into()
 }
 ```
 
 ### 7.2 Grid Builder API
 
 ```rust
+/// Build a grid widget. Returns `Element<'a, M>` where `M` is the
+/// application's message type.
+///
+/// The grid is generic over `M`. Cell elements emit `M` directly.
+/// Grid chrome (sort, resize, select, drag) emits `M` via the required
+/// `on_grid` is a required parameter — the grid cannot be constructed without it.
+///
+/// ```rust
+/// grid(&columns, &rows, &grid_state, move |gm| Message::WatchlistGrid(wl_id, gm))
+/// ```
 pub fn grid<'a, T, M, C>(
     columns: &'a [C],
     rows: &'a [T],
     state: &'a GridState,
+    on_grid: impl Fn(GridMessage) -> M + 'a,
 ) -> Grid<'a, T, M, C>
 where
     C: GridColumn<T, M>,
@@ -903,7 +920,7 @@ where
         header_height: 26.0,
         cell_padding: [2, 4],
         row_bg: None,
-        on_message: None,
+        on_grid: Box::new(on_grid),
     }
 }
 
@@ -915,7 +932,10 @@ pub struct Grid<'a, T, M, C> {
     header_height: f32,
     cell_padding: [u16; 2],
     row_bg: Option<Box<dyn Fn(usize, bool) -> Color + 'a>>,
-    on_message: Option<Box<dyn Fn(GridMessage) -> M + 'a>>,
+    /// Required callback mapping grid chrome events to the app's message type.
+    /// Cell content emits `M` directly; only grid chrome (sort buttons,
+    /// resize handles, selection areas) routes through this callback.
+    on_grid: Box<dyn Fn(GridMessage) -> M + 'a>,
 }
 
 impl<'a, T, M, C> Grid<'a, T, M, C>
@@ -934,15 +954,17 @@ where
         self.row_bg = Some(Box::new(f));
         self
     }
-
-    pub fn on_message(
-        mut self,
-        f: impl Fn(GridMessage) -> M + 'a,
-    ) -> Self {
-        self.on_message = Some(Box::new(f));
-        self
-    }
 }
+
+// Two message paths, no type contradictions:
+//
+// 1. Cell content: column.cell(&row, idx) -> Element<'a, M>  (emits M directly)
+// 2. Grid chrome:  (on_grid)(GridMessage::SortToggled(col))   (maps to M)
+//
+// Phase 0-1: on_grid is &dyn Fn, used inside header/body composition functions.
+// Phase 2+:  Widget<M> stores on_grid as Box<dyn Fn>, calls it in update()
+//            via shell.publish((self.on_grid)(grid_msg)).
+// No refactor needed at the Widget transition boundary.
 ```
 
 ---
@@ -1009,8 +1031,8 @@ The migration is incremental. The grid can be developed and tested independently
 
 ### Flash-on-Tick
 
-- Flash state lives in `GridState`, not in application state. The grid owns a `flash_state: HashMap<(usize, ColumnId), FlashState>` that tracks flash timestamps and provides the flash background color with decaying alpha. (See 04-implementation-roadmap.md Phase 3a for the canonical flash state definition.)
-- The application is responsible for detecting price changes and notifying the grid via `GridMessage::FlashCell { column, row, direction }`.
+- Flash state lives in `GridState`, not in application state. The grid owns a `flash_state: HashMap<(RowKey, ColumnId), FlashState>` that tracks flash timestamps and provides the flash background color with decaying alpha. Uses `RowKey` (not `usize` index) so flashes survive data re-sorts — a price update that triggers both a flash and a sort change keeps the flash on the correct ticker. (See 04-implementation-roadmap.md Phase 3a for the canonical flash state definition.)
+- The application is responsible for detecting price changes and notifying the grid via `GridMessage::FlashCell { column, row_key, direction }`. The app provides the `RowKey` via the same `.row_key()` closure used for multi-selection.
 - A timer message (`GridMessage::FlashTick`) fires every ~50ms to decay flash alpha values within the grid.
 - See **02-rendering.md Section 4** and **04-implementation-roadmap.md Phase 3** for the canonical flash design.
 

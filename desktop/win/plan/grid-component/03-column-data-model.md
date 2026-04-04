@@ -609,7 +609,7 @@ column_id = "change_pct"
 direction = "descending"
 ```
 
-This replaces the current `column_widths: Vec<f32>` in `WatchlistConfig`. Migration: on load, if the old `column_widths` field exists and `grid_state` is absent, convert the old widths array to the new format using the known column order `[drag, fav, ticker, price, chg%, gatr, delete]`.
+This replaces the current `column_widths: Vec<f32>` in `WatchlistConfig`. No backward-compatible dual-format loading is needed — no shipped releases exist, so there are no existing config files to migrate (see 04-implementation-roadmap.md Phase 0).
 
 ### 3.5 Column Presets
 
@@ -676,26 +676,34 @@ Grid re-renders:      with the newly sorted data
 The grid widget's `view` function receives a slice reference:
 
 ```rust
-/// Build the grid widget.
+/// Build the grid widget. Returns `Element<'a, M>` where `M` is the
+/// application's message type.
 ///
 /// `columns` -- the column definitions (generic, typically an application enum)
 /// `rows` -- borrowed slice of row data, already sorted by the application
 /// `state` -- grid state (column configs, sort specs)
 ///
-/// Uses generics (`C: GridColumn<T, Message>`) rather than trait objects.
+/// Uses generics (`C: GridColumn<T, M>`) rather than trait objects.
 /// The primary use pattern is an application enum (e.g., `WatchlistColumn`)
 /// implementing `GridColumn`, passed as `&[WatchlistColumn]`.
 /// See 00-architecture.md §7.2 for the canonical builder signature.
-pub fn grid<'a, T, Message, C>(
+///
+/// Cell content emits `M` directly. Grid chrome (sort, resize, select)
+/// maps through the required `on_grid` constructor parameter:
+/// ```rust
+/// grid(&columns, &rows, &grid_state, move |gm| Message::WatchlistGrid(wl_id, gm))
+/// ```
+pub fn grid<'a, T, M, C>(
     columns: &'a [C],
     rows: &'a [T],
     state: &'a GridState,
-) -> Grid<'a, T, Message, C>
+    on_grid: impl Fn(GridMessage) -> M + 'a,
+) -> Grid<'a, T, M, C>
 where
-    C: GridColumn<T, Message>,
-    Message: Clone + 'a,
+    C: GridColumn<T, M>,
+    M: Clone + 'a,
 {
-    Grid::new(columns, rows, state)
+    Grid::new(columns, rows, state, on_grid)
 }
 ```
 
@@ -718,8 +726,8 @@ The grid does not cache cell elements between frames. In iced's Elm architecture
 When the user clicks a sortable column header:
 
 ```
-1. Grid emits: GridMessage::SortToggled(ColumnId("ticker"))
-   App's on_message closure wraps it: Message::WatchlistGrid(wl_id, grid_msg)
+1. Grid chrome calls: (on_grid)(GridMessage::SortToggled(ColumnId("ticker")))
+   This produces: Message::WatchlistGrid(wl_id, grid_msg)
 
 2. Application update() handler:
    a. Calls wl.grid_state.toggle_sort(col_id)
@@ -759,7 +767,7 @@ fn apply_sort(
 
         // Then apply column-level sort specs.
         for spec in sort_specs {
-            let col = columns.iter().find(|c| c.id().0 == spec.column_id);
+            let col = columns.iter().find(|c| c.id() == spec.column_id);
             if let Some(col) = col {
                 let ordering = col.compare(a, b);
                 let ordering = match spec.direction {
@@ -1664,13 +1672,11 @@ fn view_watchlist_body(&self, wl_id: WatchlistId) -> Element<'_, Message> {
     // Grid state (from watchlist panel state).
     let state = &wl.grid_state;
 
-    grid(&columns, &rows, state)
+    grid(&columns, &rows, state, move |gm| Message::WatchlistGrid(wl_id, gm))
         .row_key(|row: &WatchlistRow| RowKey::new(&row.symbol))
-        .on_message(move |msg| Message::WatchlistGrid(wl_id, msg))
         .selected_row(
             wl.selected_symbol.as_ref().map(|s| RowKey::new(s))
         )
-        .into()
 }
 ```
 
@@ -1696,7 +1702,7 @@ Message::WatchlistGrid(wl_id, GridMessage::SortToggled(col_id)) => {
             }
             // Secondary: apply grid sort specs.
             for spec in &specs {
-                if let Some(col) = columns.iter().find(|c| c.id().0 == spec.column_id) {
+                if let Some(col) = columns.iter().find(|c| c.id() == spec.column_id) {
                     let ordering = col.compare(a, b);
                     let ordering = match spec.direction {
                         SortDirection::Ascending => ordering,

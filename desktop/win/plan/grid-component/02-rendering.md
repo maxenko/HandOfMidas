@@ -502,13 +502,28 @@ Time 300ms: Cell background = base color (flash complete)
 
 ### Flash State Data Structure
 
+> **Canonical source**: This section is the canonical definition for `FlashState`
+> and `FlashColor`. Other plan documents (04-implementation-roadmap.md) reference
+> this section; when in conflict, this document takes precedence.
+>
+> **Implementation note**: The `FlashMap` wrapper struct shown below is illustrative —
+> it groups the flash data and helper methods for exposition. The canonical runtime
+> representation is a raw `HashMap<(RowKey, ColumnId), FlashState>` field on `GridState`
+> (see 04-implementation-roadmap.md Phase 3a), with a `has_active_flashes()` method
+> replacing the `active_count` field. The `FlashState` and `FlashColor` types are
+> the implementation targets; the wrapper struct is not.
+
 ```rust
 /// Tracks active flash animations for the entire grid.
 struct FlashMap {
-    /// Key: (row_id, column_id). Value: active flash state.
+    /// Key: (row_key, column_id). Value: active flash state.
     /// Using a HashMap because flashes are sparse -- typically only a few
     /// cells flash simultaneously even during market open bursts.
-    flashes: HashMap<(RowId, ColumnId), FlashState>,
+    /// Uses `RowKey` (not `usize` index) so flashes survive re-sorts:
+    /// after a price update triggers both a flash and a re-sort, the
+    /// flash stays on the correct ticker rather than shifting to
+    /// whatever row now occupies the old index.
+    flashes: HashMap<(RowKey, ColumnId), FlashState>,
     /// Number of currently active flashes. When 0, no animation subscription needed.
     active_count: usize,
 }
@@ -543,9 +558,9 @@ impl FlashColor {
 
 > **Ownership clarification**: The `FlashMap` described above is canonically owned as a
 > field of `GridState` (see 04-implementation-roadmap.md Phase 3, which adds
-> `flash_state: HashMap<(usize, ColumnId), FlashState>` to `GridState`). It is NOT a
+> `flash_state: HashMap<(RowKey, ColumnId), FlashState>` to `GridState`). It is NOT a
 > separate structure managed internally by the widget. The application detects price
-> changes and sends `GridMessage::FlashCell { column, row, direction }` to trigger
+> changes and sends `GridMessage::FlashCell { column, row_key, direction }` to trigger
 > flashes; the grid manages only the animation lifecycle (timestamps, alpha decay) in
 > `GridState.flash_state`. The grid does NOT maintain a `PreviousValues` map or perform
 > any value comparison. The `FlashMap` name used here is a convenience alias for the
@@ -561,9 +576,10 @@ The app triggers flashes via `GridMessage::FlashCell`:
 /// Sent by the application when it detects a value change.
 enum GridMessage {
     /// Trigger a flash animation on a specific cell.
+    /// Uses `RowKey` (not `usize` index) so flashes survive re-sorts.
     FlashCell {
         column: ColumnId,
-        row: usize,
+        row_key: RowKey,
         direction: FlashDirection,
     },
     /// Fired every ~16ms while flashes are active to decay alpha.
@@ -595,10 +611,10 @@ fn handle_market_data_update(
                 } else {
                     FlashDirection::Down
                 };
-                let row = self.symbol_to_row_index(symbol);
+                let row_key = RowKey::new(symbol);
                 messages.push(GridMessage::FlashCell {
-                    column: ColumnId::LastPrice,
-                    row,
+                    column: ColumnId("price"),
+                    row_key,
                     direction,
                 });
             }
@@ -614,8 +630,8 @@ fn handle_market_data_update(
 When the grid receives `GridMessage::FlashCell`, it inserts into the flash map:
 ```rust
 // In GridState::update():
-GridMessage::FlashCell { column, row, direction } => {
-    let key = (row, column);
+GridMessage::FlashCell { column, row_key, direction } => {
+    let key = (row_key, column);
     let color = match direction {
         FlashDirection::Up => FlashColor::Up,
         FlashDirection::Down => FlashColor::Down,
@@ -808,7 +824,7 @@ The grid supports three drag operations:
 enum DragKind {
     /// Reordering a row within the grid.
     RowReorder {
-        source_row_id: RowId,
+        source_row_id: RowKey,
         source_index: usize,
     },
     /// Reordering a column.
@@ -973,7 +989,7 @@ During drag, the source row/column dims to 30% opacity. This is achieved by modi
 ```rust
 fn row_opacity_modifier(
     base_color: Color,
-    row_id: RowId,
+    row_id: RowKey,
     drag_state: &Option<DragState>,
 ) -> Color {
     if let Some(drag) = drag_state {
@@ -1312,12 +1328,13 @@ The grid is implemented as a custom iced widget implementing the `Widget` trait.
 /// column type, avoiding vtable indirection. See 00-architecture.md Section 3
 /// for the stated preference for static dispatch via monomorphization.
 ///
-/// **Message type**: The Widget operates on `GridMessage` internally (not the
-/// app's `Message` type). At the call site, the builder's `.on_message()` closure
-/// becomes sugar over `Element::map()`:
-///   `grid(...).into_element().map(|gm| Message::WatchlistGrid(wl_id, gm))`
-/// This follows iced's idiomatic pattern (used by `combo_box`, `ManyCounters`, etc.)
-/// and avoids storing a mapping closure inside the widget.
+/// **Message type**: The Widget is generic over the app's message type `M`:
+/// `Widget<M, Theme, Renderer>`. Cell elements are `Element<'a, M>` — they emit
+/// `M` directly. Grid chrome (sort buttons, resize handles, selection areas)
+/// maps through the stored `on_grid: Box<dyn Fn(GridMessage) -> M + 'a>`
+/// callback via `shell.publish((self.on_grid)(grid_msg))`. This two-path design
+/// avoids type contradictions: cells can emit arbitrary app messages while grid
+/// chrome uses the structured `GridMessage` enum.
 ///
 /// **Child element pattern**: Cell `Element`s are pre-built during construction
 /// (from `col.cell()` / `col.header()` calls) and stored in `cells` / `headers`.
@@ -1325,7 +1342,7 @@ The grid is implemented as a custom iced widget implementing the `Widget` trait.
 /// `layout()` produces child `Node`s, and `draw()` renders via `tree.children[i]`
 /// and `layout.children()[i]`. This follows iced's `Table` widget pattern.
 /// See `iced_widget-0.14.2/src/table.rs` for the reference implementation.
-pub struct GridWidget<'a, Row, C: GridColumn<Row, GridMessage>> {
+pub struct GridWidget<'a, Row, M, C: GridColumn<Row, M>> {
     /// Column definitions (static dispatch via monomorphization).
     columns: &'a [C],
     /// Row data (already sorted, already sliced to visible range).
@@ -1337,13 +1354,15 @@ pub struct GridWidget<'a, Row, C: GridColumn<Row, GridMessage>> {
     /// Total row count (for scrollbar computation, may differ from rows.len()
     /// when virtual scrolling is active).
     total_row_count: usize,
+    /// Callback mapping grid chrome events to the app's message type.
+    on_grid: Box<dyn Fn(GridMessage) -> M + 'a>,
     /// Pre-built header cell Elements, one per column (in display order).
     /// Built during construction from `col.header()` calls.
-    headers: Vec<Element<'a, GridMessage>>,
+    headers: Vec<Element<'a, M>>,
     /// Pre-built body cell Elements, row-major order: [row0_col0, row0_col1, ..., row1_col0, ...].
     /// Built during construction from `col.cell(row, idx)` calls for visible rows.
     /// Length = visible_rows * columns.len().
-    cells: Vec<Element<'a, GridMessage>>,
+    cells: Vec<Element<'a, M>>,
 }
 ```
 
@@ -1365,7 +1384,7 @@ fn children(&self) -> Vec<Tree> {
 }
 
 fn diff(&self, tree: &mut Tree) {
-    let all_elements: Vec<&Element<'_, GridMessage>> =
+    let all_elements: Vec<&Element<'_, M>> =
         self.headers.iter().chain(self.cells.iter()).collect();
     tree.diff_children(&all_elements);
 }
@@ -1404,17 +1423,26 @@ fn layout(
         x += col_width;
     }
 
-    // Body cell nodes (row-major: row0_col0, row0_col1, ..., row1_col0, ...)
+    // Pre-compute column X offsets once (O(C)) to avoid O(C^2) per-cell lookups.
     let num_cols = self.columns.len();
+    let column_offsets: Vec<f32> = {
+        let mut offsets = Vec::with_capacity(num_cols);
+        let mut acc = 0.0f32;
+        for i in 0..num_cols {
+            offsets.push(acc);
+            let cid = self.state.column_order[i];
+            acc += *self.state.column_widths.get(&cid).unwrap_or(&80.0);
+        }
+        offsets
+    };
+
+    // Body cell nodes (row-major: row0_col0, row0_col1, ..., row1_col0, ...)
     for (cell_idx, cell_el) in self.cells.iter().enumerate() {
         let row = cell_idx / num_cols;
         let col = cell_idx % num_cols;
         let col_id = self.state.column_order[col];
         let col_width = *self.state.column_widths.get(&col_id).unwrap_or(&80.0);
-        let cell_x: f32 = (0..col).map(|c| {
-            let cid = self.state.column_order[c];
-            *self.state.column_widths.get(&cid).unwrap_or(&80.0)
-        }).sum();
+        let cell_x = column_offsets[col];
         let cell_y = HEADER_HEIGHT + (row as f32 * ROW_HEIGHT) - self.state.scroll_y;
 
         let child_limits = layout::Limits::new(Size::ZERO, Size::new(col_width, ROW_HEIGHT));
@@ -1511,9 +1539,8 @@ fn draw(
 
 ### `update()`: Event Handling
 
-> **Method name note**: iced 0.14's `Widget` trait may use `on_event()` rather than
-> `update()` for this method. The name shown here is illustrative; verify the exact
-> signature during the Pre-Phase 2 spike.
+> **Method name**: iced 0.14's `Widget` trait uses `update()` for event handling
+> (confirmed against iced_core 0.14 source).
 
 ```rust
 /// The Widget operates on `GridMessage` internally. At the call site, the app
@@ -1530,7 +1557,7 @@ fn update(
     cursor: mouse::Cursor,
     renderer: &Renderer,
     clipboard: &mut dyn Clipboard,
-    shell: &mut Shell<'_, GridMessage>,
+    shell: &mut Shell<'_, M>,
     viewport: &Rectangle,
 ) {
     let bounds = layout.bounds();
@@ -1554,7 +1581,7 @@ fn update(
                     mouse::ScrollDelta::Lines { y, .. } => *y * ROW_HEIGHT,
                     mouse::ScrollDelta::Pixels { y, .. } => *y,
                 };
-                shell.publish(GridMessage::ScrollChanged(dy));
+                shell.publish((self.on_grid)(GridMessage::ScrollChanged(dy)));
                 shell.capture_event();
             }
         }
@@ -1567,7 +1594,7 @@ fn update(
                 } else {
                     let row_idx = self.row_at_y(pos.y, state);
                     if let Some(idx) = row_idx {
-                        shell.publish(GridMessage::RowSelected(idx));
+                        shell.publish((self.on_grid)(GridMessage::RowSelected(idx)));
                     }
                 }
                 shell.capture_event();
@@ -1580,7 +1607,7 @@ fn update(
                 if check_activation(drag, *position) {
                     let target = self.compute_drop_target(*position, bounds);
                     // Canonical: ColumnDragging(f32) / RowDragging(f32)
-                    shell.publish(GridMessage::ColumnDragging(position.x));
+                    shell.publish((self.on_grid)(GridMessage::ColumnDragging(position.x)));
                 }
             }
 
@@ -1645,7 +1672,10 @@ fn mouse_interaction(
         }
 
         // Body area: check drag handle column.
-        let first_col_width = self.state.column_widths.values().next().copied().unwrap_or(26.0);
+        let first_col_id = self.state.column_order.first().copied();
+        let first_col_width = first_col_id
+            .and_then(|id| self.state.column_widths.get(&id).copied())
+            .unwrap_or(26.0);
         if pos.x < first_col_width {
             return mouse::Interaction::Grab;
         }

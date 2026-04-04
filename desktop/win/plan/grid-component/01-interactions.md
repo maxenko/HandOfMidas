@@ -58,7 +58,7 @@ Priority order for hit-testing a cursor position:
 
 1. **Drag overlay** -- if a drag is active, the overlay is excluded (hit-test-invisible)
 2. **Context menu** -- if open, consumes click or dismisses
-3. **Resize handle (R)** -- 6px-wide vertical strips between header cells
+3. **Resize handle (R)** -- 8px-wide vertical strips between header cells (4px each side of column boundary)
 4. **Header cell (H)** -- the header cell body (excluding resize handles)
 5. **Drag handle column (D)** -- the leftmost grip column in the body
 6. **Interactive cell widget** -- buttons, toggles within cells
@@ -118,7 +118,7 @@ that the parent application maps into its own `Message` enum.
 
 | Category | Variants (all phases) | Phase |
 |---|---|---|
-| Column resize | `ResizeStarted(ColumnId, f32)`, `Resizing(f32)`, `ResizeEnded` | 1 |
+| Column resize | `ResizeStarted(ColumnId)`, `Resizing(f32)`, `ResizeEnded` | 1 |
 | Column auto-fit | `AutoFitColumn(ColumnId)` | 4 |
 | Column reorder | `ColumnDragStarted(ColumnId, f32)`, `ColumnDragging(f32)`, `ColumnDragEnded`, `ColumnDragCancelled` | 2 |
 | Sort | `SortToggled(ColumnId)` | 0 |
@@ -128,7 +128,7 @@ that the parent application maps into its own `Message` enum.
 | Keyboard | `FocusMove(Direction)`, `ActivateRow(usize)`, `DeleteRows(Vec<usize>)`, `PageScroll(Direction)` | 3 |
 | Scroll | `ScrollChanged(f32)` | 0 |
 | Context menu | `ContextMenuOpen(usize, Point)`, `ContextMenuHeaderOpen(ColumnId, Point)`, `ContextMenuAction(ContextAction)`, `ContextMenuDismiss` | 4 |
-| Trading | `SymbolActivated(String)`, `FlashTick(usize, usize, TickDirection)` | 3 |
+| Trading | `SymbolActivated(String)`, `FlashCell { column: ColumnId, row_key: RowKey, direction: FlashDirection }`, `FlashTick` | 3 |
 
 Cell widget interactions (button clicks, toggles, star) are **not** `GridMessage`
 variants — they emit the application's message type `M` directly via the cell's
@@ -140,7 +140,7 @@ from 00-architecture.md §4.1. Key mappings:
 
 | This document (descriptive) | Canonical (00-architecture.md §4.1) |
 |---|---|
-| `ColumnResizeStart { col, x }` | `ResizeStarted(ColumnId, f32)` |
+| `ColumnResizeStart { col, x }` | `ResizeStarted(ColumnId)` |
 | `SortBy { col }` | `SortToggled(ColumnId)` |
 | `RowClicked { row }` | `RowSelected(usize)` |
 | `RowCtrlClicked { row }` | `RowToggled(usize)` |
@@ -158,11 +158,11 @@ from 00-architecture.md §4.1. Key mappings:
 **What starts it**: The user positions the cursor over the vertical divider between
 two adjacent column headers and presses the left mouse button.
 
-**Detection**: The resize handle is a 6px-wide invisible hit zone centered on the
-column boundary. When the cursor enters this zone, the cursor changes to a
-horizontal-resize indicator (`ew-resize` / `col-resize`).
+**Detection**: The resize handle is an 8px-wide invisible hit zone centered on the
+column boundary (4px on each side). When the cursor enters this zone, the cursor changes to a
+horizontal-resize indicator (`ew-resize` / `col-resize`). Canonical width: 02-rendering.md §2.
 
-> **Migration note**: The current `views.rs` implementation uses 4px resize handles. Phase 0 migrates these as-is. Phase 1 widens to 6px as specified here.
+> **Migration note**: The current `views.rs` implementation uses 4px resize handles. Phase 0 migrates these as-is. Phase 1 widens to 8px as specified here.
 
 ```
          col_right_edge
@@ -1288,22 +1288,17 @@ pub enum ContextMenuState {
 ### 10.1 Interactive Cell Widgets
 
 Cells can host interactive elements that consume clicks instead of propagating them
-to row selection. These are declared in the column definition:
+to row selection. The cell content is determined by the column's `GridColumn::cell()`
+method, which returns any iced `Element<'a, M>`. Common interactive cell types include:
 
-```rust
-pub enum CellContent {
-    /// Plain text display.
-    Text,
-    /// Clickable button.
-    Button { label: String },
-    /// Toggle switch (boolean).
-    Toggle,
-    /// Star/favorite toggle.
-    Star,
-    /// Icon button (e.g., delete X).
-    IconButton { icon: Icon },
-}
-```
+- **Plain text** — display-only text (`Text` widget)
+- **Clickable button** — emits an app-level message on click (`Button` widget)
+- **Toggle switch** — boolean on/off (`Toggler` or styled `Button`)
+- **Star/favorite** — toggle with icon (`Button` with conditional styling)
+- **Icon button** — e.g., delete X (`Button` with icon content)
+
+There is no separate enum for cell content types — the `cell()` return type
+(`Element<'a, M>`) is the only abstraction needed.
 
 ### 10.2 Click Propagation Rules
 
@@ -1406,7 +1401,7 @@ let bg = lerp_color(base_color, flash_color, alpha);
 ```rust
 pub struct CellFlashState {
     pub flash_start: Option<Instant>,
-    pub direction: TickDirection,  // Up or Down
+    pub direction: FlashDirection,  // Up or Down
 }
 ```
 
@@ -1500,7 +1495,7 @@ pub struct CellStyle {
 | User Action / Event | Message | Type |
 |---|---|---|
 | Click row / Enter on row (linked) | `SymbolActivated { symbol }` | `GridMessage` |
-| Data value changes | `FlashTick { row, col, direction }` | `GridMessage` |
+| Data value changes | `FlashCell { column: ColumnId, row_key: RowKey, direction: FlashDirection }` | `GridMessage` |
 | Star toggle | e.g., `Message::ToggleFavorite(...)` | Application `M` (not `GridMessage`) |
 | Quick-add submit | *(handled via existing WatchlistAddTicker flow)* | Application `M` |
 
@@ -1560,7 +1555,7 @@ checks in order. The first matching handler consumes the event.
 
 | Conflict | Resolution |
 |---|---|
-| Column resize handle overlaps header cell body | Resize handle has higher priority (6px zone takes precedence) |
+| Column resize handle overlaps header cell body | Resize handle has higher priority (8px zone takes precedence) |
 | Click on header could be sort or reorder | DragPending handles both: mouseup < 5px = sort, >= 5px = reorder |
 | Row click could be selection or drag | Drag only starts from the dedicated drag handle column, not from the row body |
 | Star click in a selected row | Star widget consumes the click; selection does not change |
@@ -1648,7 +1643,7 @@ replacement. Key integration points (using canonical names from 00-architecture.
 | `WatchlistPanel.selected_symbol` | `GridState.selection: SelectionState` |
 | `MidasApp.resizing_column: Option<(WatchlistId, usize, f32, f32)>` | `GridState.interaction: ActiveInteraction::Resize(ResizeState)` |
 | `MidasApp.dragging_ticker: Option<DragTickerState>` | `GridState.interaction: ActiveInteraction::RowDrag(RowDragState)` |
-| `Message::WatchlistSortBy` | `GridMessage::SortToggled(ColumnId)` |
+| Inline sort logic in `views.rs` (no dedicated message variant) | `GridMessage::SortToggled(ColumnId)` |
 | `Message::WatchlistColumnResizeStart/Resizing/End` | `GridMessage::ResizeStarted/Resizing/ResizeEnded` |
 | `Message::WatchlistDragStart/Cancel` | `GridMessage::RowDragStarted/RowDragCancelled/RowDragEnded` |
 | `Message::WatchlistTickerSelected` | `GridMessage::RowSelected(usize)` + `SymbolActivated` |

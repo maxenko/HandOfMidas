@@ -76,7 +76,7 @@ Phase 3, at which point a **Pre-Phase 3 spike** validates spacer-based virtual s
 | `crates/midas-grid/src/widget.rs` | `grid()` function returning an `Element`. Builds header `Row` + `scrollable` body `Column` from trait-provided cells. |
 | `crates/midas-grid/src/header.rs` | `grid_header()` function: builds one header row from column definitions, inserting resize handles between cells. |
 | `crates/midas-grid/src/body.rs` | `grid_body()` function: iterates sorted row slice, builds one `Row` per data row using `GridColumn::cell()`. |
-| `crates/midas-grid/src/message.rs` | `GridMessage` enum — grid's message type, mapped by the app via `on_message` closure. Phase 0 defines `SortToggled` and `RowSelected`; later phases extend. |
+| `crates/midas-grid/src/message.rs` | `GridMessage` enum — grid chrome event type, mapped to the app's message type via the `on_grid` callback. Phase 0 defines `SortToggled` and `RowSelected`; later phases extend. Cell content emits the app's message type `M` directly. |
 | `crates/midas-grid/src/style.rs` | `GridStyle` struct and constants migrated from `views.rs` (`GRID_BORDER_COLOR`, `GRID_HEADER_BORDER_COLOR`, cell/header container styles). |
 | `crates/midas-grid/src/columns/mod.rs` | Re-exports. Phase 0 ships empty (placeholder for Phase 2+ pre-built column types). |
 
@@ -177,17 +177,17 @@ pub enum GridMessage {
 
 2. **Define core types in `column.rs`**: `ColumnId`, `ColumnWidth`, `SortDirection`, `SortSpec`, and the `GridColumn<T, Message>` trait. `SortDirection` must provide `toggle()` and `indicator()` identical to the existing `watchlist::SortDirection` so behavior is unchanged. **Phase 0 uses a two-state toggle (Asc <-> Desc, no clear-to-None)**; clicking a column header flips direction, clicking a different column switches to that column with the current direction. The three-state cycle (Asc -> Desc -> None) is introduced in Phase 1.
 
-   > **Per-column default direction (Phase 0 migration note)**: Phase 0's `toggle_sort()` must preserve the existing per-column default direction behavior from `app.rs`: when switching to a *new* column, numeric columns (Price, ChangePercent, GATR) start Descending and text columns (Ticker) start Ascending. This is the current codebase behavior being migrated, not a new feature. Phase 0 can implement this via a simple match on `ColumnId` or a `default_direction` field on the column definition. Phase 1's `DefaultSortDirection` (via `GridColumn::default_sort_direction()`) is the formalized, trait-based version of this same logic.
+   > **Per-column default direction (Phase 0 migration note)**: Phase 0's sort toggle must preserve the existing per-column default direction behavior: when switching to a *new* column, numeric columns (Price, ChangePercent, GATR) start Descending and text columns (Ticker) start Ascending. **Important**: This logic lives in the **app's update handler** (matching on `WatchlistColumn` kind), NOT inside `GridState::toggle_sort()`. The grid crate's `toggle_sort()` takes a `default_direction: SortDirection` parameter — the app passes the appropriate direction based on the column. This keeps `midas-grid` generic and free of column-specific knowledge. Phase 1's `DefaultSortDirection` (via `GridColumn::default_sort_direction()`) formalizes this into a trait method, replacing the app-side match.
 
 3. **Define `GridState` in `state.rs`**: Implements the canonical definition from 00-architecture.md §2.1 — stores `column_order: Vec<ColumnId>`, `column_widths: HashMap<ColumnId, f32>`, `sort: Option<SortSpec>`, `selection: SelectionState`, `scroll_y: f32`, `interaction: ActiveInteraction`. Phase 0 defines `ActiveInteraction` with only the `None` variant (later phases add interaction variants). Provides methods: `column_width(id) -> f32`, `set_column_width(id, f32, min, max)`, `toggle_sort(col)`, `move_column(from, to)`. The grid state is owned by `WatchlistPanel` (replacing the current `column_widths: [f32; 7]` array).
 
 4. **Define `GridStyle` in `style.rs`**: Migrate `GRID_BORDER_COLOR`, `GRID_HEADER_BORDER_COLOR`, and the cell/header container style closures from `views.rs`.
 
-5. **Implement `header.rs`**: A function `grid_header<'a, T, M, C>(columns: &'a [C], state: &GridState, on_message: &dyn Fn(GridMessage) -> M) -> Element<'a, M>` where `C: GridColumn<T, M>`. Iterates columns, calls `col.header()`, composites sort indicators separately, wraps each in a container with the column width, interleaves 4px `mouse_area` resize handles. All grid chrome interactions use the single `on_message` closure to map `GridMessage` variants to `M`. This is a direct extraction from `let header_labels: Vec<Element>` through `let header = Row::with_children` in `views.rs`.
+5. **Implement `header.rs`**: A function `grid_header<'a, T, M, C>(columns: &'a [C], state: &GridState, on_grid: &dyn Fn(GridMessage) -> M) -> Element<'a, M>` where `C: GridColumn<T, M>`. Iterates columns, calls `col.header()`, composites sort indicators separately, wraps each in a container with the column width, interleaves 4px `mouse_area` resize handles. Grid chrome interactions call `on_grid(GridMessage::SortToggled(col))` to produce `M` values. This is a direct extraction from `let header_labels: Vec<Element>` through `let header = Row::with_children` in `views.rs`.
 
-6. **Implement `body.rs`**: A function `grid_body<'a, T, M, C>(rows: &'a [T], columns: &'a [C], state: &GridState, on_message: &dyn Fn(GridMessage) -> M) -> Element<'a, M>` where `C: GridColumn<T, M>`. Iterates rows, builds a `Row` per data row with cells from `col.cell(row, i)`. Cell widgets emit `M` directly (the grid is transparent to cell messages). Grid chrome (row selection areas) uses `on_message` to map `GridMessage::RowSelected` to `M`. This extracts from `let mut rows = Column::new()` through the end of the sorted-rows loop in `views.rs`.
+6. **Implement `body.rs`**: A function `grid_body<'a, T, M, C>(rows: &'a [T], columns: &'a [C], state: &GridState, on_grid: &dyn Fn(GridMessage) -> M) -> Element<'a, M>` where `C: GridColumn<T, M>`. Iterates rows, builds a `Row` per data row with cells from `col.cell(row, i)`. Cell widgets emit `M` directly (the grid is transparent to cell messages). Grid chrome (row selection areas) calls `on_grid(GridMessage::RowSelected(idx))` to produce `M` values. This extracts from `let mut rows = Column::new()` through the end of the sorted-rows loop in `views.rs`.
 
-7. **Implement `widget.rs`**: The `Grid` builder struct (see 00-architecture.md §7.2) with an `on_message: Fn(GridMessage) -> M` closure. The `into() -> Element<'a, M>` method composes `grid_header()` + `scrollable(grid_body())` + add-ticker row into a `column![]`. In Phase 0-1, this is a composition function returning `Element`. In Phase 2, this becomes a custom `Widget` impl to support `overlay()` for drag ghosts (see 02-rendering.md §10 for the Phase 2+ target architecture).
+7. **Implement `widget.rs`**: The `grid()` constructor function takes `on_grid` as a required parameter (not a builder method) — see 00-architecture.md §7.2. The `into() -> Element<'a, M>` method composes `grid_header()` + `scrollable(grid_body())` + add-ticker row into a `column![]`. Cell content emits `M` directly; grid chrome maps through `on_grid`. In Phase 2, the custom `Widget<M>` stores `on_grid` as `Box<dyn Fn(GridMessage) -> M + 'a>` and calls it in `update()` via `shell.publish((self.on_grid)(grid_msg))`. No message-type refactor is needed at the Widget transition because the grid is generic over `M` from Phase 0.
 
 8. **Implement `WatchlistColumn` enum** in `midas-app`: Implement `GridColumn<WatchlistRow, Message>` for the `WatchlistColumn` enum (see 00-architecture.md §3.3 for the full example). This moves per-cell rendering from `view_watchlist_body()` into `WatchlistColumn::cell()`. Pre-built generic column types (`TextColumn`, `NumericColumn`, etc.) are deferred to Phase 2+.
 
@@ -206,7 +206,7 @@ pub enum GridMessage {
   - [ ] Header text alignment with body column content (within 1px -- no visible misalignment between header labels and the data cells beneath them)
   - [ ] Sort arrow glyph appears at the correct position relative to header text (immediately after label, not overlapping or clipped)
   - [ ] Row selection highlight covers full row width (no gap at left/right edges)
-  - [ ] Column resize handles respond in the correct hit zone (divider +/-3px -- cursor changes to resize icon only near the divider). Phase 0 uses the migrated inline resize logic from `views.rs`; the formal `ResizeState` machine replaces this in Phase 1.
+  - [ ] Column resize handles respond in the correct hit zone (divider +/-2px in Phase 0, widened to +/-4px in Phase 1 -- cursor changes to resize icon only near the divider). Phase 0 uses the migrated inline resize logic from `views.rs`; the formal `ResizeState` machine with 8px hit zone replaces this in Phase 1.
   - [ ] Alternating row background colors match pre-refactor appearance (same colors, same row parity)
   - [ ] Grid scrolls smoothly with no visual tearing (test with >20 rows)
   - [ ] Watchlist data (prices, change%) renders identically to pre-refactor (same number formatting, same color coding for positive/negative values)
@@ -215,6 +215,10 @@ pub enum GridMessage {
   - [ ] Drag grip button renders (visual presence only -- drag behavior is Phase 2)
   - [ ] Add-ticker input and submit work (type symbol, press Enter, row appears)
 - **Config roundtrip test**: Save config with new `GridState` format, reload, verify widths and sort are restored.
+- **`from_config()` edge case tests**:
+  - Config contains unknown column ID (silently dropped, no panic).
+  - Column definition exists but is not in saved config (appended to end of `column_order`).
+  - Full round-trip with reordered columns (save → load → verify order matches).
 
 ### Migration Plan
 
@@ -246,7 +250,7 @@ The migration is split into **4 commits** to reduce blast radius and make regres
          +-----------+
                |
                v
-          widget.rs          (composes header + body, uses on_message closure)
+          widget.rs          (composes header + body; cells emit M, chrome maps via on_grid callback)
                |
                v
     WatchlistColumn enum     (in midas-app, implements GridColumn trait)
@@ -317,7 +321,7 @@ The migration is split into **4 commits** to reduce blast radius and make regres
 | `ActiveInteraction::Resizing(ResizeState)` | `state.rs` | Phase 1 adds the `Resizing(ResizeState)` variant to the `ActiveInteraction` enum (which was defined with only `None` in Phase 0). Only one transient interaction can be active at a time -- this is a compile-time guarantee via the enum. Phase 2 adds `DraggingColumn(ColumnDragState)` and `DraggingRow(RowDragState)` variants. See 01-interactions.md §12 for the conflict resolution rules. |
 | `ResizeState` | `interactions/resize.rs` | `struct ResizeState { column_id: ColumnId, start_x: Option<f32>, start_width: f32 }` -- `start_x` is `Option<f32>` (None until first mouse move, replacing the NAN sentinel), `start_width` is the column width when resize began. See 00-architecture.md §6.4. |
 | (no new type) | `interactions/selection.rs` | `SelectionState` already exists from Phase 0 in `state.rs` with the simple shape (`selected: Option<usize>`, `focused: Option<usize>`). Phase 1 creates `interactions/selection.rs` with handler functions (`handle_row_click`, `handle_row_press`) that operate on the existing `SelectionState`. Single-selection only in Phase 0-2. |
-| `GridMessage` | `message.rs` | Extend with resize variants: `ResizeStarted(ColumnId, f32), Resizing(f32), ResizeEnded`. `SortToggled` and `RowSelected` already exist from Phase 0. Phase 3 adds `RowToggled(usize)` and `RowRangeSelected(usize)` for multi-select. |
+| `GridMessage` | `message.rs` | Extend with resize variants: `ResizeStarted(ColumnId), Resizing(f32), ResizeEnded`. No cursor position in `ResizeStarted` — iced 0.14's `mouse_area::on_press` does not provide it; `start_x` is set on first `Resizing` move. `SortToggled` and `RowSelected` already exist from Phase 0. Phase 3 adds `RowToggled(usize)` and `RowRangeSelected(usize)` for multi-select. |
 | ~~`RowKey`~~ | ~~`state.rs`~~ | **Deferred to Phase 3a.** `RowKey` is introduced in Phase 3a alongside multi-selection, where it is required for `BTreeSet<RowKey>` persistence across re-sorts. In Phase 0-2, selection remains index-based with `selected_symbol: Option<String>` as authoritative identity (see Phase 0 acceptance criteria). The brief visual artifact after re-sort (index points to wrong row until next `view()`) is accepted for Phase 0-2. |
 
 ### Key Implementation Steps
@@ -366,7 +370,7 @@ The migration is split into **4 commits** to reduce blast radius and make regres
 
 1. Implement `interactions/` module and `GridMessage`.
 2. Update `grid/widget.rs` to use the new interaction system.
-3. Replace watchlist-specific message variants (`WatchlistColumnResizeStart`, `WatchlistColumnResizing`, `WatchlistColumnResizeEnd`, `WatchlistSortBy`, `WatchlistTickerSelected`) with the generic `Message::WatchlistGrid(WatchlistId, GridMessage)`.
+3. Replace watchlist-specific message variants (`WatchlistColumnResizeStart`, `WatchlistColumnResizing`, `WatchlistColumnResizeEnd`, `WatchlistTickerSelected`) with the generic `Message::WatchlistGrid(WatchlistId, GridMessage)`. Note: sort column switching is currently handled inline in `views.rs` header button callbacks (no dedicated `WatchlistSortBy` message variant exists); the grid's `SortToggled` message replaces this inline logic.
 4. Remove `resizing_column: Option<(WatchlistId, usize, f32, f32)>` from `MidasApp` -- this state now lives in `GridState.interaction: ActiveInteraction::Resizing(ResizeState)`.
 
 ### Estimated Complexity
@@ -417,7 +421,7 @@ The migration is split into **4 commits** to reduce blast radius and make regres
 |------|--------|
 | `crates/midas-grid/src/interactions/mod.rs` | Add sub-module re-exports for `reorder.rs` and `drag.rs`. |
 | `crates/midas-grid/src/state.rs` | Add `DraggingColumn(ColumnDragState)` and `DraggingRow(RowDragState)` variants to the `ActiveInteraction` enum on `GridState` (matching canonical definition). Add `reorder_columns(source: ColumnId, target_index: usize)` method. Add `column_display_order() -> Vec<ColumnId>`. |
-| `crates/midas-grid/src/widget.rs` | **Architectural transition**: Rewrite from a composition function (Phase 0-1) to a custom `Widget` impl. This is required to support `Widget::overlay()` for drag ghosts that render above all sibling widgets. Estimated additional complexity: ~500-700 lines for `layout()`, `draw()`, `update()`, `mouse_interaction()`, `overlay()`, and child widget tree state management (`Tag`, `State`, `children()`, event forwarding). This is the largest risk in Phase 2 — see the **Pre-Phase 2 spike** below. When `interaction` is `DraggingColumn` or `DraggingRow`, render the drag ghost via `overlay()` and the drop indicator at the calculated insertion point. **Message mapping transition (sub-task)**: The Phase 0 `on_message: &dyn Fn(GridMessage) -> M` closure pattern does not translate cleanly to a custom `Widget<M>`. The custom `Widget` should operate on `GridMessage` internally (i.e., `Widget<GridMessage>`). At the call site, the app uses iced's `Element::map()` to convert: `grid.into().map(\|gm\| Message::Grid(id, gm))`. This eliminates the `on_message` closure from the widget internals, simplifying lifetime management. The `on_message` closure in the builder API becomes sugar that calls `.map()` internally. This must be completed as part of the Widget transition commit. |
+| `crates/midas-grid/src/widget.rs` | **Architectural transition**: Rewrite from a composition function (Phase 0-1) to a custom `Widget<M>` impl. This is required to support `Widget::overlay()` for drag ghosts that render above all sibling widgets. Estimated additional complexity: ~500-700 lines for `layout()`, `draw()`, `update()`, `mouse_interaction()`, `overlay()`, and child widget tree state management (`Tag`, `State`, `children()`, event forwarding). This is the largest risk in Phase 2 — see the **Pre-Phase 2 spike** below. When `interaction` is `DraggingColumn` or `DraggingRow`, render the drag ghost via `overlay()` and the drop indicator at the calculated insertion point. **No message mapping refactor needed**: The `Widget<M>` stores the `on_grid` callback as `Box<dyn Fn(GridMessage) -> M + 'a>` and calls it in `update()` via `shell.publish((self.on_grid)(grid_msg))`. Cell elements are already `Element<'a, M>` — they emit M directly. The two-path message design (cells emit M, chrome maps via `on_grid`) works identically for composition functions and custom Widgets. |
 | `crates/midas-grid/src/header.rs` | Header cells become draggable: `mouse_area` wrapping each header cell detects press-and-drag (threshold: 5px movement before transitioning from click to drag). |
 | `crates/midas-grid/src/message.rs` | Add `GridMessage::ColumnDragStart`, `ColumnDragging(f32)`, `ColumnDragEnd`, `RowDragStart(usize)`, `RowDragging(f32)`, `RowDragEnd`. |
 | `crates/midas-app/src/app.rs` | Handle `GridMessage::ColumnDragEnded` and `GridMessage::RowDragEnded` in the existing `WatchlistGrid` match arm. For columns, update `GridState.column_order`. For rows, reorder `WatchlistPanel::tickers` vec. |
@@ -447,7 +451,7 @@ managing child widget tree state, and rendering an overlay.
 - A custom `Widget` struct with a fixed header row (2 columns) and 2 body rows with clickable buttons.
 - `layout()` delegates to child elements.
 - `draw()` renders all children.
-- `on_event()` forwards `Event::Mouse` and `Event::Keyboard` to children.
+- `update()` forwards `Event::Mouse` and `Event::Keyboard` to children.
 - `overlay()` returns a simple positioned overlay element.
 
 **Pass/fail criteria**:
@@ -464,6 +468,22 @@ Phase 2 acceptance criteria for drag ghost visuals should be relaxed: ghosts cli
 grid bounds is acceptable (no overlay escape required). `render.rs` would provide drop
 indicators and ghost rendering within the grid's own bounds using `stack![]` layering.
 If the spike fails, the custom Widget transition becomes **Phase 3b's first deliverable** (not deferred beyond it). Phase 3b would begin with the Widget transition as its first task, followed by virtual scrolling and keyboard navigation. This extends Phase 3b's estimated timeline by ~800-1100 lines (child widget tree management — `children()`, `diff()`, `state()`, event forwarding with translated bounds — accounts for the increase) but preserves the overall dependency chain. Phase 2 proceeds with the `stack![]` fallback for drag overlays.
+
+**Phase 2 under Plan B (commit decomposition)**: If the spike fails, the three-commit
+structure adapts as follows:
+
+1. **Commit 1: `stack![]` drag overlay infrastructure** — Add `render.rs` with `draw_drop_indicator()` and `draw_drag_ghost()` helpers that render within the grid's `stack![]` bounds. Add `DragOverlayState` to track ghost position and opacity. Acceptance criteria: a colored rectangle renders at an arbitrary position within the grid using `stack![]` + padding-based positioning.
+2. **Commit 2: Column reorder** — Same as Plan A Commit 2, but drag ghost is clipped to grid bounds (acceptable visual limitation).
+3. **Commit 3: Row drag-and-drop** — Same as Plan A Commit 3, with the same clipping constraint.
+
+**Post-Spike Checkpoint: Heavy Spike (1 day)**: If the minimal spike passes, build a
+production-complexity prototype before committing to the full Commit 1 rewrite. The
+minimal spike uses 2 columns and 2 rows; production has 7 columns, dynamic row counts,
+nested interactive widgets (buttons, toggles), and the existing resize overlay. The
+heavy spike validates that `Tree::diff()` handles dynamic children at scale, that nested
+buttons receive events correctly in a 7-column layout, and that the resize overlay
+coexists with the custom Widget. If the heavy spike fails on issues the minimal spike
+missed, adopt Plan B before investing ~800-1100 lines in Commit 1.
 
 **Plan C — if custom Widget composition proves unworkable in both the spike AND the Phase 3b retry**: If the custom `Widget` approach is fundamentally incompatible with iced 0.14's child widget tree model (e.g., `Tree::diff()` cannot handle dynamic children without unsound hacks), the project accepts the following permanent constraints:
 - Drag ghosts and drop indicators remain implemented via `stack![]` overlays, accepting that ghosts are clipped to grid bounds rather than floating above siblings.
@@ -521,7 +541,13 @@ If the spike fails, the custom Widget transition becomes **Phase 3b's first deli
 
 Phase 2 is the largest delivery (~1500-1900 lines). The migration is split into **3 commits** to reduce blast radius:
 
-1. **Commit 1: Widget transition** — Rewrite `widget.rs` from a composition function to a custom `Widget` impl with identical visual output and no new features. Message mapping transition (see H2 note in Files to Modify above) is included here: the custom `Widget` operates on `GridMessage` internally, and the builder API's `on_message` closure becomes sugar over `Element::map()`. All existing tests must pass. This is the highest-risk commit and should be reviewed carefully before proceeding.
+1. **Commit 1: Widget transition** — Rewrite `widget.rs` from a composition function to a custom `Widget<M>` impl with identical visual output and no new features. The `Widget<M>` stores the `on_grid` callback as `Box<dyn Fn(GridMessage) -> M + 'a>`. Cell elements remain `Element<'a, M>`. No message-type refactor is needed because the grid is generic over `M` from Phase 0. All existing tests must pass. This is the highest-risk commit and should be reviewed carefully before proceeding.
+   **Commit 1 intermediate acceptance criteria** (must all pass before proceeding to Commit 2):
+   - [ ] All existing `GridState` unit tests pass unchanged.
+   - [ ] The Phase 0 manual test checklist (see Phase 0 Acceptance Criteria) passes — re-run every item.
+   - [ ] `text_input` state persistence: the add-ticker input retains cursor position and entered text across frame rebuilds (validates child widget state persistence in the custom Widget tree).
+   - [ ] Interactive cells: favorite toggle and delete button still receive click events correctly (validates event forwarding to child widgets).
+   - [ ] No visual regression in header/body alignment, row backgrounds, or sort indicators.
 
 2. **Commit 2: Column reorder** — Implement `interactions/reorder.rs` with `ColumnDragState`, drag detection, header drag handlers, drop indicators, and column reorder logic in `state.rs`. Add `DraggingColumn(ColumnDragState)` variant to `ActiveInteraction`. Wire up `GridMessage::ColumnDragEnded` in `app.rs`. New tests for column reorder state machine and `GridState::reorder_columns`.
 
@@ -567,16 +593,36 @@ Phase 2 is the largest delivery (~1500-1900 lines). The migration is split into 
 rewrites it from a composition function into a custom `Widget` impl. Phase 3b features
 that modify `widget.rs` (keyboard event dispatch, virtual scrolling body composition)
 **cannot** begin until the Phase 2 Widget transition is settled.
-Phase 3a features only touch other files and **can** parallelize with Phase 2:
+Phase 3a is further divided into **parallel** and **sequential** sub-groups based on
+actual file-level conflicts with Phase 2:
 
-| Feature | Sub-phase | Can parallelize with Phase 2? | Why |
+| Feature | Sub-group | Can parallelize with Phase 2? | Why |
 |---|---|---|---|
-| Flash-on-tick (`state.rs`, `flash.rs`, `style.rs`) | 3a | Yes | State + style types: yes. Flash rendering goes in a dedicated `flash.rs` file, not in `render.rs`. Phase 2 creates `render.rs` for drag/drop visuals. No file-level conflict. `flash.rs` pure functions can be written and tested in parallel with Phase 2. Subscription wiring in `app.rs` is done after Phase 2. |
-| Conditional formatting (`style.rs`, `column.rs`) | 3a | Yes | Only adds trait methods and style types |
-| Multi-selection (`interactions/selection.rs`, `state.rs`) | 3a | Yes** | Only touches selection state and interaction handlers. **Sequencing constraint**: The `SelectionState` replacement (from `Option<usize>` to `BTreeSet<RowKey>`) must be sequenced AFTER Phase 2 commits, because Phase 2 code references selection by index. Other Phase 3a features (flash state, conditional formatting, persistence) can parallelize freely with Phase 2. |
-| Column persistence (`persistence.rs`, `config.rs`) | 3a | Yes | Only touches serialization, no widget code |
+| Flash-on-tick pure functions (`flash.rs`) | 3a-parallel | Yes | `flash.rs` is a new file with pure functions (interpolation, color blending). No file-level conflict with Phase 2. |
+| Flash-on-tick state wiring (`state.rs`, `message.rs`) | 3a-sequential | No | Adds `flash_state` field to `GridState` in `state.rs` and `FlashTick` variant to `message.rs`. Phase 2 also modifies both files (adds `ActiveInteraction` variants and drag messages). Concurrent branches produce merge conflicts. |
+| Conditional formatting (`style.rs`, `column.rs`) | 3a-parallel | Yes | Only adds trait methods and style types in files Phase 2 does not touch |
+| Multi-selection (`interactions/selection.rs`, `state.rs`) | 3a-sequential | No | Replaces `SelectionState` (from `Option<usize>` to `BTreeSet<RowKey>`) in `state.rs`. Phase 2 references selection by index. Must be sequenced AFTER Phase 2 commits. |
+| Column persistence (`persistence.rs`, `config.rs`) | 3a-parallel | Yes | Only touches serialization, no widget code |
 | Virtual scrolling (`body.rs`, `widget.rs`) | 3b | No | Modifies body composition and widget layout |
 | Keyboard navigation (`interactions/keyboard.rs`, `widget.rs`) | 3b | No | Requires `Event::Keyboard` dispatch in custom Widget |
+
+**Merge protocol for `state.rs` / `message.rs`**: These files are modified by every
+phase and are serialization chokepoints for parallel work. Concrete workflow:
+
+1. **Phase 3a-parallel** branches off `main` after Phase 1 merges. Work in `flash.rs`,
+   `style.rs`, `persistence.rs`, `config.rs` — no `state.rs`/`message.rs` conflicts.
+2. **Phase 2** merges to `main` first (it is on the critical path).
+3. **Phase 3a-parallel** merges to `main` next. If it touched no shared files, this is
+   conflict-free. If minor imports changed, resolve trivially.
+4. **Phase 3a-sequential** branches off `main` AFTER both Phase 2 and Phase 3a-parallel
+   have merged. This avoids merge conflicts entirely — sequential work starts from a
+   clean base that already contains both Phase 2's `ActiveInteraction` variants and
+   Phase 3a-parallel's flash pure functions.
+5. For `state.rs`: new fields are always appended to the `GridState` struct
+   (never inserted mid-struct). For `message.rs`: new enum variants are appended to the
+   end of `GridMessage`. This minimizes diff overlap if two branches must merge concurrently.
+6. Use **merge commits** (not squash) for phase branches so that individual commit history
+   is preserved for debugging regressions.
 
 > **Pre-Phase 3b spike (2-4 hours)**: Before implementing virtual scrolling, validate
 > that iced 0.14's `Scrollable` correctly handles spacer-based virtual scrolling.
@@ -600,7 +646,7 @@ Phase 3a features only touch other files and **can** parallelize with Phase 2:
 
 | File | Change |
 |------|--------|
-| `crates/midas-grid/src/state.rs` | Add `flash_state: HashMap<(usize, ColumnId), FlashState>` as a field of `GridState` (the canonical, app-owned state struct from 00-architecture.md). This is the canonical flash state location. See also 02-rendering.md Section 4 for animation details. |
+| `crates/midas-grid/src/state.rs` | Add `flash_state: HashMap<(RowKey, ColumnId), FlashState>` as a field of `GridState` (the canonical, app-owned state struct from 00-architecture.md). Uses `RowKey` (not `usize`) so flashes survive data re-sorts. This is the canonical flash state location. See also 02-rendering.md Section 4 for animation details. |
 | `crates/midas-grid/src/style.rs` | Add `FlashStyle { positive_color, negative_color, duration_ms }`. Add conditional formatting types: `CellFormat { text_color, background_color }`, `FormatRule`. |
 | `crates/midas-grid/src/interactions/selection.rs` | **Replace** the Phase 0 simple `SelectionState` (`Option<usize>`) with the full multi-selection struct: `SelectionState { selected: BTreeSet<RowKey>, anchor: Option<RowKey>, focused: Option<usize> }`. Introduce `RowKey` (`#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)] pub struct RowKey(pub String)` with `RowKey::new(key: impl Into<String>)` constructor) in `state.rs`. The grid builder gains a required `.row_key(fn(&T) -> RowKey)` parameter for multi-selection. Add `handle_ctrl_click(key)`, `handle_shift_click(key, total_rows)` handler functions. Single-selection callers that do not need multi-select can continue using `select(key)` which clears the set and inserts one element. |
 | `crates/midas-grid/src/column.rs` | Add optional method to `GridColumn` trait: `fn format(&self, row: &T) -> Option<CellFormat>` with default `None`. (Flash detection is app-side -- no `flash_value()` method needed on the trait. See flash-on-tick implementation step.) |
@@ -630,7 +676,7 @@ Phase 3a features only touch other files and **can** parallelize with Phase 2:
 
 | Type | Location | Description |
 |------|----------|-------------|
-| `FlashState` | `state.rs` | `struct FlashState { direction: FlashDirection, started_at: Instant }` — no `previous_value` field. The app detects changes externally and calls `grid_state.trigger_flash()` with the direction. The grid only manages animation state. |
+| `FlashState` | `state.rs` | See **02-rendering.md Section 4** for the canonical definition: `struct FlashState { start_time: Instant, duration_secs: f32, color: FlashColor, peak_alpha: f32 }`. The app detects changes externally and calls `grid_state.trigger_flash()` with the direction. The grid only manages animation state (timestamps, alpha decay). |
 | `FlashDirection` | `state.rs` | `enum FlashDirection { Up, Down }` |
 | `CellFormat` | `style.rs` | `struct CellFormat { text_color: Option<Color>, background: Option<Color> }` |
 | `FormatRule` | `style.rs` | `enum FormatRule { Positive(CellFormat), Negative(CellFormat), Threshold { above: f64, format: CellFormat } }` |
@@ -649,9 +695,9 @@ Phase 3a features only touch other files and **can** parallelize with Phase 2:
 
 2. **Flash-on-tick** (Phase 3a):
    - **Headless principle**: The app (not the grid) detects value changes. The grid manages only animation state.
-   - The app detects value changes when market data updates and calls `grid_state.trigger_flash(column_id, row_index, direction)` where `direction` is `FlashDirection::Up` or `FlashDirection::Down`.
+   - The app detects value changes when market data updates and calls `grid_state.trigger_flash(column_id, row_key, direction)` where `row_key` is obtained from the `.row_key()` closure (e.g., `RowKey::new(&row.symbol)`) and `direction` is `FlashDirection::Up` or `FlashDirection::Down`.
    - The grid does NOT maintain a `PreviousValues` map. Change detection is the app's responsibility (it already has the old and new market data).
-   - `trigger_flash()` creates a `FlashState { direction, started_at: Instant::now() }` in `grid_state.flash_state: HashMap<(usize, ColumnId), FlashState>`.
+   - `trigger_flash()` creates a `FlashState { direction, started_at: Instant::now() }` in `grid_state.flash_state: HashMap<(RowKey, ColumnId), FlashState>`. The app provides the `RowKey` via the same `.row_key()` closure used for multi-selection, ensuring flashes track the correct row across re-sorts.
    - A `GridMessage::FlashTick` fires every ~50ms (via iced subscription) while any flash is active, driving the animation.
    - During rendering, `flash_background(flash_state, now)` returns a color interpolated from full flash color to transparent over 300ms.
    - Flash color: green (`rgba(0.1, 0.8, 0.3, alpha)`) for price up, red (`rgba(0.9, 0.2, 0.2, alpha)`) for price down.
@@ -698,11 +744,14 @@ Phase 3a features only touch other files and **can** parallelize with Phase 2:
 
 ### Migration Plan
 
-**Phase 3a** (can begin immediately after Phase 1):
-1. Add flash-on-tick (state types + pure functions in `flash.rs`, subscription wiring in `app.rs`).
-2. Add conditional formatting (replaces inline color logic in views).
-3. Add multi-selection: introduce `RowKey` and replace the Phase 0 simple `SelectionState` (`Option<usize>`) with `BTreeSet<RowKey>` in `interactions/selection.rs`.
-4. Add column persistence (update `midas-core` config structs, `persistence.rs`).
+**Phase 3a-parallel** (can begin immediately after Phase 1, runs concurrently with Phase 2):
+1. Add flash-on-tick pure functions in `flash.rs` (interpolation, color blending, alpha decay).
+2. Add conditional formatting (trait methods in `column.rs`, style types in `style.rs`).
+3. Add column persistence (`persistence.rs`, config structs).
+
+**Phase 3a-sequential** (begins after Phase 2 merges — branches off `main` after Phase 2 + 3a-parallel merge):
+4. Add multi-selection: introduce `RowKey` type and replace the Phase 0 simple `SelectionState` (`Option<usize>`) with `BTreeSet<RowKey>` in `interactions/selection.rs` and `state.rs`. **Must come first** — step 5 depends on the `RowKey` type.
+5. Wire flash state into `GridState` (`state.rs`) using `HashMap<(RowKey, ColumnId), FlashState>` and add `FlashTick` to `GridMessage` (`message.rs`). Wire subscription in `app.rs`. Depends on step 4 for `RowKey`.
 
 **Phase 3b** (begins after Phase 2 is complete):
 5. Implement virtual scrolling (most impactful for performance, modifies `body.rs` + `widget.rs`). Phase 0's `scroll_y: f32` is replaced by `VirtualScrollState`, which subsumes it. The `scroll_y` field is removed from `GridState` and its value migrates to `VirtualScrollState.offset`.
@@ -871,6 +920,40 @@ Phase 4 features are additive. No existing functionality needs migration. Implem
 
 ---
 
+## Critical Path
+
+The longest sequential dependency chain determines the minimum project duration:
+
+```
+Phase 0 → Phase 1 → Phase 2 → Phase 3b → Phase 4
+  (Foundation)  (Interactions)  (DnD + Widget)  (Virtual scroll, keyboard)  (Advanced)
+```
+
+The parallel path (Phase 0 → Phase 1 → Phase 3a-parallel) is shorter and can
+absorb schedule slack. Phase 3a-sequential work (multi-selection, flash wiring
+into `state.rs`) sits between the critical path and the parallel path: it depends
+on Phase 2 but does not block Phase 3b or Phase 4.
+
+The Pre-Phase 2 spike runs concurrently with Phase 0 and can shift the critical
+path if it fails (Phase 2 adopts Plan B, Widget transition moves to Phase 3b).
+
+### Rough Time Estimates (single developer)
+
+| Phase | Estimate | Notes |
+|---|---|---|
+| Pre-Phase 2 Spike | 1-2 days | Runs concurrently with Phase 0 |
+| Phase 0 (Foundation) | 3-5 days | ~1000 lines + migration across 4 commits |
+| Phase 1 (Interactions) | 3-4 days | ~800-1000 lines, resize/sort/selection |
+| Phase 2 (DnD + Widget) | 5-8 days | ~1500-1900 lines, highest risk (Widget transition) |
+| Phase 3a (Polish) | 3-5 days | Split across parallel and sequential sub-phases |
+| Phase 3b (Virtual scroll + kbd) | 3-4 days | Depends on Phase 2 completion |
+| Phase 4 (Advanced) | 4-6 days | Context menus, multi-sort, pinning, presets |
+
+**Critical path total**: ~17-27 days (Phase 0 → 1 → 2 → 3b → 4).
+These are rough ranges, not commitments — actual duration depends on iced framework surprises and spike outcomes.
+
+---
+
 ## Risk Assessment
 
 ### Phase 0 Risks
@@ -922,7 +1005,7 @@ These decisions are difficult to change later because they propagate through all
 
 2. **`ColumnId` representation**: Using `&'static str` is zero-allocation but requires compile-time-known column names. Using `String` allows runtime-generated IDs but requires cloning. **Decision**: Use `&'static str` wrapped in a newtype. All watchlist columns have known names at compile time. If runtime columns are needed later (computed columns), introduce `ColumnId::Dynamic(String)` as a variant.
 
-3. **Grid message wrapping pattern**: The grid emits `GridMessage`. The app must wrap it: `Message::WatchlistGrid(WatchlistId, GridMessage)`. If the grid is used for other panels (order grids, scanner results), each consumer wraps differently. **Decision**: The grid takes a message-mapping closure `Fn(GridMessage) -> M` in its constructor, similar to iced's `map()` pattern. This keeps the grid decoupled from any specific app message type.
+3. **Grid message wrapping pattern**: The grid is generic over the app's message type `M`. Cell content emits `M` directly. Grid chrome events are mapped to `M` via a required `on_grid: Fn(GridMessage) -> M` callback. **Decision**: Two-path message design — cell path (`Element<'a, M>` emits `M` directly) and chrome path (`on_grid(GridMessage::SortToggled(col))` produces `M`). This keeps the grid decoupled from any specific app message type while allowing cells to emit arbitrary app-level messages (e.g., `Message::ToggleFavorite`). In Phase 0-1, `on_grid` is `&dyn Fn`; in Phase 2+, the custom `Widget<M>` stores it as `Box<dyn Fn>`. No message-type refactor is needed at the Widget transition.
 
 4. **Data access pattern**: The grid receives `&[T]` -- a pre-sorted, pre-filtered slice. The grid never sorts or filters. **Decision**: This is correct and must not change. The app is responsible for data transformation. The grid is a pure view.
 
