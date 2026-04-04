@@ -189,16 +189,21 @@ pub fn generate_intraday_for_day(
     // Degenerate case: zero-range daily bar
     if range < 0.005 {
         let base_ts = daily.timestamp + MARKET_OPEN_OFFSET;
-        return (0..n)
+        let per_bar = (daily.volume / n as i64).max(1);
+        let mut bars: Vec<OhlcvBar> = (0..n)
             .map(|i| OhlcvBar {
                 timestamp: base_ts + i as i64 * BAR_SECS,
                 open: daily.open,
                 high: daily.high,
                 low: daily.low,
                 close: daily.close,
-                volume: (daily.volume / n as i64).max(1),
+                volume: per_bar,
             })
             .collect();
+        // Last bar absorbs rounding remainder
+        let assigned: i64 = bars[..n - 1].iter().map(|b| b.volume).sum();
+        bars[n - 1].volume = (daily.volume - assigned).max(1);
+        return bars;
     }
 
     let closes = generate_bridge_closes(&mut rng, daily, n);
@@ -264,6 +269,62 @@ pub fn generate_intraday_for_day(
             close: round2(bar_close),
             volume: bar_vol.max(1),
         });
+    }
+
+    // ── Post-process: enforce daily OHLCV consistency ────────────────
+    // When aggregating all intraday bars for this day, the result must
+    // exactly match the daily bar's open, high, low, close, and volume.
+    //
+    // Open/Close: already guaranteed by the Brownian bridge endpoints.
+    // High/Low: clamp per-bar wicks to daily range, then force extremes.
+    // Volume: normalize so the sum equals daily volume exactly.
+
+    // 1. Clamp all highs/lows to the daily range
+    for bar in &mut bars {
+        bar.high = bar.high.min(daily.high);
+        bar.low = bar.low.max(daily.low);
+        // Safety: ensure OHLC constraints still hold after clamping
+        bar.high = bar.high.max(bar.open.max(bar.close));
+        bar.low = bar.low.min(bar.open.min(bar.close));
+    }
+
+    // 2. Force exactly one bar to hit daily.high and one to hit daily.low.
+    //    Pick the bar whose body is closest to the extreme.
+    let (hi_idx, _) = bars
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| {
+            a.open
+                .max(a.close)
+                .partial_cmp(&b.open.max(b.close))
+                .unwrap()
+        })
+        .unwrap();
+    bars[hi_idx].high = daily.high;
+
+    let (lo_idx, _) = bars
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| {
+            a.open
+                .min(a.close)
+                .partial_cmp(&b.open.min(b.close))
+                .unwrap()
+        })
+        .unwrap();
+    bars[lo_idx].low = daily.low;
+
+    // 3. Normalize volumes so they sum exactly to daily.volume
+    let raw_sum: i64 = bars.iter().map(|b| b.volume).sum();
+    if raw_sum > 0 && daily.volume > 0 {
+        let scale = daily.volume as f64 / raw_sum as f64;
+        let mut assigned: i64 = 0;
+        for bar in &mut bars[..n - 1] {
+            bar.volume = ((bar.volume as f64 * scale).round() as i64).max(1);
+            assigned += bar.volume;
+        }
+        // Last bar gets the remainder to avoid rounding drift
+        bars[n - 1].volume = (daily.volume - assigned).max(1);
     }
 
     bars
