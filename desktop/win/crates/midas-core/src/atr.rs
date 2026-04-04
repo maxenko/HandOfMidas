@@ -114,12 +114,13 @@ pub fn gerchik_gatr_pct(highs: &[f64], lows: &[f64], closes: &[f64]) -> Option<f
     Some((today_range / avg * 100.0) as f32)
 }
 
-/// Determine the G.ATR color based on percentage consumed.
-pub fn gatr_color(pct: f32) -> [f32; 4] {
-    if pct >= GATR_THRESHOLD_PCT {
-        GATR_COLOR_RED
-    } else {
+/// Determine the G.ATR color based on today's price direction.
+/// Green if price is up from previous close, red if down.
+pub fn gatr_color(price_up: bool) -> [f32; 4] {
+    if price_up {
         GATR_COLOR_GREEN
+    } else {
+        GATR_COLOR_RED
     }
 }
 
@@ -176,18 +177,13 @@ mod tests {
     }
 
     #[test]
-    fn gatr_color_below_threshold_is_green() {
-        assert_eq!(gatr_color(50.0), GATR_COLOR_GREEN);
+    fn gatr_color_up_is_green() {
+        assert_eq!(gatr_color(true), GATR_COLOR_GREEN);
     }
 
     #[test]
-    fn gatr_color_at_threshold_is_red() {
-        assert_eq!(gatr_color(75.0), GATR_COLOR_RED);
-    }
-
-    #[test]
-    fn gatr_color_above_threshold_is_red() {
-        assert_eq!(gatr_color(100.0), GATR_COLOR_RED);
+    fn gatr_color_down_is_red() {
+        assert_eq!(gatr_color(false), GATR_COLOR_RED);
     }
 
     // ── gerchik_gatr_pct ────────────────────────────────────────

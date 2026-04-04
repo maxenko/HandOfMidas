@@ -160,11 +160,9 @@ pub fn compute(
     let session_range = last.high - last.low;
 
     let pct = (session_range / atr * 100.0) as f32;
-    let color = if pct >= config.threshold_pct {
-        midas_core::GATR_COLOR_RED
-    } else {
-        midas_core::GATR_COLOR_GREEN
-    };
+    let price_up = daily_bars.len() >= 2
+        && daily_bars.last().unwrap().close >= daily_bars[daily_bars.len() - 2].close;
+    let color = midas_core::gatr_color(price_up);
     let text = format!("G.ATR {:.0}%", pct);
 
     Some(IndicatorOutput::text_badge(text, color))
@@ -417,7 +415,8 @@ mod tests {
         let output = compute(&data, 300_000.0, &default_cfg()).unwrap();
         match output {
             IndicatorOutput::TextBadge { text: _, color } => {
-                assert_eq!(color, midas_core::GATR_COLOR_RED, "should be red for high ATR usage");
+                // Close == prev_close → price_up=true → green.
+                assert_eq!(color, midas_core::GATR_COLOR_GREEN, "flat close should be green");
             }
             _ => panic!("expected TextBadge variant"),
         }
@@ -436,12 +435,12 @@ mod tests {
     fn custom_config_threshold() {
         let data = multi_day_5m_data(20);
         let mut cfg = default_cfg();
-        // Very low threshold: everything should be red.
+        // Color is direction-based, not threshold-based.
         cfg.threshold_pct = 0.1;
         let output = compute(&data, 300_000.0, &cfg).unwrap();
         match output {
-            IndicatorOutput::TextBadge { text: _, color } => {
-                assert_eq!(color, midas_core::GATR_COLOR_RED, "near-zero threshold should produce red");
+            IndicatorOutput::TextBadge { text, color: _ } => {
+                assert!(text.starts_with("G.ATR "), "should produce G.ATR text");
             }
             _ => panic!("expected TextBadge variant"),
         }

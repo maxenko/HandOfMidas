@@ -1209,8 +1209,9 @@ impl MidasApp {
                     .unwrap_or_else(|| "--".into());
                 let gatr_color = snap
                     .gatr_pct
-                    .map(|pct| {
-                        let c = midas_core::gatr_color(pct);
+                    .map(|_| {
+                        let price_up = snap.change_pct.map_or(true, |c| c >= 0.0);
+                        let c = midas_core::gatr_color(price_up);
                         Color::from_rgba(c[0], c[1], c[2], c[3])
                     })
                     .unwrap_or(Color::from_rgb(0.6, 0.6, 0.6));
@@ -2787,8 +2788,10 @@ fn gatr_render_from_cache(
     cache: &crate::market_cache::MarketDataCache,
     symbol: &str,
 ) -> Option<midas_chart::GerchikAtrRender> {
-    let pct = cache.get(symbol)?.gatr_pct?;
-    let color = midas_core::gatr_color(pct);
+    let snap = cache.get(symbol)?;
+    let pct = snap.gatr_pct?;
+    let price_up = snap.change_pct.map_or(true, |c| c >= 0.0);
+    let color = midas_core::gatr_color(price_up);
     Some(midas_chart::GerchikAtrRender {
         pct,
         text: format!("G.ATR {:.0}%", pct),

@@ -66,7 +66,9 @@ pub fn compute_gerchik_atr(
     // Use the canonical Gerchik algorithm: skip today, walk 7 sessions,
     // filter paranormal candles, return percentage.
     let pct = midas_core::gerchik_gatr_pct(&highs, &lows, &closes)?;
-    let color = midas_core::gatr_color(pct);
+    let n = closes.len();
+    let price_up = n >= 2 && closes[n - 1] >= closes[n - 2];
+    let color = midas_core::gatr_color(price_up);
     let text = format!("G.ATR {:.0}%", pct);
 
     Some(GerchikAtrRender { pct, text, color })
@@ -125,7 +127,7 @@ fn aggregate_daily_bars(data: &dyn CandleData) -> Vec<DailyBar> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use midas_core::{GATR_COLOR_RED, GATR_THRESHOLD_PCT};
+    use midas_core::GATR_COLOR_GREEN;
     use std::ops::Range;
 
     /// Minimal test fixture implementing `CandleData`.
@@ -395,8 +397,9 @@ mod tests {
 
         let result = compute_gerchik_atr(&data, 300_000.0).unwrap();
         // Last day range = 40 (120-80), ATR ≈ 1.0 → pct >> 75%.
-        assert!(result.pct >= GATR_THRESHOLD_PCT);
-        assert_eq!(result.color, GATR_COLOR_RED);
+        assert!(result.pct > 75.0);
+        // All closes = 100.0 (flat) → price_up=true → green.
+        assert_eq!(result.color, GATR_COLOR_GREEN);
     }
 
     #[test]
