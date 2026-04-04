@@ -2661,6 +2661,7 @@ dependencies = [
  "midas-core",
  "midas-data",
  "midas-feed",
+ "midas-grid",
  "midas-render",
  "midas-store",
  "serde",
@@ -2740,6 +2741,14 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "midas-grid"
+version = "0.1.0"
+dependencies = [
+ "iced",
+ "serde",
 ]
 
 [[package]]
