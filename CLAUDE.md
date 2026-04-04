@@ -4,29 +4,32 @@ Trading platform for Interactive Brokers. Windows desktop app with GPU-rendered 
 
 ## Project Status
 
-**Phase 0 (Foundation) is complete.** 128 unit tests passing. Phase 1 (IB API integration) is next.
-
-No git history yet — all code is uncommitted on master.
+700+ tests passing across two workspaces. Market order brackets, test broker simulation, and chart rendering are implemented. Phase 1 (IB paper trading connection) is next.
 
 ## Workspace Structure
 
 ```
 HandOfMidas/
-├── Cargo.toml                     # Workspace root (resolver = "2")
+├── Cargo.toml                     # Root workspace (resolver = "2")
 ├── crates/
 │   ├── midas-core/                # Shared types — zero IB dependency
-│   │   ├── doc/                   # API documentation
-│   │   └── src/lib.rs
 │   └── midas-broker/              # Trading engine — wraps IB via rust-ibapi
-│       ├── doc/                   # API documentation (multiple files)
-│       ├── migrations/
-│       └── src/
-├── broker/plan/                   # Architecture docs (5 documents, ~7k lines)
-├── desktop/win/plan/              # UI architecture docs (8 documents, ~18k lines)
-└── *.md                           # Research docs (providers, tech stacks)
+├── desktop/win/                   # Desktop workspace (10 crates)
+│   └── crates/
+│       ├── midas-core/            # App-specific types, config, broker bridge
+│       ├── midas-data/            # SoA candle buffers, binary format, mmap
+│       ├── midas-chart/           # Sans-IO chart core (zero GPU deps)
+│       ├── midas-render/          # wgpu 27 GPU pipelines
+│       ├── midas-feed/            # CSV import, data providers
+│       ├── midas-ui/              # iced widget library
+│       ├── midas-app/             # Binary entry point
+│       ├── midas-store/           # DuckDB persistence
+│       ├── midas-indicators/      # Technical analysis (placeholder)
+│       └── mailbox_processor/     # Async actor pattern
+├── plan/                          # Active plans + plan/archive/
+├── research/                      # Research docs + research/archive/
+└── README.md
 ```
-
-Future crates (not yet created): `midas-feed`, `midas-data`, `midas-render`, `midas-chart`, `midas-indicators`, `midas-app`.
 
 ## Key Architecture Rules
 
@@ -40,9 +43,10 @@ Future crates (not yet created): `midas-feed`, `midas-data`, `midas-render`, `mi
 ## Build & Test
 
 ```bash
-cargo test              # 128 tests across both crates
+cargo test --workspace                              # broker workspace
+cd desktop/win && cargo test --workspace            # desktop workspace
 cargo build --release
-cargo clippy
+cargo clippy --workspace -- -D warnings
 ```
 
 ## Documentation Map
@@ -50,11 +54,12 @@ cargo clippy
 | Topic | Where to look |
 |---|---|
 | midas-core API | `crates/midas-core/doc/api.md` |
-| midas-broker API | `crates/midas-broker/doc/` (multiple files) |
-| Architecture overview | `broker/plan/01-architecture.md` |
-| Order state machine | `broker/plan/02-order-management.md` (canonical) |
-| SQLite schema | `broker/plan/03-data-layer.md` (canonical) |
-| Events & commands | `broker/plan/04-market-data-and-events.md` |
-| Implementation roadmap | `broker/plan/05-implementation-roadmap.md` |
-| Desktop UI architecture | `desktop/win/plan/initial/00-index.md` |
-| IB API reference | `provider-ib.md` |
+| midas-broker API | `crates/midas-broker/doc/` (8 files) |
+| Broker architecture | `plan/broker/01-architecture.md` |
+| Order state machine | `plan/broker/02-order-management.md` (canonical) |
+| SQLite schema | `plan/broker/03-data-layer.md` (canonical) |
+| Events & commands | `plan/broker/04-market-data-and-events.md` |
+| Desktop UI architecture | `desktop/win/plan/archive/initial/00-index.md` |
+| IB API reference | `research/provider-ib.md` |
+| Grid component design | `desktop/win/plan/grid-component/README.md` |
+| Widget system design | `plan/widget-system/00-index.md` |

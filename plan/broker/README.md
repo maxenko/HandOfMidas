@@ -37,9 +37,9 @@ Types and schemas are defined in multiple documents for context, but **only one 
 
 These files in the project root provide context referenced by the plan:
 
-- [`provider-ib.md`](../../provider-ib.md) — Complete IBKR API reference (order management, market data, gotchas)
-- [`tech-stack-rust-a.md`](../../tech-stack-rust-a.md) — Charting platform architecture (binary candle format, GPU rendering)
-- [`providers.md`](../../providers.md) — Market data provider research
+- [`provider-ib.md`](../../research/provider-ib.md) — Complete IBKR API reference (order management, market data, gotchas)
+- [`tech-stack-rust-a.md`](../../research/tech-stack-rust-a.md) — Charting platform architecture (binary candle format, GPU rendering)
+- [`providers.md`](../../research/providers.md) — Market data provider research
 
 ## Workspace Structure
 

@@ -12,7 +12,7 @@
 >
 > **Prerequisites**:
 > - `DataProvider` trait and `ProviderError` in `midas-core`
->   ([01-provider-trait.md](01-provider-trait.md))
+>   ([01-trait-design.md](01-trait-design.md))
 > - `TestProvider` in `midas-feed`
 >   ([02-test-provider.md](02-test-provider.md))
 > - `DbHandle` in `midas-store` (already implemented)

@@ -144,7 +144,7 @@ When multiple documents describe the same concept, follow the document listed as
 
 ## Research Foundation
 
-This plan is built on the [DuckDB integration research](../../research/duckdb/00-index.md) (7 documents covering ecosystem, architecture, schema, performance, integration, and codebase analysis).
+This plan is built on the [DuckDB integration research](../../../research/duckdb/00-index.md) (7 documents covering ecosystem, architecture, schema, performance, integration, and codebase analysis).
 
 ## Risk Summary
 

@@ -87,9 +87,13 @@ HandOfMidas/
 │   ├── midas-store/                # DuckDB persistence layer
 │   └── mailbox_processor/          # Async actor pattern
 │
-├── broker/plan/                    # Broker architecture docs (5 files)
-├── desktop/win/plan/               # UI architecture docs (8+ files)
-└── research/                       # Technology research
+├── plan/                           # Active plans + plan/archive/
+│   ├── broker/                     # Broker architecture docs (5 files)
+│   ├── widget-system/              # Chart widget system design
+│   └── archive/                    # Implemented plans
+├── desktop/win/plan/               # UI-specific plans + archive/
+│   └── grid-component/             # Trading-grade grid widget design
+└── research/                       # Technology research + archive/
 ```
 
 ---

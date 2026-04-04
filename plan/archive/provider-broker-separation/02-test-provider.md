@@ -10,7 +10,7 @@
 > **File**: `src/test_provider.rs` (new) + `src/testdata.rs` (existing, unchanged)
 >
 > **Prerequisite**: `DataProvider` trait and `ProviderError` must exist in
-> `midas-core` (defined in [01-provider-trait.md](01-provider-trait.md)).
+> `midas-core` (defined in [01-trait-design.md](01-trait-design.md)).
 
 ---
 
