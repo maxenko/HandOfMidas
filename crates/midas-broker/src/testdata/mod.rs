@@ -446,6 +446,76 @@ mod tests {
             intraday.last().unwrap().close, day.close,
             "last intraday close != daily close"
         );
+        // Max intraday high == daily high
+        let max_high = intraday
+            .iter()
+            .map(|b| b.high)
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert_eq!(max_high, day.high, "max intraday high != daily high");
+        // Min intraday low == daily low
+        let min_low = intraday
+            .iter()
+            .map(|b| b.low)
+            .fold(f64::INFINITY, f64::min);
+        assert_eq!(min_low, day.low, "min intraday low != daily low");
+        // Sum of intraday volumes == daily volume
+        let vol_sum: i64 = intraday.iter().map(|b| b.volume).sum();
+        assert_eq!(vol_sum, day.volume, "intraday volume sum != daily volume");
+    }
+
+    /// Verify that aggregating M1 bars for every day matches the daily bar
+    /// exactly (open, high, low, close, volume) across multiple tickers.
+    #[test]
+    fn m1_aggregates_to_daily_for_all_tickers() {
+        let mut p = TestDataProvider::new();
+        for ticker in &["AAPL", "TSLA", "GME", "KO", "XOM", "NVDA", "AMZN"] {
+            let daily = p.daily_bars(ticker).to_vec();
+            // Test 20 evenly-spaced days across the dataset
+            let step = daily.len() / 20;
+            for idx in (0..daily.len()).step_by(step.max(1)).take(20) {
+                let day = &daily[idx];
+                let day_end = day.timestamp + 86400;
+                let m1 = p.bars(ticker, Timeframe::M1, day.timestamp, day_end);
+                assert!(!m1.is_empty(), "{ticker} day {idx}: no M1 bars");
+
+                let agg_open = m1.first().unwrap().open;
+                let agg_close = m1.last().unwrap().close;
+                let agg_high = m1.iter().map(|b| b.high).fold(f64::NEG_INFINITY, f64::max);
+                let agg_low = m1.iter().map(|b| b.low).fold(f64::INFINITY, f64::min);
+                let agg_vol: i64 = m1.iter().map(|b| b.volume).sum();
+
+                assert_eq!(agg_open, day.open, "{ticker} day {idx}: open mismatch");
+                assert_eq!(agg_high, day.high, "{ticker} day {idx}: high mismatch");
+                assert_eq!(agg_low, day.low, "{ticker} day {idx}: low mismatch");
+                assert_eq!(agg_close, day.close, "{ticker} day {idx}: close mismatch");
+                assert_eq!(agg_vol, day.volume, "{ticker} day {idx}: volume mismatch");
+            }
+        }
+    }
+
+    /// Verify consistency across timeframe chain: S30 → M1 → M5 → H1 all
+    /// produce the same daily OHLCV when aggregated.
+    #[test]
+    fn timeframe_chain_consistent() {
+        let mut p = TestDataProvider::new();
+        let daily = p.daily_bars("AAPL").to_vec();
+        let day = &daily[daily.len() / 2];
+        let day_end = day.timestamp + 86400;
+
+        for tf in [Timeframe::S30, Timeframe::M1, Timeframe::M5, Timeframe::M15, Timeframe::H1] {
+            let bars = p.bars("AAPL", tf, day.timestamp, day_end);
+            assert!(!bars.is_empty(), "{tf}: no bars");
+
+            let agg_open = bars.first().unwrap().open;
+            let agg_close = bars.last().unwrap().close;
+            let agg_high = bars.iter().map(|b| b.high).fold(f64::NEG_INFINITY, f64::max);
+            let agg_low = bars.iter().map(|b| b.low).fold(f64::INFINITY, f64::min);
+
+            assert_eq!(agg_open, day.open, "{tf}: open mismatch");
+            assert_eq!(agg_high, day.high, "{tf}: high mismatch");
+            assert_eq!(agg_low, day.low, "{tf}: low mismatch");
+            assert_eq!(agg_close, day.close, "{tf}: close mismatch");
+        }
     }
 
     #[test]

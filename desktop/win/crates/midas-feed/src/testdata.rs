@@ -445,16 +445,21 @@ fn generate_intraday_for_day(daily: &OhlcvBar, seed: u64, day_index: usize) -> V
     // Degenerate case: zero-range daily bar -> flat intraday
     if range < 0.005 {
         let base_ts = daily.timestamp + MARKET_OPEN_OFFSET;
-        return (0..n)
+        let per_bar = (daily.volume / n as i64).max(1);
+        let mut bars: Vec<OhlcvBar> = (0..n)
             .map(|i| OhlcvBar {
                 timestamp: base_ts + i as i64 * BAR_SECS,
                 open: daily.open,
                 high: daily.high,
                 low: daily.low,
                 close: daily.close,
-                volume: (daily.volume / n as i64).max(1),
+                volume: per_bar,
             })
             .collect();
+        // Last bar absorbs rounding remainder
+        let assigned: i64 = bars[..n - 1].iter().map(|b| b.volume).sum();
+        bars[n - 1].volume = (daily.volume - assigned).max(1);
+        return bars;
     }
 
     // 1. Generate Brownian bridge close prices (n+1 points: O -> ... -> C)
@@ -501,6 +506,56 @@ fn generate_intraday_for_day(daily: &OhlcvBar, seed: u64, day_index: usize) -> V
             close: round2(close),
             volume: bar_vol.max(1),
         });
+    }
+
+    // ── Post-process: enforce daily OHLCV consistency ────────────────
+    // When aggregating all intraday bars for this day, the result must
+    // exactly match the daily bar's open, high, low, close, and volume.
+
+    // 1. Clamp all highs/lows to the daily range
+    for bar in &mut bars {
+        bar.high = bar.high.min(daily.high);
+        bar.low = bar.low.max(daily.low);
+        // Safety: ensure OHLC constraints still hold after clamping
+        bar.high = bar.high.max(bar.open.max(bar.close));
+        bar.low = bar.low.min(bar.open.min(bar.close));
+    }
+
+    // 2. Force exactly one bar to hit daily.high and one to hit daily.low
+    let (hi_idx, _) = bars
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| {
+            a.open
+                .max(a.close)
+                .partial_cmp(&b.open.max(b.close))
+                .unwrap()
+        })
+        .unwrap();
+    bars[hi_idx].high = daily.high;
+
+    let (lo_idx, _) = bars
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| {
+            a.open
+                .min(a.close)
+                .partial_cmp(&b.open.min(b.close))
+                .unwrap()
+        })
+        .unwrap();
+    bars[lo_idx].low = daily.low;
+
+    // 3. Normalize volumes so they sum exactly to daily.volume
+    let raw_sum: i64 = bars.iter().map(|b| b.volume).sum();
+    if raw_sum > 0 && daily.volume > 0 {
+        let scale = daily.volume as f64 / raw_sum as f64;
+        let mut assigned: i64 = 0;
+        for bar in &mut bars[..n - 1] {
+            bar.volume = ((bar.volume as f64 * scale).round() as i64).max(1);
+            assigned += bar.volume;
+        }
+        bars[n - 1].volume = (daily.volume - assigned).max(1);
     }
 
     bars
@@ -690,6 +745,35 @@ impl TestDataProvider {
 
         let (_, end) = self.date_range(ticker);
         let start = end - days as i64 * 86400;
+
+        let bars = if tf_secs >= Timeframe::D1.as_secs() {
+            self.bars_daily_or_coarser(ticker, timeframe, start, end)
+        } else {
+            self.bars_intraday(ticker, timeframe, start, end)
+        };
+
+        bars_to_candle_buffer(&bars)
+    }
+
+    /// Get candle data for a specific epoch-second range.
+    ///
+    /// Like [`get_candles`](Self::get_candles) but takes explicit
+    /// `[start, end)` timestamps in UTC epoch seconds instead of a
+    /// trailing day count.
+    pub fn get_candles_range(
+        &mut self,
+        ticker: &str,
+        timeframe: Timeframe,
+        start: i64,
+        end: i64,
+    ) -> CandleBuffer {
+        let tf_secs = timeframe.as_secs();
+        assert!(
+            tf_secs >= Timeframe::S30.as_secs(),
+            "TestDataProvider finest resolution is S30; requested {timeframe}",
+        );
+
+        self.ensure_ticker(ticker);
 
         let bars = if tf_secs >= Timeframe::D1.as_secs() {
             self.bars_daily_or_coarser(ticker, timeframe, start, end)
@@ -950,5 +1034,50 @@ mod tests {
     fn panics_on_sub_s30() {
         let mut p = TestDataProvider::new();
         p.get_candles("AAPL", Timeframe::S1, 1);
+    }
+
+    /// Verify that M1 bars for each day aggregate exactly to the daily bar:
+    /// same open, high, low, close, and volume.
+    #[test]
+    fn m1_aggregates_to_daily_for_all_tickers() {
+        let mut p = TestDataProvider::new();
+        for ticker in &["AAPL", "TSLA", "GME", "KO", "XOM", "NVDA", "AMZN"] {
+            let daily = p.get_candles(ticker, Timeframe::D1, 3650);
+            // Test 20 evenly-spaced days
+            let step = daily.len() / 20;
+            for d in (0..daily.len()).step_by(step.max(1)).take(20) {
+                let day_ts_ms = daily.timestamps[d];
+                let day_open = daily.opens[d];
+                let day_high = daily.highs[d];
+                let day_low = daily.lows[d];
+                let day_close = daily.closes[d];
+                let day_vol = daily.volumes[d];
+
+                // Get all M1 bars for this day (need epoch-second range for
+                // the internal provider). Day timestamp in ms → start/end in
+                // seconds passed through get_candles_range.
+                let day_start_s = day_ts_ms / 1000;
+                let day_end_s = day_start_s + 86400;
+
+                // Use internal bars method via ensure_ticker + bars_intraday
+                // We access through get_candles with a 1-day window centered
+                // on this day. Since get_candles counts backwards from dataset
+                // end, we use the raw bars_intraday path instead.
+                let m1 = p.get_candles_range(ticker, Timeframe::M1, day_start_s, day_end_s);
+                assert!(!m1.is_empty(), "{ticker} day {d}: no M1 bars");
+
+                let agg_open = m1.opens[0];
+                let agg_close = m1.closes[m1.len() - 1];
+                let agg_high = m1.highs.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                let agg_low = m1.lows.iter().cloned().fold(f32::INFINITY, f32::min);
+                let agg_vol: u32 = m1.volumes.iter().sum();
+
+                assert_eq!(agg_open, day_open, "{ticker} day {d}: open mismatch");
+                assert_eq!(agg_high, day_high, "{ticker} day {d}: high mismatch");
+                assert_eq!(agg_low, day_low, "{ticker} day {d}: low mismatch");
+                assert_eq!(agg_close, day_close, "{ticker} day {d}: close mismatch");
+                assert_eq!(agg_vol, day_vol, "{ticker} day {d}: volume mismatch");
+            }
+        }
     }
 }
