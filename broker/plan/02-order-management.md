@@ -723,6 +723,12 @@ impl BracketBuilder {
 
 ### 6.3 Activating a Bracket
 
+> **Note (2026-04-01):** For Market Order brackets, see the authoritative
+> implementation plan at `plan/market-order-bracket/02-broker-engine.md`.
+> That plan supersedes the consecutive-ID approach below — IB order IDs
+> are allocated per-leg via separate `next_order_id()` calls to prevent
+> race conditions under concurrent submission.
+
 When activating a bracket, all three orders are sent to IB as a unit using the `transmit` flag:
 
 ```
