@@ -85,8 +85,8 @@ pub fn snapshot_from_candles(buffer: &midas_core::CandleBuffer) -> MarketSnapsho
 /// today's (H-L) as a percentage of the filtered average.
 fn compute_daily_gatr(buffer: &midas_core::CandleBuffer) -> Option<f32> {
     let len = buffer.len();
-    if len < midas_core::GATR_LOOKBACK + 1 {
-        return None;
+    if len < 3 {
+        return None; // Need at least 2 history bars + today
     }
     let highs: Vec<f64> = buffer.highs.iter().map(|&h| h as f64).collect();
     let lows: Vec<f64> = buffer.lows.iter().map(|&l| l as f64).collect();
@@ -162,14 +162,12 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_gatr_needs_8_bars_minimum() {
-        // 7 bars is not enough (need GATR_LOOKBACK + 1 = 8).
+    fn snapshot_gatr_needs_at_least_3_bars() {
         let mut buf = CandleBuffer::new();
-        for i in 0..7 {
-            buf.push(i as i64 * 1000, 100.0, 110.0, 90.0, 105.0, 500);
-        }
+        buf.push(1_000, 100.0, 110.0, 90.0, 105.0, 500);
+        buf.push(2_000, 105.0, 115.0, 95.0, 110.0, 500);
         let snap = snapshot_from_candles(&buf);
-        assert!(snap.gatr_pct.is_none(), "7 bars should not produce GATR");
+        assert!(snap.gatr_pct.is_none(), "2 bars should not produce GATR");
     }
 
     #[test]

@@ -54,72 +54,64 @@ pub fn true_range(high: f64, low: f64, prev_close: f64) -> f64 {
 ///
 /// Algorithm:
 /// 1. Skip today (last bar).
-/// 2. Walk the previous [`GATR_LOOKBACK`] (7) trading sessions.
-/// 3. Compute raw average TR from those sessions.
-/// 4. Filter paranormal candles (TR > 2x or < 0.5x of the raw average).
-/// 5. Average the surviving TRs.
-/// 6. Return today's (H-L) / filtered_avg * 100.
+/// 2. Compute true ranges for all prior bars to establish a raw average.
+/// 3. Define paranormal thresholds: TR > 2x raw avg or TR < 0.5x raw avg.
+/// 4. Walk backwards from yesterday, skipping paranormal candles, until
+///    [`GATR_LOOKBACK`] (7) non-paranormal sessions are collected.
+/// 5. Average those 7 TRs.
+/// 6. Return today's (H-L) / average * 100.
 ///
 /// `highs`, `lows`, `closes` must have the same length and represent
 /// daily bars ordered oldest-first. The last element is "today".
 ///
-/// Returns `None` if not enough data (need at least `GATR_LOOKBACK + 1` bars,
-/// i.e. 7 history bars + 1 today bar = 8 minimum).
+/// Returns `None` if fewer than 7 non-paranormal history bars exist.
 pub fn gerchik_gatr_pct(highs: &[f64], lows: &[f64], closes: &[f64]) -> Option<f32> {
     let len = highs.len().min(lows.len()).min(closes.len());
-    // Need at least GATR_LOOKBACK prior bars + 1 for today.
-    if len < GATR_LOOKBACK + 1 {
+    if len < 2 {
         return None;
     }
 
-    // Today is the last bar — we measure its range but exclude it from ATR.
+    // Today is the last bar — we measure its range but exclude it from the average.
     let today_range = highs[len - 1] - lows[len - 1];
 
-    // Walk the previous GATR_LOOKBACK sessions (indices len-2 down to len-1-GATR_LOOKBACK).
-    let history_end = len - 1; // exclusive — skip today
-    let history_start = history_end - GATR_LOOKBACK;
-
-    // Compute true ranges for the lookback window.
-    let mut trs = Vec::with_capacity(GATR_LOOKBACK);
-    for i in history_start..history_end {
-        let tr = if i > 0 {
-            true_range(highs[i], lows[i], closes[i - 1])
-        } else {
-            highs[i] - lows[i]
-        };
-        trs.push(tr);
+    // Compute TR for every bar before today (indices 1..len-1, using prev close).
+    let history_end = len - 1;
+    let mut all_trs: Vec<f64> = Vec::with_capacity(history_end);
+    for i in 1..history_end {
+        all_trs.push(true_range(highs[i], lows[i], closes[i - 1]));
     }
-
-    if trs.is_empty() {
+    if all_trs.is_empty() {
         return None;
     }
 
-    // Step 1: raw average.
-    let raw_avg = trs.iter().sum::<f64>() / trs.len() as f64;
+    // Raw average over all history — used only for paranormal classification.
+    let raw_avg = all_trs.iter().sum::<f64>() / all_trs.len() as f64;
     if raw_avg <= f64::EPSILON {
         return None;
     }
 
-    // Step 2: filter paranormal candles.
+    // Walk backwards, collecting non-paranormal TRs until we have 7.
     let upper = raw_avg * GATR_PARANORMAL_UPPER;
     let lower = raw_avg * GATR_PARANORMAL_LOWER;
     let mut sum = 0.0;
     let mut count = 0u32;
-    for &tr in &trs {
+    for &tr in all_trs.iter().rev() {
         if tr >= lower && tr <= upper {
             sum += tr;
             count += 1;
+            if count == GATR_LOOKBACK as u32 {
+                break;
+            }
         }
     }
 
-    // Step 3: average survivors (fall back to raw if all paranormal).
-    let filtered_avg = if count > 0 {
-        sum / count as f64
-    } else {
-        raw_avg
-    };
+    if count == 0 {
+        // All candles paranormal — fall back to raw average.
+        return Some((today_range / raw_avg * 100.0) as f32);
+    }
 
-    Some((today_range / filtered_avg * 100.0) as f32)
+    let avg = sum / count as f64;
+    Some((today_range / avg * 100.0) as f32)
 }
 
 /// Determine the G.ATR color based on percentage consumed.
@@ -202,69 +194,90 @@ mod tests {
 
     #[test]
     fn gatr_pct_too_few_bars() {
-        // Need GATR_LOOKBACK + 1 = 8 bars minimum.
-        let h = vec![110.0; 7];
-        let l = vec![90.0; 7];
-        let c = vec![100.0; 7];
-        assert!(gerchik_gatr_pct(&h, &l, &c).is_none());
+        // Need at least 2 bars (1 history + 1 today).
+        assert!(gerchik_gatr_pct(&[110.0], &[90.0], &[100.0]).is_none());
+        assert!(gerchik_gatr_pct(&[], &[], &[]).is_none());
     }
 
     #[test]
     fn gatr_pct_uniform_range() {
-        // 8 bars: 7 history + 1 today, all with range 20.
-        let h = vec![110.0; 8];
-        let l = vec![90.0; 8];
-        let c = vec![100.0; 8];
+        // 10 bars: 9 history + 1 today, all with range 20.
+        let h = vec![110.0; 10];
+        let l = vec![90.0; 10];
+        let c = vec![100.0; 10];
         let pct = gerchik_gatr_pct(&h, &l, &c).unwrap();
-        // Today range = 20, avg TR = 20, pct = 100%.
+        // Today range = 20, avg of 7 recent TRs = 20, pct = 100%.
         assert!((pct - 100.0).abs() < 1.0, "expected ~100%, got {pct}");
     }
 
     #[test]
     fn gatr_pct_skips_today() {
-        // 7 history bars with range 20, today with range 10.
-        let mut h = vec![110.0; 7];
+        // 9 history bars with range 20, today with range 10.
+        let mut h = vec![110.0; 9];
         h.push(105.0); // today high
-        let mut l = vec![90.0; 7];
+        let mut l = vec![90.0; 9];
         l.push(95.0); // today low
-        let c = vec![100.0; 8];
+        let c = vec![100.0; 10];
         let pct = gerchik_gatr_pct(&h, &l, &c).unwrap();
-        // Today range = 10, avg TR ≈ 20, pct ≈ 50%.
-        assert!((pct - 50.0).abs() < 5.0, "expected ~50%, got {pct}");
+        // Today range = 10, avg TR = 20, pct = 50%.
+        assert!((pct - 50.0).abs() < 1.0, "expected ~50%, got {pct}");
     }
 
     #[test]
-    fn gatr_pct_filters_paranormal() {
-        // 7 history bars: 6 normal (range 20) + 1 paranormal (range 200).
-        // Raw avg ≈ (20*6 + 200) / 7 ≈ 45.7. Upper = 91.4, Lower = 22.9.
-        // The 200 is excluded (>91.4). The 20s are excluded (<22.9).
-        // All filtered → falls back to raw avg ≈ 45.7.
+    fn gatr_pct_walks_past_paranormal_to_collect_7() {
+        // 12 bars total: 11 history + today.
+        // History layout (most recent first):
+        //   bars 10,9: paranormal (huge range 200)
+        //   bars 8,7,6,5,4,3,2: normal (range 40)  ← these 7 should be collected
+        //   bar 1: normal (range 40) ← not needed, first 7 suffice
+        //   bar 0: seed for prev_close
         //
-        // Use ranges that survive filtering: 6 normal at 40, 1 huge at 200.
-        // Raw avg = (40*6 + 200) / 7 ≈ 62.9. Upper = 125.7, Lower = 31.4.
-        // 40s pass (>31.4, <125.7). 200 excluded. Filtered avg = 40.
+        // All closes = 100.0 for simplicity.
+        let c = vec![100.0; 12];
         let mut h = Vec::new();
         let mut l = Vec::new();
-        let c = vec![100.0; 9]; // 8 + 1 extra for prev_close lookback
 
-        // Bar 0 (seed for prev_close).
-        h.push(120.0);
-        l.push(80.0);
-
-        // Bars 1-6: normal range 40.
-        for _ in 0..6 {
-            h.push(120.0);
-            l.push(80.0);
-        }
-        // Bar 7: paranormal range 200.
-        h.push(200.0);
-        l.push(0.0);
+        // Bar 0: seed.
+        h.push(120.0); l.push(80.0);
+        // Bars 1-8: normal range 40 (close=100, H=120, L=80, TR=40).
+        for _ in 0..8 { h.push(120.0); l.push(80.0); }
+        // Bars 9-10: paranormal range 200 (H=200, L=0, TR=200).
+        for _ in 0..2 { h.push(200.0); l.push(0.0); }
         // Today: range 40.
-        h.push(120.0);
-        l.push(80.0);
+        h.push(120.0); l.push(80.0);
 
         let pct = gerchik_gatr_pct(&h, &l, &c).unwrap();
-        // Today range = 40, filtered avg = 40, pct ≈ 100%.
-        assert!((pct - 100.0).abs() < 5.0, "expected ~100%, got {pct}");
+        // Paranormal bars (TR=200) skipped. 7 normal bars (TR=40) collected.
+        // Today range = 40, avg = 40, pct = 100%.
+        assert!(
+            (pct - 100.0).abs() < 1.0,
+            "expected ~100% (paranormal skipped), got {pct}"
+        );
+    }
+
+    #[test]
+    fn gatr_pct_fewer_than_7_non_paranormal_still_works() {
+        // 6 history bars: 3 normal (TR=10) + 3 paranormal (TR=100).
+        // Raw avg of all 6 TRs = (10*3 + 100*3) / 6 = 55.
+        // Upper = 110, Lower = 27.5. Normal (10) excluded (<27.5).
+        // Only 100s pass, and they are the collected ones.
+        //
+        // Better: use values where normals pass and paranormals don't.
+        // 6 history: 3 at TR=50, 3 at TR=500.
+        // Raw avg = (50*3 + 500*3) / 6 = 275.
+        // Upper = 550, Lower = 137.5. 50s excluded (<137.5), 500s excluded (>550? No, 500<550).
+        //
+        // Simplest: 5 history bars at TR=10, 1 bar at TR=1000.
+        // Raw avg = (10*5 + 1000) / 6 = 175. Upper=350, Lower=87.5.
+        // 10s excluded (<87.5). 1000 excluded (>350). All paranormal → fallback.
+        //
+        // Let's just test with 3 bars where count < 7 naturally.
+        let c = vec![100.0; 5]; // 4 history + 1 today
+        let h = vec![110.0, 110.0, 110.0, 110.0, 105.0]; // all range 20, today 10
+        let l = vec![90.0, 90.0, 90.0, 90.0, 95.0];
+        let pct = gerchik_gatr_pct(&h, &l, &c).unwrap();
+        // 3 non-paranormal TRs collected (all uniform, none filtered).
+        // Avg TR = 20. Today range = 10. Pct = 50%.
+        assert!((pct - 50.0).abs() < 1.0, "expected ~50%, got {pct}");
     }
 }

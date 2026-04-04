@@ -54,7 +54,7 @@ pub fn compute_gerchik_atr(
 
     // Aggregate intraday candles into synthetic daily bars.
     let daily_bars = aggregate_daily_bars(data);
-    if daily_bars.len() < midas_core::GATR_LOOKBACK + 1 {
+    if daily_bars.len() < 3 {
         return None;
     }
 
@@ -320,10 +320,11 @@ mod tests {
 
     #[test]
     fn returns_none_for_too_few_days() {
-        // Need at least GATR_LOOKBACK + 1 = 8 daily bars.
+        // 1 day → only 1 daily bar → not enough for TR computation.
         let data = multi_day_5m_data(1);
         assert!(compute_gerchik_atr(&data, 300_000.0).is_none());
-        let data = multi_day_5m_data(7);
+        // 2 days → only 2 daily bars → not enough (need ≥ 3).
+        let data = multi_day_5m_data(2);
         assert!(compute_gerchik_atr(&data, 300_000.0).is_none());
     }
 
