@@ -859,25 +859,14 @@ impl TestBroker {
         }
     }
 
-    /// Subscribe to market data for a symbol. Seeds initial price from
-    /// TestDataProvider and pushes an initial tick callback.
-    pub fn subscribe_market_data(&self, symbol: &str, con_id: i32) {
-        let mut inner = self.inner.lock();
-        inner.subscriptions.insert(symbol.to_string());
-
-        // Seed initial price from TestDataProvider if not set
-        let price = Self::get_or_seed_price_inner(&mut inner, symbol);
-        let spread = self.config.default_spread;
-
-        // Push initial tick
-        inner
-            .callbacks
-            .push_back(Self::make_market_data_callback(con_id, symbol, price, spread, 0));
+    /// Subscribe to market data. Convenience wrapper around the trait method.
+    pub fn subscribe(&self, symbol: &str, con_id: i32) {
+        BrokerClient::subscribe_market_data(self, symbol, con_id);
     }
 
-    /// Unsubscribe from market data for a symbol.
-    pub fn unsubscribe_market_data(&self, symbol: &str) {
-        self.inner.lock().subscriptions.remove(symbol);
+    /// Unsubscribe from market data. Convenience wrapper around the trait method.
+    pub fn unsubscribe(&self, symbol: &str) {
+        BrokerClient::unsubscribe_market_data(self, symbol);
     }
 
     /// Generate a synthetic tick for a subscribed symbol. Returns `None` if
@@ -1063,6 +1052,57 @@ impl BrokerClient for TestBroker {
         }
 
         Ok(CancelOrderResult { ib_order_id })
+    }
+
+    fn subscribe_market_data(&self, symbol: &str, con_id: i32) {
+        let mut inner = self.inner.lock();
+        inner.subscriptions.insert(symbol.to_string());
+
+        let price = Self::get_or_seed_price_inner(&mut inner, symbol);
+        let spread = self.config.default_spread;
+
+        inner
+            .callbacks
+            .push_back(Self::make_market_data_callback(con_id, symbol, price, spread, 0));
+    }
+
+    fn unsubscribe_market_data(&self, symbol: &str) {
+        self.inner.lock().subscriptions.remove(symbol);
+    }
+
+    fn request_positions(&self) -> Vec<crate::client::PositionRecord> {
+        let inner = self.inner.lock();
+        inner
+            .positions
+            .values()
+            .filter(|p| p.quantity.abs() > f64::EPSILON)
+            .map(|p| crate::client::PositionRecord {
+                symbol: p.symbol.clone(),
+                quantity: p.quantity,
+                avg_cost: p.avg_cost,
+            })
+            .collect()
+    }
+
+    fn request_account_summary(&self) -> crate::client::AccountSummary {
+        let inner = self.inner.lock();
+        let unrealized_pnl: f64 = inner
+            .positions
+            .values()
+            .map(|pos| {
+                let market_price = inner
+                    .market_prices
+                    .get(&pos.symbol)
+                    .copied()
+                    .unwrap_or(pos.avg_cost);
+                (market_price - pos.avg_cost) * pos.quantity
+            })
+            .sum();
+        crate::client::AccountSummary {
+            cash_balance: inner.cash,
+            unrealized_pnl,
+            realized_pnl: inner.realized_pnl,
+        }
     }
 
     fn poll_callbacks(&self) -> Vec<BrokerCallback> {

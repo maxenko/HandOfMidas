@@ -8,7 +8,7 @@
 > types, no margin logic. Everything here is code that already exists but
 > is stranded behind concrete types instead of the trait.
 >
-> **Status:** Plan
+> **Status:** Implemented
 > **Date:** 2026-04-04
 
 ---

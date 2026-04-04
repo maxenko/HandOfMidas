@@ -210,6 +210,78 @@ impl BrokerEngine {
                 self.handle_modify_bracket_leg(order_id, new_price);
                 false
             }
+            BrokerCommand::Connect => {
+                if let Some(ref client) = self.client {
+                    match client.connect() {
+                        Ok(ver) => {
+                            let _ = self.order_event_tx.send(BrokerEvent::Connected {
+                                server_version: ver,
+                            });
+                            tracing::info!("Connected to broker (server version {ver})");
+                        }
+                        Err(e) => {
+                            let _ = self.order_event_tx.send(BrokerEvent::Error {
+                                code: -10,
+                                message: format!("connection failed: {e}"),
+                            });
+                        }
+                    }
+                }
+                false
+            }
+            BrokerCommand::Disconnect => {
+                if let Some(ref client) = self.client {
+                    client.disconnect();
+                    let _ = self.order_event_tx.send(BrokerEvent::Disconnected {
+                        reason: "user requested disconnect".to_string(),
+                    });
+                    tracing::info!("Disconnected from broker");
+                }
+                false
+            }
+            BrokerCommand::SubscribeMarketData { symbol, con_id } => {
+                if let Some(ref client) = self.client {
+                    client.subscribe_market_data(&symbol, con_id);
+                }
+                false
+            }
+            BrokerCommand::UnsubscribeMarketData { symbol } => {
+                if let Some(ref client) = self.client {
+                    client.unsubscribe_market_data(&symbol);
+                }
+                false
+            }
+            BrokerCommand::RequestPositions => {
+                if let Some(ref client) = self.client {
+                    for pos in client.request_positions() {
+                        let _ = self.order_event_tx.send(BrokerEvent::PositionUpdate {
+                            account: String::new(),
+                            symbol: pos.symbol,
+                            con_id: 0,
+                            quantity: pos.quantity,
+                            avg_cost: pos.avg_cost,
+                        });
+                    }
+                }
+                false
+            }
+            BrokerCommand::RequestAccountSummary => {
+                if let Some(ref client) = self.client {
+                    let summary = client.request_account_summary();
+                    let _ = self.order_event_tx.send(BrokerEvent::PnlUpdate {
+                        daily_pnl: 0.0,
+                        unrealized_pnl: summary.unrealized_pnl,
+                        realized_pnl: summary.realized_pnl,
+                    });
+                    let _ = self.order_event_tx.send(BrokerEvent::AccountValueUpdate {
+                        account: String::new(),
+                        key: "CashBalance".to_string(),
+                        value: format!("{:.2}", summary.cash_balance),
+                        currency: "USD".to_string(),
+                    });
+                }
+                false
+            }
             _ => {
                 tracing::debug!(?cmd, "Command received (handler not yet implemented)");
                 false
@@ -1032,6 +1104,30 @@ impl BrokerEngine {
                     low,
                     close,
                     volume,
+                });
+            }
+
+            BrokerCallback::Position { symbol, quantity, avg_cost } => {
+                let _ = self.order_event_tx.send(BrokerEvent::PositionUpdate {
+                    account: String::new(),
+                    symbol,
+                    con_id: 0,
+                    quantity,
+                    avg_cost,
+                });
+            }
+
+            BrokerCallback::Account { cash_balance, unrealized_pnl, realized_pnl } => {
+                let _ = self.order_event_tx.send(BrokerEvent::PnlUpdate {
+                    daily_pnl: 0.0,
+                    unrealized_pnl,
+                    realized_pnl,
+                });
+                let _ = self.order_event_tx.send(BrokerEvent::AccountValueUpdate {
+                    account: String::new(),
+                    key: "CashBalance".to_string(),
+                    value: format!("{cash_balance:.2}"),
+                    currency: "USD".to_string(),
                 });
             }
         }

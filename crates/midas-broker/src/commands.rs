@@ -1,4 +1,3 @@
-use midas_core::SecurityType;
 use uuid::Uuid;
 
 use crate::orders::bracket::MarketBracketParams;
@@ -16,16 +15,8 @@ pub enum BrokerCommand {
     Connect,
     /// Gracefully disconnect from TWS / IB Gateway.
     Disconnect,
-    /// Force a reconnection cycle.
-    Reconnect,
 
     // ── Orders ──────────────────────────────────────────────────────────────
-    /// Create a new order in local state (not yet submitted to IB).
-    CreateOrder(CreateOrderParams),
-    /// Submit a locally-created order to IB.
-    ActivateOrder { order_id: Uuid },
-    /// Pull an active order back from IB (cancel + return to local staging).
-    DeactivateOrder { order_id: Uuid },
     /// Cancel an order at IB.
     CancelOrder { order_id: Uuid },
     /// Modify price or quantity of an existing order.
@@ -36,13 +27,6 @@ pub enum BrokerCommand {
     },
 
     // ── Brackets ────────────────────────────────────────────────────────────
-    /// Create a bracket order (entry + take-profit + stop-loss) as a single unit.
-    /// Used for limit-entry brackets (existing workflow).
-    CreateBracketOrder {
-        entry: CreateOrderParams,
-        take_profit_price: f64,
-        stop_loss_price: f64,
-    },
     /// Create and immediately submit a market order bracket.
     ///
     /// Unlike `CreateBracketOrder` (which creates in Draft and requires
@@ -83,90 +67,9 @@ pub enum BrokerCommand {
     Shutdown,
 }
 
-/// Parameters for creating a new order. Passed inside
-/// [`BrokerCommand::CreateOrder`] and [`BrokerCommand::CreateBracketOrder`].
-#[derive(Debug, Clone)]
-pub struct CreateOrderParams {
-    /// IB symbol string, e.g. "AAPL".
-    pub symbol: String,
-    /// IB contract ID. `None` means the engine will resolve it.
-    pub con_id: Option<i32>,
-    /// Security type (Stock, Option, Future, Forex).
-    pub sec_type: SecurityType,
-    /// Exchange routing, e.g. "SMART".
-    pub exchange: String,
-    /// Currency code, e.g. "USD".
-    pub currency: String,
-    /// Trade direction: "BUY" or "SELL".
-    pub action: String,
-    /// IB order type string: "MKT", "LMT", "STP", "TRAIL", etc.
-    pub order_type: String,
-    /// Number of shares/contracts.
-    pub quantity: f64,
-    /// Limit price (required for LMT orders).
-    pub limit_price: Option<f64>,
-    /// Stop trigger price (required for STP orders).
-    pub stop_price: Option<f64>,
-    /// Trailing amount in absolute price units.
-    pub trail_amount: Option<f64>,
-    /// Trailing amount as a percentage.
-    pub trail_percent: Option<f64>,
-    /// Time-in-force: "DAY", "GTC", "IOC", etc.
-    pub tif: String,
-    /// Allow fills outside regular trading hours.
-    pub outside_rth: bool,
-    /// IB algo strategy name, e.g. "Adaptive".
-    pub algo_strategy: Option<String>,
-    /// Algo-specific parameters as JSON.
-    pub algo_params: Option<serde_json::Value>,
-    /// User-defined tag for grouping / filtering.
-    pub tag: Option<String>,
-    /// Strategy name that originated this order.
-    pub strategy: Option<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn sample_params() -> CreateOrderParams {
-        CreateOrderParams {
-            symbol: "AAPL".to_string(),
-            con_id: Some(265598),
-            sec_type: SecurityType::Stock,
-            exchange: "SMART".to_string(),
-            currency: "USD".to_string(),
-            action: "BUY".to_string(),
-            order_type: "LMT".to_string(),
-            quantity: 100.0,
-            limit_price: Some(175.00),
-            stop_price: None,
-            trail_amount: None,
-            trail_percent: None,
-            tif: "DAY".to_string(),
-            outside_rth: false,
-            algo_strategy: None,
-            algo_params: None,
-            tag: Some("test".to_string()),
-            strategy: None,
-        }
-    }
-
-    #[test]
-    fn create_order_params_debug() {
-        let params = sample_params();
-        let dbg = format!("{params:?}");
-        assert!(dbg.contains("AAPL"));
-        assert!(dbg.contains("LMT"));
-    }
-
-    #[test]
-    fn create_order_params_clone() {
-        let params = sample_params();
-        let cloned = params.clone();
-        assert_eq!(cloned.symbol, "AAPL");
-        assert_eq!(cloned.quantity, 100.0);
-    }
 
     #[test]
     fn broker_command_debug() {
@@ -181,22 +84,24 @@ mod tests {
     }
 
     #[test]
-    fn bracket_order_command() {
-        let cmd = BrokerCommand::CreateBracketOrder {
-            entry: sample_params(),
-            take_profit_price: 200.0,
-            stop_loss_price: 160.0,
-        };
-        match cmd {
-            BrokerCommand::CreateBracketOrder {
-                take_profit_price,
-                stop_loss_price,
-                ..
-            } => {
-                assert!((take_profit_price - 200.0).abs() < f64::EPSILON);
-                assert!((stop_loss_price - 160.0).abs() < f64::EPSILON);
-            }
-            _ => panic!("expected CreateBracketOrder"),
-        }
+    fn market_bracket_command() {
+        use crate::orders::bracket::MarketBracketParams;
+        let cmd = BrokerCommand::CreateMarketBracket(MarketBracketParams {
+            symbol: "AAPL".to_string(),
+            con_id: None,
+            sec_type: midas_core::SecurityType::Stock,
+            exchange: "SMART".to_string(),
+            currency: "USD".to_string(),
+            action: crate::orders::types::OrderAction::Buy,
+            quantity: 100.0,
+            outside_rth: false,
+            take_profit: None,
+            stop_loss: None,
+            reference_price: None,
+            strategy: None,
+            tags: Vec::new(),
+        });
+        let dbg = format!("{cmd:?}");
+        assert!(dbg.contains("CreateMarketBracket"));
     }
 }

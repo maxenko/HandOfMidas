@@ -17,6 +17,22 @@ pub struct CancelOrderResult {
     pub ib_order_id: i32,
 }
 
+/// A single position as reported by the broker.
+#[derive(Debug, Clone)]
+pub struct PositionRecord {
+    pub symbol: String,
+    pub quantity: f64,
+    pub avg_cost: f64,
+}
+
+/// Snapshot of account values.
+#[derive(Debug, Clone, Default)]
+pub struct AccountSummary {
+    pub cash_balance: f64,
+    pub unrealized_pnl: f64,
+    pub realized_pnl: f64,
+}
+
 /// Callbacks produced by the broker client (IB status updates, fills, etc.).
 /// The engine polls these and translates to BrokerEvents.
 #[derive(Debug, Clone)]
@@ -77,6 +93,18 @@ pub enum BrokerCallback {
         close: f64,
         volume: i64,
     },
+    /// Position snapshot (one per symbol).
+    Position {
+        symbol: String,
+        quantity: f64,
+        avg_cost: f64,
+    },
+    /// Account summary snapshot.
+    Account {
+        cash_balance: f64,
+        unrealized_pnl: f64,
+        realized_pnl: f64,
+    },
 }
 
 /// Abstraction over IB API client. Allows test/null implementations.
@@ -111,27 +139,37 @@ pub trait BrokerClient: Send + Sync {
     /// Name of this client implementation.
     fn name(&self) -> &str;
 
-    // -- Optional methods with defaults (for future TestBroker) --
+    // -- Optional methods with defaults --
 
-    /// Poll for pending status callbacks. Returns events the engine should
-    /// process. Default: empty (no callbacks). The full TestBroker overrides
-    /// this to return simulated fills and status changes.
-    fn poll_callbacks(&self) -> Vec<BrokerCallback> {
-        Vec::new()
-    }
-
-    /// Connect to the broker. Returns server version. Default: 176.
-    fn connect(&self) -> Result<i32, String> {
-        Ok(176)
-    }
+    /// Connect to the broker. Returns server version.
+    fn connect(&self) -> Result<i32, String> { Ok(176) }
 
     /// Disconnect from the broker.
     fn disconnect(&self) {}
 
     /// Whether the client is currently connected.
-    fn is_connected(&self) -> bool {
-        true
-    }
+    fn is_connected(&self) -> bool { true }
+
+    // ── Market data subscriptions ─────────────────────────────────
+
+    /// Subscribe to streaming L1 market data for a symbol.
+    fn subscribe_market_data(&self, _symbol: &str, _con_id: i32) {}
+
+    /// Unsubscribe from streaming market data.
+    fn unsubscribe_market_data(&self, _symbol: &str) {}
+
+    // ── Account queries ───────────────────────────────────────────
+
+    /// Request current positions. Returns a snapshot.
+    fn request_positions(&self) -> Vec<PositionRecord> { Vec::new() }
+
+    /// Request account summary (cash, P&L). Returns a snapshot.
+    fn request_account_summary(&self) -> AccountSummary { AccountSummary::default() }
+
+    // ── Polling ───────────────────────────────────────────────────
+
+    /// Poll for pending callbacks (status changes, fills, ticks).
+    fn poll_callbacks(&self) -> Vec<BrokerCallback> { Vec::new() }
 }
 
 /// A placed order record for inspection in tests.

@@ -95,6 +95,30 @@ pub enum BracketLifecycleStatus {
 }
 
 // ===========================================================================
+// MIRROR OF: crates/midas-broker/src/client.rs::PositionRecord
+// ===========================================================================
+
+/// A single position as reported by the broker (desktop mirror).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PositionRecord {
+    pub symbol: String,
+    pub quantity: f64,
+    pub avg_cost: f64,
+}
+
+// ===========================================================================
+// MIRROR OF: crates/midas-broker/src/client.rs::AccountSummary
+// ===========================================================================
+
+/// Snapshot of account values (desktop mirror).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AccountSummary {
+    pub cash_balance: f64,
+    pub unrealized_pnl: f64,
+    pub realized_pnl: f64,
+}
+
+// ===========================================================================
 // Broker Events (desktop-side)
 // ===========================================================================
 

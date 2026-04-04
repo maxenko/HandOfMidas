@@ -19,7 +19,7 @@ pub mod test_broker;
 pub mod testdata;
 
 // Re-exports for the public API surface
-pub use client::{BrokerCallback, BrokerClient, TestBrokerClient};
+pub use client::{AccountSummary, BrokerCallback, BrokerClient, PositionRecord, TestBrokerClient};
 pub use test_broker::{TestBroker, TestBrokerConfig};
 pub use commands::BrokerCommand;
 pub use config::BrokerConfig;
