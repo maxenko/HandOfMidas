@@ -93,24 +93,46 @@ pub fn gerchik_gatr_pct(highs: &[f64], lows: &[f64], closes: &[f64]) -> Option<f
     // Walk backwards, collecting non-paranormal TRs until we have 7.
     let upper = raw_avg * GATR_PARANORMAL_UPPER;
     let lower = raw_avg * GATR_PARANORMAL_LOWER;
+    tracing::debug!(
+        "G.ATR paranormal thresholds: raw_avg={raw_avg:.4} lower={lower:.4} upper={upper:.4}"
+    );
+
     let mut sum = 0.0;
     let mut count = 0u32;
-    for &tr in all_trs.iter().rev() {
+    let mut skipped = 0u32;
+    // Walk backwards through history TRs. Index in all_trs maps to bar index + 1.
+    for (rev_idx, &tr) in all_trs.iter().rev().enumerate() {
+        let bar_idx = history_end - 1 - rev_idx; // index into the original highs/lows/closes
         if tr >= lower && tr <= upper {
             sum += tr;
             count += 1;
+            tracing::debug!(
+                "G.ATR  KEPT bar[{bar_idx}]: TR={tr:.4} H={:.2} L={:.2} (#{count} of {GATR_LOOKBACK})",
+                highs[bar_idx], lows[bar_idx],
+            );
             if count == GATR_LOOKBACK as u32 {
                 break;
             }
+        } else {
+            skipped += 1;
+            let reason = if tr > upper { "TOO LARGE" } else { "TOO SMALL" };
+            tracing::debug!(
+                "G.ATR  SKIP bar[{bar_idx}]: TR={tr:.4} H={:.2} L={:.2} ({reason})",
+                highs[bar_idx], lows[bar_idx],
+            );
         }
     }
 
     if count == 0 {
-        // All candles paranormal — fall back to raw average.
+        tracing::debug!("G.ATR all {skipped} bars paranormal — using raw_avg={raw_avg:.4}");
         return Some((today_range / raw_avg * 100.0) as f32);
     }
 
     let avg = sum / count as f64;
+    tracing::debug!(
+        "G.ATR today H-L={today_range:.4} / avg={avg:.4} = {:.1}% ({count} kept, {skipped} skipped)",
+        today_range / avg * 100.0,
+    );
     Some((today_range / avg * 100.0) as f32)
 }
 

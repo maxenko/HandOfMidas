@@ -91,7 +91,22 @@ fn compute_daily_gatr(buffer: &midas_core::CandleBuffer) -> Option<f32> {
     let highs: Vec<f64> = buffer.highs.iter().map(|&h| h as f64).collect();
     let lows: Vec<f64> = buffer.lows.iter().map(|&l| l as f64).collect();
     let closes: Vec<f64> = buffer.closes.iter().map(|&c| c as f64).collect();
-    midas_core::gerchik_gatr_pct(&highs, &lows, &closes)
+
+    // Debug: log the last few bars so we can verify the calculation.
+    let start = len.saturating_sub(10);
+    for i in start..len {
+        let label = if i == len - 1 { "TODAY" } else { "     " };
+        tracing::debug!(
+            "G.ATR {label} bar[{i}]: H={:.2} L={:.2} C={:.2} range={:.2}",
+            highs[i], lows[i], closes[i], highs[i] - lows[i],
+        );
+    }
+
+    let result = midas_core::gerchik_gatr_pct(&highs, &lows, &closes);
+    if let Some(pct) = result {
+        tracing::debug!("G.ATR result: {pct:.1}% (from {len} D1 bars)");
+    }
+    result
 }
 
 #[cfg(test)]
