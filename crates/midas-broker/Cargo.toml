@@ -15,6 +15,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 
 # Async runtime (workspace shared)
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "signal"] }
+futures = "0.3"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

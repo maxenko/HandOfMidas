@@ -64,6 +64,28 @@ pub fn duration_to_start(end: i64, duration: &str) -> Result<i64, BrokerError> {
     }
 }
 
+/// Convert a [`Timeframe`] to the IB bar size string.
+///
+/// This is the inverse of [`parse_bar_size`].
+pub fn timeframe_to_bar_size(tf: Timeframe) -> String {
+    match tf {
+        Timeframe::S1 => "1 secs",
+        Timeframe::S5 => "5 secs",
+        Timeframe::S15 => "15 secs",
+        Timeframe::S30 => "30 secs",
+        Timeframe::M1 => "1 min",
+        Timeframe::M5 => "5 mins",
+        Timeframe::M15 => "15 mins",
+        Timeframe::M30 => "30 mins",
+        Timeframe::H1 => "1 hour",
+        Timeframe::H4 => "4 hours",
+        Timeframe::D1 => "1 day",
+        Timeframe::W1 => "1 week",
+        Timeframe::MN1 => "1 month",
+    }
+    .to_string()
+}
+
 fn subtract_calendar_months(end: i64, months: u32, duration: &str) -> Result<i64, BrokerError> {
     let dt = DateTime::<Utc>::from_timestamp(end, 0)
         .ok_or_else(|| BrokerError::Config(format!("invalid end timestamp: {end}")))?;
