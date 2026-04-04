@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::error::BrokerError;
+use crate::test_broker::TestBrokerConfig;
 
 /// Selects the market data source for the broker engine.
 #[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
@@ -33,6 +34,46 @@ pub struct BrokerConfig {
     /// Market data source: "live" (default) or "test".
     #[serde(default)]
     pub data_source: DataSourceConfig,
+
+    /// Engine-level order size limits. Hard reject before IB submission.
+    #[serde(default)]
+    pub trading_limits: TradingLimits,
+
+    /// Test broker simulation configuration.
+    #[serde(default)]
+    pub test_broker: TestBrokerConfig,
+}
+
+/// Engine-level maximum order size validation.
+///
+/// These limits run before bracket building and IB submission.
+/// They are hard rejects, not UI-only warnings. Protects against
+/// UI bugs, programmatic misuse, and quick trade mode oversizing.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TradingLimits {
+    /// Maximum quantity per order (shares/contracts). 0 = no limit.
+    #[serde(default = "default_max_order_quantity")]
+    pub max_order_quantity: f64,
+    /// Maximum notional value per order (quantity x reference price). 0 = no limit.
+    #[serde(default = "default_max_notional_value")]
+    pub max_notional_value: f64,
+}
+
+fn default_max_order_quantity() -> f64 {
+    10_000.0
+}
+
+fn default_max_notional_value() -> f64 {
+    500_000.0
+}
+
+impl Default for TradingLimits {
+    fn default() -> Self {
+        Self {
+            max_order_quantity: default_max_order_quantity(),
+            max_notional_value: default_max_notional_value(),
+        }
+    }
 }
 
 /// TWS / IB Gateway connection parameters.
@@ -185,6 +226,8 @@ impl Default for BrokerConfig {
             persistence: PersistenceConfig::default(),
             reconnect: ReconnectConfig::default(),
             data_source: DataSourceConfig::default(),
+            trading_limits: TradingLimits::default(),
+            test_broker: TestBrokerConfig::default(),
         }
     }
 }

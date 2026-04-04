@@ -1,6 +1,8 @@
 use midas_core::SecurityType;
 use uuid::Uuid;
 
+use crate::orders::bracket::MarketBracketParams;
+
 /// Commands sent from the UI to the broker engine via mpsc channel.
 ///
 /// The engine receives these on `mpsc::Receiver<BrokerCommand>` and
@@ -35,11 +37,22 @@ pub enum BrokerCommand {
 
     // ── Brackets ────────────────────────────────────────────────────────────
     /// Create a bracket order (entry + take-profit + stop-loss) as a single unit.
+    /// Used for limit-entry brackets (existing workflow).
     CreateBracketOrder {
         entry: CreateOrderParams,
         take_profit_price: f64,
         stop_loss_price: f64,
     },
+    /// Create and immediately submit a market order bracket.
+    ///
+    /// Unlike `CreateBracketOrder` (which creates in Draft and requires
+    /// separate activation), this command creates the bracket AND submits
+    /// the market order to IB in a single step.
+    CreateMarketBracket(MarketBracketParams),
+    /// Cancel an entire bracket (parent + all children) as a unit.
+    CancelBracket { parent_id: Uuid },
+    /// Modify a bracket leg's price without affecting other legs.
+    ModifyBracketLeg { order_id: Uuid, new_price: f64 },
 
     // ── Market Data ─────────────────────────────────────────────────────────
     /// Subscribe to streaming L1 market data.

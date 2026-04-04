@@ -95,6 +95,7 @@ impl OrderStatus {
             "ApiPending" | "PendingSubmit" => Self::PendingSubmit,
             "PreSubmitted" => Self::PreSubmitted,
             "Submitted" => Self::Submitted,
+            "PartiallyFilled" => Self::PartiallyFilled,
             "Filled" => Self::Filled,
             "PendingCancel" => Self::PendingCancel,
             "Cancelled" | "ApiCancelled" => Self::Cancelled,
@@ -152,8 +153,15 @@ impl OrderStatus {
     }
 
     /// The order can be modified in-flight at IB.
+    ///
+    /// Includes `PartiallyFilled` because IB accepts modifications to the
+    /// remaining unfilled quantity. This is important for bracket children
+    /// (TP/SL) on large or illiquid orders where partial fills are possible.
     pub fn can_modify_at_ib(&self) -> bool {
-        matches!(self, Self::PreSubmitted | Self::Submitted)
+        matches!(
+            self,
+            Self::PreSubmitted | Self::Submitted | Self::PartiallyFilled
+        )
     }
 }
 
@@ -178,15 +186,19 @@ impl OrderStatus {
                     | Self::Error
                     | Self::PendingCancel
             ),
+            // Cancelled is allowed directly from PreSubmitted/Submitted for
+            // IB server-side cancellations (OCA auto-cancel on bracket sibling
+            // fill, parent cancel propagation). IB sends "Cancelled" without
+            // going through PendingCancel for these cases.
             Self::PreSubmitted => matches!(
                 to,
-                Self::Submitted | Self::PendingCancel | Self::Filled | Self::Rejected
+                Self::Submitted | Self::PendingCancel | Self::Cancelled | Self::Filled | Self::Rejected
             ),
             Self::Submitted => matches!(
                 to,
-                Self::PartiallyFilled | Self::Filled | Self::PendingCancel | Self::Rejected
+                Self::PartiallyFilled | Self::Filled | Self::PendingCancel | Self::Cancelled | Self::Rejected
             ),
-            Self::PartiallyFilled => matches!(to, Self::Filled | Self::PendingCancel),
+            Self::PartiallyFilled => matches!(to, Self::Filled | Self::PendingCancel | Self::Cancelled),
             Self::PendingCancel => matches!(
                 to,
                 Self::Cancelled | Self::Inactive | Self::Filled
@@ -294,6 +306,14 @@ mod tests {
     }
 
     #[test]
+    fn from_ib_status_partially_filled() {
+        assert_eq!(
+            OrderStatus::from_ib_status("PartiallyFilled"),
+            OrderStatus::PartiallyFilled
+        );
+    }
+
+    #[test]
     fn from_ib_status_unknown_maps_to_rejected() {
         assert_eq!(OrderStatus::from_ib_status("SomethingNew"), OrderStatus::Rejected);
     }
@@ -373,7 +393,7 @@ mod tests {
     fn can_modify_at_ib() {
         assert!(OrderStatus::PreSubmitted.can_modify_at_ib());
         assert!(OrderStatus::Submitted.can_modify_at_ib());
-        assert!(!OrderStatus::PartiallyFilled.can_modify_at_ib());
+        assert!(OrderStatus::PartiallyFilled.can_modify_at_ib());
         assert!(!OrderStatus::Inactive.can_modify_at_ib());
     }
 
@@ -506,6 +526,19 @@ mod tests {
         OrderStatus::validate_transition(OrderStatus::PendingCancel, OrderStatus::Filled).unwrap();
     }
 
+    #[test]
+    fn valid_pre_submitted_to_cancelled_oca() {
+        // IB OCA: server-side cancel when bracket sibling fills.
+        OrderStatus::validate_transition(OrderStatus::PreSubmitted, OrderStatus::Cancelled)
+            .unwrap();
+    }
+
+    #[test]
+    fn valid_submitted_to_cancelled_oca() {
+        // IB OCA: server-side cancel when bracket sibling fills.
+        OrderStatus::validate_transition(OrderStatus::Submitted, OrderStatus::Cancelled).unwrap();
+    }
+
     // -----------------------------------------------------------------------
     // Invalid transitions
     // -----------------------------------------------------------------------
@@ -572,15 +605,11 @@ mod tests {
     }
 
     #[test]
-    fn invalid_partially_filled_to_cancelled() {
-        // Must go through PendingCancel first.
-        assert!(
-            OrderStatus::validate_transition(
-                OrderStatus::PartiallyFilled,
-                OrderStatus::Cancelled
-            )
-            .is_err()
-        );
+    fn valid_partially_filled_to_cancelled_oca() {
+        // IB OCA: server-side cancel of a partially filled child when bracket
+        // sibling fills. IB sends Cancelled directly without PendingCancel.
+        OrderStatus::validate_transition(OrderStatus::PartiallyFilled, OrderStatus::Cancelled)
+            .unwrap();
     }
 
     #[test]

@@ -125,6 +125,47 @@ impl FromStr for TimeInForce {
 }
 
 // ===========================================================================
+// BracketRole
+// ===========================================================================
+
+/// Role of an order within a bracket group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum BracketRole {
+    /// The entry order (parent). Children reference this via `parent_id`.
+    Parent,
+    /// Take-profit child. Limit order on the opposite side.
+    TakeProfit,
+    /// Stop-loss child. Stop or StopLimit on the opposite side.
+    StopLoss,
+}
+
+impl fmt::Display for BracketRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Parent => f.write_str("PARENT"),
+            Self::TakeProfit => f.write_str("TAKE_PROFIT"),
+            Self::StopLoss => f.write_str("STOP_LOSS"),
+        }
+    }
+}
+
+impl FromStr for BracketRole {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // Accept all known variants: uppercase canonical, lowercase from
+        // architecture plan (02-order-management.md), and abbreviated legacy.
+        match s {
+            "PARENT" | "parent" => Ok(Self::Parent),
+            "TAKE_PROFIT" | "take_profit" | "PROFIT" => Ok(Self::TakeProfit),
+            "STOP_LOSS" | "stop_loss" | "STOP" => Ok(Self::StopLoss),
+            other => Err(format!("unknown BracketRole: {other}")),
+        }
+    }
+}
+
+// ===========================================================================
 // FillInfo
 // ===========================================================================
 
@@ -193,8 +234,8 @@ pub struct LocalOrder {
     pub parent_id: Option<Uuid>,
     /// OCA (one-cancels-all) group name.
     pub oca_group: Option<String>,
-    /// Role within a bracket: "PARENT", "PROFIT", "STOP".
-    pub bracket_role: Option<String>,
+    /// Role within a bracket group.
+    pub bracket_role: Option<BracketRole>,
     /// Strategy label, e.g. "momentum_scalp".
     pub strategy: Option<String>,
     /// Arbitrary tags for filtering/grouping.
@@ -396,5 +437,97 @@ mod tests {
         assert_eq!(restored.symbol, "TSLA");
         assert_eq!(restored.order_type, OrderKind::StopLimit);
         assert_eq!(restored.status, OrderStatus::Draft);
+    }
+
+    // -----------------------------------------------------------------------
+    // BracketRole
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn bracket_role_display_parent() {
+        assert_eq!(BracketRole::Parent.to_string(), "PARENT");
+    }
+
+    #[test]
+    fn bracket_role_display_take_profit() {
+        assert_eq!(BracketRole::TakeProfit.to_string(), "TAKE_PROFIT");
+    }
+
+    #[test]
+    fn bracket_role_display_stop_loss() {
+        assert_eq!(BracketRole::StopLoss.to_string(), "STOP_LOSS");
+    }
+
+    #[test]
+    fn bracket_role_parse_parent() {
+        assert_eq!("PARENT".parse::<BracketRole>().unwrap(), BracketRole::Parent);
+    }
+
+    #[test]
+    fn bracket_role_parse_take_profit() {
+        assert_eq!(
+            "TAKE_PROFIT".parse::<BracketRole>().unwrap(),
+            BracketRole::TakeProfit
+        );
+    }
+
+    #[test]
+    fn bracket_role_parse_legacy_profit() {
+        assert_eq!("PROFIT".parse::<BracketRole>().unwrap(), BracketRole::TakeProfit);
+    }
+
+    #[test]
+    fn bracket_role_parse_legacy_stop() {
+        assert_eq!("STOP".parse::<BracketRole>().unwrap(), BracketRole::StopLoss);
+    }
+
+    #[test]
+    fn bracket_role_parse_lowercase_parent() {
+        assert_eq!("parent".parse::<BracketRole>().unwrap(), BracketRole::Parent);
+    }
+
+    #[test]
+    fn bracket_role_parse_lowercase_take_profit() {
+        assert_eq!(
+            "take_profit".parse::<BracketRole>().unwrap(),
+            BracketRole::TakeProfit
+        );
+    }
+
+    #[test]
+    fn bracket_role_parse_lowercase_stop_loss() {
+        assert_eq!(
+            "stop_loss".parse::<BracketRole>().unwrap(),
+            BracketRole::StopLoss
+        );
+    }
+
+    #[test]
+    fn bracket_role_parse_unknown_fails() {
+        assert!("UNKNOWN".parse::<BracketRole>().is_err());
+    }
+
+    #[test]
+    fn bracket_role_serde_round_trip() {
+        let role = BracketRole::TakeProfit;
+        let json = serde_json::to_string(&role).unwrap();
+        let restored: BracketRole = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, role);
+    }
+
+    #[test]
+    fn bracket_role_serde_matches_display() {
+        assert_eq!(
+            serde_json::to_string(&BracketRole::Parent).unwrap(),
+            "\"PARENT\""
+        );
+        assert_eq!(
+            serde_json::to_string(&BracketRole::TakeProfit).unwrap(),
+            "\"TAKE_PROFIT\""
+        );
+        assert_eq!(
+            serde_json::to_string(&BracketRole::StopLoss).unwrap(),
+            "\"STOP_LOSS\""
+        );
     }
 }

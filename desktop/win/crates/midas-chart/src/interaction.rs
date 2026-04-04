@@ -106,6 +106,18 @@ pub enum ChartAction {
     /// Report the current preview price during level placement.
     /// Emitted on each in-bounds mouse move while Placing.
     PlacingPreview { price: f64 },
+    /// Drag a bracket take-profit or stop-loss leg to a new price.
+    ///
+    /// Emitted during mouse move while dragging a bracket leg. The entry
+    /// line is NOT draggable (market orders fill instantly, entry is terminal).
+    DragBracketLeg {
+        /// Which annotation (OrderBracket) owns the leg being dragged.
+        annotation_id: super::widget::AnnotationId,
+        /// Which leg is being dragged.
+        leg: super::widget::order_bracket::LegRole,
+        /// The new price for this leg (may be clamped by side constraints).
+        new_price: f64,
+    },
 }
 
 /// Mouse button discriminant.
@@ -278,6 +290,7 @@ fn handle_mouse_moved(
         state.interaction_mode,
         InteractionMode::DraggingVolumeScale { .. }
             | InteractionMode::DraggingTimelineBorder { .. }
+            | InteractionMode::DraggingBracketLeg { .. }
     );
     let in_bounds = x >= 0.0
         && y >= 0.0
@@ -316,9 +329,28 @@ fn handle_mouse_moved(
             let dist = (ddx * ddx + ddy * ddy).sqrt();
 
             if dist >= DRAG_THRESHOLD_PX {
-                // Exceeded threshold. Left-drag only initiates level drag,
-                // never panning (panning is right-mouse only).
-                if let Some((level_id, grab_offset)) =
+                // Exceeded threshold. Left-drag only initiates level or bracket
+                // leg drag, never panning (panning is right-mouse only).
+
+                // Check bracket legs first (TP/SL are more specific than levels).
+                if let Some((ann_id, leg, grab_offset, entry_price, side)) =
+                    hit_test_bracket_legs(annotations, start_y, &state.camera)
+                {
+                    state.interaction_mode = InteractionMode::DraggingBracketLeg {
+                        annotation_id: ann_id,
+                        leg,
+                        grab_offset,
+                        entry_price,
+                        side,
+                    };
+                    state.crosshair.suppress();
+                    #[allow(deprecated)]
+                    {
+                        state.crosshair_pos = None;
+                    }
+                    actions.push(ChartAction::ClearCrosshair);
+                    state.drag_start = Some((x, y));
+                } else if let Some((level_id, grab_offset)) =
                     hit_test_levels(annotations, start_y, &state.camera)
                 {
                     let is_locked = annotations.iter().any(|a| a.id == level_id && a.locked);
@@ -344,7 +376,7 @@ fn handle_mouse_moved(
                         state.interaction_mode = InteractionMode::Idle;
                     }
                 } else {
-                    // No level hit — left-drag is just crosshair. Return to Idle.
+                    // No level or bracket leg hit — left-drag is just crosshair. Return to Idle.
                     state.interaction_mode = InteractionMode::Idle;
                 }
             }
@@ -499,6 +531,27 @@ fn handle_mouse_moved(
                 scale: new_scale as f64,
             });
         }
+
+        InteractionMode::DraggingBracketLeg {
+            annotation_id,
+            leg,
+            grab_offset,
+            entry_price,
+            side,
+        } => {
+            let raw_price = state.camera.y_to_price(y) + grab_offset;
+
+            // Clamp to correct side of entry based on trade direction.
+            let clamped = clamp_bracket_leg_price(raw_price, entry_price, leg, side);
+            // Snap to valid tick increment.
+            let snapped = snap_to_tick(clamped, DEFAULT_TICK_SIZE);
+
+            actions.push(ChartAction::DragBracketLeg {
+                annotation_id,
+                leg,
+                new_price: snapped,
+            });
+        }
     }
 
     actions
@@ -589,12 +642,14 @@ fn handle_mouse_pressed(
                 state.left_mouse_down = true;
             }
 
-            // Don't show crosshair if pressing on a draggable (unlocked) level —
-            // the PendingDrag will resolve to a level drag, not a crosshair.
+            // Don't show crosshair if pressing on a draggable level or bracket leg —
+            // the PendingDrag will resolve to a drag, not a crosshair.
             let over_draggable_level = hit_test_levels(annotations, y, &state.camera)
                 .map(|(id, _)| !annotations.iter().any(|a| a.id == id && a.locked))
                 .unwrap_or(false);
-            if over_draggable_level {
+            let over_bracket_leg =
+                hit_test_bracket_legs(annotations, y, &state.camera).is_some();
+            if over_draggable_level || over_bracket_leg {
                 state.crosshair.suppress();
                 #[allow(deprecated)]
                 {
@@ -722,6 +777,21 @@ fn handle_mouse_released(
         return vec![];
     }
 
+    // End bracket leg dragging on left mouse-up.
+    if matches!(
+        state.interaction_mode,
+        InteractionMode::DraggingBracketLeg { .. }
+    ) {
+        state.interaction_mode = InteractionMode::Idle;
+        state.drag_start = None;
+        state.crosshair.on_left_release();
+        #[allow(deprecated)]
+        {
+            state.left_mouse_down = false;
+        }
+        return vec![ChartAction::ClearCrosshair];
+    }
+
     // End LevelTool dragging on left mouse-up.
     if state.level_tool.is_dragging() {
         state.level_tool.mode = crate::level_tool::LevelToolMode::Idle;
@@ -781,6 +851,7 @@ fn handle_mouse_released(
         // Handled by the early return above; unreachable.
         InteractionMode::DraggingVolumeScale { .. } => {}
         InteractionMode::DraggingTimelineBorder { .. } => {}
+        InteractionMode::DraggingBracketLeg { .. } => {}
     }
 
     // Always return to Idle on mouse release.
@@ -1025,6 +1096,138 @@ fn hit_test_levels(
     }
 
     closest.map(|(id, _, offset)| (id, offset))
+}
+
+/// Default tick size for price snapping during bracket leg drags.
+/// Used to round dragged TP/SL prices to valid tick increments.
+/// Can be made configurable per-instrument in a future iteration.
+const DEFAULT_TICK_SIZE: f64 = 0.01;
+
+/// Snap a price to the nearest tick increment.
+///
+/// Returns `price` unchanged if `tick_size` is zero or negative.
+fn snap_to_tick(price: f64, tick_size: f64) -> f64 {
+    if tick_size <= 0.0 {
+        return price;
+    }
+    (price / tick_size).round() * tick_size
+}
+
+/// Clamp a bracket leg price so it stays on the correct side of entry.
+///
+/// - Long TP must be above entry; Long SL must be below entry.
+/// - Short TP must be below entry; Short SL must be above entry.
+///
+/// A small `MIN_OFFSET` prevents the leg from sitting exactly on the entry
+/// line (which would be zero-risk or zero-reward).
+fn clamp_bracket_leg_price(
+    raw_price: f64,
+    entry_price: f64,
+    leg: crate::widget::order_bracket::LegRole,
+    side: crate::widget::order_bracket::BracketSide,
+) -> f64 {
+    use crate::widget::order_bracket::{BracketSide, LegRole};
+
+    /// Minimum price offset from entry (prevents degenerate zero-width legs).
+    const MIN_OFFSET: f64 = 0.01;
+
+    match (side, leg) {
+        // Long TP must be above entry.
+        (BracketSide::Long, LegRole::TakeProfit) => raw_price.max(entry_price + MIN_OFFSET),
+        // Long SL must be below entry.
+        (BracketSide::Long, LegRole::StopLoss) => raw_price.min(entry_price - MIN_OFFSET),
+        // Short TP must be below entry.
+        (BracketSide::Short, LegRole::TakeProfit) => raw_price.min(entry_price - MIN_OFFSET),
+        // Short SL must be above entry.
+        (BracketSide::Short, LegRole::StopLoss) => raw_price.max(entry_price + MIN_OFFSET),
+        // Entry is not draggable — return as-is (should never reach here).
+        (_, LegRole::Entry) => raw_price,
+    }
+}
+
+/// Hit-test bracket TP/SL legs within `LEVEL_HIT_TOLERANCE_PX` of `cursor_y`.
+///
+/// Returns `Some((annotation_id, leg_role, grab_offset, entry_price, side))`
+/// for the closest bracket leg. Entry legs are excluded because they are not
+/// draggable (market orders fill instantly, entry is terminal).
+fn hit_test_bracket_legs(
+    annotations: &[crate::widget::Annotation],
+    cursor_y: f32,
+    camera: &crate::camera::Camera2D,
+) -> Option<(
+    AnnotationId,
+    crate::widget::order_bracket::LegRole,
+    f64,
+    f64,
+    crate::widget::order_bracket::BracketSide,
+)> {
+    let cursor_price = camera.y_to_price(cursor_y);
+    let mut closest: Option<(
+        AnnotationId,
+        crate::widget::order_bracket::LegRole,
+        f32,
+        f64,
+        f64,
+        crate::widget::order_bracket::BracketSide,
+    )> = None;
+
+    for ann in annotations {
+        if !ann.presence.is_interactive() || ann.locked {
+            continue;
+        }
+        let bracket = match &ann.kind {
+            crate::widget::AnnotationKind::OrderBracket(b) => b,
+            _ => continue,
+        };
+
+        // Check TP leg.
+        if let Some(ref tp) = bracket.take_profit {
+            let leg_y = camera.price_to_y(tp.price);
+            let dist = (cursor_y - leg_y).abs();
+            if dist <= LEVEL_HIT_TOLERANCE_PX {
+                let better = match closest {
+                    None => true,
+                    Some((_, _, prev_dist, _, _, _)) => dist < prev_dist,
+                };
+                if better {
+                    let offset = tp.price - cursor_price;
+                    closest = Some((
+                        ann.id,
+                        crate::widget::order_bracket::LegRole::TakeProfit,
+                        dist,
+                        offset,
+                        bracket.entry.price,
+                        bracket.side,
+                    ));
+                }
+            }
+        }
+
+        // Check SL leg.
+        if let Some(ref sl) = bracket.stop_loss {
+            let leg_y = camera.price_to_y(sl.price);
+            let dist = (cursor_y - leg_y).abs();
+            if dist <= LEVEL_HIT_TOLERANCE_PX {
+                let better = match closest {
+                    None => true,
+                    Some((_, _, prev_dist, _, _, _)) => dist < prev_dist,
+                };
+                if better {
+                    let offset = sl.price - cursor_price;
+                    closest = Some((
+                        ann.id,
+                        crate::widget::order_bracket::LegRole::StopLoss,
+                        dist,
+                        offset,
+                        bracket.entry.price,
+                        bracket.side,
+                    ));
+                }
+            }
+        }
+    }
+
+    closest.map(|(id, role, _, offset, entry, side)| (id, role, offset, entry, side))
 }
 
 #[cfg(test)]
@@ -2432,5 +2635,408 @@ mod tests {
         );
         assert_eq!(state.drag_start, None);
         assert_eq!(state.interaction_mode, InteractionMode::Idle);
+    }
+
+    // ── Bracket leg drag tests ──────────────────────────────────────
+
+    use crate::widget::order_bracket::{
+        BracketLeg, BracketSide, BracketStatus, LegRole, OrderBracket,
+    };
+
+    fn make_bracket_leg(price: f64) -> BracketLeg {
+        BracketLeg {
+            price,
+            timestamp: None,
+            color: None,
+            style: crate::widget::level::LineStyle::default(),
+            line_width: 1.0,
+            label: None,
+            projected_pnl: None,
+            projected_pnl_pct: None,
+        }
+    }
+
+    fn test_bracket_annotation(id: u64, entry: f64, tp: f64, sl: f64) -> Annotation {
+        Annotation {
+            id: AnnotationId(id),
+            kind: AnnotationKind::OrderBracket(OrderBracket {
+                entry: make_bracket_leg(entry),
+                take_profit: Some(make_bracket_leg(tp)),
+                stop_loss: Some(make_bracket_leg(sl)),
+                side: BracketSide::Long,
+                status: BracketStatus::Active,
+                quantity: Some(100.0),
+            }),
+            presence: Presence::Active,
+            visible_timeframes: None,
+            locked: false,
+            created_at: 0,
+            modified_at: 0,
+        }
+    }
+
+    #[test]
+    fn test_drag_bracket_leg_action_created() {
+        let action = ChartAction::DragBracketLeg {
+            annotation_id: AnnotationId(1),
+            leg: LegRole::TakeProfit,
+            new_price: 195.0,
+        };
+        match action {
+            ChartAction::DragBracketLeg { new_price, .. } => {
+                assert!((new_price - 195.0).abs() < f64::EPSILON);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_drag_bracket_leg_action_stop_loss() {
+        let action = ChartAction::DragBracketLeg {
+            annotation_id: AnnotationId(2),
+            leg: LegRole::StopLoss,
+            new_price: 178.0,
+        };
+        match action {
+            ChartAction::DragBracketLeg {
+                annotation_id,
+                leg,
+                new_price,
+            } => {
+                assert_eq!(annotation_id, AnnotationId(2));
+                assert_eq!(leg, LegRole::StopLoss);
+                assert!((new_price - 178.0).abs() < f64::EPSILON);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_clamp_bracket_leg_long_tp_above_entry() {
+        // Long TP dragged above entry stays above.
+        let clamped = clamp_bracket_leg_price(195.0, 185.0, LegRole::TakeProfit, BracketSide::Long);
+        assert!((clamped - 195.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_clamp_bracket_leg_long_tp_below_entry_clamped() {
+        // Long TP dragged below entry is clamped to just above entry.
+        let clamped = clamp_bracket_leg_price(180.0, 185.0, LegRole::TakeProfit, BracketSide::Long);
+        assert!(
+            clamped > 185.0,
+            "Long TP must be above entry, got {}",
+            clamped
+        );
+    }
+
+    #[test]
+    fn test_clamp_bracket_leg_long_sl_below_entry() {
+        // Long SL dragged below entry stays below.
+        let clamped = clamp_bracket_leg_price(175.0, 185.0, LegRole::StopLoss, BracketSide::Long);
+        assert!((clamped - 175.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_clamp_bracket_leg_long_sl_above_entry_clamped() {
+        // Long SL dragged above entry is clamped to just below entry.
+        let clamped = clamp_bracket_leg_price(190.0, 185.0, LegRole::StopLoss, BracketSide::Long);
+        assert!(
+            clamped < 185.0,
+            "Long SL must be below entry, got {}",
+            clamped
+        );
+    }
+
+    #[test]
+    fn test_clamp_bracket_leg_short_tp_below_entry() {
+        // Short TP dragged below entry stays below.
+        let clamped =
+            clamp_bracket_leg_price(175.0, 185.0, LegRole::TakeProfit, BracketSide::Short);
+        assert!((clamped - 175.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_clamp_bracket_leg_short_tp_above_entry_clamped() {
+        // Short TP dragged above entry is clamped to just below entry.
+        let clamped =
+            clamp_bracket_leg_price(190.0, 185.0, LegRole::TakeProfit, BracketSide::Short);
+        assert!(
+            clamped < 185.0,
+            "Short TP must be below entry, got {}",
+            clamped
+        );
+    }
+
+    #[test]
+    fn test_clamp_bracket_leg_short_sl_above_entry() {
+        // Short SL dragged above entry stays above.
+        let clamped = clamp_bracket_leg_price(195.0, 185.0, LegRole::StopLoss, BracketSide::Short);
+        assert!((clamped - 195.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_clamp_bracket_leg_short_sl_below_entry_clamped() {
+        // Short SL dragged below entry is clamped to just above entry.
+        let clamped = clamp_bracket_leg_price(180.0, 185.0, LegRole::StopLoss, BracketSide::Short);
+        assert!(
+            clamped > 185.0,
+            "Short SL must be above entry, got {}",
+            clamped
+        );
+    }
+
+    #[test]
+    fn hit_test_bracket_legs_finds_tp() {
+        let state = test_state();
+        // camera: price_low=100, price_high=200, viewport_height=1080
+        let bracket = test_bracket_annotation(10, 150.0, 170.0, 130.0);
+        let tp_y = state.camera.price_to_y(170.0);
+
+        let result = hit_test_bracket_legs(&[bracket], tp_y, &state.camera);
+        assert!(result.is_some(), "should hit TP leg");
+        let (id, role, _, _, _) = result.unwrap();
+        assert_eq!(id, AnnotationId(10));
+        assert_eq!(role, LegRole::TakeProfit);
+    }
+
+    #[test]
+    fn hit_test_bracket_legs_finds_sl() {
+        let state = test_state();
+        let bracket = test_bracket_annotation(10, 150.0, 170.0, 130.0);
+        let sl_y = state.camera.price_to_y(130.0);
+
+        let result = hit_test_bracket_legs(&[bracket], sl_y, &state.camera);
+        assert!(result.is_some(), "should hit SL leg");
+        let (id, role, _, _, _) = result.unwrap();
+        assert_eq!(id, AnnotationId(10));
+        assert_eq!(role, LegRole::StopLoss);
+    }
+
+    #[test]
+    fn hit_test_bracket_legs_misses_entry() {
+        let state = test_state();
+        let bracket = test_bracket_annotation(10, 150.0, 170.0, 130.0);
+        let entry_y = state.camera.price_to_y(150.0);
+
+        // Entry line should NOT be hit-testable for bracket leg drags.
+        let result = hit_test_bracket_legs(&[bracket], entry_y, &state.camera);
+        assert!(result.is_none(), "entry should not be draggable");
+    }
+
+    #[test]
+    fn hit_test_bracket_legs_skips_locked() {
+        let state = test_state();
+        let mut bracket = test_bracket_annotation(10, 150.0, 170.0, 130.0);
+        bracket.locked = true;
+        let tp_y = state.camera.price_to_y(170.0);
+
+        let result = hit_test_bracket_legs(&[bracket], tp_y, &state.camera);
+        assert!(result.is_none(), "locked bracket legs should not be hit");
+    }
+
+    #[test]
+    fn hit_test_bracket_legs_skips_ghost() {
+        let state = test_state();
+        let mut bracket = test_bracket_annotation(10, 150.0, 170.0, 130.0);
+        bracket.presence = Presence::Ghost;
+        let tp_y = state.camera.price_to_y(170.0);
+
+        let result = hit_test_bracket_legs(&[bracket], tp_y, &state.camera);
+        assert!(result.is_none(), "ghost bracket legs should not be hit");
+    }
+
+    #[test]
+    fn pending_drag_transitions_to_dragging_bracket_leg() {
+        let mut state = test_state();
+        // Place bracket with TP at price 170 (well above price_low=100).
+        let bracket = test_bracket_annotation(10, 150.0, 170.0, 130.0);
+        let tp_y = state.camera.price_to_y(170.0);
+        let annotations = [bracket];
+
+        // Press left button on TP line.
+        handle_event(
+            &mut state,
+            ChartEvent::MousePressed {
+                x: 500.0,
+                y: tp_y,
+                button: MouseButton::Left,
+                alt_held: false,
+            },
+            None,
+            false,
+            &annotations,
+        );
+        assert!(
+            matches!(state.interaction_mode, InteractionMode::PendingDrag { .. }),
+            "should enter PendingDrag, got {:?}",
+            state.interaction_mode
+        );
+
+        // Move past drag threshold (>4px).
+        let actions = handle_event(
+            &mut state,
+            ChartEvent::MouseMoved {
+                x: 500.0,
+                y: tp_y + 10.0,
+                alt_held: false,
+            },
+            None,
+            false,
+            &annotations,
+        );
+
+        assert!(
+            matches!(
+                state.interaction_mode,
+                InteractionMode::DraggingBracketLeg { .. }
+            ),
+            "should transition to DraggingBracketLeg, got {:?}",
+            state.interaction_mode
+        );
+        // Should emit ClearCrosshair (crosshair suppressed during drag).
+        assert!(
+            actions.iter().any(|a| *a == ChartAction::ClearCrosshair),
+            "should emit ClearCrosshair"
+        );
+    }
+
+    #[test]
+    fn dragging_bracket_leg_emits_drag_action() {
+        let mut state = test_state();
+        let bracket = test_bracket_annotation(10, 150.0, 170.0, 130.0);
+        let tp_y = state.camera.price_to_y(170.0);
+        let annotations = [bracket];
+
+        // Press and drag past threshold to enter DraggingBracketLeg.
+        handle_event(
+            &mut state,
+            ChartEvent::MousePressed {
+                x: 500.0,
+                y: tp_y,
+                button: MouseButton::Left,
+                alt_held: false,
+            },
+            None,
+            false,
+            &annotations,
+        );
+        handle_event(
+            &mut state,
+            ChartEvent::MouseMoved {
+                x: 500.0,
+                y: tp_y + 10.0,
+                alt_held: false,
+            },
+            None,
+            false,
+            &annotations,
+        );
+        assert!(matches!(
+            state.interaction_mode,
+            InteractionMode::DraggingBracketLeg { .. }
+        ));
+
+        // Continue dragging — should emit DragBracketLeg action.
+        let actions = handle_event(
+            &mut state,
+            ChartEvent::MouseMoved {
+                x: 500.0,
+                y: tp_y + 20.0,
+                alt_held: false,
+            },
+            None,
+            false,
+            &annotations,
+        );
+
+        let has_drag = actions.iter().any(|a| {
+            matches!(
+                a,
+                ChartAction::DragBracketLeg {
+                    annotation_id: AnnotationId(10),
+                    leg: LegRole::TakeProfit,
+                    ..
+                }
+            )
+        });
+        assert!(has_drag, "should emit DragBracketLeg, got: {:?}", actions);
+    }
+
+    #[test]
+    fn releasing_bracket_leg_drag_returns_to_idle() {
+        let mut state = test_state();
+        let bracket = test_bracket_annotation(10, 150.0, 170.0, 130.0);
+        let tp_y = state.camera.price_to_y(170.0);
+        let annotations = [bracket];
+
+        // Press, drag past threshold, then release.
+        handle_event(
+            &mut state,
+            ChartEvent::MousePressed {
+                x: 500.0,
+                y: tp_y,
+                button: MouseButton::Left,
+                alt_held: false,
+            },
+            None,
+            false,
+            &annotations,
+        );
+        handle_event(
+            &mut state,
+            ChartEvent::MouseMoved {
+                x: 500.0,
+                y: tp_y + 10.0,
+                alt_held: false,
+            },
+            None,
+            false,
+            &annotations,
+        );
+        assert!(matches!(
+            state.interaction_mode,
+            InteractionMode::DraggingBracketLeg { .. }
+        ));
+
+        // Release.
+        let actions = handle_event(
+            &mut state,
+            ChartEvent::MouseReleased {
+                x: 500.0,
+                y: tp_y + 20.0,
+                button: MouseButton::Left,
+                alt_held: false,
+            },
+            None,
+            false,
+            &annotations,
+        );
+
+        assert_eq!(
+            state.interaction_mode,
+            InteractionMode::Idle,
+            "should return to Idle"
+        );
+        assert!(
+            actions.iter().any(|a| *a == ChartAction::ClearCrosshair),
+            "should emit ClearCrosshair on release"
+        );
+    }
+
+    #[test]
+    fn apply_drag_bracket_leg_marks_dirty() {
+        let mut state = test_state();
+        let gen_before = state.dirty.candles;
+
+        state.apply_action(&ChartAction::DragBracketLeg {
+            annotation_id: AnnotationId(1),
+            leg: LegRole::TakeProfit,
+            new_price: 195.0,
+        });
+
+        assert!(
+            state.dirty.candles > gen_before,
+            "DragBracketLeg should mark data dirty"
+        );
     }
 }

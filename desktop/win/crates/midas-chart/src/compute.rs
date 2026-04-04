@@ -225,6 +225,7 @@ fn compute_normal_scene(
     let y_labels = compute_y_labels(camera);
     let x_labels = compute_x_labels(camera, candle_duration);
     let levels = compute_levels(input.annotations, camera);
+    let widget_output = compute_widget_annotations(input.annotations, camera, input);
     let crosshair = compute_crosshair_impl(input.crosshair, data, camera, input.symbol, &|cx| {
         let cursor_time = camera.x_to_time(cx);
         let idx = data.find_index_by_time(cursor_time as i64);
@@ -274,6 +275,7 @@ fn compute_normal_scene(
         separator_y,
         date_labels,
         volume_profile_instances,
+        widget_output,
         generations: SceneGenerations {
             candles: input.dirty.candles,
             camera: input.dirty.camera,
@@ -372,6 +374,7 @@ fn compute_collapsed_scene(
     );
 
     let levels = compute_levels(input.annotations, camera);
+    let widget_output = compute_widget_annotations(input.annotations, camera, input);
 
     // Crosshair in collapsed mode: convert cursor X to the nearest candle index.
     let crosshair = compute_crosshair_impl(input.crosshair, data, camera, input.symbol, &|cx| {
@@ -435,6 +438,7 @@ fn compute_collapsed_scene(
         separator_y,
         date_labels,
         volume_profile_instances,
+        widget_output,
         generations: SceneGenerations {
             candles: input.dirty.candles,
             camera: input.dirty.camera,
@@ -1052,6 +1056,56 @@ fn compute_levels(
             }
         })
         .collect()
+}
+
+/// Compute merged `WidgetOutput` for all non-level annotations.
+///
+/// Walks the annotation slice, dispatches to the appropriate widget
+/// compute function (currently `OrderBracket`), and merges all outputs
+/// into a single `WidgetOutput`.
+fn compute_widget_annotations(
+    annotations: &[crate::widget::Annotation],
+    camera: &Camera2D,
+    input: &ChartInput<'_>,
+) -> crate::widget::WidgetOutput {
+    use crate::widget::compute::{ComputeContext, Viewport};
+    use crate::widget::order_bracket::compute_bracket;
+    use crate::widget::theme::Theme;
+    use crate::widget::WidgetOutput;
+
+    let ctx = ComputeContext {
+        camera,
+        data: input.data,
+        viewport: Viewport {
+            width: input.viewport_width,
+            height: input.viewport_height,
+        },
+        theme: &Theme::default(),
+        snap_fn: &|_y| None, // bracket compute does not use snap
+        candle_duration_ms: estimate_candle_duration(input.data),
+        collapse_gaps: input.collapse_gaps,
+        separator_y: input.viewport_height as f32 * (1.0 - input.timeline_border_ratio),
+        dpi_scale: input.dpi_scale,
+    };
+
+    let mut merged = WidgetOutput::default();
+
+    for ann in annotations {
+        if !ann.presence.is_visible() {
+            continue;
+        }
+        let alpha = ann.presence.alpha();
+        match &ann.kind {
+            crate::widget::AnnotationKind::OrderBracket(bracket) => {
+                let out = compute_bracket(bracket, ann.id, &ctx, alpha);
+                merged.merge(out);
+            }
+            // Level is handled by compute_levels(); other kinds are future work.
+            _ => {}
+        }
+    }
+
+    merged
 }
 
 /// Format a timestamp as a long date/time string (e.g. "Fri 3/27/26 02:40:00 PM").

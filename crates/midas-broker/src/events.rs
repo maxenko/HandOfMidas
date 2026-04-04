@@ -2,6 +2,9 @@ use chrono::{DateTime, Utc};
 use midas_core::SymbolKey;
 use uuid::Uuid;
 
+use crate::orders::bracket::BracketLifecycleStatus;
+use crate::orders::types::OrderAction;
+
 /// Every event the broker engine can emit.
 /// Sent over broadcast channels to consumers (UI, logger, strategy).
 #[derive(Clone, Debug)]
@@ -55,6 +58,31 @@ pub enum BrokerEvent {
         order_id: Uuid,
         code: i32,
         message: String,
+    },
+
+    /// A command was rejected due to local validation (not an IB error).
+    OrderValidationFailed {
+        message: String,
+        /// Negative code to distinguish from IB error codes.
+        code: i32,
+    },
+
+    // ── Brackets ────────────────────────────────────────────────────────────
+    /// A market bracket was created and submitted.
+    BracketCreated {
+        parent_id: Uuid,
+        take_profit_id: Option<Uuid>,
+        stop_loss_id: Option<Uuid>,
+        symbol: String,
+        action: OrderAction,
+        quantity: f64,
+    },
+    /// A bracket's lifecycle status changed (derived from leg statuses).
+    BracketStatusChanged {
+        parent_id: Uuid,
+        status: BracketLifecycleStatus,
+        /// Fill price of the parent (available after entry fill).
+        entry_fill_price: Option<f64>,
     },
 
     // ── Market Data: L1 ─────────────────────────────────────────────────────

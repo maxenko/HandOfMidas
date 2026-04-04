@@ -23,9 +23,11 @@ use midas_core::{CandleBuffer, ChartId, DataProvider, LinkMode, Timeframe, Watch
 
 use crate::registry::ProviderRegistry;
 
+use crate::annotation_store::AnnotationStore;
 use crate::layout::{LayoutPresetKind, PanelContent, WorkspaceLayout};
 use crate::level_store::LevelStore;
 use crate::link::{LinkDimension, PickerTarget};
+use crate::order_panel::{OrderPanelState, OrderSide, PriceInputMode, StopLossType};
 use crate::watchlist::WatchlistPanel;
 
 // ── Load state ────────────────────────────────────────────────────────
@@ -133,6 +135,19 @@ pub struct MidasApp {
     pub link_picker_open: Option<(PickerTarget, LinkDimension)>,
     /// Active column resize: (watchlist_id, column_index, start_x, original_width).
     pub resizing_column: Option<(WatchlistId, usize, f32, f32)>,
+    /// Order entry panel state.
+    pub order_panel: OrderPanelState,
+    /// Links between chart bracket annotations and broker orders,
+    /// keyed by the parent (entry) order UUID for O(1) lookup.
+    pub order_annotation_links: HashMap<uuid::Uuid, crate::order_panel::OrderAnnotationLink>,
+    /// Toast notification message (shown briefly, then auto-dismissed).
+    pub toast_message: Option<String>,
+    /// When the current toast was created. Used for auto-dismiss timing.
+    pub toast_created_at: Option<Instant>,
+    /// Bracket context menu state: (chart_id, annotation_id, leg_role, screen_x, screen_y).
+    pub bracket_context_menu: Option<(ChartId, u64, midas_chart::widget::order_bracket::LegRole, f32, f32)>,
+    /// Centralized per-symbol annotation store (order brackets, levels, etc.).
+    pub annotation_store: AnnotationStore,
 }
 
 /// State for an in-progress ticker drag from a watchlist to a chart.
@@ -335,6 +350,76 @@ pub enum Message {
     ToggleLinkPicker(PickerTarget, LinkDimension),
     /// Dismiss any open link picker.
     DismissLinkPicker,
+
+    // -- Order panel --
+    /// Toggle the order panel visibility.
+    OrderPanelToggle,
+    /// Set the order side (Buy/Sell).
+    OrderPanelSetSide(OrderSide),
+    /// Update the quantity input text.
+    OrderPanelSetQuantity(String),
+    /// Toggle Take Profit enabled.
+    OrderPanelToggleTp(bool),
+    /// Set TP price input mode.
+    OrderPanelSetTpMode(PriceInputMode),
+    /// Update TP value input text.
+    OrderPanelSetTpValue(String),
+    /// Toggle Stop Loss enabled.
+    OrderPanelToggleSl(bool),
+    /// Set SL price input mode.
+    OrderPanelSetSlMode(PriceInputMode),
+    /// Update SL value input text.
+    OrderPanelSetSlValue(String),
+    /// Set SL type (Stop vs StopLimit).
+    OrderPanelSetSlType(StopLossType),
+    /// Update SL limit price input text.
+    OrderPanelSetSlLimit(String),
+    /// Submit the order (triggers confirmation dialog).
+    OrderPanelSubmit,
+    /// User confirmed the order in the confirmation dialog.
+    OrderPanelConfirmYes,
+    /// User cancelled the confirmation dialog.
+    OrderPanelConfirmNo,
+    /// Dismiss the order panel.
+    OrderPanelDismiss,
+
+    // -- Bracket drag --
+    /// A bracket leg was dragged on a chart.
+    ChartDragBracketLeg(ChartId, u64, midas_chart::widget::order_bracket::LegRole, f64),
+
+    // -- Bracket context menu --
+    /// Right-click on a bracket leg — show context menu.
+    ChartBracketContextMenu(ChartId, u64, midas_chart::widget::order_bracket::LegRole, f32, f32),
+    /// Cancel a bracket from the context menu.
+    BracketContextCancel(uuid::Uuid),
+    /// Dismiss the bracket context menu.
+    BracketContextDismiss,
+
+    // -- Broker bracket events --
+    /// A bracket was created by the broker engine (or order panel submit).
+    BrokerBracketCreated {
+        parent_id: uuid::Uuid,
+        take_profit_id: Option<uuid::Uuid>,
+        stop_loss_id: Option<uuid::Uuid>,
+        symbol: String,
+        action: midas_chart::widget::order_bracket::BracketSide,
+        quantity: f64,
+        entry_price: Option<f64>,
+        tp_price: Option<f64>,
+        sl_price: Option<f64>,
+    },
+    /// A bracket's status changed (broker lifecycle update).
+    BrokerBracketStatusChanged {
+        parent_id: uuid::Uuid,
+        status: midas_chart::widget::order_bracket::BracketStatus,
+        entry_fill_price: Option<f64>,
+    },
+
+    // -- Toast notifications --
+    /// Show a toast notification.
+    ShowToast(String),
+    /// Dismiss the current toast (auto or manual).
+    DismissToast,
 
     // -- Window --
     /// Periodic tick for animations and status bar clock.
@@ -588,7 +673,34 @@ impl MidasApp {
             dragging_ticker: None,
             link_picker_open: None,
             resizing_column: None,
+            order_panel: OrderPanelState::default(),
+            order_annotation_links: HashMap::new(),
+            toast_message: None,
+            toast_created_at: None,
+            bracket_context_menu: None,
+            annotation_store: AnnotationStore::new(),
         };
+
+        // Restore bracket annotations from persistence.
+        let data_dir = app
+            .config_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        match crate::annotation_persistence::load_all(data_dir) {
+            Ok(files) => {
+                let loaded_count: usize = files.values().map(|v| v.len()).sum();
+                if loaded_count > 0 {
+                    app.annotation_store =
+                        crate::annotation_persistence::store_from_files(files);
+                    tracing::info!(
+                        "Restored {loaded_count} annotation(s) from persistence"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load persisted annotations: {e}");
+            }
+        }
 
         // Async-load data for all restored charts that have a symbol.
         let mut load_tasks: Vec<Task<Message>> = Vec::new();
@@ -2296,7 +2408,370 @@ impl MidasApp {
                 Task::none()
             }
 
-            Message::Tick => self.maybe_save_config(),
+            // -- Order panel --
+            Message::OrderPanelToggle => {
+                self.order_panel.visible = !self.order_panel.visible;
+                if self.order_panel.visible {
+                    // Populate from focused chart (not arbitrary)
+                    let focused = self.active_chart_id();
+                    if let Some(panel) = focused.and_then(|id| self.charts.get(&id)) {
+                        self.order_panel.symbol = panel.symbol.clone();
+                        self.order_panel.source_chart = focused;
+                        // Get last price from chart data
+                        if let Some(ref data) = panel.data {
+                            use midas_core::CandleData;
+                            let len = data.len();
+                            if len > 0 {
+                                self.order_panel.last_price = Some(data.close(len - 1) as f64);
+                            }
+                        }
+                    }
+                }
+                Task::none()
+            }
+            Message::OrderPanelSetSide(side) => {
+                self.order_panel.side = side;
+                Task::none()
+            }
+            Message::OrderPanelSetQuantity(qty) => {
+                self.order_panel.quantity = qty;
+                Task::none()
+            }
+            Message::OrderPanelToggleTp(enabled) => {
+                self.order_panel.tp_enabled = enabled;
+                Task::none()
+            }
+            Message::OrderPanelSetTpMode(mode) => {
+                self.order_panel.tp_mode = mode;
+                Task::none()
+            }
+            Message::OrderPanelSetTpValue(val) => {
+                self.order_panel.tp_value = val;
+                Task::none()
+            }
+            Message::OrderPanelToggleSl(enabled) => {
+                self.order_panel.sl_enabled = enabled;
+                Task::none()
+            }
+            Message::OrderPanelSetSlMode(mode) => {
+                self.order_panel.sl_mode = mode;
+                Task::none()
+            }
+            Message::OrderPanelSetSlValue(val) => {
+                self.order_panel.sl_value = val;
+                Task::none()
+            }
+            Message::OrderPanelSetSlType(sl_type) => {
+                self.order_panel.sl_type = sl_type;
+                Task::none()
+            }
+            Message::OrderPanelSetSlLimit(val) => {
+                self.order_panel.sl_limit_value = val;
+                Task::none()
+            }
+            Message::OrderPanelSubmit => {
+                // Validate first
+                let errors = crate::order_panel::validate_panel(&self.order_panel);
+                if !errors.is_empty() {
+                    self.order_panel.errors = errors;
+                    return Task::none();
+                }
+                self.order_panel.errors.clear();
+                // Show confirmation dialog instead of submitting directly
+                self.order_panel.showing_confirmation = true;
+                Task::none()
+            }
+
+            Message::OrderPanelConfirmYes => {
+                self.order_panel.showing_confirmation = false;
+
+                // Build params (would send to broker bridge in production)
+                let panel = &self.order_panel;
+                let last_price = panel.last_price.unwrap_or(0.0);
+                tracing::info!(
+                    "Order confirmed: {} {} {} (TP: {}, SL: {})",
+                    match panel.side { OrderSide::Buy => "BUY", OrderSide::Sell => "SELL" },
+                    panel.quantity,
+                    panel.symbol,
+                    panel.tp_enabled,
+                    panel.sl_enabled,
+                );
+
+                // Resolve TP/SL prices from panel inputs.
+                let tp_price = if panel.tp_enabled {
+                    panel.tp_value.parse::<f64>().ok().map(|val| {
+                        crate::order_panel::resolve_price(
+                            panel.tp_mode, val, last_price, panel.side, true,
+                        )
+                    })
+                } else {
+                    None
+                };
+                let sl_price = if panel.sl_enabled {
+                    panel.sl_value.parse::<f64>().ok().map(|val| {
+                        crate::order_panel::resolve_price(
+                            panel.sl_mode, val, last_price, panel.side, false,
+                        )
+                    })
+                } else {
+                    None
+                };
+
+                let action = match panel.side {
+                    OrderSide::Buy => midas_chart::widget::order_bracket::BracketSide::Long,
+                    OrderSide::Sell => midas_chart::widget::order_bracket::BracketSide::Short,
+                };
+                let quantity: f64 = panel.quantity.parse().unwrap_or(100.0);
+                let symbol = panel.symbol.clone();
+
+                // Broker bridge not yet wired — order is visualized but not submitted.
+                tracing::warn!(
+                    "Broker bridge not connected: CreateMarketBracket for {} not sent",
+                    panel.symbol,
+                );
+                self.status_message = format!(
+                    "Order submitted: {} {} {}",
+                    match panel.side { OrderSide::Buy => "BUY", OrderSide::Sell => "SELL" },
+                    panel.quantity,
+                    panel.symbol,
+                );
+
+                self.order_panel.visible = false;
+
+                // Create chart annotation via self-message so the bracket is
+                // visible on all charts displaying this symbol.
+                return self.update(Message::BrokerBracketCreated {
+                    parent_id: uuid::Uuid::now_v7(),
+                    take_profit_id: tp_price.map(|_| uuid::Uuid::now_v7()),
+                    stop_loss_id: sl_price.map(|_| uuid::Uuid::now_v7()),
+                    symbol,
+                    action,
+                    quantity,
+                    entry_price: Some(last_price),
+                    tp_price,
+                    sl_price,
+                });
+            }
+
+            Message::OrderPanelConfirmNo => {
+                self.order_panel.showing_confirmation = false;
+                Task::none()
+            }
+
+            Message::OrderPanelDismiss => {
+                self.order_panel.visible = false;
+                self.order_panel.showing_confirmation = false;
+                self.order_panel.errors.clear();
+                Task::none()
+            }
+
+            // -- Bracket drag --
+            Message::ChartDragBracketLeg(chart_id, annotation_id, leg, new_price) => {
+                use midas_chart::widget::order_bracket::LegRole;
+
+                // Entry legs are not draggable (market orders fill instantly).
+                if leg == LegRole::Entry {
+                    tracing::warn!("Attempted to drag entry leg — entry is not draggable");
+                    return Task::none();
+                }
+
+                let ann_id = AnnotationId(annotation_id);
+
+                // Resolve the ticker for this chart so we can look up the
+                // annotation in the per-symbol store.
+                let ticker = self.chart_ticker(chart_id).map(str::to_owned);
+                if let Some(ref ticker) = ticker {
+                    let updated = self.annotation_store.update(
+                        ticker,
+                        ann_id,
+                        |ann| {
+                            if let midas_chart::widget::AnnotationKind::OrderBracket(
+                                ref mut bracket,
+                            ) = ann.kind
+                            {
+                                match leg {
+                                    LegRole::Entry => {
+                                        // Unreachable: guarded by early return above.
+                                        bracket.entry.price = new_price;
+                                    }
+                                    LegRole::TakeProfit => {
+                                        if let Some(ref mut tp) = bracket.take_profit {
+                                            tp.price = new_price;
+                                        }
+                                    }
+                                    LegRole::StopLoss => {
+                                        if let Some(ref mut sl) = bracket.stop_loss {
+                                            sl.price = new_price;
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                    );
+                    if updated {
+                        tracing::debug!(
+                            "Bracket leg drag: chart={chart_id:?} ann={annotation_id} \
+                             leg={leg:?} price={new_price:.4}"
+                        );
+                        // Mark levels dirty on all charts showing this symbol
+                        // so the GPU re-renders the bracket lines.
+                        self.mark_levels_dirty_for_ticker(ticker);
+                    } else {
+                        tracing::warn!(
+                            "Bracket leg drag: annotation {annotation_id} not found \
+                             for symbol {ticker}"
+                        );
+                    }
+                }
+                Task::none()
+            }
+
+            // -- Bracket context menu --
+            Message::ChartBracketContextMenu(chart_id, ann_id, leg, x, y) => {
+                self.bracket_context_menu = Some((chart_id, ann_id, leg, x, y));
+                Task::none()
+            }
+            Message::BracketContextCancel(parent_id) => {
+                self.bracket_context_menu = None;
+                // Find and remove the bracket annotation link
+                if let Some(link) = self.order_annotation_links.remove(&parent_id) {
+                    // Update annotation to Cancelled before removing the link
+                    let ann_id = midas_chart::AnnotationId(link.annotation_id);
+                    self.annotation_store.update(&link.symbol, ann_id, |ann| {
+                        if let midas_chart::widget::AnnotationKind::OrderBracket(ref mut b) = ann.kind {
+                            b.status = midas_chart::widget::order_bracket::BracketStatus::Cancelled;
+                        }
+                    });
+                    self.mark_levels_dirty_for_ticker(&link.symbol);
+                    tracing::info!("Bracket {} cancelled from context menu", link.parent_order_id);
+                    // Broker bridge not yet wired — cancellation is visual only.
+                    tracing::warn!(
+                        "Broker bridge not connected: CancelBracket for {} not sent",
+                        parent_id,
+                    );
+                }
+                self.toast_message = Some("Bracket cancelled".to_string());
+                self.toast_created_at = Some(Instant::now());
+                Task::none()
+            }
+            Message::BracketContextDismiss => {
+                self.bracket_context_menu = None;
+                Task::none()
+            }
+
+            // -- Broker bracket events --
+            Message::BrokerBracketCreated {
+                parent_id,
+                take_profit_id,
+                stop_loss_id,
+                symbol,
+                action,
+                quantity,
+                entry_price,
+                tp_price,
+                sl_price,
+            } => {
+                let entry = entry_price.unwrap_or(0.0);
+                let bracket = crate::order_panel::create_bracket_annotation(
+                    action, entry, tp_price, sl_price, quantity,
+                );
+
+                // Add the annotation to the centralized store for this symbol.
+                let annotation_id = self.annotation_store.add(
+                    &symbol,
+                    midas_chart::widget::AnnotationKind::OrderBracket(bracket),
+                );
+
+                // Store the mapping from annotation to broker order IDs.
+                let link = crate::order_panel::OrderAnnotationLink {
+                    annotation_id: annotation_id.0,
+                    parent_order_id: parent_id,
+                    tp_order_id: take_profit_id,
+                    sl_order_id: stop_loss_id,
+                    symbol: symbol.clone(),
+                };
+                self.order_annotation_links.insert(link.parent_order_id, link);
+
+                tracing::info!(
+                    "Bracket annotation created: {annotation_id} for {symbol} \
+                     (parent={parent_id}, entry={entry:.2})"
+                );
+
+                self.status_message = format!(
+                    "Bracket annotation {annotation_id} created for {symbol}"
+                );
+                Task::none()
+            }
+
+            Message::BrokerBracketStatusChanged {
+                parent_id,
+                status,
+                entry_fill_price,
+            } => {
+                // Find the annotation link by parent broker order ID.
+                if let Some(link) = self
+                    .order_annotation_links
+                    .get(&parent_id)
+                    .cloned()
+                {
+                    let ann_id = midas_chart::widget::AnnotationId(link.annotation_id);
+                    let updated = self.annotation_store.update(
+                        &link.symbol,
+                        ann_id,
+                        |ann| {
+                            if let midas_chart::widget::AnnotationKind::OrderBracket(
+                                ref mut bracket,
+                            ) = ann.kind
+                            {
+                                bracket.status = status;
+                                if let Some(fill_price) = entry_fill_price {
+                                    bracket.entry.price = fill_price;
+                                }
+                            }
+                        },
+                    );
+                    if updated {
+                        tracing::info!(
+                            "Bracket {ann_id} status -> {status:?} \
+                             (parent={parent_id})"
+                        );
+                    } else {
+                        tracing::warn!(
+                            "Bracket annotation {ann_id} not found in store for \
+                             symbol {} (parent={parent_id})",
+                            link.symbol
+                        );
+                    }
+                } else {
+                    tracing::warn!(
+                        "No annotation link found for parent_id={parent_id}"
+                    );
+                }
+                Task::none()
+            }
+
+            // -- Toast notifications --
+            Message::ShowToast(msg) => {
+                self.toast_message = Some(msg);
+                self.toast_created_at = Some(Instant::now());
+                Task::none()
+            }
+            Message::DismissToast => {
+                self.toast_message = None;
+                self.toast_created_at = None;
+                Task::none()
+            }
+
+            Message::Tick => {
+                // Auto-dismiss toast after 4 seconds.
+                if let (Some(_toast), Some(created)) = (&self.toast_message, self.toast_created_at) {
+                    if created.elapsed() > std::time::Duration::from_secs(4) {
+                        self.toast_message = None;
+                        self.toast_created_at = None;
+                    }
+                }
+                self.maybe_save_config()
+            }
         }
     }
 
@@ -2316,12 +2791,39 @@ impl MidasApp {
                 "h" | "H" => {
                     self.level_placing = !self.level_placing;
                 }
+                "t" | "T" => {
+                    // Toggle order panel with full population (same as OrderPanelToggle)
+                    self.order_panel.visible = !self.order_panel.visible;
+                    if self.order_panel.visible {
+                        let focused = self.active_chart_id();
+                        if let Some(panel) = focused.and_then(|id| self.charts.get(&id)) {
+                            self.order_panel.symbol = panel.symbol.clone();
+                            self.order_panel.source_chart = focused;
+                            if let Some(ref data) = panel.data {
+                                use midas_core::CandleData;
+                                let len = data.len();
+                                if len > 0 {
+                                    self.order_panel.last_price =
+                                        Some(data.close(len - 1) as f64);
+                                }
+                            }
+                        }
+                    }
+                }
                 _ => {}
             },
             Key::Named(Named::Escape) => {
                 self.link_picker_open = None;
                 self.level_placing = false;
                 self.placing_preview = None;
+                self.bracket_context_menu = None;
+                self.toast_message = None;
+                self.toast_created_at = None;
+                if self.order_panel.visible {
+                    self.order_panel.visible = false;
+                    self.order_panel.showing_confirmation = false;
+                    self.order_panel.errors.clear();
+                }
                 if self.dragging_ticker.is_some() {
                     self.dragging_ticker = None;
                     self.status_message = "Drag cancelled".into();

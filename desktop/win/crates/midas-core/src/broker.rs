@@ -1,0 +1,191 @@
+//! Broker bridge types for the desktop workspace.
+//!
+//! These types mirror their counterparts in `crates/midas-broker/src/orders/`.
+//! The desktop workspace cannot depend on midas-broker (which depends on ibapi).
+//! Changes to either side must be kept in sync manually.
+
+use serde::{Deserialize, Serialize};
+
+// ===========================================================================
+// MIRROR OF: crates/midas-broker/src/orders/types.rs::OrderAction
+// ===========================================================================
+
+/// Direction of an order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum OrderAction {
+    Buy,
+    Sell,
+}
+
+impl std::fmt::Display for OrderAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Buy => f.write_str("BUY"),
+            Self::Sell => f.write_str("SELL"),
+        }
+    }
+}
+
+// ===========================================================================
+// MIRROR OF: crates/midas-broker/src/orders/types.rs::TimeInForce
+// ===========================================================================
+
+/// Time-in-force qualifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TimeInForce {
+    Day,
+    Gtc,
+    Ioc,
+    Gtd,
+    Opg,
+}
+
+// ===========================================================================
+// MIRROR OF: crates/midas-broker/src/orders/bracket.rs::MarketBracketParams
+// ===========================================================================
+
+/// Parameters for creating a Market Order bracket (desktop mirror).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketBracketParams {
+    pub symbol: String,
+    pub con_id: Option<i32>,
+    pub sec_type: crate::SecurityType,
+    pub exchange: String,
+    pub currency: String,
+    pub action: OrderAction,
+    pub quantity: f64,
+    pub outside_rth: bool,
+    pub take_profit: Option<TakeProfitParams>,
+    pub stop_loss: Option<StopLossParams>,
+    pub reference_price: Option<f64>,
+    pub strategy: Option<String>,
+    pub tags: Vec<String>,
+}
+
+/// Take profit configuration (desktop mirror).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TakeProfitParams {
+    pub price: f64,
+    pub tif: Option<TimeInForce>,
+}
+
+/// Stop loss configuration (desktop mirror).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StopLossParams {
+    pub stop_price: f64,
+    pub limit_price: Option<f64>,
+    pub tif: Option<TimeInForce>,
+}
+
+// ===========================================================================
+// MIRROR OF: crates/midas-broker/src/orders/bracket.rs::BracketLifecycleStatus
+// ===========================================================================
+
+/// Bracket lifecycle status (desktop mirror).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum BracketLifecycleStatus {
+    Submitted,
+    EntryFilled,
+    TakeProfitHit,
+    StopLossHit,
+    Cancelled,
+    Rejected,
+    Error,
+    Closed,
+}
+
+// ===========================================================================
+// Broker Events (desktop-side)
+// ===========================================================================
+
+/// Bracket events received by the desktop app from the broker engine.
+#[derive(Debug, Clone)]
+pub enum BracketEvent {
+    Created {
+        parent_id: uuid::Uuid,
+        take_profit_id: Option<uuid::Uuid>,
+        stop_loss_id: Option<uuid::Uuid>,
+        symbol: String,
+        action: OrderAction,
+        quantity: f64,
+    },
+    StatusChanged {
+        parent_id: uuid::Uuid,
+        status: BracketLifecycleStatus,
+        entry_fill_price: Option<f64>,
+    },
+}
+
+// ===========================================================================
+// OrderBroker trait
+// ===========================================================================
+
+/// Trait for broker order operations. The desktop workspace defines the
+/// interface; the root workspace provides the implementation.
+pub trait OrderBroker: Send + Sync {
+    /// Connection info
+    fn name(&self) -> &str;
+    fn is_connected(&self) -> bool;
+
+    /// Create and submit a market bracket order.
+    fn create_market_bracket(&self, params: MarketBracketParams) -> Result<(), String>;
+
+    /// Cancel an entire bracket.
+    fn cancel_bracket(&self, parent_id: uuid::Uuid) -> Result<(), String>;
+
+    /// Modify a bracket leg's price.
+    fn modify_bracket_leg(&self, order_id: uuid::Uuid, new_price: f64) -> Result<(), String>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn order_action_display() {
+        assert_eq!(OrderAction::Buy.to_string(), "BUY");
+        assert_eq!(OrderAction::Sell.to_string(), "SELL");
+    }
+
+    #[test]
+    fn bracket_params_serde_round_trip() {
+        let params = MarketBracketParams {
+            symbol: "AAPL".to_string(),
+            con_id: Some(265598),
+            sec_type: crate::SecurityType::Stock,
+            exchange: "SMART".to_string(),
+            currency: "USD".to_string(),
+            action: OrderAction::Buy,
+            quantity: 100.0,
+            outside_rth: false,
+            take_profit: Some(TakeProfitParams {
+                price: 192.0,
+                tif: None,
+            }),
+            stop_loss: Some(StopLossParams {
+                stop_price: 182.0,
+                limit_price: None,
+                tif: None,
+            }),
+            reference_price: Some(185.50),
+            strategy: None,
+            tags: Vec::new(),
+        };
+        let json = serde_json::to_string(&params).unwrap();
+        let decoded: MarketBracketParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.symbol, "AAPL");
+        assert_eq!(decoded.quantity, 100.0);
+    }
+
+    #[test]
+    fn lifecycle_status_eq() {
+        assert_eq!(
+            BracketLifecycleStatus::Submitted,
+            BracketLifecycleStatus::Submitted
+        );
+        assert_ne!(
+            BracketLifecycleStatus::Submitted,
+            BracketLifecycleStatus::Cancelled
+        );
+    }
+}

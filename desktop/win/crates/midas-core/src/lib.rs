@@ -3,6 +3,9 @@
 //! This is the leaf crate of the workspace. It has no internal dependencies.
 //! Every other midas crate depends on this one, so keep it small and stable.
 
+use serde::{Deserialize, Serialize};
+
+pub mod broker;
 pub mod candle_buffer;
 pub mod candle_data;
 pub mod config;
@@ -24,3 +27,51 @@ pub use id::{ChartId, PaneId, SymbolId, WatchlistId};
 pub use link::{LinkColor, LinkMode};
 pub use provider::{ConnectionState, DataProvider, OrderBroker, ProviderError};
 pub use timeframe::Timeframe;
+
+// Re-export broker bridge types for convenience.
+pub use broker::{
+    BracketEvent, BracketLifecycleStatus, MarketBracketParams, OrderAction,
+    StopLossParams, TakeProfitParams, TimeInForce,
+};
+
+// ---------------------------------------------------------------------------
+// SecurityType — IB security type for contracts
+// ---------------------------------------------------------------------------
+
+/// IB security type identifier. Replaces raw strings like "STK", "OPT", etc.
+/// with a type-safe enum that serializes to the same IB API strings.
+///
+/// MIRROR OF: `crates/midas-core/src/lib.rs::SecurityType`
+/// Changes must be kept in sync manually.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SecurityType {
+    Stock,
+    Option,
+    Future,
+    Forex,
+}
+
+impl std::fmt::Display for SecurityType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Stock => f.write_str("STK"),
+            Self::Option => f.write_str("OPT"),
+            Self::Future => f.write_str("FUT"),
+            Self::Forex => f.write_str("CASH"),
+        }
+    }
+}
+
+impl std::str::FromStr for SecurityType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "STK" => Ok(Self::Stock),
+            "OPT" => Ok(Self::Option),
+            "FUT" => Ok(Self::Future),
+            "CASH" => Ok(Self::Forex),
+            other => Err(format!("unknown SecurityType: {other}")),
+        }
+    }
+}

@@ -66,6 +66,8 @@ pub struct ChartRenderSnapshot {
     pub crosshair_pos: Option<(f32, f32)>,
     /// Horizontal price levels.
     pub levels: Vec<HorizontalLevel>,
+    /// Order bracket annotations from the AnnotationStore.
+    pub bracket_annotations: Vec<Annotation>,
     /// Viewport width in logical pixels.
     pub viewport_width: u32,
     /// Viewport height in logical pixels.
@@ -152,11 +154,9 @@ impl shader::Program<Message> for ChartProgram {
         cursor: mouse::Cursor,
     ) -> Option<shader::Action<Message>> {
         // Ensure the widget state has a ChartState for interaction.
-        if state.chart_state.is_none() {
-            state.chart_state = Some(ChartState::new(self.snapshot.camera.clone()));
-        }
-
-        let chart_state = state.chart_state.as_mut().unwrap();
+        let chart_state = state.chart_state.get_or_insert_with(|| {
+            ChartState::new(self.snapshot.camera.clone())
+        });
         // Sync camera from latest snapshot so interactions use current view.
         chart_state.camera = self.snapshot.camera.clone();
         // CRITICAL: Update camera viewport to match actual widget bounds.
@@ -260,9 +260,11 @@ impl shader::Program<Message> for ChartProgram {
         let mut messages: Vec<Message> = Vec::new();
         let mut captured = false;
 
-        // Convert old HorizontalLevel snapshots to Annotation for handle_event.
-        let event_annotations: Vec<Annotation> =
+        // Convert old HorizontalLevel snapshots to Annotation for handle_event,
+        // then append bracket annotations from the AnnotationStore.
+        let mut event_annotations: Vec<Annotation> =
             old_levels_to_annotations(&self.snapshot.levels);
+        event_annotations.extend(self.snapshot.bracket_annotations.iter().cloned());
 
         for chart_event in chart_events {
             let data_ref = self
@@ -447,9 +449,11 @@ impl shader::Program<Message> for ChartProgram {
             effective_level_tool.preview_price = None;
         }
 
-        // Convert effective old-style levels to Annotation for ChartInput.
-        let effective_annotations: Vec<Annotation> =
+        // Convert effective old-style levels to Annotation for ChartInput,
+        // then append bracket annotations from the AnnotationStore.
+        let mut effective_annotations: Vec<Annotation> =
             old_levels_to_annotations(&effective_levels);
+        effective_annotations.extend(snap.bracket_annotations.iter().cloned());
 
         let input = ChartInput {
             symbol: &snap.symbol,
@@ -521,6 +525,7 @@ impl shader::Program<Message> for ChartProgram {
                 cs.interaction_mode,
                 InteractionMode::DraggingVolumeScale { .. }
                     | InteractionMode::DraggingTimelineBorder { .. }
+                    | InteractionMode::DraggingBracketLeg { .. }
             ) || cs.level_tool.is_dragging()
             {
                 return mouse::Interaction::ResizingVertically;
@@ -831,6 +836,16 @@ impl shader::Primitive for ChartPrimitive {
             }
         }
 
+        // Widget output: bracket fills (Layer 6, behind lines) and
+        // bracket lines (Layer 7). Both are GridLineInstance and go
+        // into the grid_lines buffer for rendering.
+        for fill in &scene.widget_output.fills {
+            resources.grid_lines.push(*fill);
+        }
+        for line in &scene.widget_output.lines {
+            resources.grid_lines.push(*line);
+        }
+
         // Volume Profile instances (pre-computed in the chart scene).
         resources.volume_profile_instances = scene.volume_profile_instances.clone();
 
@@ -1102,6 +1117,16 @@ fn action_to_message(
         ChartAction::PlacingPreview { price } => {
             Some(Message::PlacingCursorMoved(chart_id, *price))
         }
+        ChartAction::DragBracketLeg {
+            annotation_id,
+            leg,
+            new_price,
+        } => Some(Message::ChartDragBracketLeg(
+            chart_id,
+            annotation_id.0,
+            *leg,
+            *new_price,
+        )),
         ChartAction::Redraw => None,
         _ => None,
     }

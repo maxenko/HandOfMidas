@@ -12,6 +12,7 @@ use crate::date_labels::DateLabel;
 use crate::instances::{
     AxisLabel, CandleInstance, CrosshairRender, GridLineInstance, LevelRender, VolumeInstance,
 };
+use crate::widget::WidgetOutput;
 
 /// The output of chart logic -- a complete description of what to render.
 ///
@@ -61,6 +62,14 @@ pub struct ChartScene {
 
     /// Volume Profile horizontal histogram instances (empty if VP disabled).
     pub volume_profile_instances: Vec<GridLineInstance>,
+
+    /// Merged widget output for annotation rendering (brackets, etc.).
+    ///
+    /// Contains all GPU-ready geometry (fills, lines, markers) and text
+    /// labels for annotations that use the widget compute pipeline.
+    /// Levels are still in `levels` for backward compatibility; this
+    /// field covers `OrderBracket` and future widget kinds.
+    pub widget_output: WidgetOutput,
 
     /// Dirty generation counters -- renderer compares to decide what to upload.
     pub generations: SceneGenerations,

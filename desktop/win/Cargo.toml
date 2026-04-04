@@ -83,6 +83,9 @@ tempfile = "3"
 # Time
 chrono = { version = "0.4", features = ["serde"] }
 
+# Identity
+uuid = { version = "1", features = ["v7", "serde"] }
+
 # Concurrency primitives
 parking_lot = "0.12"
 

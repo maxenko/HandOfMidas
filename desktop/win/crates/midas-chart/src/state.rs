@@ -69,6 +69,20 @@ pub enum InteractionMode {
         /// Volume scale value at drag start.
         start_scale: f32,
     },
+    /// Dragging a bracket leg (TP or SL) to a new price.
+    DraggingBracketLeg {
+        /// The annotation ID of the bracket being dragged.
+        annotation_id: crate::widget::AnnotationId,
+        /// Which leg is being dragged (TakeProfit or StopLoss).
+        leg: crate::widget::order_bracket::LegRole,
+        /// Price offset between cursor and leg price at grab time
+        /// (so the leg does not jump to the cursor).
+        grab_offset: f64,
+        /// Entry price of the bracket (used for side-constraint clamping).
+        entry_price: f64,
+        /// Trade direction (used for side-constraint clamping).
+        side: crate::widget::order_bracket::BracketSide,
+    },
 }
 
 /// Momentum state for flick-to-scroll after a pan drag release.
@@ -389,6 +403,13 @@ impl ChartState {
 
             ChartAction::PlacingPreview { .. } => {
                 // Handled by the app layer (ghost preview propagation).
+            }
+
+            ChartAction::DragBracketLeg { .. } => {
+                // Handled by the app layer via AnnotationStore.
+                // The app layer finds the matching OrderBracket annotation
+                // and updates the appropriate leg's price.
+                self.dirty.mark_data();
             }
         }
     }

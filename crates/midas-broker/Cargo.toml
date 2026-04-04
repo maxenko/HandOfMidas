@@ -8,7 +8,7 @@ edition = "2021"
 midas-core = { path = "../midas-core" }
 
 # IB connectivity
-ibapi = "2"
+ibapi = "2.10"
 
 # Database
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -37,6 +37,9 @@ toml = "0.8"
 
 # Platform directories
 dirs = "5"
+
+# Mutex without poisoning
+parking_lot = "0.12"
 
 # Random (test data generation)
 rand = "0.8"
