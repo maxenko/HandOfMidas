@@ -11,6 +11,8 @@ pub mod db;
 pub mod engine;
 pub mod error;
 pub mod events;
+pub mod ib_client;
+pub mod ib_data_source;
 pub mod ib_strings;
 pub mod market_data;
 pub mod orders;

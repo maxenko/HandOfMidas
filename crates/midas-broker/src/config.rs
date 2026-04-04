@@ -9,10 +9,10 @@ use crate::test_broker::TestBrokerConfig;
 #[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum DataSourceConfig {
-    /// Real IB connection (not yet implemented).
-    #[default]
+    /// Real IB connection via TWS / IB Gateway.
     Live,
     /// Deterministic test data — per-ticker seeded generation.
+    #[default]
     Test,
 }
 
@@ -201,11 +201,11 @@ fn default_initial_delay() -> u64 {
 }
 
 fn default_max_delay() -> u64 {
-    60
+    30
 }
 
 fn default_max_retries() -> u32 {
-    10
+    15
 }
 
 impl Default for ReconnectConfig {
