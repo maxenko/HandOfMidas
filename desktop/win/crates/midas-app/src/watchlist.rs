@@ -7,6 +7,42 @@
 use midas_core::config::{WatchlistConfig, WatchlistTickerConfig};
 use midas_core::{LinkMode, WatchlistId};
 
+// ── Sorting ─────────────────────────────────────────────────────────
+
+/// Which column to sort the watchlist by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortColumn {
+    Ticker,
+    Price,
+    ChangePercent,
+    GATR,
+}
+
+/// Sort direction for the watchlist column sort.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortDirection {
+    Ascending,
+    Descending,
+}
+
+impl SortDirection {
+    /// Return the opposite direction.
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::Ascending => Self::Descending,
+            Self::Descending => Self::Ascending,
+        }
+    }
+
+    /// Unicode arrow indicator for the current direction.
+    pub fn indicator(self) -> &'static str {
+        match self {
+            Self::Ascending => " \u{25B2}",
+            Self::Descending => " \u{25BC}",
+        }
+    }
+}
+
 // ── Per-ticker data ─────────────────────────────────────────────────
 
 /// A single ticker entry within a watchlist.
@@ -37,6 +73,10 @@ pub struct WatchlistPanel {
     pub symbol_link: LinkMode,
     /// Column widths in logical pixels.
     pub column_widths: [f32; 7],
+    /// Active sort column, or `None` for default insertion order.
+    pub sort_column: Option<SortColumn>,
+    /// Sort direction (only meaningful when `sort_column` is `Some`).
+    pub sort_direction: SortDirection,
 }
 
 /// Default column widths: [drag, fav, ticker, price, chg%, G.ATR, delete].
@@ -53,6 +93,8 @@ impl WatchlistPanel {
             selected_symbol: None,
             symbol_link: LinkMode::Unlinked,
             column_widths: DEFAULT_COLUMN_WIDTHS,
+            sort_column: None,
+            sort_direction: SortDirection::Ascending,
         }
     }
 
@@ -82,6 +124,8 @@ impl WatchlistPanel {
             selected_symbol: None,
             symbol_link: config.symbol_link,
             column_widths,
+            sort_column: None,
+            sort_direction: SortDirection::Ascending,
         }
     }
 
