@@ -5,12 +5,14 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod atr;
 pub mod broker;
 pub mod candle_buffer;
 pub mod candle_data;
 pub mod config;
 pub mod id;
 pub mod link;
+pub mod market_data;
 pub mod provider;
 pub mod timeframe;
 
@@ -18,6 +20,10 @@ pub mod timeframe;
 // pub mod events;       // MarketEvent, ChartEvent, UIEvent
 // pub mod time_axis;    // TimeAxisController
 
+pub use atr::{
+    gatr_color, gerchik_gatr_pct, true_range, wilder_atr, ATR_PERIOD, GATR_COLOR_GREEN,
+    GATR_COLOR_RED, GATR_LOOKBACK, GATR_THRESHOLD_PCT,
+};
 pub use candle_buffer::{CandleBuffer, CandleSlice};
 pub use candle_data::CandleData;
 pub use config::AppConfig;
@@ -25,6 +31,7 @@ pub use config::AppConfig;
 /// Example: `use midas_core::{Timeframe, CandleData, AppConfig};`
 pub use id::{ChartId, PaneId, SymbolId, WatchlistId};
 pub use link::{LinkColor, LinkMode};
+pub use market_data::MarketSnapshot;
 pub use provider::{ConnectionState, DataProvider, OrderBroker, ProviderError};
 pub use timeframe::Timeframe;
 

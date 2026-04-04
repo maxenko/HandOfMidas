@@ -1,9 +1,12 @@
-//! Gerchik ATR indicator — shows what percentage of the daily ATR has been
-//! consumed in the current intraday session.
+//! Gerchik ATR indicator — shows what percentage of the average daily range
+//! has been consumed in the current intraday session.
 //!
-//! Computes a 14-period ATR by aggregating intraday candles into synthetic
-//! daily bars. Only produces output for intraday charts (candle duration < 1 day).
-//! The indicator is always-on and cannot be toggled off.
+//! Aggregates intraday candles into synthetic daily bars, then delegates to
+//! [`midas_core::gerchik_gatr_pct`] which implements the canonical algorithm:
+//! skip today, walk previous 7 sessions, filter paranormal candles (TR > 2x
+//! or < 0.5x of raw average), return today's (H-L) / filtered average * 100.
+//!
+//! Only produces output for intraday charts (candle duration < 1 day).
 //!
 //! # Display
 //!
@@ -12,18 +15,6 @@
 //! - **Red** when ≥ 75% of ATR consumed (range exhaustion)
 
 use midas_core::CandleData;
-
-/// Default ATR period (number of daily bars for smoothing).
-const ATR_PERIOD: usize = 14;
-
-/// Percentage threshold: below = green, at or above = red.
-const ATR_THRESHOLD_PCT: f32 = 75.0;
-
-/// Green color for ATR below threshold (low alpha — watermark style).
-const ATR_GREEN: [f32; 4] = [0.2, 0.8, 0.3, 0.18];
-
-/// Red color for ATR at/above threshold (low alpha — watermark style).
-const ATR_RED: [f32; 4] = [0.9, 0.25, 0.2, 0.18];
 
 /// One day in milliseconds.
 const DAY_MS: i64 = 86_400_000;
@@ -48,6 +39,10 @@ pub struct GerchikAtrRender {
 /// - Data has fewer than 2 candles
 /// - Candle duration ≥ 1 day (not an intraday chart)
 /// - Not enough daily bars for ATR calculation (need at least 2)
+///
+/// **Note**: This is the intraday variant. The watchlist grid uses a daily
+/// variant in `midas_app::market_cache` that computes directly from D1 bars.
+/// The two may show different percentages for the same symbol.
 pub fn compute_gerchik_atr(
     data: &dyn CandleData,
     candle_duration_ms: f64,
@@ -59,26 +54,19 @@ pub fn compute_gerchik_atr(
 
     // Aggregate intraday candles into synthetic daily bars.
     let daily_bars = aggregate_daily_bars(data);
-    if daily_bars.len() < 2 {
+    if daily_bars.len() < midas_core::GATR_LOOKBACK + 1 {
         return None;
     }
 
-    // Compute ATR from the synthetic daily bars.
-    let atr = compute_atr(&daily_bars)?;
-    if atr <= 0.0 {
-        return None;
-    }
+    // Convert synthetic daily bars to f64 slices for the shared algorithm.
+    let highs: Vec<f64> = daily_bars.iter().map(|b| b.high as f64).collect();
+    let lows: Vec<f64> = daily_bars.iter().map(|b| b.low as f64).collect();
+    let closes: Vec<f64> = daily_bars.iter().map(|b| b.close as f64).collect();
 
-    // Current session range = last daily bar's (high - low).
-    let last = daily_bars.last()?;
-    let session_range = last.high - last.low;
-
-    let pct = (session_range as f64 / atr * 100.0) as f32;
-    let color = if pct >= ATR_THRESHOLD_PCT {
-        ATR_RED
-    } else {
-        ATR_GREEN
-    };
+    // Use the canonical Gerchik algorithm: skip today, walk 7 sessions,
+    // filter paranormal candles, return percentage.
+    let pct = midas_core::gerchik_gatr_pct(&highs, &lows, &closes)?;
+    let color = midas_core::gatr_color(pct);
     let text = format!("G.ATR {:.0}%", pct);
 
     Some(GerchikAtrRender { pct, text, color })
@@ -134,56 +122,10 @@ fn aggregate_daily_bars(data: &dyn CandleData) -> Vec<DailyBar> {
     bars
 }
 
-/// Compute ATR from daily bars using Wilder's smoothing method.
-///
-/// Uses the standard True Range definition:
-///   TR = max(high - low, |high - prev_close|, |low - prev_close|)
-///
-/// The first `period` TRs are simple-averaged to seed the ATR,
-/// then Wilder's exponential smoothing is applied for the remainder.
-fn compute_atr(bars: &[DailyBar]) -> Option<f64> {
-    if bars.len() < 2 {
-        return None;
-    }
-
-    let period = ATR_PERIOD.min(bars.len() - 1);
-    if period == 0 {
-        return None;
-    }
-
-    // Compute True Range for each bar (starting from index 1).
-    let true_ranges: Vec<f64> = (1..bars.len())
-        .map(|i| {
-            let high = bars[i].high as f64;
-            let low = bars[i].low as f64;
-            let prev_close = bars[i - 1].close as f64;
-            let tr1 = high - low;
-            let tr2 = (high - prev_close).abs();
-            let tr3 = (low - prev_close).abs();
-            tr1.max(tr2).max(tr3)
-        })
-        .collect();
-
-    if true_ranges.is_empty() {
-        return None;
-    }
-
-    // Seed: simple average of the first `period` TRs.
-    let initial_count = period.min(true_ranges.len());
-    let mut atr: f64 = true_ranges[..initial_count].iter().sum::<f64>() / initial_count as f64;
-
-    // Wilder's smoothing for the remaining TRs.
-    let alpha = 1.0 / period as f64;
-    for &tr in &true_ranges[initial_count..] {
-        atr = atr * (1.0 - alpha) + tr * alpha;
-    }
-
-    Some(atr)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use midas_core::{GATR_COLOR_RED, GATR_THRESHOLD_PCT};
     use std::ops::Range;
 
     /// Minimal test fixture implementing `CandleData`.
@@ -353,55 +295,6 @@ mod tests {
         assert!((bars[2].low - 98.0).abs() < f32::EPSILON);
     }
 
-    // ── compute_atr ────────────────────────────────────────────────
-
-    #[test]
-    fn atr_too_few_bars() {
-        let bars = vec![DailyBar {
-            high: 110.0,
-            low: 90.0,
-            close: 100.0,
-        }];
-        assert!(compute_atr(&bars).is_none());
-        assert!(compute_atr(&[]).is_none());
-    }
-
-    #[test]
-    fn atr_two_bars() {
-        // With exactly 2 bars, period = min(14, 1) = 1, one TR value.
-        let bars = vec![
-            DailyBar {
-                high: 110.0,
-                low: 90.0,
-                close: 100.0,
-            },
-            DailyBar {
-                high: 115.0,
-                low: 95.0,
-                close: 105.0,
-            },
-        ];
-        let atr = compute_atr(&bars).unwrap();
-        // TR = max(115-95, |115-100|, |95-100|) = max(20, 15, 5) = 20
-        assert!((atr - 20.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn atr_constant_range() {
-        // 5 bars, all with the same range and close.
-        let bars: Vec<DailyBar> = (0..5)
-            .map(|_| DailyBar {
-                high: 110.0,
-                low: 90.0,
-                close: 100.0,
-            })
-            .collect();
-        let atr = compute_atr(&bars).unwrap();
-        // Every TR = max(20, |110-100|, |90-100|) = 20.
-        // ATR should be 20.0 (constant).
-        assert!((atr - 20.0).abs() < 1e-6);
-    }
-
     // ── compute_gerchik_atr ────────────────────────────────────────
 
     #[test]
@@ -426,9 +319,11 @@ mod tests {
     }
 
     #[test]
-    fn returns_none_for_single_day() {
-        // Only 1 day of data → only 1 daily bar → can't compute ATR.
+    fn returns_none_for_too_few_days() {
+        // Need at least GATR_LOOKBACK + 1 = 8 daily bars.
         let data = multi_day_5m_data(1);
+        assert!(compute_gerchik_atr(&data, 300_000.0).is_none());
+        let data = multi_day_5m_data(7);
         assert!(compute_gerchik_atr(&data, 300_000.0).is_none());
     }
 
@@ -499,13 +394,13 @@ mod tests {
 
         let result = compute_gerchik_atr(&data, 300_000.0).unwrap();
         // Last day range = 40 (120-80), ATR ≈ 1.0 → pct >> 75%.
-        assert!(result.pct >= ATR_THRESHOLD_PCT);
-        assert_eq!(result.color, ATR_RED);
+        assert!(result.pct >= GATR_THRESHOLD_PCT);
+        assert_eq!(result.color, GATR_COLOR_RED);
     }
 
     #[test]
     fn text_format() {
-        let data = multi_day_5m_data(5);
+        let data = multi_day_5m_data(10);
         let result = compute_gerchik_atr(&data, 300_000.0).unwrap();
         // Should be "G.ATR XX%"
         assert!(result.text.starts_with("G.ATR "));
