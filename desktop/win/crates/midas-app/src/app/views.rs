@@ -3,7 +3,6 @@
 //! Builds the widget tree: toolbar, pane grid, title bars, chart body,
 //! status bar, and floating chart windows.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use iced::widget::pane_grid::{self, PaneGrid};
@@ -174,14 +173,13 @@ impl MidasApp {
             let floating_chart_id = ChartId::new(0);
             let drawing_panel = build_drawing_panel(floating_chart_id, self.level_placing);
 
-            // Gerchik ATR overlay (always-on for intraday charts).
-            let gerchik_atr =
-                midas_chart::gerchik_atr::compute_gerchik_atr(data.as_ref(), candle_duration);
+            // Gerchik ATR overlay — reads from the central market_cache
+            // (computed from D1 bars), not from intraday aggregation.
+            let gerchik_atr = gatr_render_from_cache(&self.market_cache, &chart.symbol);
 
             let mut chart_layers: Vec<Element<'_, Message>> =
                 vec![shader.into(), date_overlay, price_overlay];
 
-            // ATR overlay goes early in the stack (receded behind interactive elements).
             chart_layers.push(build_gerchik_atr_overlay(gerchik_atr.as_ref()));
 
             let store_levels = self.level_store.levels_for(&chart.symbol);
@@ -845,14 +843,13 @@ impl MidasApp {
             // Build level-related overlays.
             let drawing_panel = build_drawing_panel(chart_id, self.level_placing);
 
-            // Gerchik ATR overlay (always-on for intraday charts).
-            let gerchik_atr =
-                midas_chart::gerchik_atr::compute_gerchik_atr(data.as_ref(), candle_duration);
+            // Gerchik ATR overlay — reads from the central market_cache
+            // (computed from D1 bars), not from intraday aggregation.
+            let gerchik_atr = gatr_render_from_cache(&self.market_cache, &chart.symbol);
 
             let mut chart_layers: Vec<Element<'_, Message>> =
                 vec![shader.into(), date_overlay, price_overlay];
 
-            // ATR overlay goes early in the stack (receded behind interactive elements).
             chart_layers.push(build_gerchik_atr_overlay(gerchik_atr.as_ref()));
 
             let store_levels = self.level_store.levels_for(&chart.symbol);
@@ -1183,34 +1180,39 @@ impl MidasApp {
             }
         };
 
-        // Compute market data for all tickers in one pass.
-        let market_data = self.compute_all_market_data();
-
-        // Build WatchlistRow structs from tickers + market data.
-        let empty_mkt = TickerMarketData::default();
+        // Build WatchlistRow structs from tickers + cached market data.
+        let empty_snapshot = midas_core::MarketSnapshot::default();
         let mut grid_rows: Vec<crate::watchlist_columns::WatchlistRow> = wl
             .tickers
             .iter()
             .map(|ticker| {
-                let mkt = market_data.get(&ticker.symbol).unwrap_or(&empty_mkt);
-                let price_text = match mkt.last_price {
-                    Some(p) => format!("{p:.2}"),
-                    None => "--".into(),
-                };
-                let change_text = match mkt.change_pct {
-                    Some(c) => format!("{c:+.2}%"),
-                    None => "--".into(),
-                };
-                let change_color = match mkt.change_pct {
+                let snap = self
+                    .market_cache
+                    .get(&ticker.symbol)
+                    .unwrap_or(&empty_snapshot);
+                let price_text = snap
+                    .last_price
+                    .map(|p| format!("{p:.2}"))
+                    .unwrap_or_else(|| "--".into());
+                let change_text = snap
+                    .change_pct
+                    .map(|c| format!("{c:+.2}%"))
+                    .unwrap_or_else(|| "--".into());
+                let change_color = match snap.change_pct {
                     Some(c) if c > 0.0 => Color::from_rgb(0.2, 0.8, 0.3),
                     Some(c) if c < 0.0 => Color::from_rgb(0.9, 0.25, 0.2),
                     _ => Color::from_rgb(0.6, 0.6, 0.6),
                 };
-                let gatr_text: String =
-                    mkt.gatr_text.as_deref().unwrap_or("--").to_owned();
-                let gatr_color = mkt
-                    .gatr_color
-                    .map(|c| Color::from_rgba(c[0], c[1], c[2], c[3]))
+                let gatr_text = snap
+                    .gatr_pct
+                    .map(|pct| format!("G.ATR {:.0}%", pct))
+                    .unwrap_or_else(|| "--".into());
+                let gatr_color = snap
+                    .gatr_pct
+                    .map(|pct| {
+                        let c = midas_core::gatr_color(pct);
+                        Color::from_rgba(c[0], c[1], c[2], c[3])
+                    })
                     .unwrap_or(Color::from_rgb(0.6, 0.6, 0.6));
                 crate::watchlist_columns::WatchlistRow {
                     symbol: ticker.symbol.clone(),
@@ -1221,8 +1223,8 @@ impl MidasApp {
                     gatr_text,
                     gatr_color,
                     wl_id,
-                    price_value: mkt.last_price,
-                    change_value: mkt.change_pct,
+                    price_value: snap.last_price,
+                    change_value: snap.change_pct,
                 }
             })
             .collect();
@@ -1408,8 +1410,8 @@ impl MidasApp {
                 let inner_row = Row::with_children(vec![
                     grid_data_cell(drag_btn.into(), w(COL_DRAG)),
                     grid_data_cell(fav_btn.into(), w(COL_FAV)),
-                    grid_data_cell(text(row_data.symbol.clone()).size(13).into(), w(COL_TICKER)),
-                    grid_data_cell(text(row_data.price_text.clone()).size(13).into(), w(COL_PRICE)),
+                    grid_data_cell(text(row_data.symbol.clone()).size(13).color(theme::TEXT_PRIMARY).into(), w(COL_TICKER)),
+                    grid_data_cell(text(row_data.price_text.clone()).size(13).color(theme::TEXT_PRIMARY).into(), w(COL_PRICE)),
                     grid_data_cell(
                         text(row_data.change_text.clone())
                             .size(13)
@@ -1533,60 +1535,6 @@ impl MidasApp {
         body.into()
     }
 
-    /// Compute market data for all symbols that have loaded chart data.
-    ///
-    /// Returns a map from symbol to market snapshot, computed in a single
-    /// pass over all charts. Avoids redundant per-ticker linear scans.
-    fn compute_all_market_data(&self) -> HashMap<String, TickerMarketData> {
-        let mut result = HashMap::new();
-        for chart in self.charts.values().chain(self.floating_charts.values()) {
-            if chart.symbol.is_empty() || result.contains_key(&chart.symbol) {
-                continue;
-            }
-            if let Some(ref data) = chart.data {
-                let len = data.len();
-                if len == 0 {
-                    continue;
-                }
-                let last_close = data.closes[len - 1] as f64;
-                let prev_close = if len >= 2 {
-                    data.closes[len - 2] as f64
-                } else {
-                    last_close
-                };
-                let change_pct = if prev_close != 0.0 {
-                    ((last_close - prev_close) / prev_close) * 100.0
-                } else {
-                    0.0
-                };
-                let candle_duration =
-                    midas_chart::estimate_candle_duration(data.as_ref());
-                let gatr = midas_chart::gerchik_atr::compute_gerchik_atr(
-                    data.as_ref(),
-                    candle_duration,
-                );
-                result.insert(
-                    chart.symbol.clone(),
-                    TickerMarketData {
-                        last_price: Some(last_close),
-                        change_pct: Some(change_pct),
-                        gatr_text: gatr.as_ref().map(|g| g.text.clone()),
-                        gatr_color: gatr.as_ref().map(|g| g.color),
-                    },
-                );
-            }
-        }
-        result
-    }
-}
-
-/// Market data snapshot for one watchlist ticker, derived from loaded chart data.
-#[derive(Default)]
-struct TickerMarketData {
-    last_price: Option<f64>,
-    change_pct: Option<f64>,
-    gatr_text: Option<String>,
-    gatr_color: Option<[f32; 4]>,
 }
 
 // ── Status bar ──────────────────────────────────────────────────────
@@ -2832,6 +2780,21 @@ fn build_crosshair_label_overlay<'a>(
 }
 
 // ── Gerchik ATR overlay ────────────────────────────────────────────
+
+/// Build a GerchikAtrRender from the central market_cache.
+/// Both chart overlay and watchlist grid read from the same source.
+fn gatr_render_from_cache(
+    cache: &crate::market_cache::MarketDataCache,
+    symbol: &str,
+) -> Option<midas_chart::GerchikAtrRender> {
+    let pct = cache.get(symbol)?.gatr_pct?;
+    let color = midas_core::gatr_color(pct);
+    Some(midas_chart::GerchikAtrRender {
+        pct,
+        text: format!("G.ATR {:.0}%", pct),
+        color,
+    })
+}
 
 fn build_gerchik_atr_overlay<'a>(
     data: Option<&midas_chart::GerchikAtrRender>,

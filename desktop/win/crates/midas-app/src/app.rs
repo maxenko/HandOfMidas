@@ -148,6 +148,8 @@ pub struct MidasApp {
     pub bracket_context_menu: Option<(ChartId, u64, midas_chart::widget::order_bracket::LegRole, f32, f32)>,
     /// Centralized per-symbol annotation store (order brackets, levels, etc.).
     pub annotation_store: AnnotationStore,
+    /// In-memory market data cache for watchlist columns.
+    pub market_cache: crate::market_cache::MarketDataCache,
 }
 
 /// State for an in-progress ticker drag from a watchlist to a chart.
@@ -423,6 +425,12 @@ pub enum Message {
     /// Dismiss the current toast (auto or manual).
     DismissToast,
 
+    // -- Market data cache --
+    /// Market data snapshot loaded for a watchlist symbol (D1 candles).
+    MarketSnapshotLoaded(String, Result<midas_core::CandleBuffer, String>),
+    /// Timer tick to refresh all cached market data.
+    RefreshMarketData,
+
     // -- Window --
     /// Periodic tick for animations and status bar clock.
     Tick,
@@ -681,6 +689,7 @@ impl MidasApp {
             toast_created_at: None,
             bracket_context_menu: None,
             annotation_store: AnnotationStore::new(),
+            market_cache: crate::market_cache::MarketDataCache::default(),
         };
 
         // Restore bracket annotations from persistence.
@@ -718,10 +727,14 @@ impl MidasApp {
             }
             load_tasks.push(app.load_chart_async_restore(*id, symbol, *tf));
         }
+        // Also load market snapshots for all watchlist symbols.
+        let watchlist_task = app.load_all_watchlist_snapshots();
+
         let startup_task = if load_tasks.is_empty() {
-            open_task
+            Task::batch([open_task, watchlist_task])
         } else {
             load_tasks.push(open_task);
+            load_tasks.push(watchlist_task);
             Task::batch(load_tasks)
         };
 
@@ -1069,6 +1082,44 @@ impl MidasApp {
         self.load_chart_with(chart_id, symbol, tf, Message::DataRestoredFromStartup)
     }
 
+    /// Load a market data snapshot for a symbol from the active data provider.
+    fn load_market_snapshot(&self, symbol: &str) -> Task<Message> {
+        let provider = match self.providers.active_data_provider() {
+            Some(p) => p,
+            None => return Task::none(),
+        };
+        let sym = symbol.to_uppercase();
+        let sym_clone = sym.clone();
+        Task::perform(
+            async move {
+                provider
+                    .get_candles(&sym, midas_core::Timeframe::D1, 30)
+                    .await
+            },
+            move |result| {
+                Message::MarketSnapshotLoaded(sym_clone, result.map_err(|e| e.to_string()))
+            },
+        )
+    }
+
+    /// Load market snapshots for all symbols across all watchlists.
+    fn load_all_watchlist_snapshots(&self) -> Task<Message> {
+        let mut seen = std::collections::HashSet::new();
+        let mut tasks = Vec::new();
+        for wl in self.watchlists.values() {
+            for ticker in &wl.tickers {
+                if seen.insert(ticker.symbol.clone()) {
+                    tasks.push(self.load_market_snapshot(&ticker.symbol));
+                }
+            }
+        }
+        if tasks.is_empty() {
+            Task::none()
+        } else {
+            Task::batch(tasks)
+        }
+    }
+
     /// Apply loaded candle data to a chart panel, optionally resetting
     /// the camera to show the last 200 candles.
     fn apply_candle_data(
@@ -1234,6 +1285,7 @@ impl MidasApp {
             Message::DataLoaded(chart_id, result) => {
                 match result {
                     Ok(buffer) => {
+                        let mut loaded_symbol: Option<String> = None;
                         // Try docked charts first, then floating charts.
                         if let Some(chart) = self.charts.get_mut(&chart_id) {
                             let sym = chart.symbol.clone();
@@ -1246,14 +1298,22 @@ impl MidasApp {
                                 count,
                                 tf.display_name()
                             );
+                            loaded_symbol = Some(sym);
                         } else if chart_id == ChartId::new(0) {
                             // Floating chart sentinel: apply to the first
                             // floating chart that is in Loading state.
                             for chart in self.floating_charts.values_mut() {
                                 if matches!(chart.load_state, LoadState::Loading) {
+                                    loaded_symbol = Some(chart.symbol.clone());
                                     Self::apply_candle_data(chart, buffer, true);
                                     break;
                                 }
+                            }
+                        }
+                        // Ensure D1 market snapshot exists for G.ATR display.
+                        if let Some(sym) = loaded_symbol {
+                            if self.market_cache.get(&sym).is_none() {
+                                return self.load_market_snapshot(&sym);
                             }
                         }
                     }
@@ -1295,7 +1355,9 @@ impl MidasApp {
                     if self.providers.set_active_data(idx) {
                         tracing::info!(provider = %name, "switched data provider");
                         self.mark_config_dirty();
-                        return self.reload_all_charts();
+                        let chart_task = self.reload_all_charts();
+                        let market_task = self.load_all_watchlist_snapshots();
+                        return Task::batch([chart_task, market_task]);
                     }
                 }
                 Task::none()
@@ -2066,7 +2128,10 @@ impl MidasApp {
                     let input = wl.add_ticker_input.clone();
                     if wl.add_ticker(&input) {
                         wl.add_ticker_input.clear();
-                        return self.flush_config();
+                        // Always load fresh data — don't rely on potentially stale cache.
+                        let symbol = input.trim().to_uppercase();
+                        let task = self.load_market_snapshot(&symbol);
+                        return Task::batch([self.flush_config(), task]);
                     }
                 }
                 Task::none()
@@ -2078,6 +2143,15 @@ impl MidasApp {
                         wl.selected_symbol = None;
                     }
                     wl.remove_ticker(&symbol);
+                    // Remove from cache if no watchlist still has this symbol.
+                    let symbol_upper = symbol.to_uppercase();
+                    let still_used = self
+                        .watchlists
+                        .values()
+                        .any(|wl| wl.has_ticker(&symbol_upper));
+                    if !still_used {
+                        self.market_cache.remove(&symbol_upper);
+                    }
                     return self.flush_config();
                 }
                 Task::none()
@@ -2224,6 +2298,40 @@ impl MidasApp {
                     }
                 }
                 Task::none()
+            }
+
+            // -- Market data cache --
+            Message::MarketSnapshotLoaded(symbol, Ok(buffer)) => {
+                // Only insert if a watchlist still references this symbol.
+                // The ticker may have been removed while the async load was in-flight.
+                let still_used = self.watchlists.values().any(|wl| wl.has_ticker(&symbol));
+                if still_used {
+                    let snapshot = crate::market_cache::snapshot_from_candles(&buffer);
+                    self.market_cache.insert(symbol, snapshot);
+                }
+                Task::none()
+            }
+            Message::MarketSnapshotLoaded(_symbol, Err(e)) => {
+                tracing::warn!("Failed to load market snapshot: {e}");
+                Task::none()
+            }
+            Message::RefreshMarketData => {
+                // Refresh all watchlist symbols, not just cached ones.
+                // This retries any symbols whose initial load failed.
+                let mut seen = std::collections::HashSet::new();
+                let mut tasks = Vec::new();
+                for wl in self.watchlists.values() {
+                    for ticker in &wl.tickers {
+                        if seen.insert(ticker.symbol.clone()) {
+                            tasks.push(self.load_market_snapshot(&ticker.symbol));
+                        }
+                    }
+                }
+                if tasks.is_empty() {
+                    Task::none()
+                } else {
+                    Task::batch(tasks)
+                }
             }
 
             // -- Chart linking --
