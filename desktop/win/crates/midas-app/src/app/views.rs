@@ -1348,7 +1348,7 @@ impl MidasApp {
             if i < col_defs.len() - 1 {
                 let col_idx = i;
                 header_cells.push(
-                    iced::widget::mouse_area(Space::new().width(4).height(Fill))
+                    iced::widget::mouse_area(Space::new().width(4).height(26))
                         .interaction(iced::mouse::Interaction::ResizingHorizontally)
                         .on_press(Message::WatchlistColumnResizeStart(wl_id, col_idx, 0.0))
                         .into(),
@@ -1438,9 +1438,6 @@ impl MidasApp {
             }
         }
 
-        let grid_element: Element<'_, Message> =
-            column![header, scrollable(body_rows).height(Fill)].into();
-
         // Add ticker input row.
         let add_input = text_input("Add ticker...", &wl.add_ticker_input)
             .on_input(move |val| Message::WatchlistTickerInputChanged(wl_id, val))
@@ -1458,25 +1455,46 @@ impl MidasApp {
             .padding([6, 8])
             .align_y(iced::Alignment::Center);
 
-        let mut body_layers: Vec<Element<'_, Message>> =
-            vec![column![grid_element, add_row].into()];
+        let main_content: Element<'_, Message> = column![
+            header,
+            scrollable(body_rows).height(Fill),
+            add_row,
+        ]
+        .width(Fill)
+        .height(Fill)
+        .into();
+
+        // Wrap in stack only when overlays are needed (resize or link picker).
+        let needs_resize_overlay = self
+            .resizing_column
+            .map(|(id, _, _, _)| id == wl_id)
+            .unwrap_or(false);
+
+        let needs_link_picker = matches!(
+            self.link_picker_open,
+            Some((PickerTarget::Watchlist(id), _)) if id == wl_id
+        );
+
+        if !needs_resize_overlay && !needs_link_picker {
+            return main_content;
+        }
+
+        let mut body_layers: Vec<Element<'_, Message>> = vec![main_content];
 
         // Global resize overlay (when actively dragging a column divider).
-        if let Some((resize_wl_id, _, _, _)) = self.resizing_column {
-            if resize_wl_id == wl_id {
-                body_layers.push(
-                    iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
-                        .interaction(iced::mouse::Interaction::ResizingHorizontally)
-                        .on_move(|point| Message::WatchlistColumnResizing(point.x))
-                        .on_release(Message::WatchlistColumnResizeEnd)
-                        .into(),
-                );
-            }
+        if needs_resize_overlay {
+            body_layers.push(
+                iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
+                    .interaction(iced::mouse::Interaction::ResizingHorizontally)
+                    .on_move(|point| Message::WatchlistColumnResizing(point.x))
+                    .on_release(Message::WatchlistColumnResizeEnd)
+                    .into(),
+            );
         }
 
         let body = stack(body_layers).width(Fill).height(Fill);
 
-        // Link picker overlay (when open for this watchlist).
+        // Link picker overlay.
         if let Some((PickerTarget::Watchlist(picker_wl_id), dim)) = self.link_picker_open {
             if picker_wl_id == wl_id {
                 let backdrop = iced::widget::mouse_area(
@@ -1488,27 +1506,23 @@ impl MidasApp {
                     Message::WatchlistSetSymbolLink(wl_id, mode)
                 });
 
-                return container(
-                    stack![
-                        body,
-                        backdrop,
-                        container(picker)
-                            .align_x(iced::alignment::Horizontal::Right)
-                            .align_y(iced::alignment::Vertical::Top)
-                            .padding([4, 4])
-                            .width(Fill)
-                            .height(Fill)
-                    ]
-                    .width(Fill)
-                    .height(Fill),
-                )
+                return stack![
+                    body,
+                    backdrop,
+                    container(picker)
+                        .align_x(iced::alignment::Horizontal::Right)
+                        .align_y(iced::alignment::Vertical::Top)
+                        .padding([4, 4])
+                        .width(Fill)
+                        .height(Fill)
+                ]
                 .width(Fill)
                 .height(Fill)
                 .into();
             }
         }
 
-        container(body).width(Fill).height(Fill).into()
+        body.into()
     }
 
     /// Compute market data for all symbols that have loaded chart data.
