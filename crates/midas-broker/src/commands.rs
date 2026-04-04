@@ -28,10 +28,7 @@ pub enum BrokerCommand {
 
     // ── Brackets ────────────────────────────────────────────────────────────
     /// Create and immediately submit a market order bracket.
-    ///
-    /// Unlike `CreateBracketOrder` (which creates in Draft and requires
-    /// separate activation), this command creates the bracket AND submits
-    /// the market order to IB in a single step.
+    /// Builds the bracket, persists all legs, and submits to the broker.
     CreateMarketBracket(MarketBracketParams),
     /// Cancel an entire bracket (parent + all children) as a unit.
     CancelBracket { parent_id: Uuid },
