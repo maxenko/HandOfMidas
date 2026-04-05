@@ -38,7 +38,7 @@ pub fn parse_bar_size(bar_size: &str) -> Result<Timeframe, BrokerError> {
 /// the start timestamp. Supported units: `S` (seconds), `D` (days),
 /// `W` (weeks), `M` (months), `Y` (years).
 pub fn duration_to_start(end: i64, duration: &str) -> Result<i64, BrokerError> {
-    let parts: Vec<&str> = duration.trim().split_whitespace().collect();
+    let parts: Vec<&str> = duration.split_whitespace().collect();
     if parts.len() != 2 {
         return Err(BrokerError::Config(format!(
             "invalid duration format: \"{duration}\" (expected \"<n> <unit>\")"

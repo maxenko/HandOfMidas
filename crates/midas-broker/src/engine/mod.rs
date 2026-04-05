@@ -1414,7 +1414,7 @@ impl BrokerEngine {
             return;
         }
 
-        let connected = self.client.as_ref().map_or(false, |c| c.is_connected());
+        let connected = self.client.as_ref().is_some_and(|c| c.is_connected());
 
         if connected {
             if !self.was_connected {

@@ -17,7 +17,7 @@ pub enum DataSourceConfig {
 }
 
 /// Top-level broker configuration, typically loaded from a TOML file.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct BrokerConfig {
     #[serde(default)]
     pub connection: ConnectionConfig,
@@ -218,19 +218,6 @@ impl Default for ReconnectConfig {
     }
 }
 
-impl Default for BrokerConfig {
-    fn default() -> Self {
-        Self {
-            connection: ConnectionConfig::default(),
-            order_defaults: OrderDefaults::default(),
-            persistence: PersistenceConfig::default(),
-            reconnect: ReconnectConfig::default(),
-            data_source: DataSourceConfig::default(),
-            trading_limits: TradingLimits::default(),
-            test_broker: TestBrokerConfig::default(),
-        }
-    }
-}
 
 impl BrokerConfig {
     /// Load configuration from a TOML file at `path`.

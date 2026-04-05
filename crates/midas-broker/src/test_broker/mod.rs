@@ -978,7 +978,7 @@ impl BrokerClient for TestBroker {
         inner.order_count += 1;
         let should_reject = if self.config.rejection_rate > 0.0 {
             let n = (1.0 / self.config.rejection_rate).round() as u64;
-            n > 0 && inner.order_count % n == 0
+            n > 0 && inner.order_count.is_multiple_of(n)
         } else {
             false
         };

@@ -162,6 +162,7 @@ pub fn update_order_status(
 /// Update fill-tracking fields on an order row after a fill event.
 /// Returns `true` if exactly one row was modified, `false` if the order was
 /// not found.
+#[expect(clippy::too_many_arguments, reason = "maps to SQL UPDATE column set")]
 pub fn update_order_fill(
     conn: &Connection,
     local_id: &str,

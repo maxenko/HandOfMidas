@@ -59,6 +59,7 @@ impl IbClient {
     }
 
     /// Build an `ibapi::orders::Order` from our order parameters.
+    #[expect(clippy::too_many_arguments, reason = "mirrors IB order field set")]
     fn build_order(
         action: &str,
         order_type: &str,
@@ -70,31 +71,31 @@ impl IbClient {
         tif: &str,
         outside_rth: bool,
     ) -> ibapi::orders::Order {
-        let mut order = ibapi::orders::Order::default();
-
-        order.action = match action.to_uppercase().as_str() {
+        let action = match action.to_uppercase().as_str() {
             "BUY" => ibapi::orders::Action::Buy,
             _ => ibapi::orders::Action::Sell,
         };
-        order.total_quantity = quantity;
-        order.order_type = order_type.to_string();
-        order.limit_price = limit_price;
-        order.aux_price = stop_price;
-        order.transmit = transmit;
-        order.outside_rth = outside_rth;
-
-        order.tif = match tif.to_uppercase().as_str() {
+        let tif = match tif.to_uppercase().as_str() {
             "GTC" => ibapi::orders::TimeInForce::GoodTilCanceled,
             "IOC" => ibapi::orders::TimeInForce::ImmediateOrCancel,
             "GTD" => ibapi::orders::TimeInForce::GoodTilDate,
             "OPG" => ibapi::orders::TimeInForce::OnOpen,
             _ => ibapi::orders::TimeInForce::Day,
         };
-
+        let mut order = ibapi::orders::Order {
+            action,
+            total_quantity: quantity,
+            order_type: order_type.to_string(),
+            limit_price,
+            aux_price: stop_price,
+            transmit,
+            outside_rth,
+            tif,
+            ..Default::default()
+        };
         if let Some(pid) = parent_id {
             order.parent_id = pid;
         }
-
         order
     }
 
@@ -299,7 +300,7 @@ impl BrokerClient for IbClient {
     }
 
     fn is_connected(&self) -> bool {
-        self.client().map_or(false, |c| c.is_connected())
+        self.client().is_some_and(|c| c.is_connected())
     }
 
     fn subscribe_market_data(&self, symbol: &str, _con_id: i32) {
