@@ -116,8 +116,7 @@ async fn test_connection_state_watch() {
 async fn test_historical_data_via_test_source() {
     use crate::config::DataSourceConfig;
 
-    let mut config = BrokerConfig::default();
-    config.data_source = DataSourceConfig::Test;
+    let config = BrokerConfig { data_source: DataSourceConfig::Test, ..Default::default() };
     let handle = start_broker_engine(config);
     let mut rx = handle.market_events.subscribe();
 
@@ -381,8 +380,7 @@ async fn test_historical_data_test_source_returns_data() {
 #[tokio::test]
 async fn test_cancel_bracket_via_command() {
     use crate::config::DataSourceConfig;
-    let mut config = BrokerConfig::default();
-    config.data_source = DataSourceConfig::Test;
+    let config = BrokerConfig { data_source: DataSourceConfig::Test, ..Default::default() };
     let handle = start_broker_engine(config);
     let mut rx = handle.order_events.subscribe();
 
@@ -460,9 +458,7 @@ fn test_check_bracket_status_change_unit() {
 
 /// Helper: create a BrokerConfig with Test data source for integration tests.
 fn test_config() -> BrokerConfig {
-    let mut config = BrokerConfig::default();
-    config.data_source = DataSourceConfig::Test;
-    config
+    BrokerConfig { data_source: DataSourceConfig::Test, ..Default::default() }
 }
 
 /// Helper: create a BrokerConfig with custom trading limits.
@@ -1066,7 +1062,7 @@ fn test_order_row_to_local_all_fields() {
     assert_eq!(restored.tags, vec!["urgent".to_string(), "earnings".to_string(), "q4".to_string()]);
     assert_eq!(restored.algo_strategy, Some("TWAP".to_string()));
     assert_eq!(restored.algo_params, Some(serde_json::json!({"startTime": "09:30", "endTime": "16:00"})));
-    assert_eq!(restored.outside_rth, true);
+    assert!(restored.outside_rth);
     assert_eq!(restored.filled_qty, 10.0);
     assert_eq!(restored.remaining_qty, 40.0);
     assert_eq!(restored.avg_fill_price, Some(252.75));

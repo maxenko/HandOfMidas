@@ -57,7 +57,7 @@ fn test_insert_and_get_order() {
     assert_eq!(fetched.symbol, "AAPL");
     assert_eq!(fetched.quantity, 100.0);
     assert_eq!(fetched.limit_price, Some(150.0));
-    assert_eq!(fetched.outside_rth, false);
+    assert!(!fetched.outside_rth);
     assert_eq!(fetched.tif, "DAY");
     assert_eq!(fetched.action, "BUY");
     assert_eq!(fetched.order_type, "LMT");
