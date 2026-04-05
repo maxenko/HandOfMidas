@@ -1,5 +1,7 @@
 # Hand of Midas
 
+[![Rust](https://github.com/maxenko/HandOfMidas/actions/workflows/rust.yml/badge.svg)](https://github.com/maxenko/HandOfMidas/actions/workflows/rust.yml)
+
 A personal, criteria-driven day-trading application for Interactive Brokers.
 
 This software is built almost entirely around one person's trading style, preferences, and workflow. The charts look the way I want. The order entry works the way I think. The indicators are the ones I actually use. If you're looking for a general-purpose trading platform, this probably isn't it.

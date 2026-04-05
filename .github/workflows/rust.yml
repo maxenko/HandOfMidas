@@ -1,0 +1,39 @@
+name: Rust
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  broker:
+    name: Broker workspace
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Format check
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --workspace -- -D warnings
+      - name: Build
+        run: cargo build --workspace --verbose
+      - name: Test
+        run: cargo test --workspace --verbose
+
+  desktop:
+    name: Desktop workspace
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Format check
+        run: cd desktop/win && cargo fmt --check
+      - name: Clippy
+        run: cd desktop/win && cargo clippy --workspace -- -D warnings
+      - name: Build
+        run: cd desktop/win && cargo build --workspace --verbose
+      - name: Test
+        run: cd desktop/win && cargo test --workspace --verbose
