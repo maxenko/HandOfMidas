@@ -60,6 +60,11 @@ pub struct AppConfig {
     /// If absent or empty, falls back to charts-only restoration (backward compat).
     #[serde(default)]
     pub panel_order: Vec<PanelSlot>,
+    /// Flattened layout tree (pre-order traversal of the pane split tree).
+    /// Preserves full topology, axes, and split ratios. If present, takes
+    /// priority over `panel_order` during restoration.
+    #[serde(default)]
+    pub layout_tree: Vec<LayoutNode>,
     /// DuckDB persistent cache configuration.
     #[serde(default)]
     pub store: StoreConfig,
@@ -232,6 +237,33 @@ pub enum PanelSlot {
     },
 }
 
+/// Flattened layout tree node for pane grid topology persistence.
+///
+/// Stored as a pre-order traversal of the binary split tree. A `Split`
+/// node's two children are the next two subtrees in the array. Leaf
+/// nodes (`Chart`/`Watchlist`) terminate a branch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum LayoutNode {
+    /// A binary split in the pane grid.
+    Split {
+        /// `"horizontal"` or `"vertical"`.
+        axis: String,
+        /// Split ratio in \[0.0, 1.0\].
+        ratio: f32,
+    },
+    /// A chart pane — index into `AppConfig::charts`.
+    Chart {
+        /// Index into `AppConfig::charts`.
+        chart_index: usize,
+    },
+    /// A watchlist pane — index into `AppConfig::watchlists`.
+    Watchlist {
+        /// Index into `AppConfig::watchlists`.
+        watchlist_index: usize,
+    },
+}
+
 /// Configuration for the DuckDB persistent cache store.
 ///
 /// Serialized as the `[store]` section in `config.toml`. Existing configs
@@ -317,6 +349,7 @@ impl Default for AppConfig {
             levels: HashMap::new(),
             watchlists: Vec::new(),
             panel_order: Vec::new(),
+            layout_tree: Vec::new(),
             store: StoreConfig::default(),
             providers: None,
         }
@@ -507,6 +540,7 @@ mod tests {
             levels: msft_levels,
             watchlists: Vec::new(),
             panel_order: Vec::new(),
+            layout_tree: Vec::new(),
             store: StoreConfig::default(),
             providers: None,
         };
@@ -662,6 +696,7 @@ mod tests {
             levels: aapl_levels,
             watchlists: Vec::new(),
             panel_order: Vec::new(),
+            layout_tree: Vec::new(),
             store: StoreConfig::default(),
             providers: None,
         };
@@ -837,6 +872,7 @@ color = [1.0, 0.843, 0.0, 1.0]
             levels: HashMap::new(),
             watchlists: Vec::new(),
             panel_order: Vec::new(),
+            layout_tree: Vec::new(),
             store: StoreConfig::default(),
             providers: None,
         };
@@ -950,6 +986,7 @@ color = [1.0, 0.843, 0.0, 1.0]
             levels: spy_levels,
             watchlists: Vec::new(),
             panel_order: Vec::new(),
+            layout_tree: Vec::new(),
             store: StoreConfig::default(),
             providers: None,
         };

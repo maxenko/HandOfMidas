@@ -18,7 +18,7 @@ use iced::{window, Task};
 use midas_chart::camera::Camera2D;
 use midas_chart::state::ChartState;
 use midas_chart::AnnotationId;
-use midas_core::config::{AppConfig, ChartConfig, PanelSlot};
+use midas_core::config::{AppConfig, ChartConfig, LayoutNode, PanelSlot};
 use midas_core::{CandleBuffer, ChartId, DataProvider, LinkMode, Timeframe, WatchlistId};
 
 use crate::registry::ProviderRegistry;
@@ -546,8 +546,17 @@ impl MidasApp {
         // Build workspace, charts, and watchlists from config.
         let (workspace, charts, watchlists, status_message);
 
-        if !config.panel_order.is_empty() {
-            // panel_order-driven restoration (supports mixed chart + watchlist layouts).
+        if !config.layout_tree.is_empty() {
+            // Full topology restoration from layout_tree.
+            let (ws, ch, wl) =
+                Self::restore_from_layout_tree(&config.layout_tree, &config.charts, &config.watchlists);
+            let n = ch.len() + wl.len();
+            workspace = ws;
+            charts = ch;
+            watchlists = wl;
+            status_message = format!("Restored {n} panel(s) from layout tree");
+        } else if !config.panel_order.is_empty() {
+            // Legacy: panel_order-driven restoration (flat, no topology).
             let (mut ws, first_chart_id) = WorkspaceLayout::single();
             let mut ch = HashMap::new();
             let mut wl = HashMap::new();
@@ -579,7 +588,6 @@ impl MidasApp {
                         let wl_id = ws.next_watchlist_id();
                         let panel = WatchlistPanel::from_config(wl_id, wl_cfg);
                         if is_first {
-                            // First slot is a watchlist: replace the default chart pane.
                             if let Some(state) = ws.panes.get_mut(first_pane) {
                                 state.content = PanelContent::Watchlist(wl_id);
                             }
@@ -597,7 +605,6 @@ impl MidasApp {
                 }
             }
 
-            // If all panel_order entries were invalid, create a default panel.
             if is_first {
                 ch.insert(first_chart_id, Self::make_empty_panel());
             }
@@ -609,7 +616,7 @@ impl MidasApp {
             watchlists = wl;
             status_message = format!("Restored {n} panel(s) from config");
         } else if !config.charts.is_empty() {
-            // Legacy path: charts only (backward compat, no panel_order).
+            // Legacy path: charts only (backward compat).
             let (mut ws, first_id) = WorkspaceLayout::single();
             let mut ch = HashMap::new();
 
@@ -739,6 +746,103 @@ impl MidasApp {
         };
 
         (app, startup_task)
+    }
+
+    /// Restore the full pane grid topology from a flattened layout tree.
+    ///
+    /// Parses the pre-order traversal, builds a `pane_grid::Configuration`,
+    /// and creates the `WorkspaceLayout` with correct axes and ratios.
+    fn restore_from_layout_tree(
+        tree: &[LayoutNode],
+        chart_cfgs: &[ChartConfig],
+        watchlist_cfgs: &[midas_core::config::WatchlistConfig],
+    ) -> (WorkspaceLayout, HashMap<ChartId, ChartPanel>, HashMap<WatchlistId, WatchlistPanel>) {
+        use crate::layout::PaneState;
+
+        struct RestoreCtx {
+            charts: HashMap<ChartId, ChartPanel>,
+            watchlists: HashMap<WatchlistId, WatchlistPanel>,
+            next_chart_id: u32,
+            next_wl_id: u32,
+            cursor: usize,
+        }
+
+        impl RestoreCtx {
+            fn parse_node(
+                &mut self,
+                tree: &[LayoutNode],
+                chart_cfgs: &[ChartConfig],
+                watchlist_cfgs: &[midas_core::config::WatchlistConfig],
+            ) -> pane_grid::Configuration<PaneState> {
+                if self.cursor >= tree.len() {
+                    let id = ChartId::new(self.next_chart_id);
+                    self.next_chart_id += 1;
+                    self.charts.insert(id, MidasApp::make_empty_panel());
+                    return pane_grid::Configuration::Pane(PaneState::chart(id));
+                }
+                match &tree[self.cursor] {
+                    LayoutNode::Split { axis, ratio } => {
+                        let ax = if axis == "horizontal" {
+                            pane_grid::Axis::Horizontal
+                        } else {
+                            pane_grid::Axis::Vertical
+                        };
+                        let r = *ratio;
+                        self.cursor += 1;
+                        let a = self.parse_node(tree, chart_cfgs, watchlist_cfgs);
+                        let b = self.parse_node(tree, chart_cfgs, watchlist_cfgs);
+                        pane_grid::Configuration::Split {
+                            axis: ax,
+                            ratio: r,
+                            a: Box::new(a),
+                            b: Box::new(b),
+                        }
+                    }
+                    LayoutNode::Chart { chart_index } => {
+                        let id = ChartId::new(self.next_chart_id);
+                        self.next_chart_id += 1;
+                        let panel = chart_cfgs
+                            .get(*chart_index)
+                            .map(|cfg| MidasApp::restore_panel(cfg))
+                            .unwrap_or_else(MidasApp::make_empty_panel);
+                        self.charts.insert(id, panel);
+                        self.cursor += 1;
+                        pane_grid::Configuration::Pane(PaneState::chart(id))
+                    }
+                    LayoutNode::Watchlist { watchlist_index } => {
+                        let wl_id = WatchlistId::new(self.next_wl_id);
+                        self.next_wl_id += 1;
+                        if let Some(wl_cfg) = watchlist_cfgs.get(*watchlist_index) {
+                            let panel = WatchlistPanel::from_config(wl_id, wl_cfg);
+                            self.watchlists.insert(wl_id, panel);
+                        }
+                        self.cursor += 1;
+                        pane_grid::Configuration::Pane(PaneState::watchlist(wl_id))
+                    }
+                }
+            }
+        }
+
+        let mut ctx = RestoreCtx {
+            charts: HashMap::new(),
+            watchlists: HashMap::new(),
+            next_chart_id: 1,
+            next_wl_id: 1,
+            cursor: 0,
+        };
+
+        let config = ctx.parse_node(tree, chart_cfgs, watchlist_cfgs);
+
+        let panes = pane_grid::State::with_configuration(config);
+        let first_pane = panes.panes.keys().next().copied();
+        let ws = WorkspaceLayout {
+            panes,
+            focus: first_pane,
+            next_chart_id: ctx.next_chart_id,
+            next_watchlist_id: ctx.next_wl_id,
+        };
+
+        (ws, ctx.charts, ctx.watchlists)
     }
 
     /// Restore a single chart panel from config.
@@ -1467,6 +1571,7 @@ impl MidasApp {
 
             Message::PaneResized(pane_grid::ResizeEvent { split, ratio }) => {
                 self.workspace.panes.resize(split, ratio);
+                self.mark_config_dirty();
                 Task::none()
             }
 
@@ -1480,6 +1585,7 @@ impl MidasApp {
                     self.dragging_ticker = None;
                 }
                 self.workspace.panes.drop(pane, target);
+                self.mark_config_dirty();
                 Task::none()
             }
 
@@ -2035,6 +2141,8 @@ impl MidasApp {
                     Err(ref e) => {
                         tracing::warn!("Config save failed: {e}");
                         self.status_message = format!("Config save failed: {e}");
+                        // Re-mark dirty so the next tick retries the save.
+                        self.config_dirty = true;
                     }
                 }
                 Task::none()
@@ -2062,6 +2170,7 @@ impl MidasApp {
                             });
                             self.floating_charts.insert(win_id, floating_chart);
                             self.status_message = format!("Popped out {title} to new window");
+                            self.mark_config_dirty();
                             return open_task.map(|_id| Message::Tick);
                         }
                     }
@@ -2088,6 +2197,7 @@ impl MidasApp {
             Message::MonitorSizeResult(size) => {
                 if let Some(s) = size {
                     self.monitor_size = Some((s.width as u32, s.height as u32));
+                    self.mark_config_dirty();
                 }
                 Task::none()
             }

@@ -76,9 +76,9 @@ pub struct WorkspaceLayout {
     /// The currently focused pane, if any.
     pub focus: Option<pane_grid::Pane>,
     /// Monotonic counter for generating unique `ChartId` values.
-    next_chart_id: u32,
+    pub(crate) next_chart_id: u32,
     /// Monotonic counter for generating unique `WatchlistId` values.
-    next_watchlist_id: u32,
+    pub(crate) next_watchlist_id: u32,
 }
 
 impl WorkspaceLayout {

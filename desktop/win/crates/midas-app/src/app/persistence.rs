@@ -2,9 +2,10 @@
 
 use std::time::Instant;
 
+use iced::widget::pane_grid;
 use iced::Task;
 
-use midas_core::config::{AppConfig, ChartConfig, PanelSlot, ProviderConfig};
+use midas_core::config::{AppConfig, ChartConfig, LayoutNode, PanelSlot, ProviderConfig};
 
 use crate::layout::PanelContent;
 
@@ -13,52 +14,54 @@ use super::{Message, MidasApp, CONFIG_SAVE_DEBOUNCE_SECS};
 impl MidasApp {
     /// Build an `AppConfig` from the current application state.
     ///
-    /// Uses a single pass over workspace panes so that `panel_order` indices
-    /// are always consistent with the `charts` and `watchlists` vectors,
-    /// even if a pane references a chart/watchlist that no longer exists.
+    /// Walks the pane grid `Node` tree to capture the full layout topology
+    /// (split axes and ratios). Also builds the legacy `panel_order` for
+    /// backward compatibility.
     pub(crate) fn build_config(&self) -> AppConfig {
         let mut chart_configs: Vec<ChartConfig> = Vec::new();
         let mut watchlist_configs = Vec::new();
         let mut panel_order: Vec<PanelSlot> = Vec::new();
+        let mut layout_tree: Vec<LayoutNode> = Vec::new();
 
+        // Walk the pane grid tree to build layout_tree (pre-order traversal).
+        let node = self.workspace.panes.layout();
+        self.walk_node(
+            node,
+            &mut chart_configs,
+            &mut watchlist_configs,
+            &mut layout_tree,
+        );
+
+        // Also build legacy panel_order from BTreeMap iteration order.
         for ps in self.workspace.panes.panes.values() {
             match &ps.content {
                 PanelContent::Chart(chart_id) => {
-                    if let Some(panel) = self.charts.get(chart_id) {
-                        let cam = &panel.chart_state.camera;
-                        let idx = chart_configs.len();
-                        chart_configs.push(ChartConfig {
-                            symbol: panel.symbol.clone(),
-                            timeframe: panel.timeframe.display_name().to_string(),
-                            levels: vec![], // deprecated — now in top-level levels map
-                            camera_time_start: Some(cam.time_start),
-                            camera_time_end: Some(cam.time_end),
-                            camera_price_low: Some(cam.price_low),
-                            camera_price_high: Some(cam.price_high),
-                            collapse_gaps: panel.chart_state.collapse_gaps,
-                            timeline_border_ratio: panel.chart_state.timeline_border_ratio,
-                            volume_scale: panel.chart_state.volume_scale,
-                            show_volume_profile: panel.chart_state.show_volume_profile,
-                            show_levels: panel.chart_state.show_levels,
-                            viewport_width: Some(cam.viewport_width),
-                            viewport_height: Some(cam.viewport_height),
-                            symbol_link: panel.symbol_link,
-                            timeframe_link: panel.timeframe_link,
-                        });
+                    if let Some(idx) = chart_configs
+                        .iter()
+                        .position(|c| self.charts.get(chart_id).map_or(false, |p| {
+                            c.symbol == p.symbol && c.timeframe == p.timeframe.display_name()
+                        }))
+                    {
                         panel_order.push(PanelSlot::Chart { chart_index: idx });
-                    } else {
-                        tracing::warn!("Pane references missing {chart_id}, skipping in config");
                     }
                 }
                 PanelContent::Watchlist(wl_id) => {
-                    if let Some(wl) = self.watchlists.get(wl_id) {
-                        let idx = watchlist_configs.len();
-                        watchlist_configs.push(wl.to_config());
+                    if let Some(idx) = watchlist_configs
+                        .iter()
+                        .enumerate()
+                        .position(|(i, _)| {
+                            self.watchlists
+                                .get(wl_id)
+                                .map_or(false, |wl| {
+                                    watchlist_configs.get(i).map_or(false, |wc: &midas_core::config::WatchlistConfig| {
+                                        wc.name == wl.name
+                                    })
+                                })
+                        })
+                    {
                         panel_order.push(PanelSlot::Watchlist {
                             watchlist_index: idx,
                         });
-                    } else {
-                        tracing::warn!("Pane references missing {wl_id}, skipping in config");
                     }
                 }
             }
@@ -84,6 +87,7 @@ impl MidasApp {
             levels: self.level_store.to_config(),
             watchlists: watchlist_configs,
             panel_order,
+            layout_tree,
             store: midas_core::config::StoreConfig::default(),
             providers: Some(ProviderConfig {
                 active_data: Some(self.providers.active_data_provider_name()),
@@ -92,6 +96,73 @@ impl MidasApp {
                     .active_broker()
                     .map(|b| b.name().to_string()),
             }),
+        }
+    }
+
+    /// Recursively walk the pane grid `Node` tree (pre-order) and populate
+    /// the chart/watchlist config vectors and the flattened layout tree.
+    fn walk_node(
+        &self,
+        node: &pane_grid::Node,
+        charts: &mut Vec<ChartConfig>,
+        watchlists: &mut Vec<midas_core::config::WatchlistConfig>,
+        tree: &mut Vec<LayoutNode>,
+    ) {
+        match node {
+            pane_grid::Node::Split {
+                axis, ratio, a, b, ..
+            } => {
+                let axis_str = match axis {
+                    pane_grid::Axis::Horizontal => "horizontal",
+                    pane_grid::Axis::Vertical => "vertical",
+                };
+                tree.push(LayoutNode::Split {
+                    axis: axis_str.to_string(),
+                    ratio: *ratio,
+                });
+                self.walk_node(a, charts, watchlists, tree);
+                self.walk_node(b, charts, watchlists, tree);
+            }
+            pane_grid::Node::Pane(pane) => {
+                if let Some(ps) = self.workspace.panes.get(*pane) {
+                    match &ps.content {
+                        PanelContent::Chart(chart_id) => {
+                            if let Some(panel) = self.charts.get(chart_id) {
+                                let cam = &panel.chart_state.camera;
+                                let idx = charts.len();
+                                charts.push(ChartConfig {
+                                    symbol: panel.symbol.clone(),
+                                    timeframe: panel.timeframe.display_name().to_string(),
+                                    levels: vec![],
+                                    camera_time_start: Some(cam.time_start),
+                                    camera_time_end: Some(cam.time_end),
+                                    camera_price_low: Some(cam.price_low),
+                                    camera_price_high: Some(cam.price_high),
+                                    collapse_gaps: panel.chart_state.collapse_gaps,
+                                    timeline_border_ratio: panel.chart_state.timeline_border_ratio,
+                                    volume_scale: panel.chart_state.volume_scale,
+                                    show_volume_profile: panel.chart_state.show_volume_profile,
+                                    show_levels: panel.chart_state.show_levels,
+                                    viewport_width: Some(cam.viewport_width),
+                                    viewport_height: Some(cam.viewport_height),
+                                    symbol_link: panel.symbol_link,
+                                    timeframe_link: panel.timeframe_link,
+                                });
+                                tree.push(LayoutNode::Chart { chart_index: idx });
+                            }
+                        }
+                        PanelContent::Watchlist(wl_id) => {
+                            if let Some(wl) = self.watchlists.get(wl_id) {
+                                let idx = watchlists.len();
+                                watchlists.push(wl.to_config());
+                                tree.push(LayoutNode::Watchlist {
+                                    watchlist_index: idx,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
