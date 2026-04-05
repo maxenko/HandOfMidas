@@ -93,8 +93,9 @@ pub fn gerchik_gatr_detail(
         return None;
     }
 
-    // Today's True Range (includes gap from yesterday's close).
-    let today_tr = true_range(highs[len - 1], lows[len - 1], closes[len - 2]);
+    // Today's range: simple H-L (not True Range). Gaps from yesterday's
+    // close don't count toward "traveled" — only actual intraday movement.
+    let today_range = highs[len - 1] - lows[len - 1];
 
     // Compute TR for every bar before today (indices 1..len-1, using prev close).
     let history_end = len - 1;
@@ -129,10 +130,10 @@ pub fn gerchik_gatr_detail(
     }
 
     let pct = if selected_bars.is_empty() {
-        (today_tr / raw_avg * 100.0) as f32
+        (today_range / raw_avg * 100.0) as f32
     } else {
         let avg = sum / selected_bars.len() as f64;
-        (today_tr / avg * 100.0) as f32
+        (today_range / avg * 100.0) as f32
     };
 
     // Reverse so indices are in ascending order.
@@ -256,20 +257,24 @@ mod tests {
     }
 
     #[test]
-    fn gatr_pct_gap_up_counts_toward_today() {
-        // Yesterday closed at 100. Today opens at 110 (gap up of 10),
-        // trades H=115, L=108. H-L = 7, but TR = max(7, |115-100|, |108-100|) = 15.
+    fn gatr_pct_gap_up_does_not_inflate_today() {
+        // Yesterday closed at 100. Today gaps up: H=115, L=108.
+        // H-L = 7 (today's actual range). Gap is 8 points but doesn't
+        // count toward today's traveled range.
         // History: 8 bars, all TR=15, no gaps.
         let mut h = vec![115.0; 8];
         h.push(115.0); // today
         let mut l = vec![100.0; 8];
         l.push(108.0); // today
         let mut c = vec![100.0; 8];
-        c.push(112.0); // today's close (irrelevant for G.ATR)
-        // prev_close for today = c[7] = 100. TR = max(7, 15, 8) = 15.
+        c.push(112.0); // today's close
+        // Today H-L = 7, avg TR = 15, pct = 7/15*100 ≈ 46.7%.
         let pct = gerchik_gatr_pct(&h, &l, &c).unwrap();
-        // Today TR = 15, avg TR = 15, pct = 100%.
-        assert!((pct - 100.0).abs() < 1.0, "expected ~100%, got {pct}");
+        let expected = 7.0 / 15.0 * 100.0;
+        assert!(
+            (pct - expected as f32).abs() < 1.0,
+            "expected ~{expected:.0}%, got {pct}"
+        );
     }
 
     #[test]
