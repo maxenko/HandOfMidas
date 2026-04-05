@@ -2218,9 +2218,7 @@ impl MidasApp {
 
             Message::ConfigSaved(result) => {
                 match result {
-                    Ok(()) => {
-                        tracing::debug!("Config saved successfully");
-                    }
+                    Ok(()) => {}
                     Err(ref e) => {
                         tracing::warn!("Config save failed: {e}");
                         self.status_message = format!("Config save failed: {e}");
