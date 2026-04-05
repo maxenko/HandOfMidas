@@ -81,8 +81,8 @@ pub fn snapshot_from_candles(buffer: &midas_core::CandleBuffer) -> MarketSnapsho
 ///
 /// Delegates to [`midas_core::gerchik_gatr_pct`] which implements the
 /// canonical algorithm: skip today, walk previous 7 sessions, filter
-/// paranormal candles (TR > 2x or < 0.5x of raw average), then show
-/// today's (H-L) as a percentage of the filtered average.
+/// paranormal candles (TR > 2× or < 0.5× of raw average), then show
+/// today's TR as a percentage of the filtered average.
 fn compute_daily_gatr(buffer: &midas_core::CandleBuffer) -> Option<f32> {
     let len = buffer.len();
     if len < 3 {

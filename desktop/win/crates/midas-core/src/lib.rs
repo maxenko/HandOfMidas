@@ -21,8 +21,8 @@ pub mod timeframe;
 // pub mod time_axis;    // TimeAxisController
 
 pub use atr::{
-    gatr_color, gerchik_gatr_pct, true_range, wilder_atr, ATR_PERIOD, GATR_COLOR_GREEN,
-    GATR_COLOR_RED, GATR_LOOKBACK, GATR_THRESHOLD_PCT,
+    gatr_color, gerchik_gatr_detail, gerchik_gatr_pct, true_range, wilder_atr, ATR_PERIOD,
+    GATR_COLOR_GREEN, GATR_COLOR_RED, GATR_LOOKBACK, GATR_THRESHOLD_PCT, GatrResult,
 };
 pub use candle_buffer::{CandleBuffer, CandleSlice};
 pub use candle_data::CandleData;
