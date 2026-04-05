@@ -70,6 +70,9 @@ the intraday Brownian bridge to exactly hit daily H/L/O/C.
 
 ## Known Gaps (Not Blocking)
 
+- **Duplicate `aggregate_daily_bars` / `DailyBar`** — Two copies exist:
+  `midas-chart/src/gerchik_atr.rs` (f32) and `midas-chart/src/indicators/gerchik_atr.rs` (f64).
+  Consolidate into a single shared implementation to reduce duplication.
 - **BrokerClient trait ~35% IB parity** — market data subs, positions,
   account queries are on the trait now. Missing: trailing stops, TIF
   enforcement, margin, bar streaming, algo orders.
