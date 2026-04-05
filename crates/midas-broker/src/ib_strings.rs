@@ -89,11 +89,9 @@ pub fn timeframe_to_bar_size(tf: Timeframe) -> String {
 fn subtract_calendar_months(end: i64, months: u32, duration: &str) -> Result<i64, BrokerError> {
     let dt = DateTime::<Utc>::from_timestamp(end, 0)
         .ok_or_else(|| BrokerError::Config(format!("invalid end timestamp: {end}")))?;
-    let start_dt = dt
-        .checked_sub_months(Months::new(months))
-        .ok_or_else(|| {
-            BrokerError::Config(format!("month subtraction overflow for \"{duration}\""))
-        })?;
+    let start_dt = dt.checked_sub_months(Months::new(months)).ok_or_else(|| {
+        BrokerError::Config(format!("month subtraction overflow for \"{duration}\""))
+    })?;
     Ok(start_dt.timestamp())
 }
 

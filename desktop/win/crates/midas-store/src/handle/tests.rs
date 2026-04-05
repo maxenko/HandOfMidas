@@ -13,7 +13,14 @@ fn sample_buffer(n: usize) -> CandleBuffer {
     for i in 0..n {
         let ts = 1_700_000_000_000i64 + (i as i64 * 86_400_000);
         let price = 150.0 + (i as f32 * 0.01);
-        buf.push(ts, price, price + 2.0, price - 1.5, price + 0.5, (1000 + i) as u32);
+        buf.push(
+            ts,
+            price,
+            price + 2.0,
+            price - 1.5,
+            price + 0.5,
+            (1000 + i) as u32,
+        );
     }
     buf
 }
@@ -32,7 +39,10 @@ async fn test_dbhandle_roundtrip() {
     let key = sample_key();
     let buf = sample_buffer(100);
 
-    let inserted = handle.insert_candles(key.clone(), buf.clone(), "test").await.unwrap();
+    let inserted = handle
+        .insert_candles(key.clone(), buf.clone(), "test")
+        .await
+        .unwrap();
     assert_eq!(inserted, 100);
 
     let loaded = handle.query_candles(key).await.unwrap();
@@ -137,7 +147,10 @@ async fn test_dbhandle_query_range() {
     let handle = DbHandle::open_memory();
     let key = sample_key();
     let buf = sample_buffer(1000);
-    handle.insert_candles(key.clone(), buf.clone(), "test").await.unwrap();
+    handle
+        .insert_candles(key.clone(), buf.clone(), "test")
+        .await
+        .unwrap();
 
     let start = buf.timestamps[100];
     let end = buf.timestamps[199];

@@ -82,7 +82,14 @@ fn bulk_insert_inner(
         "INSERT INTO meta.data_ranges
          (symbol, timeframe_secs, candle_count, first_ts, last_ts, source)
          VALUES (?, ?, ?, ?, ?, ?)",
-        params![&key.symbol, tf_secs, i32::try_from(buf.len()).unwrap_or(i32::MAX), first_ts, last_ts, source],
+        params![
+            &key.symbol,
+            tf_secs,
+            i32::try_from(buf.len()).unwrap_or(i32::MAX),
+            first_ts,
+            last_ts,
+            source
+        ],
     )?;
 
     Ok(buf.len())
@@ -214,7 +221,9 @@ pub fn delete_symbol(conn: &Connection, key: &DataKey) -> Result<(), StoreError>
     })();
     match &result {
         Ok(()) => conn.execute_batch("COMMIT")?,
-        Err(_) => { let _ = conn.execute_batch("ROLLBACK"); }
+        Err(_) => {
+            let _ = conn.execute_batch("ROLLBACK");
+        }
     }
     result
 }
@@ -226,11 +235,9 @@ pub fn delete_symbol(conn: &Connection, key: &DataKey) -> Result<(), StoreError>
 /// scan on every startup for well-maintained databases.
 pub fn reconcile_data_ranges(conn: &Connection) -> Result<(), StoreError> {
     // Quick check: does metadata count match candle data distinct keys?
-    let meta_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM meta.data_ranges",
-        [],
-        |row| row.get(0),
-    )?;
+    let meta_count: i64 = conn.query_row("SELECT COUNT(*) FROM meta.data_ranges", [], |row| {
+        row.get(0)
+    })?;
     let candle_keys: i64 = conn.query_row(
         "SELECT COUNT(DISTINCT (symbol, timeframe_secs)) FROM market.candles",
         [],
@@ -246,11 +253,7 @@ pub fn reconcile_data_ranges(conn: &Connection) -> Result<(), StoreError> {
         return Ok(()); // Empty database, nothing to reconcile.
     }
 
-    tracing::info!(
-        meta_count,
-        candle_keys,
-        "reconciling data_ranges metadata"
-    );
+    tracing::info!(meta_count, candle_keys, "reconciling data_ranges metadata");
 
     // Full reconciliation: query aggregates then rewrite metadata row-by-row.
     // (DuckDB has a debug-mode assertion bug in INSERT INTO ... SELECT
@@ -291,7 +294,9 @@ pub fn reconcile_data_ranges(conn: &Connection) -> Result<(), StoreError> {
     })();
     match &result {
         Ok(()) => conn.execute_batch("COMMIT")?,
-        Err(_) => { let _ = conn.execute_batch("ROLLBACK"); }
+        Err(_) => {
+            let _ = conn.execute_batch("ROLLBACK");
+        }
     }
     result
 }

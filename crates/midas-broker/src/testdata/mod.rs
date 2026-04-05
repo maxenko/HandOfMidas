@@ -26,9 +26,9 @@
 //! assert_eq!(a.len(), b.len());
 //! ```
 
-pub mod personality;
 mod adapter;
 mod generate;
+pub mod personality;
 
 use std::collections::HashMap;
 

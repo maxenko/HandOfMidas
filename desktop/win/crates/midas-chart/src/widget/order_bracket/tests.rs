@@ -202,7 +202,10 @@ fn test_format_entry_label_long() {
     b.side = BracketSide::Long;
     b.quantity = Some(100.0);
     let label = format_entry_label(&b);
-    assert!(label.starts_with('\u{25B2}'), "Long should start with up arrow, got: {label}");
+    assert!(
+        label.starts_with('\u{25B2}'),
+        "Long should start with up arrow, got: {label}"
+    );
     assert!(label.contains("185.50"));
     assert!(label.contains("100sh"));
 }
@@ -213,7 +216,10 @@ fn test_format_entry_label_short() {
     b.side = BracketSide::Short;
     b.quantity = Some(50.0);
     let label = format_entry_label(&b);
-    assert!(label.starts_with('\u{25BC}'), "Short should start with down arrow, got: {label}");
+    assert!(
+        label.starts_with('\u{25BC}'),
+        "Short should start with down arrow, got: {label}"
+    );
     assert!(label.contains("185.50"));
     assert!(label.contains("50sh"));
 }
@@ -246,7 +252,11 @@ fn test_bracket_zone_rects_active() {
     let price_to_y = |p: f64| ((200.0 - p) * 10.0) as f32;
     let entry_y = price_to_y(185.0); // 150.0
     let zones = bracket_zone_rects(&b, entry_y, 1920.0, price_to_y);
-    assert_eq!(zones.len(), 2, "Active bracket with TP+SL should produce 2 zones");
+    assert_eq!(
+        zones.len(),
+        2,
+        "Active bracket with TP+SL should produce 2 zones"
+    );
 
     // TP zone: entry_y=150, tp_y=price_to_y(192)=80 => top=80, bottom=150
     let (tp_rect, tp_color) = &zones[0];
@@ -270,5 +280,8 @@ fn test_bracket_zone_rects_draft() {
     let price_to_y = |p: f64| ((200.0 - p) * 10.0) as f32;
     let entry_y = price_to_y(185.0);
     let zones = bracket_zone_rects(&b, entry_y, 1920.0, price_to_y);
-    assert!(zones.is_empty(), "Draft bracket should produce no zone rects");
+    assert!(
+        zones.is_empty(),
+        "Draft bracket should produce no zone rects"
+    );
 }

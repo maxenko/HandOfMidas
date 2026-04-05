@@ -2,8 +2,8 @@ use super::*;
 use crate::camera::Camera2D;
 use crate::state::{ChartState, InteractionMode, Momentum, YAnimation};
 use crate::widget::{
-    Annotation, AnnotationId, AnnotationKind, Presence,
     level::{LevelExtend, LineStyle},
+    Annotation, AnnotationId, AnnotationKind, Presence,
 };
 
 fn test_state() -> ChartState {
@@ -1320,10 +1320,7 @@ fn hit_test_finds_closest_level() {
         viewport_height: 1000,
         dpi_scale: 1.0,
     };
-    let levels = vec![
-        test_level(1, 50.0),
-        test_level(2, 55.0),
-    ];
+    let levels = vec![test_level(1, 50.0), test_level(2, 55.0)];
 
     let result = hit_test_levels(&levels, 500.0, &camera);
     assert!(result.is_some());
@@ -1402,9 +1399,7 @@ fn mouse_release_clears_drag() {
 
 // ── Bracket leg drag tests ──────────────────────────────────────
 
-use crate::widget::order_bracket::{
-    BracketLeg, BracketSide, BracketStatus, LegRole, OrderBracket,
-};
+use crate::widget::order_bracket::{BracketLeg, BracketSide, BracketStatus, LegRole, OrderBracket};
 
 fn make_bracket_leg(price: f64) -> BracketLeg {
     BracketLeg {
@@ -1513,16 +1508,14 @@ fn test_clamp_bracket_leg_long_sl_above_entry_clamped() {
 #[test]
 fn test_clamp_bracket_leg_short_tp_below_entry() {
     // Short TP dragged below entry stays below.
-    let clamped =
-        clamp_bracket_leg_price(175.0, 185.0, LegRole::TakeProfit, BracketSide::Short);
+    let clamped = clamp_bracket_leg_price(175.0, 185.0, LegRole::TakeProfit, BracketSide::Short);
     assert!((clamped - 175.0).abs() < f64::EPSILON);
 }
 
 #[test]
 fn test_clamp_bracket_leg_short_tp_above_entry_clamped() {
     // Short TP dragged above entry is clamped to just below entry.
-    let clamped =
-        clamp_bracket_leg_price(190.0, 185.0, LegRole::TakeProfit, BracketSide::Short);
+    let clamped = clamp_bracket_leg_price(190.0, 185.0, LegRole::TakeProfit, BracketSide::Short);
     assert!(
         clamped < 185.0,
         "Short TP must be below entry, got {}",

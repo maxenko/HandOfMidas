@@ -1,6 +1,6 @@
 use super::*;
 use midas_chart::levels::LevelIcon;
-use midas_chart::widget::{level::LineStyle, level::LevelExtend, HorizontalLevel};
+use midas_chart::widget::{level::LevelExtend, level::LineStyle, HorizontalLevel};
 
 fn make_level(price: f64) -> AnnotationKind {
     AnnotationKind::Level(HorizontalLevel {

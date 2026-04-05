@@ -7,7 +7,10 @@ async fn test_broker_handle_creation() {
     let handle = start_broker_engine(config);
 
     // Connection should start as Disconnected.
-    assert_eq!(*handle.connection_state.borrow(), ConnectionState::Disconnected);
+    assert_eq!(
+        *handle.connection_state.borrow(),
+        ConnectionState::Disconnected
+    );
 
     // Send Shutdown and verify the engine stops (command sender is not
     // dropped prematurely).
@@ -37,7 +40,9 @@ async fn test_event_broadcast() {
     let mut order_rx = handle.order_events.subscribe();
 
     // Emit a market event on the broadcast channel.
-    let market_event = BrokerEvent::Connected { server_version: 176 };
+    let market_event = BrokerEvent::Connected {
+        server_version: 176,
+    };
     handle
         .market_events
         .send(market_event)
@@ -116,7 +121,10 @@ async fn test_connection_state_watch() {
 async fn test_historical_data_via_test_source() {
     use crate::config::DataSourceConfig;
 
-    let config = BrokerConfig { data_source: DataSourceConfig::Test, ..Default::default() };
+    let config = BrokerConfig {
+        data_source: DataSourceConfig::Test,
+        ..Default::default()
+    };
     let handle = start_broker_engine(config);
     let mut rx = handle.market_events.subscribe();
 
@@ -145,10 +153,7 @@ async fn test_historical_data_via_test_source() {
                 assert_eq!(symbol.contract_id, 265598);
                 bar_count += 1;
             }
-            BrokerEvent::HistoricalDataComplete {
-                request_id,
-                symbol,
-            } => {
+            BrokerEvent::HistoricalDataComplete { request_id, symbol } => {
                 assert_eq!(request_id, 42);
                 assert_eq!(symbol.symbol, "AAPL");
                 break;
@@ -180,8 +185,15 @@ fn sample_bracket_params() -> MarketBracketParams {
         action: crate::orders::types::OrderAction::Buy,
         quantity: 100.0,
         outside_rth: false,
-        take_profit: Some(TakeProfitParams { price: 192.0, tif: None }),
-        stop_loss: Some(StopLossParams { stop_price: 182.0, limit_price: None, tif: None }),
+        take_profit: Some(TakeProfitParams {
+            price: 192.0,
+            tif: None,
+        }),
+        stop_loss: Some(StopLossParams {
+            stop_price: 182.0,
+            limit_price: None,
+            tif: None,
+        }),
         reference_price: Some(185.50),
         strategy: Some("test_strat".to_string()),
         tags: vec!["tag1".to_string()],
@@ -380,17 +392,27 @@ async fn test_historical_data_test_source_returns_data() {
 #[tokio::test]
 async fn test_cancel_bracket_via_command() {
     use crate::config::DataSourceConfig;
-    let config = BrokerConfig { data_source: DataSourceConfig::Test, ..Default::default() };
+    let config = BrokerConfig {
+        data_source: DataSourceConfig::Test,
+        ..Default::default()
+    };
     let handle = start_broker_engine(config);
     let mut rx = handle.order_events.subscribe();
 
     // Create a bracket first
     let params = sample_bracket_params();
-    handle.commands.send(BrokerCommand::CreateMarketBracket(params)).await.unwrap();
+    handle
+        .commands
+        .send(BrokerCommand::CreateMarketBracket(params))
+        .await
+        .unwrap();
 
     // Wait for BracketCreated
     let parent_id = loop {
-        let event = tokio::time::timeout(Duration::from_secs(1), rx.recv()).await.unwrap().unwrap();
+        let event = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
         if let BrokerEvent::BracketCreated { parent_id: pid, .. } = event {
             break pid;
         }
@@ -401,21 +423,30 @@ async fn test_cancel_bracket_via_command() {
 
     // Cancel it — with TestBroker instant fills, the market order is
     // already filled. Cancel only affects non-terminal children.
-    handle.commands.send(BrokerCommand::CancelBracket { parent_id }).await.unwrap();
+    handle
+        .commands
+        .send(BrokerCommand::CancelBracket { parent_id })
+        .await
+        .unwrap();
 
     // Drain events — expect at least one BracketStatusChanged
     tokio::time::sleep(Duration::from_millis(50)).await;
     let mut got_status = false;
     for _ in 0..30 {
         match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
-            Ok(Ok(BrokerEvent::BracketStatusChanged { parent_id: pid, .. })) if pid == parent_id => {
+            Ok(Ok(BrokerEvent::BracketStatusChanged { parent_id: pid, .. }))
+                if pid == parent_id =>
+            {
                 got_status = true;
             }
             Ok(Ok(_)) => {} // drain other events
             _ => break,
         }
     }
-    assert!(got_status, "Expected at least one BracketStatusChanged event");
+    assert!(
+        got_status,
+        "Expected at least one BracketStatusChanged event"
+    );
 
     let _ = handle.commands.send(BrokerCommand::Shutdown).await;
 }
@@ -448,8 +479,15 @@ fn test_check_bracket_status_change_unit() {
         o.parent_id = Some(parent.id);
         o
     };
-    let group = BracketGroup { parent, take_profit: Some(tp), stop_loss: Some(sl) };
-    assert_eq!(derive_bracket_status(&group), BracketLifecycleStatus::EntryFilled);
+    let group = BracketGroup {
+        parent,
+        take_profit: Some(tp),
+        stop_loss: Some(sl),
+    };
+    assert_eq!(
+        derive_bracket_status(&group),
+        BracketLifecycleStatus::EntryFilled
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -458,7 +496,10 @@ fn test_check_bracket_status_change_unit() {
 
 /// Helper: create a BrokerConfig with Test data source for integration tests.
 fn test_config() -> BrokerConfig {
-    BrokerConfig { data_source: DataSourceConfig::Test, ..Default::default() }
+    BrokerConfig {
+        data_source: DataSourceConfig::Test,
+        ..Default::default()
+    }
 }
 
 /// Helper: create a BrokerConfig with custom trading limits.
@@ -478,7 +519,11 @@ async fn test_create_full_bracket_emits_event() {
     let mut rx = handle.order_events.subscribe();
 
     let params = sample_bracket_params();
-    handle.commands.send(BrokerCommand::CreateMarketBracket(params)).await.unwrap();
+    handle
+        .commands
+        .send(BrokerCommand::CreateMarketBracket(params))
+        .await
+        .unwrap();
 
     let event = recv_bracket_created(&mut rx, 2).await;
 
@@ -521,7 +566,11 @@ async fn test_create_tp_only_bracket() {
 
     let mut params = sample_bracket_params();
     params.stop_loss = None;
-    handle.commands.send(BrokerCommand::CreateMarketBracket(params)).await.unwrap();
+    handle
+        .commands
+        .send(BrokerCommand::CreateMarketBracket(params))
+        .await
+        .unwrap();
 
     let event = recv_bracket_created(&mut rx, 2).await;
 
@@ -548,7 +597,11 @@ async fn test_create_sl_only_bracket() {
 
     let mut params = sample_bracket_params();
     params.take_profit = None;
-    handle.commands.send(BrokerCommand::CreateMarketBracket(params)).await.unwrap();
+    handle
+        .commands
+        .send(BrokerCommand::CreateMarketBracket(params))
+        .await
+        .unwrap();
 
     let event = recv_bracket_created(&mut rx, 2).await;
 
@@ -558,7 +611,10 @@ async fn test_create_sl_only_bracket() {
             stop_loss_id,
             ..
         } => {
-            assert!(take_profit_id.is_none(), "SL-only bracket should not have TP");
+            assert!(
+                take_profit_id.is_none(),
+                "SL-only bracket should not have TP"
+            );
             assert!(stop_loss_id.is_some(), "SL-only bracket should have SL");
         }
         other => panic!("expected BracketCreated, got {other:?}"),
@@ -577,7 +633,11 @@ async fn test_create_naked_market_order() {
     params.take_profit = None;
     params.stop_loss = None;
     // No TP/SL means no notional guard is needed, but we still have reference_price
-    handle.commands.send(BrokerCommand::CreateMarketBracket(params)).await.unwrap();
+    handle
+        .commands
+        .send(BrokerCommand::CreateMarketBracket(params))
+        .await
+        .unwrap();
 
     let event = recv_bracket_created(&mut rx, 2).await;
 
@@ -604,7 +664,11 @@ async fn test_create_bracket_empty_symbol_rejected() {
 
     let mut params = sample_bracket_params();
     params.symbol = String::new();
-    handle.commands.send(BrokerCommand::CreateMarketBracket(params)).await.unwrap();
+    handle
+        .commands
+        .send(BrokerCommand::CreateMarketBracket(params))
+        .await
+        .unwrap();
 
     let event = tokio::time::timeout(Duration::from_secs(1), rx.recv())
         .await
@@ -624,7 +688,10 @@ async fn test_create_bracket_empty_symbol_rejected() {
 
     // Ensure no BracketCreated follows
     let timeout_result = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await;
-    assert!(timeout_result.is_err(), "should not receive any more events after validation error");
+    assert!(
+        timeout_result.is_err(),
+        "should not receive any more events after validation error"
+    );
 
     let _ = handle.commands.send(BrokerCommand::Shutdown).await;
 }
@@ -637,7 +704,11 @@ async fn test_create_bracket_zero_qty_rejected() {
 
     let mut params = sample_bracket_params();
     params.quantity = 0.0;
-    handle.commands.send(BrokerCommand::CreateMarketBracket(params)).await.unwrap();
+    handle
+        .commands
+        .send(BrokerCommand::CreateMarketBracket(params))
+        .await
+        .unwrap();
 
     let event = tokio::time::timeout(Duration::from_secs(1), rx.recv())
         .await
@@ -665,7 +736,11 @@ async fn test_order_size_guard_quantity() {
     let mut rx = handle.order_events.subscribe();
 
     let params = sample_bracket_params(); // quantity=100, limit=50
-    handle.commands.send(BrokerCommand::CreateMarketBracket(params)).await.unwrap();
+    handle
+        .commands
+        .send(BrokerCommand::CreateMarketBracket(params))
+        .await
+        .unwrap();
 
     let event = tokio::time::timeout(Duration::from_secs(1), rx.recv())
         .await
@@ -695,7 +770,11 @@ async fn test_order_size_guard_notional() {
     let mut params = sample_bracket_params();
     params.quantity = 100.0;
     params.reference_price = Some(185.0); // notional = 18500, limit = 1000
-    handle.commands.send(BrokerCommand::CreateMarketBracket(params)).await.unwrap();
+    handle
+        .commands
+        .send(BrokerCommand::CreateMarketBracket(params))
+        .await
+        .unwrap();
 
     let event = tokio::time::timeout(Duration::from_secs(1), rx.recv())
         .await
@@ -723,7 +802,11 @@ async fn test_cancel_bracket_lifecycle() {
     let mut rx = handle.order_events.subscribe();
 
     let params = sample_bracket_params();
-    handle.commands.send(BrokerCommand::CreateMarketBracket(params)).await.unwrap();
+    handle
+        .commands
+        .send(BrokerCommand::CreateMarketBracket(params))
+        .await
+        .unwrap();
 
     // Collect parent_id from BracketCreated
     let parent_id = loop {
@@ -741,7 +824,11 @@ async fn test_cancel_bracket_lifecycle() {
 
     // Cancel the bracket — with instant fills, parent is already Filled.
     // Children (TP/SL) are still live and will be cancelled.
-    handle.commands.send(BrokerCommand::CancelBracket { parent_id }).await.unwrap();
+    handle
+        .commands
+        .send(BrokerCommand::CancelBracket { parent_id })
+        .await
+        .unwrap();
 
     // Wait for BracketStatusChanged — may be Cancelled or Closed depending
     // on which legs were already terminal when cancel arrived.
@@ -749,7 +836,9 @@ async fn test_cancel_bracket_lifecycle() {
     let mut found_status = false;
     for _ in 0..20 {
         match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
-            Ok(Ok(BrokerEvent::BracketStatusChanged { parent_id: pid, .. })) if pid == parent_id => {
+            Ok(Ok(BrokerEvent::BracketStatusChanged { parent_id: pid, .. }))
+                if pid == parent_id =>
+            {
                 found_status = true;
                 break;
             }
@@ -769,7 +858,11 @@ async fn test_modify_tp_price() {
     let mut rx = handle.order_events.subscribe();
 
     let params = sample_bracket_params();
-    handle.commands.send(BrokerCommand::CreateMarketBracket(params)).await.unwrap();
+    handle
+        .commands
+        .send(BrokerCommand::CreateMarketBracket(params))
+        .await
+        .unwrap();
 
     // Collect TP id from BracketCreated
     let tp_id = loop {
@@ -783,10 +876,14 @@ async fn test_modify_tp_price() {
     };
 
     // Modify the TP leg price
-    handle.commands.send(BrokerCommand::ModifyBracketLeg {
-        order_id: tp_id,
-        new_price: 195.0,
-    }).await.unwrap();
+    handle
+        .commands
+        .send(BrokerCommand::ModifyBracketLeg {
+            order_id: tp_id,
+            new_price: 195.0,
+        })
+        .await
+        .unwrap();
 
     // The modify handler logs but may not emit an event for the price change
     // in the current implementation (it requires the order to be in a
@@ -815,12 +912,21 @@ async fn test_sell_bracket_created() {
 
     let mut params = sample_bracket_params();
     params.action = OrderAction::Sell;
-    handle.commands.send(BrokerCommand::CreateMarketBracket(params)).await.unwrap();
+    handle
+        .commands
+        .send(BrokerCommand::CreateMarketBracket(params))
+        .await
+        .unwrap();
 
     let event = recv_bracket_created(&mut rx, 2).await;
 
     match event {
-        BrokerEvent::BracketCreated { action, symbol, quantity, .. } => {
+        BrokerEvent::BracketCreated {
+            action,
+            symbol,
+            quantity,
+            ..
+        } => {
             assert_eq!(action, OrderAction::Sell, "bracket action should be Sell");
             assert_eq!(symbol, "AAPL");
             assert_eq!(quantity, 100.0);
@@ -845,13 +951,20 @@ async fn test_stop_limit_sl_bracket() {
         limit_price: Some(181.50),
         tif: None,
     });
-    handle.commands.send(BrokerCommand::CreateMarketBracket(params)).await.unwrap();
+    handle
+        .commands
+        .send(BrokerCommand::CreateMarketBracket(params))
+        .await
+        .unwrap();
 
     let event = recv_bracket_created(&mut rx, 2).await;
 
     match event {
         BrokerEvent::BracketCreated { stop_loss_id, .. } => {
-            assert!(stop_loss_id.is_some(), "StopLimit SL bracket should have SL");
+            assert!(
+                stop_loss_id.is_some(),
+                "StopLimit SL bracket should have SL"
+            );
         }
         other => panic!("expected BracketCreated, got {other:?}"),
     }
@@ -868,7 +981,11 @@ async fn test_multiple_brackets_sequential() {
     // Create 3 brackets
     for _ in 0..3 {
         let params = sample_bracket_params();
-        handle.commands.send(BrokerCommand::CreateMarketBracket(params)).await.unwrap();
+        handle
+            .commands
+            .send(BrokerCommand::CreateMarketBracket(params))
+            .await
+            .unwrap();
     }
 
     // Collect 3 BracketCreated events
@@ -885,7 +1002,11 @@ async fn test_multiple_brackets_sequential() {
             }
         }
     }
-    assert_eq!(parent_ids.len(), 3, "should have received 3 BracketCreated events");
+    assert_eq!(
+        parent_ids.len(),
+        3,
+        "should have received 3 BracketCreated events"
+    );
 
     // All parent IDs must be unique
     let mut unique = parent_ids.clone();
@@ -903,7 +1024,13 @@ async fn test_cancel_nonexistent_bracket() {
     let mut rx = handle.order_events.subscribe();
 
     let random_id = Uuid::now_v7();
-    handle.commands.send(BrokerCommand::CancelBracket { parent_id: random_id }).await.unwrap();
+    handle
+        .commands
+        .send(BrokerCommand::CancelBracket {
+            parent_id: random_id,
+        })
+        .await
+        .unwrap();
 
     // Should not crash. May or may not emit an event.
     // Give a short window then verify engine is still alive.
@@ -922,8 +1049,7 @@ async fn test_cancel_nonexistent_bracket() {
 fn test_bracket_persistence_round_trip() {
     use crate::db::BrokerDb;
     use crate::persist::order_repo::{
-        get_order, get_orders_by_parent_id, insert_order, local_to_order_row,
-        order_row_to_local,
+        get_order, get_orders_by_parent_id, insert_order, local_to_order_row, order_row_to_local,
     };
 
     let db = BrokerDb::open_in_memory().unwrap();
@@ -1020,7 +1146,11 @@ fn test_order_row_to_local_all_fields() {
     order.oca_group = Some("oca-group-42".to_string());
     order.bracket_role = Some(BracketRole::StopLoss);
     order.strategy = Some("mean_reversion".to_string());
-    order.tags = vec!["urgent".to_string(), "earnings".to_string(), "q4".to_string()];
+    order.tags = vec![
+        "urgent".to_string(),
+        "earnings".to_string(),
+        "q4".to_string(),
+    ];
     order.algo_strategy = Some("TWAP".to_string());
     order.algo_params = Some(serde_json::json!({"startTime": "09:30", "endTime": "16:00"}));
     order.outside_rth = true;
@@ -1059,9 +1189,19 @@ fn test_order_row_to_local_all_fields() {
     assert_eq!(restored.oca_group, Some("oca-group-42".to_string()));
     assert_eq!(restored.bracket_role, Some(BracketRole::StopLoss));
     assert_eq!(restored.strategy, Some("mean_reversion".to_string()));
-    assert_eq!(restored.tags, vec!["urgent".to_string(), "earnings".to_string(), "q4".to_string()]);
+    assert_eq!(
+        restored.tags,
+        vec![
+            "urgent".to_string(),
+            "earnings".to_string(),
+            "q4".to_string()
+        ]
+    );
     assert_eq!(restored.algo_strategy, Some("TWAP".to_string()));
-    assert_eq!(restored.algo_params, Some(serde_json::json!({"startTime": "09:30", "endTime": "16:00"})));
+    assert_eq!(
+        restored.algo_params,
+        Some(serde_json::json!({"startTime": "09:30", "endTime": "16:00"}))
+    );
     assert!(restored.outside_rth);
     assert_eq!(restored.filled_qty, 10.0);
     assert_eq!(restored.remaining_qty, 40.0);
@@ -1098,7 +1238,11 @@ async fn test_create_bracket_empty_exchange_rejected() {
 
     let mut params = sample_bracket_params();
     params.exchange = String::new();
-    handle.commands.send(BrokerCommand::CreateMarketBracket(params)).await.unwrap();
+    handle
+        .commands
+        .send(BrokerCommand::CreateMarketBracket(params))
+        .await
+        .unwrap();
 
     let event = tokio::time::timeout(Duration::from_secs(1), rx.recv())
         .await
@@ -1127,7 +1271,11 @@ async fn test_create_bracket_empty_currency_rejected() {
 
     let mut params = sample_bracket_params();
     params.currency = String::new();
-    handle.commands.send(BrokerCommand::CreateMarketBracket(params)).await.unwrap();
+    handle
+        .commands
+        .send(BrokerCommand::CreateMarketBracket(params))
+        .await
+        .unwrap();
 
     let event = tokio::time::timeout(Duration::from_secs(1), rx.recv())
         .await
@@ -1156,7 +1304,11 @@ async fn test_order_size_guard_missing_reference_price() {
 
     let mut params = sample_bracket_params();
     params.reference_price = None; // remove reference price
-    handle.commands.send(BrokerCommand::CreateMarketBracket(params)).await.unwrap();
+    handle
+        .commands
+        .send(BrokerCommand::CreateMarketBracket(params))
+        .await
+        .unwrap();
 
     let event = tokio::time::timeout(Duration::from_secs(1), rx.recv())
         .await
@@ -1171,7 +1323,9 @@ async fn test_order_size_guard_missing_reference_price() {
                 "error should mention missing reference price: {message}"
             );
         }
-        other => panic!("expected OrderValidationFailed event for missing reference price, got {other:?}"),
+        other => panic!(
+            "expected OrderValidationFailed event for missing reference price, got {other:?}"
+        ),
     }
 
     let _ = handle.commands.send(BrokerCommand::Shutdown).await;
@@ -1184,7 +1338,11 @@ async fn test_bracket_persisted_to_db_via_engine() {
     let mut rx = handle.order_events.subscribe();
 
     let params = sample_bracket_params();
-    handle.commands.send(BrokerCommand::CreateMarketBracket(params)).await.unwrap();
+    handle
+        .commands
+        .send(BrokerCommand::CreateMarketBracket(params))
+        .await
+        .unwrap();
 
     // Get parent_id and child IDs from BracketCreated
     let (parent_id, tp_id, sl_id) = loop {
@@ -1228,7 +1386,11 @@ async fn test_cancel_bracket_emits_order_cancelled_per_leg() {
     let mut rx = handle.order_events.subscribe();
 
     let params = sample_bracket_params();
-    handle.commands.send(BrokerCommand::CreateMarketBracket(params)).await.unwrap();
+    handle
+        .commands
+        .send(BrokerCommand::CreateMarketBracket(params))
+        .await
+        .unwrap();
 
     // Get parent_id from BracketCreated
     let parent_id = loop {
@@ -1243,7 +1405,11 @@ async fn test_cancel_bracket_emits_order_cancelled_per_leg() {
 
     // Cancel it — with TestBroker instant fills, the parent market order
     // fills immediately, so only the non-terminal children get cancelled.
-    handle.commands.send(BrokerCommand::CancelBracket { parent_id }).await.unwrap();
+    handle
+        .commands
+        .send(BrokerCommand::CancelBracket { parent_id })
+        .await
+        .unwrap();
 
     // Collect all events within a window
     let mut order_cancelled_count = 0;
@@ -1288,12 +1454,7 @@ async fn collect_order_submitted(
 ) -> Vec<(Uuid, i32, i64)> {
     let mut results = Vec::new();
     for _ in 0..count * 5 {
-        match tokio::time::timeout(
-            Duration::from_secs(timeout_secs),
-            rx.recv(),
-        )
-        .await
-        {
+        match tokio::time::timeout(Duration::from_secs(timeout_secs), rx.recv()).await {
             Ok(Ok(BrokerEvent::OrderSubmitted {
                 order_id,
                 ib_order_id,
@@ -1318,12 +1479,7 @@ async fn recv_bracket_created(
     timeout_secs: u64,
 ) -> BrokerEvent {
     for _ in 0..20 {
-        match tokio::time::timeout(
-            Duration::from_secs(timeout_secs),
-            rx.recv(),
-        )
-        .await
-        {
+        match tokio::time::timeout(Duration::from_secs(timeout_secs), rx.recv()).await {
             Ok(Ok(event @ BrokerEvent::BracketCreated { .. })) => return event,
             Ok(Ok(_)) => {} // skip non-BracketCreated events
             Ok(Err(e)) => panic!("broadcast recv error: {e}"),
@@ -1472,10 +1628,19 @@ async fn test_bracket_ib_order_ids_match_events() {
 
     for _ in 0..20 {
         match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
-            Ok(Ok(BrokerEvent::OrderSubmitted { order_id, ib_order_id, ib_perm_id })) => {
+            Ok(Ok(BrokerEvent::OrderSubmitted {
+                order_id,
+                ib_order_id,
+                ib_perm_id,
+            })) => {
                 submitted.push((order_id, ib_order_id, ib_perm_id));
             }
-            Ok(Ok(BrokerEvent::BracketCreated { parent_id, take_profit_id, stop_loss_id, .. })) => {
+            Ok(Ok(BrokerEvent::BracketCreated {
+                parent_id,
+                take_profit_id,
+                stop_loss_id,
+                ..
+            })) => {
                 bracket_created = Some((parent_id, take_profit_id.unwrap(), stop_loss_id.unwrap()));
                 // BracketCreated is last in the sequence, so we can stop
                 break;
@@ -1499,14 +1664,8 @@ async fn test_bracket_ib_order_ids_match_events() {
         id_map.contains_key(&parent_id),
         "parent should have OrderSubmitted"
     );
-    assert!(
-        id_map.contains_key(&tp_id),
-        "TP should have OrderSubmitted"
-    );
-    assert!(
-        id_map.contains_key(&sl_id),
-        "SL should have OrderSubmitted"
-    );
+    assert!(id_map.contains_key(&tp_id), "TP should have OrderSubmitted");
+    assert!(id_map.contains_key(&sl_id), "SL should have OrderSubmitted");
 
     let _ = handle.commands.send(BrokerCommand::Shutdown).await;
 }

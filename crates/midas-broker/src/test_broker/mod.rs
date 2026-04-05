@@ -17,9 +17,9 @@
 //! // cbs contains: Submitted, Execution, Filled
 //! ```
 
+use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use parking_lot::Mutex;
 use std::time::Instant;
 
 use serde::Deserialize;
@@ -87,7 +87,6 @@ pub struct TestBrokerConfig {
     pub auto_connect: bool,
 
     // ── Phase 3: Partial fills ──────────────────────────────────────────
-
     /// Minimum order quantity to trigger partial fills (0.0 = disabled).
     #[serde(default)]
     pub partial_fill_threshold: f64,
@@ -97,7 +96,6 @@ pub struct TestBrokerConfig {
     pub partial_fill_tranches: u32,
 
     // ── Phase 4: Tick generation ─────────────────────────────────────────
-
     /// Interval in milliseconds between auto-tick generation (0 = no auto ticks).
     #[serde(default)]
     pub tick_interval_ms: u64,
@@ -107,7 +105,6 @@ pub struct TestBrokerConfig {
     pub default_spread: f64,
 
     // ── Phase 6: Error injection ────────────────────────────────────────
-
     /// Fraction of orders to reject deterministically (0.0 = none).
     /// Uses order count modulo: every Nth order is rejected where N = 1/rate.
     #[serde(default)]
@@ -217,7 +214,6 @@ struct TestBrokerInner {
     data_provider: TestDataProvider,
 
     // ── Phase 5: Position tracking ──────────────────────────────────────
-
     /// Current positions keyed by symbol.
     positions: HashMap<String, PositionState>,
     /// Available cash (starts at config.initial_cash).
@@ -226,14 +222,12 @@ struct TestBrokerInner {
     realized_pnl: f64,
 
     // ── Phase 4: Tick generation ─────────────────────────────────────────
-
     /// Symbols with active market data subscriptions.
     subscriptions: HashSet<String>,
     /// Last time auto-ticks were generated (for interval gating).
     last_tick_time: Instant,
 
     // ── Phase 6: Error injection ────────────────────────────────────────
-
     /// Running count of orders placed (used for deterministic rejection).
     order_count: u64,
 }
@@ -310,13 +304,7 @@ impl TestBroker {
     /// To avoid simultaneous mutable borrows of `inner.orders` and `inner.callbacks`,
     /// this method temporarily removes the order from the map, mutates it, then
     /// reinserts it.
-    fn execute_fill(
-        &self,
-        inner: &mut TestBrokerInner,
-        ib_order_id: i32,
-        shares: f64,
-        price: f64,
-    ) {
+    fn execute_fill(&self, inner: &mut TestBrokerInner, ib_order_id: i32, shares: f64, price: f64) {
         let mut order = match inner.orders.remove(&ib_order_id) {
             Some(o) => o,
             None => return,
@@ -439,11 +427,14 @@ impl TestBroker {
             _ => return,
         };
 
-        let pos = inner.positions.entry(symbol.to_string()).or_insert(PositionState {
-            symbol: symbol.to_string(),
-            quantity: 0.0,
-            avg_cost: 0.0,
-        });
+        let pos = inner
+            .positions
+            .entry(symbol.to_string())
+            .or_insert(PositionState {
+                symbol: symbol.to_string(),
+                quantity: 0.0,
+                avg_cost: 0.0,
+            });
 
         if pos.quantity.signum() == signed_shares.signum() || pos.quantity == 0.0 {
             // Adding to position (or opening new): weighted average cost
@@ -488,11 +479,7 @@ impl TestBroker {
     }
 
     /// Fill a market order immediately. Must be called with the lock already held.
-    fn fill_market_order_inner(
-        &self,
-        inner: &mut TestBrokerInner,
-        ib_order_id: i32,
-    ) {
+    fn fill_market_order_inner(&self, inner: &mut TestBrokerInner, ib_order_id: i32) {
         let (symbol, action) = match inner.orders.get(&ib_order_id) {
             Some(o) => (o.symbol.clone(), o.action.clone()),
             None => return,
@@ -573,7 +560,9 @@ impl TestBroker {
         }
 
         // 2. If parent is MKT, fill it immediately (instant mode)
-        let parent_is_mkt = inner.orders.get(&parent_id)
+        let parent_is_mkt = inner
+            .orders
+            .get(&parent_id)
             .map(|o| o.order_type == "MKT")
             .unwrap_or(false);
 
@@ -582,8 +571,14 @@ impl TestBroker {
         }
 
         // 3. Activate children
-        let children = inner.bracket_links.get(&parent_id).cloned().unwrap_or_default();
-        let parent_filled = inner.orders.get(&parent_id)
+        let children = inner
+            .bracket_links
+            .get(&parent_id)
+            .cloned()
+            .unwrap_or_default();
+        let parent_filled = inner
+            .orders
+            .get(&parent_id)
             .map(|o| o.status == SimOrderStatus::Filled)
             .unwrap_or(false);
 
@@ -660,9 +655,7 @@ impl TestBroker {
             .orders
             .values()
             .filter(|o| {
-                o.symbol == symbol
-                    && o.status == SimOrderStatus::Working
-                    && o.order_type == "LMT"
+                o.symbol == symbol && o.status == SimOrderStatus::Working && o.order_type == "LMT"
             })
             .filter_map(|o| {
                 let limit = o.limit_price?;
@@ -674,8 +667,8 @@ impl TestBroker {
                 if should_fill {
                     // Fill at the better price for the trader
                     let fill_price = match o.action.as_str() {
-                        "BUY" => limit.min(new_price),   // BUY gets the lower (better) price
-                        "SELL" => limit.max(new_price),   // SELL gets the higher (better) price
+                        "BUY" => limit.min(new_price),  // BUY gets the lower (better) price
+                        "SELL" => limit.max(new_price), // SELL gets the higher (better) price
                         _ => limit,
                     };
                     Some((o.ib_order_id, fill_price))
@@ -708,12 +701,7 @@ impl TestBroker {
     /// Plain STP orders: trigger -> Submitted callback -> fill at market price.
     /// STP LMT orders: trigger -> Submitted callback -> check limit; only fills
     /// if limit condition is also met (may remain unfilled if price gaps through).
-    fn check_stop_triggers_inner(
-        &self,
-        inner: &mut TestBrokerInner,
-        symbol: &str,
-        new_price: f64,
-    ) {
+    fn check_stop_triggers_inner(&self, inner: &mut TestBrokerInner, symbol: &str, new_price: f64) {
         // Phase 1: collect triggered order IDs.
         let triggered: Vec<i32> = inner
             .orders
@@ -878,7 +866,9 @@ impl TestBroker {
         }
         let base_price = Self::get_or_seed_price_inner(&mut inner, symbol);
         let spread = self.config.default_spread;
-        Some(Self::make_market_data_callback(0, symbol, base_price, spread, 100))
+        Some(Self::make_market_data_callback(
+            0, symbol, base_price, spread, 100,
+        ))
     }
 
     /// Generate ticks for all subscribed symbols and enqueue them as callbacks.
@@ -889,9 +879,9 @@ impl TestBroker {
         for symbol in &symbols {
             let price = Self::get_or_seed_price_inner(&mut inner, symbol);
             let spread = self.config.default_spread;
-            inner
-                .callbacks
-                .push_back(Self::make_market_data_callback(0, symbol, price, spread, 100));
+            inner.callbacks.push_back(Self::make_market_data_callback(
+                0, symbol, price, spread, 100,
+            ));
         }
         // Price-triggered fills are already handled by set_market_price
         // which is called externally. Auto-ticks just produce tick events.
@@ -1016,7 +1006,11 @@ impl BrokerClient for TestBroker {
 
         // Register in bracket_links if this is a child order
         if let Some(pid) = parent_id {
-            inner.bracket_links.entry(pid).or_default().push(ib_order_id);
+            inner
+                .bracket_links
+                .entry(pid)
+                .or_default()
+                .push(ib_order_id);
         }
 
         // If transmit=true, activate the bracket
@@ -1061,9 +1055,9 @@ impl BrokerClient for TestBroker {
         let price = Self::get_or_seed_price_inner(&mut inner, symbol);
         let spread = self.config.default_spread;
 
-        inner
-            .callbacks
-            .push_back(Self::make_market_data_callback(con_id, symbol, price, spread, 0));
+        inner.callbacks.push_back(Self::make_market_data_callback(
+            con_id, symbol, price, spread, 0,
+        ));
     }
 
     fn unsubscribe_market_data(&self, symbol: &str) {
@@ -1109,9 +1103,7 @@ impl BrokerClient for TestBroker {
         let mut inner = self.inner.lock();
 
         // Phase 4: auto-tick generation based on elapsed time
-        if self.config.tick_interval_ms > 0
-            && !inner.subscriptions.is_empty()
-        {
+        if self.config.tick_interval_ms > 0 && !inner.subscriptions.is_empty() {
             let elapsed = inner.last_tick_time.elapsed();
             let interval = std::time::Duration::from_millis(self.config.tick_interval_ms);
             if elapsed >= interval {
@@ -1120,9 +1112,9 @@ impl BrokerClient for TestBroker {
                 for symbol in &symbols {
                     let price = Self::get_or_seed_price_inner(&mut inner, symbol);
                     let spread = self.config.default_spread;
-                    inner
-                        .callbacks
-                        .push_back(Self::make_market_data_callback(0, symbol, price, spread, 100));
+                    inner.callbacks.push_back(Self::make_market_data_callback(
+                        0, symbol, price, spread, 100,
+                    ));
                 }
             }
         }

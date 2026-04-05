@@ -41,32 +41,26 @@ impl MidasApp {
 
         // Drag overlay: floating label near cursor when dragging a ticker.
         if let Some(ref drag) = self.dragging_ticker {
-            let label = container(
-                text(drag.symbol.clone())
-                    .size(13)
-                    .color(Color::WHITE),
-            )
-            .padding([4, 8])
-            .style(|_| container::Style {
-                background: Some(iced::Background::Color(Color::from_rgba(
-                    0.15, 0.35, 0.65, 0.92,
-                ))),
-                border: iced::Border {
-                    color: Color::from_rgb(0.3, 0.5, 0.8),
-                    width: 1.0,
-                    radius: 4.0.into(),
-                },
-                ..Default::default()
-            });
+            let label = container(text(drag.symbol.clone()).size(13).color(Color::WHITE))
+                .padding([4, 8])
+                .style(|_| container::Style {
+                    background: Some(iced::Background::Color(Color::from_rgba(
+                        0.15, 0.35, 0.65, 0.92,
+                    ))),
+                    border: iced::Border {
+                        color: Color::from_rgb(0.3, 0.5, 0.8),
+                        width: 1.0,
+                        radius: 4.0.into(),
+                    },
+                    ..Default::default()
+                });
 
             // Position the label offset from the current cursor.
             let pos = self.cursor_position;
             let drag_preview = container(label)
                 .width(Length::Shrink)
                 .height(Length::Shrink)
-                .padding(iced::Padding::ZERO
-                    .top(pos.y + 16.0)
-                    .left(pos.x + 12.0));
+                .padding(iced::Padding::ZERO.top(pos.y + 16.0).left(pos.x + 12.0));
 
             let base = column![toolbar, content, status_bar];
             return stack![base, drag_preview].into();
@@ -122,16 +116,20 @@ impl MidasApp {
                     },
                 ),
                 placing_cursor_chart: self.placing_preview.as_ref().map(|(id, _, _)| *id),
-                bracket_annotations: self.annotation_store.get(&chart.symbol)
+                bracket_annotations: self
+                    .annotation_store
+                    .get(&chart.symbol)
                     .iter()
-                    .filter(|a| matches!(
-                        a.kind,
-                        midas_chart::widget::AnnotationKind::OrderBracket(_)
-                    ))
+                    .filter(|a| {
+                        matches!(a.kind, midas_chart::widget::AnnotationKind::OrderBracket(_))
+                    })
                     .cloned()
                     .collect(),
                 gatr_bright_ranges: if chart.gatr_hover && chart.timeframe == Timeframe::D1 {
-                    chart.data.as_ref().map_or(Vec::new(), |d| compute_daily_bright_ranges(d))
+                    chart
+                        .data
+                        .as_ref()
+                        .map_or(Vec::new(), |d| compute_daily_bright_ranges(d))
                 } else {
                     Vec::new()
                 },
@@ -169,7 +167,11 @@ impl MidasApp {
             let mut chart_layers: Vec<Element<'_, Message>> =
                 vec![shader.into(), date_overlay, price_overlay];
 
-            chart_layers.push(build_gerchik_atr_overlay(gerchik_atr.as_ref(), floating_chart_id, chart.timeframe == Timeframe::D1));
+            chart_layers.push(build_gerchik_atr_overlay(
+                gerchik_atr.as_ref(),
+                floating_chart_id,
+                chart.timeframe == Timeframe::D1,
+            ));
 
             let store_levels = self.level_store.levels_for(&chart.symbol);
             if chart.chart_state.show_levels {
@@ -217,17 +219,13 @@ impl MidasApp {
                 if picker_wid == wid {
                     // Backdrop to dismiss picker on click outside.
                     chart_layers.push(
-                        iced::widget::mouse_area(
-                            Space::new().width(Fill).height(Fill),
-                        )
-                        .on_press(Message::DismissLinkPicker)
-                        .into(),
+                        iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
+                            .on_press(Message::DismissLinkPicker)
+                            .into(),
                     );
                     let picker = self.build_link_picker(dim, move |mode| match dim {
                         LinkDimension::Symbol => Message::FloatingSetSymbolLink(wid, mode),
-                        LinkDimension::Timeframe => {
-                            Message::FloatingSetTimeframeLink(wid, mode)
-                        }
+                        LinkDimension::Timeframe => Message::FloatingSetTimeframeLink(wid, mode),
                     });
                     chart_layers.push(
                         container(picker)
@@ -250,60 +248,45 @@ impl MidasApp {
             };
             let sym_link = chart.symbol_link;
             let sym_color = link_mode_indicator_rgba(sym_link);
-            let float_s_btn = button(
-                text("S").size(10).color(Color::WHITE).font(bold_font),
-            )
-            .on_press(Message::ToggleLinkPicker(
-                PickerTarget::Floating(wid),
-                LinkDimension::Symbol,
-            ))
-            .padding([2, 5])
-            .style(move |_theme, _status| button::Style {
-                background: Some(
-                    Color::from_rgba(
-                        sym_color[0],
-                        sym_color[1],
-                        sym_color[2],
-                        sym_color[3],
-                    )
-                    .into(),
-                ),
-                text_color: Color::WHITE,
-                border: iced::Border {
-                    radius: 2.0.into(),
+            let float_s_btn = button(text("S").size(10).color(Color::WHITE).font(bold_font))
+                .on_press(Message::ToggleLinkPicker(
+                    PickerTarget::Floating(wid),
+                    LinkDimension::Symbol,
+                ))
+                .padding([2, 5])
+                .style(move |_theme, _status| button::Style {
+                    background: Some(
+                        Color::from_rgba(sym_color[0], sym_color[1], sym_color[2], sym_color[3])
+                            .into(),
+                    ),
+                    text_color: Color::WHITE,
+                    border: iced::Border {
+                        radius: 2.0.into(),
+                        ..Default::default()
+                    },
                     ..Default::default()
-                },
-                ..Default::default()
-            });
+                });
 
             // Timeframe link button for floating chart.
             let tf_link = chart.timeframe_link;
             let tf_color = link_mode_indicator_rgba(tf_link);
-            let float_t_btn = button(
-                text("T").size(10).color(Color::WHITE).font(bold_font),
-            )
-            .on_press(Message::ToggleLinkPicker(
-                PickerTarget::Floating(wid),
-                LinkDimension::Timeframe,
-            ))
-            .padding([2, 5])
-            .style(move |_theme, _status| button::Style {
-                background: Some(
-                    Color::from_rgba(
-                        tf_color[0],
-                        tf_color[1],
-                        tf_color[2],
-                        tf_color[3],
-                    )
-                    .into(),
-                ),
-                text_color: Color::WHITE,
-                border: iced::Border {
-                    radius: 2.0.into(),
+            let float_t_btn = button(text("T").size(10).color(Color::WHITE).font(bold_font))
+                .on_press(Message::ToggleLinkPicker(
+                    PickerTarget::Floating(wid),
+                    LinkDimension::Timeframe,
+                ))
+                .padding([2, 5])
+                .style(move |_theme, _status| button::Style {
+                    background: Some(
+                        Color::from_rgba(tf_color[0], tf_color[1], tf_color[2], tf_color[3]).into(),
+                    ),
+                    text_color: Color::WHITE,
+                    border: iced::Border {
+                        radius: 2.0.into(),
+                        ..Default::default()
+                    },
                     ..Default::default()
-                },
-                ..Default::default()
-            });
+                });
 
             // Header bar with symbol, link buttons, and timeframe.
             let header = container(
@@ -428,11 +411,14 @@ impl MidasApp {
 
         let broker_names = self.providers.order_broker_names();
         let active_broker = self.providers.active_broker_display_name();
-        let broker_picker =
-            pick_list(broker_names, Some(active_broker), Message::OrderBrokerSelected)
-                .text_size(11)
-                .padding([3, 6])
-                .style(dark_pick_list_style);
+        let broker_picker = pick_list(
+            broker_names,
+            Some(active_broker),
+            Message::OrderBrokerSelected,
+        )
+        .text_size(11)
+        .padding([3, 6])
+        .style(dark_pick_list_style);
 
         let toolbar_row = row![
             layout_buttons,
@@ -698,50 +684,46 @@ impl MidasApp {
         };
         let sym_link = chart.map(|c| c.symbol_link).unwrap_or(LinkMode::Unlinked);
         let sym_color = link_mode_indicator_rgba(sym_link);
-        let s_btn = button(
-            text("S").size(10).color(Color::WHITE).font(bold_font),
-        )
-        .on_press(Message::ToggleLinkPicker(
-            PickerTarget::Docked(chart_id),
-            LinkDimension::Symbol,
-        ))
-        .padding([2, 5])
-        .style(move |_theme, _status| button::Style {
-            background: Some(
-                Color::from_rgba(sym_color[0], sym_color[1], sym_color[2], sym_color[3])
-                    .into(),
-            ),
-            text_color: Color::WHITE,
-            border: iced::Border {
-                radius: 2.0.into(),
+        let s_btn = button(text("S").size(10).color(Color::WHITE).font(bold_font))
+            .on_press(Message::ToggleLinkPicker(
+                PickerTarget::Docked(chart_id),
+                LinkDimension::Symbol,
+            ))
+            .padding([2, 5])
+            .style(move |_theme, _status| button::Style {
+                background: Some(
+                    Color::from_rgba(sym_color[0], sym_color[1], sym_color[2], sym_color[3]).into(),
+                ),
+                text_color: Color::WHITE,
+                border: iced::Border {
+                    radius: 2.0.into(),
+                    ..Default::default()
+                },
                 ..Default::default()
-            },
-            ..Default::default()
-        });
+            });
 
         // Timeframe link button.
-        let tf_link = chart.map(|c| c.timeframe_link).unwrap_or(LinkMode::Unlinked);
+        let tf_link = chart
+            .map(|c| c.timeframe_link)
+            .unwrap_or(LinkMode::Unlinked);
         let tf_color = link_mode_indicator_rgba(tf_link);
-        let t_btn = button(
-            text("T").size(10).color(Color::WHITE).font(bold_font),
-        )
-        .on_press(Message::ToggleLinkPicker(
-            PickerTarget::Docked(chart_id),
-            LinkDimension::Timeframe,
-        ))
-        .padding([2, 5])
-        .style(move |_theme, _status| button::Style {
-            background: Some(
-                Color::from_rgba(tf_color[0], tf_color[1], tf_color[2], tf_color[3])
-                    .into(),
-            ),
-            text_color: Color::WHITE,
-            border: iced::Border {
-                radius: 2.0.into(),
+        let t_btn = button(text("T").size(10).color(Color::WHITE).font(bold_font))
+            .on_press(Message::ToggleLinkPicker(
+                PickerTarget::Docked(chart_id),
+                LinkDimension::Timeframe,
+            ))
+            .padding([2, 5])
+            .style(move |_theme, _status| button::Style {
+                background: Some(
+                    Color::from_rgba(tf_color[0], tf_color[1], tf_color[2], tf_color[3]).into(),
+                ),
+                text_color: Color::WHITE,
+                border: iced::Border {
+                    radius: 2.0.into(),
+                    ..Default::default()
+                },
                 ..Default::default()
-            },
-            ..Default::default()
-        });
+            });
 
         let pop_out_btn = button(text("\u{29C9}").size(12))
             .on_press(Message::PopOut(pane))
@@ -815,16 +797,20 @@ impl MidasApp {
                     },
                 ),
                 placing_cursor_chart: self.placing_preview.as_ref().map(|(id, _, _)| *id),
-                bracket_annotations: self.annotation_store.get(&chart.symbol)
+                bracket_annotations: self
+                    .annotation_store
+                    .get(&chart.symbol)
                     .iter()
-                    .filter(|a| matches!(
-                        a.kind,
-                        midas_chart::widget::AnnotationKind::OrderBracket(_)
-                    ))
+                    .filter(|a| {
+                        matches!(a.kind, midas_chart::widget::AnnotationKind::OrderBracket(_))
+                    })
                     .cloned()
                     .collect(),
                 gatr_bright_ranges: if chart.gatr_hover && chart.timeframe == Timeframe::D1 {
-                    chart.data.as_ref().map_or(Vec::new(), |d| compute_daily_bright_ranges(d))
+                    chart
+                        .data
+                        .as_ref()
+                        .map_or(Vec::new(), |d| compute_daily_bright_ranges(d))
                 } else {
                     Vec::new()
                 },
@@ -857,7 +843,11 @@ impl MidasApp {
             let mut chart_layers: Vec<Element<'_, Message>> =
                 vec![shader.into(), date_overlay, price_overlay];
 
-            chart_layers.push(build_gerchik_atr_overlay(gerchik_atr.as_ref(), chart_id, chart.timeframe == Timeframe::D1));
+            chart_layers.push(build_gerchik_atr_overlay(
+                gerchik_atr.as_ref(),
+                chart_id,
+                chart.timeframe == Timeframe::D1,
+            ));
 
             let store_levels = self.level_store.levels_for(&chart.symbol);
             if chart.chart_state.show_levels {
@@ -905,17 +895,13 @@ impl MidasApp {
                 if picker_id == chart_id {
                     // Backdrop to dismiss picker on click outside.
                     chart_layers.push(
-                        iced::widget::mouse_area(
-                            Space::new().width(Fill).height(Fill),
-                        )
-                        .on_press(Message::DismissLinkPicker)
-                        .into(),
+                        iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
+                            .on_press(Message::DismissLinkPicker)
+                            .into(),
                     );
                     let picker = self.build_link_picker(dim, move |mode| match dim {
                         LinkDimension::Symbol => Message::SetSymbolLink(chart_id, mode),
-                        LinkDimension::Timeframe => {
-                            Message::SetTimeframeLink(chart_id, mode)
-                        }
+                        LinkDimension::Timeframe => Message::SetTimeframeLink(chart_id, mode),
                     });
                     chart_layers.push(
                         container(picker)
@@ -1004,18 +990,15 @@ impl MidasApp {
             let label = color.display_name();
             let msg = msg_builder(mode);
 
-            let color_swatch = container(Space::new().width(12).height(12)).style(
-                move |_| container::Style {
-                    background: Some(
-                        Color::from_rgba(rgba[0], rgba[1], rgba[2], rgba[3]).into(),
-                    ),
+            let color_swatch =
+                container(Space::new().width(12).height(12)).style(move |_| container::Style {
+                    background: Some(Color::from_rgba(rgba[0], rgba[1], rgba[2], rgba[3]).into()),
                     border: iced::Border {
                         radius: 2.0.into(),
                         ..Default::default()
                     },
                     ..Default::default()
-                },
-            );
+                });
 
             items.push(
                 button(
@@ -1034,8 +1017,8 @@ impl MidasApp {
         // "Listen for any changes" option.
         let listen_msg = msg_builder(LinkMode::ListenAll);
         let listen_rgba = link_mode_indicator_rgba(LinkMode::ListenAll);
-        let listen_swatch = container(Space::new().width(12).height(12)).style(
-            move |_| container::Style {
+        let listen_swatch =
+            container(Space::new().width(12).height(12)).style(move |_| container::Style {
                 background: Some(
                     Color::from_rgba(
                         listen_rgba[0],
@@ -1050,16 +1033,12 @@ impl MidasApp {
                     ..Default::default()
                 },
                 ..Default::default()
-            },
-        );
+            });
         items.push(
             button(
-                row![
-                    listen_swatch,
-                    text("Listen *").size(11)
-                ]
-                .spacing(6)
-                .align_y(iced::Alignment::Center),
+                row![listen_swatch, text("Listen *").size(11)]
+                    .spacing(6)
+                    .align_y(iced::Alignment::Center),
             )
             .on_press(listen_msg)
             .padding([3, 8])
@@ -1071,19 +1050,17 @@ impl MidasApp {
         // "Not Linked" option.
         let unlinked_msg = msg_builder(LinkMode::Unlinked);
         let gray_rgba = link_mode_indicator_rgba(LinkMode::Unlinked);
-        let gray_swatch = container(Space::new().width(12).height(12)).style(
-            move |_| container::Style {
+        let gray_swatch =
+            container(Space::new().width(12).height(12)).style(move |_| container::Style {
                 background: Some(
-                    Color::from_rgba(gray_rgba[0], gray_rgba[1], gray_rgba[2], gray_rgba[3])
-                        .into(),
+                    Color::from_rgba(gray_rgba[0], gray_rgba[1], gray_rgba[2], gray_rgba[3]).into(),
                 ),
                 border: iced::Border {
                     radius: 2.0.into(),
                     ..Default::default()
                 },
                 ..Default::default()
-            },
-        );
+            });
         items.push(
             button(
                 row![gray_swatch, text("Not Linked").size(11)]
@@ -1131,27 +1108,25 @@ impl MidasApp {
             weight: iced::font::Weight::Bold,
             ..iced::Font::default()
         };
-        let wl_s_btn: Element<'_, Message> = button(
-            text("S").size(10).color(Color::WHITE).font(bold_font),
-        )
-        .on_press(Message::ToggleLinkPicker(
-            PickerTarget::Watchlist(wl_id),
-            LinkDimension::Symbol,
-        ))
-        .padding([2, 5])
-        .style(move |_theme, _status| button::Style {
-            background: Some(
-                Color::from_rgba(wl_color[0], wl_color[1], wl_color[2], wl_color[3])
-                    .into(),
-            ),
-            text_color: Color::WHITE,
-            border: iced::Border {
-                radius: 2.0.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        })
-        .into();
+        let wl_s_btn: Element<'_, Message> =
+            button(text("S").size(10).color(Color::WHITE).font(bold_font))
+                .on_press(Message::ToggleLinkPicker(
+                    PickerTarget::Watchlist(wl_id),
+                    LinkDimension::Symbol,
+                ))
+                .padding([2, 5])
+                .style(move |_theme, _status| button::Style {
+                    background: Some(
+                        Color::from_rgba(wl_color[0], wl_color[1], wl_color[2], wl_color[3]).into(),
+                    ),
+                    text_color: Color::WHITE,
+                    border: iced::Border {
+                        radius: 2.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .into();
 
         let close_btn: Element<'_, Message> = button(text("X").size(10))
             .on_press(Message::PaneClose(pane))
@@ -1163,13 +1138,11 @@ impl MidasApp {
             row![text("Watchlist").size(14), Space::new().width(Fill)]
                 .align_y(iced::Alignment::Center),
         )
-        .controls(
-            Element::from(
-                row![wl_s_btn, Space::new().width(4), close_btn]
-                    .spacing(2)
-                    .align_y(iced::Alignment::Center),
-            ),
-        )
+        .controls(Element::from(
+            row![wl_s_btn, Space::new().width(4), close_btn]
+                .spacing(2)
+                .align_y(iced::Alignment::Center),
+        ))
         .padding([2, 4])
         .always_show_controls()
         .style(|_theme| container::Style::default())
@@ -1262,9 +1235,10 @@ impl MidasApp {
 
         // Update selection to match selected_symbol (bridge index-based selection).
         // Find the index of the selected symbol in the sorted rows.
-        let selected_idx = wl.selected_symbol.as_ref().and_then(|sym| {
-            grid_rows.iter().position(|r| r.symbol == *sym)
-        });
+        let selected_idx = wl
+            .selected_symbol
+            .as_ref()
+            .and_then(|sym| grid_rows.iter().position(|r| r.symbol == *sym));
 
         // Build a temporary GridState copy with the correct selection index.
         let mut view_state = wl.grid_state.clone();
@@ -1305,10 +1279,8 @@ impl MidasApp {
                     .map(|s| s.direction.indicator())
                     .unwrap_or("");
 
-                let msg = Message::WatchlistGrid(
-                    wl_id,
-                    midas_grid::GridMessage::SortToggled(col_id),
-                );
+                let msg =
+                    Message::WatchlistGrid(wl_id, midas_grid::GridMessage::SortToggled(col_id));
                 iced::widget::mouse_area(
                     container(row![text(label).size(12), text(sort_indicator).size(12)])
                         .width(width)
@@ -1364,11 +1336,7 @@ impl MidasApp {
                 .width(Fill)
                 .align_x(iced::alignment::Horizontal::Right);
 
-                header_cells.push(
-                    stack![header_content, resize_handle]
-                        .width(width)
-                        .into(),
-                );
+                header_cells.push(stack![header_content, resize_handle].width(width).into());
             } else {
                 header_cells.push(header_content);
             }
@@ -1393,7 +1361,11 @@ impl MidasApp {
                 };
 
                 // Build cells matching column order.
-                let fav_label = if row_data.favorite { "\u{2605}" } else { "\u{2606}" };
+                let fav_label = if row_data.favorite {
+                    "\u{2605}"
+                } else {
+                    "\u{2606}"
+                };
                 let sym = row_data.symbol.clone();
                 let sym_del = row_data.symbol.clone();
                 let sym_drag = row_data.symbol.clone();
@@ -1423,7 +1395,14 @@ impl MidasApp {
                 let inner_row = Row::with_children(vec![
                     grid_data_cell(fav_btn.into(), w(COL_FAV)),
                     grid_data_cell(ticker_cell.into(), w(COL_TICKER)),
-                    grid_data_cell(text(row_data.price_text.clone()).size(13).wrapping(Wrapping::None).color(theme::TEXT_PRIMARY).into(), w(COL_PRICE)),
+                    grid_data_cell(
+                        text(row_data.price_text.clone())
+                            .size(13)
+                            .wrapping(Wrapping::None)
+                            .color(theme::TEXT_PRIMARY)
+                            .into(),
+                        w(COL_PRICE),
+                    ),
                     grid_data_cell(
                         text(row_data.change_text.clone())
                             .size(13)
@@ -1450,12 +1429,12 @@ impl MidasApp {
                 // correct symbol at each visual row position.
                 let sym_for_select = row_data.symbol.clone();
                 let msg = Message::WatchlistTickerSelected(wl_id, sym_for_select);
-                let ticker_row = iced::widget::mouse_area(
-                    container(inner_row).style(move |_| container::Style {
+                let ticker_row = iced::widget::mouse_area(container(inner_row).style(move |_| {
+                    container::Style {
                         background: Some(row_bg.into()),
                         ..Default::default()
-                    }),
-                )
+                    }
+                }))
                 .on_release(msg);
 
                 body_rows = body_rows.push(ticker_row);
@@ -1479,14 +1458,11 @@ impl MidasApp {
             .padding([6, 8])
             .align_y(iced::Alignment::Center);
 
-        let main_content: Element<'_, Message> = column![
-            header,
-            scrollable(body_rows).height(Fill),
-            add_row,
-        ]
-        .width(Fill)
-        .height(Fill)
-        .into();
+        let main_content: Element<'_, Message> =
+            column![header, scrollable(body_rows).height(Fill), add_row,]
+                .width(Fill)
+                .height(Fill)
+                .into();
 
         // Wrap in stack only when overlays are needed (resize or link picker).
         let needs_resize_overlay = self
@@ -1521,10 +1497,8 @@ impl MidasApp {
         // Link picker overlay.
         if let Some((PickerTarget::Watchlist(picker_wl_id), dim)) = self.link_picker_open {
             if picker_wl_id == wl_id {
-                let backdrop = iced::widget::mouse_area(
-                    Space::new().width(Fill).height(Fill),
-                )
-                .on_press(Message::DismissLinkPicker);
+                let backdrop = iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
+                    .on_press(Message::DismissLinkPicker);
 
                 let picker = self.build_link_picker(dim, move |mode| {
                     Message::WatchlistSetSymbolLink(wl_id, mode)
@@ -1548,7 +1522,6 @@ impl MidasApp {
 
         body.into()
     }
-
 }
 
 // ── Dockable order panel ───────────────────────────────────────────
@@ -1583,27 +1556,25 @@ impl MidasApp {
             weight: iced::font::Weight::Bold,
             ..iced::Font::default()
         };
-        let op_s_btn: Element<'_, Message> = button(
-            text("S").size(10).color(Color::WHITE).font(bold_font),
-        )
-        .on_press(Message::ToggleLinkPicker(
-            PickerTarget::Order(order_id),
-            LinkDimension::Symbol,
-        ))
-        .padding([2, 5])
-        .style(move |_theme, _status| button::Style {
-            background: Some(
-                Color::from_rgba(op_color[0], op_color[1], op_color[2], op_color[3])
-                    .into(),
-            ),
-            text_color: Color::WHITE,
-            border: iced::Border {
-                radius: 2.0.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        })
-        .into();
+        let op_s_btn: Element<'_, Message> =
+            button(text("S").size(10).color(Color::WHITE).font(bold_font))
+                .on_press(Message::ToggleLinkPicker(
+                    PickerTarget::Order(order_id),
+                    LinkDimension::Symbol,
+                ))
+                .padding([2, 5])
+                .style(move |_theme, _status| button::Style {
+                    background: Some(
+                        Color::from_rgba(op_color[0], op_color[1], op_color[2], op_color[3]).into(),
+                    ),
+                    text_color: Color::WHITE,
+                    border: iced::Border {
+                        radius: 2.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .into();
 
         let close_btn: Element<'_, Message> = button(text("X").size(10))
             .on_press(Message::PaneClose(pane))
@@ -1612,19 +1583,14 @@ impl MidasApp {
             .into();
 
         pane_grid::TitleBar::new(
-            row![
-                text(title_text).size(14),
-                Space::new().width(Fill),
-            ]
-            .align_y(iced::Alignment::Center),
+            row![text(title_text).size(14), Space::new().width(Fill),]
+                .align_y(iced::Alignment::Center),
         )
-        .controls(
-            Element::from(
-                row![op_s_btn, Space::new().width(4), close_btn]
-                    .spacing(2)
-                    .align_y(iced::Alignment::Center),
-            ),
-        )
+        .controls(Element::from(
+            row![op_s_btn, Space::new().width(4), close_btn]
+                .spacing(2)
+                .align_y(iced::Alignment::Center),
+        ))
         .padding([2, 4])
         .always_show_controls()
         .style(|_theme| container::Style::default())
@@ -1721,10 +1687,7 @@ impl MidasApp {
             let mut col = Column::new().spacing(4);
             let tp_check = row![iced::widget::checkbox(state.tp_enabled,)
                 .label("Take Profit")
-                .on_toggle(move |val| Message::OrderPanelMsg(
-                    oid,
-                    OrderPanelAction::ToggleTp(val),
-                ))
+                .on_toggle(move |val| Message::OrderPanelMsg(oid, OrderPanelAction::ToggleTp(val),))
                 .size(14),];
             col = col.push(tp_check);
             if state.tp_enabled {
@@ -1750,10 +1713,7 @@ impl MidasApp {
             let mut col = Column::new().spacing(4);
             let sl_check = row![iced::widget::checkbox(state.sl_enabled,)
                 .label("Stop Loss")
-                .on_toggle(move |val| Message::OrderPanelMsg(
-                    oid,
-                    OrderPanelAction::ToggleSl(val),
-                ))
+                .on_toggle(move |val| Message::OrderPanelMsg(oid, OrderPanelAction::ToggleSl(val),))
                 .size(14),];
             col = col.push(sl_check);
             if state.sl_enabled {
@@ -1778,26 +1738,14 @@ impl MidasApp {
         let rr_row = if let Some(last) = last_price {
             let tp_price = if state.tp_enabled {
                 state.tp_value.parse::<f64>().ok().map(|val| {
-                    crate::order_panel::resolve_price(
-                        state.tp_mode,
-                        val,
-                        last,
-                        state.side,
-                        true,
-                    )
+                    crate::order_panel::resolve_price(state.tp_mode, val, last, state.side, true)
                 })
             } else {
                 None
             };
             let sl_price = if state.sl_enabled {
                 state.sl_value.parse::<f64>().ok().map(|val| {
-                    crate::order_panel::resolve_price(
-                        state.sl_mode,
-                        val,
-                        last,
-                        state.side,
-                        false,
-                    )
+                    crate::order_panel::resolve_price(state.sl_mode, val, last, state.side, false)
                 })
             } else {
                 None
@@ -1829,8 +1777,7 @@ impl MidasApp {
         let error_col = if !state.errors.is_empty() {
             let mut col = Column::new().spacing(2);
             for (_field, msg) in &state.errors {
-                col = col
-                    .push(text(msg).size(11).color(Color::from_rgb(0.9, 0.3, 0.2)));
+                col = col.push(text(msg).size(11).color(Color::from_rgb(0.9, 0.3, 0.2)));
             }
             col
         } else {
@@ -1873,18 +1820,13 @@ impl MidasApp {
             container(Space::new().height(1))
                 .width(Fill)
                 .style(|_t| container::Style {
-                    background: Some(iced::Background::Color(Color::from_rgb(
-                        0.25, 0.25, 0.30,
-                    ))),
+                    background: Some(iced::Background::Color(Color::from_rgb(0.25, 0.25, 0.30))),
                     ..Default::default()
                 })
         };
 
         // Assemble form column.
-        let mut form = Column::new()
-            .spacing(6)
-            .padding(12)
-            .width(Fill);
+        let mut form = Column::new().spacing(6).padding(12).width(Fill);
 
         form = form
             .push(side_row)
@@ -1916,20 +1858,19 @@ impl MidasApp {
             let mut details = Column::new().spacing(4);
             details = details.push(text(order_summary).size(12));
             if state.tp_enabled && !state.tp_value.is_empty() {
-                let tp_display = if let (Some(last), Ok(val)) =
-                    (last_price, state.tp_value.parse::<f64>())
-                {
-                    let resolved = crate::order_panel::resolve_price(
-                        state.tp_mode,
-                        val,
-                        last,
-                        state.side,
-                        true,
-                    );
-                    format!("TP: {:.2}", resolved)
-                } else {
-                    format!("TP: {}", state.tp_value)
-                };
+                let tp_display =
+                    if let (Some(last), Ok(val)) = (last_price, state.tp_value.parse::<f64>()) {
+                        let resolved = crate::order_panel::resolve_price(
+                            state.tp_mode,
+                            val,
+                            last,
+                            state.side,
+                            true,
+                        );
+                        format!("TP: {:.2}", resolved)
+                    } else {
+                        format!("TP: {}", state.tp_value)
+                    };
                 details = details.push(
                     text(tp_display)
                         .size(11)
@@ -1937,20 +1878,19 @@ impl MidasApp {
                 );
             }
             if state.sl_enabled && !state.sl_value.is_empty() {
-                let sl_display = if let (Some(last), Ok(val)) =
-                    (last_price, state.sl_value.parse::<f64>())
-                {
-                    let resolved = crate::order_panel::resolve_price(
-                        state.sl_mode,
-                        val,
-                        last,
-                        state.side,
-                        false,
-                    );
-                    format!("SL: {:.2}", resolved)
-                } else {
-                    format!("SL: {}", state.sl_value)
-                };
+                let sl_display =
+                    if let (Some(last), Ok(val)) = (last_price, state.sl_value.parse::<f64>()) {
+                        let resolved = crate::order_panel::resolve_price(
+                            state.sl_mode,
+                            val,
+                            last,
+                            state.side,
+                            false,
+                        );
+                        format!("SL: {:.2}", resolved)
+                    } else {
+                        format!("SL: {}", state.sl_value)
+                    };
                 details = details.push(
                     text(sl_display)
                         .size(11)
@@ -1963,18 +1903,14 @@ impl MidasApp {
                 container(Space::new().height(1))
                     .width(Fill)
                     .style(|_t| container::Style {
-                        background: Some(iced::Background::Color(Color::from_rgb(
-                            0.3, 0.3, 0.35,
-                        ))),
+                        background: Some(iced::Background::Color(Color::from_rgb(0.3, 0.3, 0.35,))),
                         ..Default::default()
                     }),
                 details,
                 container(Space::new().height(1))
                     .width(Fill)
                     .style(|_t| container::Style {
-                        background: Some(iced::Background::Color(Color::from_rgb(
-                            0.3, 0.3, 0.35,
-                        ))),
+                        background: Some(iced::Background::Color(Color::from_rgb(0.3, 0.3, 0.35,))),
                         ..Default::default()
                     }),
                 row![
@@ -1983,10 +1919,7 @@ impl MidasApp {
                         .padding([6, 16]),
                     Space::new().width(Fill),
                     button(text("Confirm & Submit").size(12))
-                        .on_press(Message::OrderPanelMsg(
-                            oid,
-                            OrderPanelAction::ConfirmYes
-                        ))
+                        .on_press(Message::OrderPanelMsg(oid, OrderPanelAction::ConfirmYes))
                         .padding([6, 16]),
                 ]
                 .spacing(8),
@@ -1995,18 +1928,15 @@ impl MidasApp {
             .padding(16)
             .width(Fill);
 
-            let confirm_section = container(confirm_content)
-                .style(|_theme| container::Style {
-                    background: Some(iced::Background::Color(Color::from_rgb(
-                        0.12, 0.12, 0.16,
-                    ))),
-                    border: iced::Border {
-                        color: Color::from_rgb(0.4, 0.4, 0.5),
-                        width: 1.5,
-                        radius: 8.0.into(),
-                    },
-                    ..Default::default()
-                });
+            let confirm_section = container(confirm_content).style(|_theme| container::Style {
+                background: Some(iced::Background::Color(Color::from_rgb(0.12, 0.12, 0.16))),
+                border: iced::Border {
+                    color: Color::from_rgb(0.4, 0.4, 0.5),
+                    width: 1.5,
+                    radius: 8.0.into(),
+                },
+                ..Default::default()
+            });
 
             form = form.push(confirm_section);
         }
@@ -2016,10 +1946,8 @@ impl MidasApp {
         // Link picker overlay (when open for this order panel).
         if let Some((PickerTarget::Order(picker_op_id), dim)) = self.link_picker_open {
             if picker_op_id == order_id {
-                let backdrop = iced::widget::mouse_area(
-                    Space::new().width(Fill).height(Fill),
-                )
-                .on_press(Message::DismissLinkPicker);
+                let backdrop = iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
+                    .on_press(Message::DismissLinkPicker);
 
                 let picker = self.build_link_picker(dim, move |mode| {
                     Message::OrderPanelSetSymbolLink(order_id, mode)
@@ -2082,7 +2010,10 @@ impl MidasApp {
                     .active_broker()
                     .map(|b| b.name().to_string())
                     .unwrap_or_else(|| "Broker".to_string());
-                (Color::from_rgb(0.2, 0.8, 0.2), format!("Broker: {broker_name}"))
+                (
+                    Color::from_rgb(0.2, 0.8, 0.2),
+                    format!("Broker: {broker_name}"),
+                )
             } else if self.broker_connection_display == "Disconnected" {
                 (
                     Color::from_rgb(0.6, 0.6, 0.6),
@@ -2096,7 +2027,9 @@ impl MidasApp {
             };
             row![
                 text("\u{25CF}").size(10).color(dot_color),
-                text(format!(" {label}")).size(12).color(theme::TEXT_SECONDARY),
+                text(format!(" {label}"))
+                    .size(12)
+                    .color(theme::TEXT_SECONDARY),
             ]
             .align_y(iced::Alignment::Center)
         };
@@ -2967,11 +2900,8 @@ fn compute_daily_bright_ranges(data: &midas_core::CandleBuffer) -> Vec<(usize, u
     let Some(result) = midas_core::gerchik_gatr_detail(&highs, &lows, &closes) else {
         return Vec::new();
     };
-    let mut ranges: Vec<(usize, usize)> = result
-        .selected_bars
-        .iter()
-        .map(|&idx| (idx, idx))
-        .collect();
+    let mut ranges: Vec<(usize, usize)> =
+        result.selected_bars.iter().map(|&idx| (idx, idx)).collect();
     // Always include today (last bar).
     let last = data.len() - 1;
     ranges.push((last, last));
@@ -2993,15 +2923,12 @@ fn build_gerchik_atr_overlay<'a>(
 
     // Bold watermark-style text, offset from the right edge.
     // Wrapped in mouse_area to detect hover for candle dimming (D1 only).
-    let mut area = iced::widget::mouse_area(
-        text(data.text.clone())
-            .size(20)
-            .color(color)
-            .font(iced::Font {
-                weight: iced::font::Weight::Bold,
-                ..iced::Font::default()
-            }),
-    );
+    let mut area = iced::widget::mouse_area(text(data.text.clone()).size(20).color(color).font(
+        iced::Font {
+            weight: iced::font::Weight::Bold,
+            ..iced::Font::default()
+        },
+    ));
     if is_daily {
         area = area
             .on_enter(Message::GatrHoverEnter(chart_id))
@@ -3066,10 +2993,7 @@ fn hover_text_button_style(_theme: &iced::Theme, status: button::Status) -> butt
 }
 
 /// Dark-themed pick_list style matching the toolbar background.
-fn dark_pick_list_style(
-    theme: &iced::Theme,
-    status: pick_list::Status,
-) -> pick_list::Style {
+fn dark_pick_list_style(theme: &iced::Theme, status: pick_list::Status) -> pick_list::Style {
     let _ = theme;
     let bg = match status {
         pick_list::Status::Hovered => Color::from_rgba(1.0, 1.0, 1.0, 0.12),

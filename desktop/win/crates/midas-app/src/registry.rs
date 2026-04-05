@@ -121,16 +121,12 @@ impl ProviderRegistry {
 
     /// Find a data provider's index by display name.
     pub fn find_data_provider_index(&self, name: &str) -> Option<usize> {
-        self.data_providers
-            .iter()
-            .position(|p| p.name() == name)
+        self.data_providers.iter().position(|p| p.name() == name)
     }
 
     /// Find a broker's index by display name.
     pub fn find_broker_index(&self, name: &str) -> Option<usize> {
-        self.order_brokers
-            .iter()
-            .position(|b| b.name() == name)
+        self.order_brokers.iter().position(|b| b.name() == name)
     }
 }
 

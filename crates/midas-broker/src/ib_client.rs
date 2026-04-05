@@ -50,7 +50,10 @@ impl IbClient {
     }
 
     fn push_callback(&self, cb: BrokerCallback) {
-        self.callbacks.lock().expect("callback mutex poisoned").push(cb);
+        self.callbacks
+            .lock()
+            .expect("callback mutex poisoned")
+            .push(cb);
     }
 
     /// Get a clone of the inner client Arc, if connected.
@@ -101,33 +104,36 @@ impl IbClient {
 
     /// Spawn a background task to monitor order updates from a `place_order`
     /// subscription and queue callbacks.
-    fn spawn_order_monitor(
-        &self,
-        mut sub: ibapi::client::Subscription<ibapi::orders::PlaceOrder>,
-    ) {
+    fn spawn_order_monitor(&self, mut sub: ibapi::client::Subscription<ibapi::orders::PlaceOrder>) {
         let callbacks = Arc::clone(&self.callbacks);
         self.rt.spawn(async move {
             while let Some(update) = sub.next().await {
                 match update {
                     Ok(ibapi::orders::PlaceOrder::OrderStatus(status)) => {
-                        callbacks.lock().expect("mutex").push(BrokerCallback::OrderStatus {
-                            ib_order_id: status.order_id,
-                            status: status.status.clone(),
-                            filled: status.filled,
-                            remaining: status.remaining,
-                            avg_fill_price: status.average_fill_price,
-                        });
+                        callbacks
+                            .lock()
+                            .expect("mutex")
+                            .push(BrokerCallback::OrderStatus {
+                                ib_order_id: status.order_id,
+                                status: status.status.clone(),
+                                filled: status.filled,
+                                remaining: status.remaining,
+                                avg_fill_price: status.average_fill_price,
+                            });
                     }
                     Ok(ibapi::orders::PlaceOrder::ExecutionData(exec_data)) => {
                         let exec = &exec_data.execution;
-                        callbacks.lock().expect("mutex").push(BrokerCallback::Execution {
-                            ib_order_id: exec.order_id,
-                            exec_id: exec.execution_id.clone(),
-                            shares: exec.shares,
-                            price: exec.price,
-                            commission: 0.0,
-                            side: exec.side.clone(),
-                        });
+                        callbacks
+                            .lock()
+                            .expect("mutex")
+                            .push(BrokerCallback::Execution {
+                                ib_order_id: exec.order_id,
+                                exec_id: exec.execution_id.clone(),
+                                shares: exec.shares,
+                                price: exec.price,
+                                commission: 0.0,
+                                side: exec.side.clone(),
+                            });
                     }
                     Ok(_) => {} // CommissionReport, OpenOrder, Message
                     Err(e) => {
@@ -148,24 +154,29 @@ impl IbClient {
                     while let Some(update) = sub.next().await {
                         match update {
                             Ok(ibapi::orders::OrderUpdate::OrderStatus(status)) => {
-                                callbacks.lock().expect("mutex").push(BrokerCallback::OrderStatus {
-                                    ib_order_id: status.order_id,
-                                    status: status.status.clone(),
-                                    filled: status.filled,
-                                    remaining: status.remaining,
-                                    avg_fill_price: status.average_fill_price,
-                                });
+                                callbacks.lock().expect("mutex").push(
+                                    BrokerCallback::OrderStatus {
+                                        ib_order_id: status.order_id,
+                                        status: status.status.clone(),
+                                        filled: status.filled,
+                                        remaining: status.remaining,
+                                        avg_fill_price: status.average_fill_price,
+                                    },
+                                );
                             }
                             Ok(ibapi::orders::OrderUpdate::ExecutionData(exec_data)) => {
                                 let exec = &exec_data.execution;
-                                callbacks.lock().expect("mutex").push(BrokerCallback::Execution {
-                                    ib_order_id: exec.order_id,
-                                    exec_id: exec.execution_id.clone(),
-                                    shares: exec.shares,
-                                    price: exec.price,
-                                    commission: 0.0,
-                                    side: exec.side.clone(),
-                                });
+                                callbacks
+                                    .lock()
+                                    .expect("mutex")
+                                    .push(BrokerCallback::Execution {
+                                        ib_order_id: exec.order_id,
+                                        exec_id: exec.execution_id.clone(),
+                                        shares: exec.shares,
+                                        price: exec.price,
+                                        commission: 0.0,
+                                        side: exec.side.clone(),
+                                    });
                             }
                             Ok(_) => {}
                             Err(e) => {
@@ -174,10 +185,13 @@ impl IbClient {
                             }
                         }
                     }
-                    callbacks.lock().expect("mutex").push(BrokerCallback::ConnectionStatus {
-                        connected: false,
-                        server_version: None,
-                    });
+                    callbacks
+                        .lock()
+                        .expect("mutex")
+                        .push(BrokerCallback::ConnectionStatus {
+                            connected: false,
+                            server_version: None,
+                        });
                 }
                 Err(e) => {
                     tracing::error!("Failed to start order update stream: {e}");
@@ -213,18 +227,27 @@ impl BrokerClient for IbClient {
         let client = self.client().ok_or("not connected to IB")?;
         let contract = ibapi::contracts::Contract::stock(symbol).build();
         let order = Self::build_order(
-            action, order_type, quantity, limit_price, stop_price,
-            parent_id, transmit, tif, outside_rth,
+            action,
+            order_type,
+            quantity,
+            limit_price,
+            stop_price,
+            parent_id,
+            transmit,
+            tif,
+            outside_rth,
         );
 
-        let result = self.rt.block_on(async {
-            client.place_order(order_id, &contract, &order).await
-        });
+        let result = self
+            .rt
+            .block_on(async { client.place_order(order_id, &contract, &order).await });
 
         match result {
             Ok(sub) => {
                 self.spawn_order_monitor(sub);
-                Ok(PlaceOrderResult { ib_order_id: order_id })
+                Ok(PlaceOrderResult {
+                    ib_order_id: order_id,
+                })
             }
             Err(e) => {
                 self.push_callback(BrokerCallback::OrderRejected {
@@ -246,13 +269,15 @@ impl BrokerClient for IbClient {
                     tokio::spawn(async move {
                         while let Some(update) = sub.next().await {
                             if let Ok(ibapi::orders::CancelOrder::OrderStatus(status)) = update {
-                                callbacks.lock().expect("mutex").push(BrokerCallback::OrderStatus {
-                                    ib_order_id: status.order_id,
-                                    status: status.status,
-                                    filled: status.filled,
-                                    remaining: status.remaining,
-                                    avg_fill_price: status.average_fill_price,
-                                });
+                                callbacks.lock().expect("mutex").push(
+                                    BrokerCallback::OrderStatus {
+                                        ib_order_id: status.order_id,
+                                        status: status.status,
+                                        filled: status.filled,
+                                        remaining: status.remaining,
+                                        avg_fill_price: status.average_fill_price,
+                                    },
+                                );
                             }
                         }
                     });
@@ -271,9 +296,10 @@ impl BrokerClient for IbClient {
         let address = self.address.clone();
         let client_id = self.client_id;
 
-        let client = self.rt.block_on(async {
-            ibapi::Client::connect(&address, client_id).await
-        }).map_err(|e| format!("IB connection failed: {e}"))?;
+        let client = self
+            .rt
+            .block_on(async { ibapi::Client::connect(&address, client_id).await })
+            .map_err(|e| format!("IB connection failed: {e}"))?;
 
         let server_version = client.server_version();
         let client = Arc::new(client);
@@ -310,25 +336,31 @@ impl BrokerClient for IbClient {
 
         self.rt.spawn(async move {
             let contract = ibapi::contracts::Contract::stock(&symbol).build();
-            match client.realtime_bars(
-                &contract,
-                ibapi::market_data::realtime::BarSize::Sec5,
-                ibapi::market_data::realtime::WhatToShow::Trades,
-                ibapi::market_data::TradingHours::Regular,
-            ).await {
+            match client
+                .realtime_bars(
+                    &contract,
+                    ibapi::market_data::realtime::BarSize::Sec5,
+                    ibapi::market_data::realtime::WhatToShow::Trades,
+                    ibapi::market_data::TradingHours::Regular,
+                )
+                .await
+            {
                 Ok(mut sub) => {
                     while let Some(update) = sub.next().await {
                         match update {
                             Ok(bar) => {
-                                callbacks.lock().expect("mutex").push(BrokerCallback::BarClosed {
-                                    symbol: symbol.clone(),
-                                    timestamp: bar.date.unix_timestamp(),
-                                    open: bar.open,
-                                    high: bar.high,
-                                    low: bar.low,
-                                    close: bar.close,
-                                    volume: bar.volume as i64,
-                                });
+                                callbacks
+                                    .lock()
+                                    .expect("mutex")
+                                    .push(BrokerCallback::BarClosed {
+                                        symbol: symbol.clone(),
+                                        timestamp: bar.date.unix_timestamp(),
+                                        open: bar.open,
+                                        high: bar.high,
+                                        low: bar.low,
+                                        close: bar.close,
+                                        volume: bar.volume as i64,
+                                    });
                             }
                             Err(e) => {
                                 tracing::error!("IB realtime bar error for {symbol}: {e}");
@@ -391,7 +423,12 @@ impl BrokerClient for IbClient {
 
         self.rt.block_on(async {
             let group = ibapi::accounts::types::AccountGroup("All".to_string());
-            let tags = &["NetLiquidation", "TotalCashValue", "UnrealizedPnL", "RealizedPnL"];
+            let tags = &[
+                "NetLiquidation",
+                "TotalCashValue",
+                "UnrealizedPnL",
+                "RealizedPnL",
+            ];
             match client.account_summary(&group, tags).await {
                 Ok(mut sub) => {
                     let mut summary = AccountSummary::default();

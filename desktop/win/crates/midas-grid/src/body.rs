@@ -93,12 +93,10 @@ where
             .align_y(iced::Alignment::Center);
 
         let msg = on_grid(GridMessage::RowSelected(row_idx));
-        let selectable_row = mouse_area(
-            container(inner_row).style(move |_| container::Style {
-                background: Some(row_bg.into()),
-                ..Default::default()
-            }),
-        )
+        let selectable_row = mouse_area(container(inner_row).style(move |_| container::Style {
+            background: Some(row_bg.into()),
+            ..Default::default()
+        }))
         .on_release(msg);
 
         body = body.push(selectable_row);

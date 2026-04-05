@@ -32,14 +32,14 @@ pub enum LinkDimension {
 /// RGBA color for a link color (sRGB space).
 pub const fn link_color_rgba(c: LinkColor) -> [f32; 4] {
     match c {
-        LinkColor::Blue   => [0.20, 0.40, 0.90, 1.0],
-        LinkColor::Red    => [0.90, 0.15, 0.15, 1.0],
+        LinkColor::Blue => [0.20, 0.40, 0.90, 1.0],
+        LinkColor::Red => [0.90, 0.15, 0.15, 1.0],
         LinkColor::Orange => [0.95, 0.55, 0.05, 1.0],
-        LinkColor::Green  => [0.15, 0.75, 0.25, 1.0],
+        LinkColor::Green => [0.15, 0.75, 0.25, 1.0],
         LinkColor::Purple => [0.55, 0.15, 0.75, 1.0],
         LinkColor::Violet => [0.70, 0.35, 0.85, 1.0],
-        LinkColor::Teal   => [0.15, 0.75, 0.80, 1.0],
-        LinkColor::Brown  => [0.55, 0.35, 0.15, 1.0],
+        LinkColor::Teal => [0.15, 0.75, 0.80, 1.0],
+        LinkColor::Brown => [0.55, 0.35, 0.15, 1.0],
     }
 }
 
@@ -126,9 +126,7 @@ mod tests {
     fn unlinked_does_not_broadcast() {
         let targets = find_link_targets(
             LinkMode::Unlinked,
-            vec![
-                (ChartId::new(1), LinkMode::Color(LinkColor::Blue)),
-            ],
+            vec![(ChartId::new(1), LinkMode::Color(LinkColor::Blue))],
         );
         assert!(targets.is_empty());
     }

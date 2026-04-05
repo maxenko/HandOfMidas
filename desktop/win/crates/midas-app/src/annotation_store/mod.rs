@@ -9,9 +9,7 @@
 
 use std::collections::HashMap;
 
-use midas_chart::widget::{
-    Annotation, AnnotationId, AnnotationKind, Presence,
-};
+use midas_chart::widget::{Annotation, AnnotationId, AnnotationKind, Presence};
 use midas_core::Timeframe;
 use serde::{Deserialize, Serialize};
 
@@ -127,9 +125,7 @@ impl AnnotationStore {
     #[allow(dead_code)] // part of planned API
     pub fn generation(&self, symbol: &str) -> u64 {
         let key = SymbolKey::new(symbol);
-        self.by_symbol
-            .get(&key)
-            .map_or(0, |sa| sa.generation)
+        self.by_symbol.get(&key).map_or(0, |sa| sa.generation)
     }
 
     /// Returns the global generation counter.
@@ -232,11 +228,7 @@ impl AnnotationStore {
     /// Removes annotations matching a predicate for a symbol.
     /// Returns the number of annotations removed.
     #[allow(dead_code)] // part of planned API
-    pub fn retain(
-        &mut self,
-        symbol: &str,
-        pred: impl FnMut(&Annotation) -> bool,
-    ) -> usize {
+    pub fn retain(&mut self, symbol: &str, pred: impl FnMut(&Annotation) -> bool) -> usize {
         let key = SymbolKey::new(symbol);
         let Some(sa) = self.by_symbol.get_mut(&key) else {
             return 0;

@@ -215,7 +215,9 @@ mod tests {
 
     #[test]
     fn broker_event_clone() {
-        let event = BrokerEvent::Connected { server_version: 176 };
+        let event = BrokerEvent::Connected {
+            server_version: 176,
+        };
         let cloned = event.clone();
         match cloned {
             BrokerEvent::Connected { server_version } => assert_eq!(server_version, 176),
@@ -253,7 +255,13 @@ mod tests {
             timestamp: Utc::now(),
         };
         match event {
-            BrokerEvent::Tick { bid, ask, last, volume, .. } => {
+            BrokerEvent::Tick {
+                bid,
+                ask,
+                last,
+                volume,
+                ..
+            } => {
                 assert!(bid.is_some());
                 assert!(ask.is_some());
                 assert!(last.is_none());

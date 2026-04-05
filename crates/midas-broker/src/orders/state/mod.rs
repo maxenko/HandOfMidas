@@ -192,17 +192,24 @@ impl OrderStatus {
             // going through PendingCancel for these cases.
             Self::PreSubmitted => matches!(
                 to,
-                Self::Submitted | Self::PendingCancel | Self::Cancelled | Self::Filled | Self::Rejected
+                Self::Submitted
+                    | Self::PendingCancel
+                    | Self::Cancelled
+                    | Self::Filled
+                    | Self::Rejected
             ),
             Self::Submitted => matches!(
                 to,
-                Self::PartiallyFilled | Self::Filled | Self::PendingCancel | Self::Cancelled | Self::Rejected
+                Self::PartiallyFilled
+                    | Self::Filled
+                    | Self::PendingCancel
+                    | Self::Cancelled
+                    | Self::Rejected
             ),
-            Self::PartiallyFilled => matches!(to, Self::Filled | Self::PendingCancel | Self::Cancelled),
-            Self::PendingCancel => matches!(
-                to,
-                Self::Cancelled | Self::Inactive | Self::Filled
-            ),
+            Self::PartiallyFilled => {
+                matches!(to, Self::Filled | Self::PendingCancel | Self::Cancelled)
+            }
+            Self::PendingCancel => matches!(to, Self::Cancelled | Self::Inactive | Self::Filled),
             // Terminal states: no transitions out.
             Self::Filled | Self::Cancelled | Self::Rejected => false,
         };

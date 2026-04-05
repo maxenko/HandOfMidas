@@ -14,7 +14,9 @@ use midas_core::WatchlistId;
 use midas_grid::{Alignment, ColumnId, ColumnWidth, GridColumn};
 
 use crate::app::Message;
-use crate::watchlist::{COL_CHANGE, COL_DELETE, COL_DRAG, COL_FAV, COL_GATR, COL_PRICE, COL_TICKER};
+use crate::watchlist::{
+    COL_CHANGE, COL_DELETE, COL_DRAG, COL_FAV, COL_GATR, COL_PRICE, COL_TICKER,
+};
 
 // ── Colors ──────────────────────────────────────────────────────────
 
@@ -79,7 +81,10 @@ pub enum WatchlistColumn {
     /// Daily change percent.
     ChangePercent,
     /// Generalized ATR value.
-    #[expect(clippy::upper_case_acronyms, reason = "GATR is a domain-specific indicator name")]
+    #[expect(
+        clippy::upper_case_acronyms,
+        reason = "GATR is a domain-specific indicator name"
+    )]
     GATR,
     /// Delete (remove from watchlist) button.
     Delete,
@@ -126,16 +131,14 @@ impl GridColumn<WatchlistRow, Message> for WatchlistColumn {
 
     fn cell<'a>(&'a self, row: &'a WatchlistRow, _row_index: usize) -> Element<'a, Message> {
         match self {
-            Self::DragHandle => {
-                button(text("\u{2807}").size(12))
-                    .on_press(Message::WatchlistTickerPressed(
-                        row.wl_id,
-                        row.symbol.clone(),
-                    ))
-                    .padding([2, 4])
-                    .style(hover_text_button_style)
-                    .into()
-            }
+            Self::DragHandle => button(text("\u{2807}").size(12))
+                .on_press(Message::WatchlistTickerPressed(
+                    row.wl_id,
+                    row.symbol.clone(),
+                ))
+                .padding([2, 4])
+                .style(hover_text_button_style)
+                .into(),
             Self::Favorite => {
                 let star = if row.favorite { "\u{2605}" } else { "\u{2606}" };
                 button(text(star).size(12))
@@ -147,28 +150,29 @@ impl GridColumn<WatchlistRow, Message> for WatchlistColumn {
                     .style(hover_text_button_style)
                     .into()
             }
-            Self::Ticker => {
-                text(&row.symbol).size(13).wrapping(Wrapping::None).into()
-            }
-            Self::Price => {
-                text(&row.price_text).size(13).wrapping(Wrapping::None).into()
-            }
-            Self::ChangePercent => {
-                text(&row.change_text).size(13).wrapping(Wrapping::None).color(row.change_color).into()
-            }
-            Self::GATR => {
-                text(&row.gatr_text).size(13).wrapping(Wrapping::None).color(row.gatr_color).into()
-            }
-            Self::Delete => {
-                button(text("\u{00D7}").size(12))
-                    .on_press(Message::WatchlistRemoveTicker(
-                        row.wl_id,
-                        row.symbol.clone(),
-                    ))
-                    .padding([2, 4])
-                    .style(hover_text_button_style)
-                    .into()
-            }
+            Self::Ticker => text(&row.symbol).size(13).wrapping(Wrapping::None).into(),
+            Self::Price => text(&row.price_text)
+                .size(13)
+                .wrapping(Wrapping::None)
+                .into(),
+            Self::ChangePercent => text(&row.change_text)
+                .size(13)
+                .wrapping(Wrapping::None)
+                .color(row.change_color)
+                .into(),
+            Self::GATR => text(&row.gatr_text)
+                .size(13)
+                .wrapping(Wrapping::None)
+                .color(row.gatr_color)
+                .into(),
+            Self::Delete => button(text("\u{00D7}").size(12))
+                .on_press(Message::WatchlistRemoveTicker(
+                    row.wl_id,
+                    row.symbol.clone(),
+                ))
+                .padding([2, 4])
+                .style(hover_text_button_style)
+                .into(),
         }
     }
 

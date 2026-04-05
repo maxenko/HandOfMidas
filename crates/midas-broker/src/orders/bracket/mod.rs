@@ -222,9 +222,7 @@ impl fmt::Display for ValidationError {
 }
 
 /// Validate market bracket params. Returns errors if any fields are invalid.
-pub fn validate_market_bracket(
-    params: &MarketBracketParams,
-) -> Result<(), Vec<ValidationError>> {
+pub fn validate_market_bracket(params: &MarketBracketParams) -> Result<(), Vec<ValidationError>> {
     let mut errors = Vec::new();
 
     if params.symbol.is_empty() {
@@ -293,24 +291,36 @@ pub fn check_bracket_direction(
         OrderAction::Buy => {
             if let Some(tp) = tp_price {
                 if tp <= reference_price {
-                    warnings.push(DirectionWarning::TpBelowReference { tp, reference_price });
+                    warnings.push(DirectionWarning::TpBelowReference {
+                        tp,
+                        reference_price,
+                    });
                 }
             }
             if let Some(sl) = sl_price {
                 if sl >= reference_price {
-                    warnings.push(DirectionWarning::SlAboveReference { sl, reference_price });
+                    warnings.push(DirectionWarning::SlAboveReference {
+                        sl,
+                        reference_price,
+                    });
                 }
             }
         }
         OrderAction::Sell => {
             if let Some(tp) = tp_price {
                 if tp >= reference_price {
-                    warnings.push(DirectionWarning::TpAboveReference { tp, reference_price });
+                    warnings.push(DirectionWarning::TpAboveReference {
+                        tp,
+                        reference_price,
+                    });
                 }
             }
             if let Some(sl) = sl_price {
                 if sl <= reference_price {
-                    warnings.push(DirectionWarning::SlBelowReference { sl, reference_price });
+                    warnings.push(DirectionWarning::SlBelowReference {
+                        sl,
+                        reference_price,
+                    });
                 }
             }
         }

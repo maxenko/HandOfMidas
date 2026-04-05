@@ -153,12 +153,14 @@ fn intraday_consistent_with_daily() {
     assert!(!intraday.is_empty());
     // First intraday open == daily open
     assert_eq!(
-        intraday.first().unwrap().open, day.open,
+        intraday.first().unwrap().open,
+        day.open,
         "first intraday open != daily open"
     );
     // Last intraday close == daily close
     assert_eq!(
-        intraday.last().unwrap().close, day.close,
+        intraday.last().unwrap().close,
+        day.close,
         "last intraday close != daily close"
     );
     // Max intraday high == daily high
@@ -168,10 +170,7 @@ fn intraday_consistent_with_daily() {
         .fold(f64::NEG_INFINITY, f64::max);
     assert_eq!(max_high, day.high, "max intraday high != daily high");
     // Min intraday low == daily low
-    let min_low = intraday
-        .iter()
-        .map(|b| b.low)
-        .fold(f64::INFINITY, f64::min);
+    let min_low = intraday.iter().map(|b| b.low).fold(f64::INFINITY, f64::min);
     assert_eq!(min_low, day.low, "min intraday low != daily low");
     // Sum of intraday volumes == daily volume
     let vol_sum: i64 = intraday.iter().map(|b| b.volume).sum();
@@ -217,13 +216,22 @@ fn timeframe_chain_consistent() {
     let day = &daily[daily.len() / 2];
     let day_end = day.timestamp + 86400;
 
-    for tf in [Timeframe::S30, Timeframe::M1, Timeframe::M5, Timeframe::M15, Timeframe::H1] {
+    for tf in [
+        Timeframe::S30,
+        Timeframe::M1,
+        Timeframe::M5,
+        Timeframe::M15,
+        Timeframe::H1,
+    ] {
         let bars = p.bars("AAPL", tf, day.timestamp, day_end);
         assert!(!bars.is_empty(), "{tf}: no bars");
 
         let agg_open = bars.first().unwrap().open;
         let agg_close = bars.last().unwrap().close;
-        let agg_high = bars.iter().map(|b| b.high).fold(f64::NEG_INFINITY, f64::max);
+        let agg_high = bars
+            .iter()
+            .map(|b| b.high)
+            .fold(f64::NEG_INFINITY, f64::max);
         let agg_low = bars.iter().map(|b| b.low).fold(f64::INFINITY, f64::min);
 
         assert_eq!(agg_open, day.open, "{tf}: open mismatch");
@@ -376,8 +384,7 @@ fn volume_correlates_with_moves() {
     let q1 = returns.len() / 4;
     let q3 = returns.len() * 3 / 4;
 
-    let avg_vol_small: f64 =
-        returns[..q1].iter().map(|r| r.1 as f64).sum::<f64>() / q1 as f64;
+    let avg_vol_small: f64 = returns[..q1].iter().map(|r| r.1 as f64).sum::<f64>() / q1 as f64;
     let avg_vol_big: f64 =
         returns[q3..].iter().map(|r| r.1 as f64).sum::<f64>() / (returns.len() - q3) as f64;
 

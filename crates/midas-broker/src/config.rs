@@ -218,12 +218,14 @@ impl Default for ReconnectConfig {
     }
 }
 
-
 impl BrokerConfig {
     /// Load configuration from a TOML file at `path`.
     pub fn load_from_file(path: &Path) -> Result<Self, BrokerError> {
         let content = std::fs::read_to_string(path).map_err(|e| {
-            BrokerError::Config(format!("failed to read config file {}: {e}", path.display()))
+            BrokerError::Config(format!(
+                "failed to read config file {}: {e}",
+                path.display()
+            ))
         })?;
         let config: BrokerConfig = toml::from_str(&content).map_err(|e| {
             BrokerError::Config(format!(
@@ -274,7 +276,10 @@ mod tests {
         cfg.connection.allow_live = false;
         let err = cfg.validate().unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("allow_live"), "error should mention allow_live: {msg}");
+        assert!(
+            msg.contains("allow_live"),
+            "error should mention allow_live: {msg}"
+        );
     }
 
     #[test]
@@ -282,7 +287,8 @@ mod tests {
         let mut cfg = BrokerConfig::default();
         cfg.connection.port = 4001;
         cfg.connection.allow_live = true;
-        cfg.validate().expect("live port with allow_live should be valid");
+        cfg.validate()
+            .expect("live port with allow_live should be valid");
     }
 
     #[test]

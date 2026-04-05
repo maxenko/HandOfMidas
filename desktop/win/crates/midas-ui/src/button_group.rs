@@ -199,8 +199,7 @@ mod tests {
 
     #[test]
     fn button_group_empty_items() {
-        let group: ButtonGroup<'_, Tf, Msg> =
-            ButtonGroup::new(vec![], Tf::D1, Msg::Selected);
+        let group: ButtonGroup<'_, Tf, Msg> = ButtonGroup::new(vec![], Tf::D1, Msg::Selected);
         assert_eq!(group.item_count(), 0);
     }
 

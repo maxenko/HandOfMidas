@@ -105,13 +105,8 @@ fn validate_valid_bracket() {
 fn create_bracket_long_with_tp_sl() {
     use midas_chart::widget::order_bracket::*;
 
-    let bracket = create_bracket_annotation(
-        BracketSide::Long,
-        185.0,
-        Some(192.0),
-        Some(182.0),
-        100.0,
-    );
+    let bracket =
+        create_bracket_annotation(BracketSide::Long, 185.0, Some(192.0), Some(182.0), 100.0);
     assert_eq!(bracket.side, BracketSide::Long);
     assert_eq!(bracket.status, BracketStatus::Pending);
     assert!((bracket.entry.price - 185.0).abs() < f64::EPSILON);
@@ -126,13 +121,7 @@ fn create_bracket_long_with_tp_sl() {
 fn create_bracket_short_no_tp() {
     use midas_chart::widget::order_bracket::*;
 
-    let bracket = create_bracket_annotation(
-        BracketSide::Short,
-        185.0,
-        None,
-        Some(188.0),
-        50.0,
-    );
+    let bracket = create_bracket_annotation(BracketSide::Short, 185.0, None, Some(188.0), 50.0);
     assert_eq!(bracket.side, BracketSide::Short);
     assert_eq!(bracket.status, BracketStatus::Pending);
     assert!(bracket.take_profit.is_none());
@@ -144,13 +133,7 @@ fn create_bracket_short_no_tp() {
 fn create_bracket_no_legs() {
     use midas_chart::widget::order_bracket::*;
 
-    let bracket = create_bracket_annotation(
-        BracketSide::Long,
-        185.0,
-        None,
-        None,
-        200.0,
-    );
+    let bracket = create_bracket_annotation(BracketSide::Long, 185.0, None, None, 200.0);
     assert!(bracket.take_profit.is_none());
     assert!(bracket.stop_loss.is_none());
     assert!((bracket.entry.price - 185.0).abs() < f64::EPSILON);
@@ -161,43 +144,64 @@ fn create_bracket_no_legs() {
 #[test]
 fn lifecycle_submitted_maps_to_pending() {
     use midas_chart::widget::order_bracket::BracketStatus;
-    assert_eq!(map_lifecycle_to_chart_status("Submitted"), BracketStatus::Pending);
+    assert_eq!(
+        map_lifecycle_to_chart_status("Submitted"),
+        BracketStatus::Pending
+    );
 }
 
 #[test]
 fn lifecycle_entry_filled_maps_to_active() {
     use midas_chart::widget::order_bracket::BracketStatus;
-    assert_eq!(map_lifecycle_to_chart_status("EntryFilled"), BracketStatus::Active);
+    assert_eq!(
+        map_lifecycle_to_chart_status("EntryFilled"),
+        BracketStatus::Active
+    );
 }
 
 #[test]
 fn lifecycle_take_profit_hit_maps_to_closed() {
     use midas_chart::widget::order_bracket::BracketStatus;
-    assert_eq!(map_lifecycle_to_chart_status("TakeProfitHit"), BracketStatus::Closed);
+    assert_eq!(
+        map_lifecycle_to_chart_status("TakeProfitHit"),
+        BracketStatus::Closed
+    );
 }
 
 #[test]
 fn lifecycle_stop_loss_hit_maps_to_closed() {
     use midas_chart::widget::order_bracket::BracketStatus;
-    assert_eq!(map_lifecycle_to_chart_status("StopLossHit"), BracketStatus::Closed);
+    assert_eq!(
+        map_lifecycle_to_chart_status("StopLossHit"),
+        BracketStatus::Closed
+    );
 }
 
 #[test]
 fn lifecycle_cancelled_maps_to_cancelled() {
     use midas_chart::widget::order_bracket::BracketStatus;
-    assert_eq!(map_lifecycle_to_chart_status("Cancelled"), BracketStatus::Cancelled);
+    assert_eq!(
+        map_lifecycle_to_chart_status("Cancelled"),
+        BracketStatus::Cancelled
+    );
 }
 
 #[test]
 fn lifecycle_rejected_maps_to_cancelled() {
     use midas_chart::widget::order_bracket::BracketStatus;
-    assert_eq!(map_lifecycle_to_chart_status("Rejected"), BracketStatus::Cancelled);
+    assert_eq!(
+        map_lifecycle_to_chart_status("Rejected"),
+        BracketStatus::Cancelled
+    );
 }
 
 #[test]
 fn lifecycle_unknown_defaults_to_pending() {
     use midas_chart::widget::order_bracket::BracketStatus;
-    assert_eq!(map_lifecycle_to_chart_status("SomethingNew"), BracketStatus::Pending);
+    assert_eq!(
+        map_lifecycle_to_chart_status("SomethingNew"),
+        BracketStatus::Pending
+    );
 }
 
 #[test]
@@ -210,7 +214,9 @@ fn validate_non_numeric_quantity() {
     };
     let errors = validate_panel(&state);
     assert!(
-        errors.iter().any(|(f, msg)| f == "quantity" && msg.contains("not a number")),
+        errors
+            .iter()
+            .any(|(f, msg)| f == "quantity" && msg.contains("not a number")),
         "expected 'not a number' error for quantity, got: {errors:?}"
     );
 }
@@ -228,12 +234,18 @@ fn validate_non_numeric_tp_value() {
     };
     let errors = validate_panel(&state);
     assert!(
-        errors.iter().any(|(f, msg)| f == "tp" && msg.contains("not a number")),
+        errors
+            .iter()
+            .any(|(f, msg)| f == "tp" && msg.contains("not a number")),
         "expected 'not a number' error for TP, got: {errors:?}"
     );
     // Should not double-report with generic "Invalid TP price"
     let tp_errors: Vec<_> = errors.iter().filter(|(f, _)| f == "tp").collect();
-    assert_eq!(tp_errors.len(), 1, "TP should have exactly one error, got: {tp_errors:?}");
+    assert_eq!(
+        tp_errors.len(),
+        1,
+        "TP should have exactly one error, got: {tp_errors:?}"
+    );
 }
 
 #[test]
@@ -249,11 +261,17 @@ fn validate_non_numeric_sl_value() {
     };
     let errors = validate_panel(&state);
     assert!(
-        errors.iter().any(|(f, msg)| f == "sl" && msg.contains("not a number")),
+        errors
+            .iter()
+            .any(|(f, msg)| f == "sl" && msg.contains("not a number")),
         "expected 'not a number' error for SL, got: {errors:?}"
     );
     let sl_errors: Vec<_> = errors.iter().filter(|(f, _)| f == "sl").collect();
-    assert_eq!(sl_errors.len(), 1, "SL should have exactly one error, got: {sl_errors:?}");
+    assert_eq!(
+        sl_errors.len(),
+        1,
+        "SL should have exactly one error, got: {sl_errors:?}"
+    );
 }
 
 // -- OrderPanel (dockable) tests --

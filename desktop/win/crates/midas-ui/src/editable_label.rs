@@ -203,25 +203,11 @@ mod tests {
     }
 
     fn make_display_label<'a>() -> EditableLabel<'a, Msg> {
-        EditableLabel::new(
-            "AAPL",
-            "",
-            false,
-            Msg::Changed,
-            Msg::Confirm,
-            Msg::Start,
-        )
+        EditableLabel::new("AAPL", "", false, Msg::Changed, Msg::Confirm, Msg::Start)
     }
 
     fn make_editing_label<'a>() -> EditableLabel<'a, Msg> {
-        EditableLabel::new(
-            "AAPL",
-            "MSFT",
-            true,
-            Msg::Changed,
-            Msg::Confirm,
-            Msg::Start,
-        )
+        EditableLabel::new("AAPL", "MSFT", true, Msg::Changed, Msg::Confirm, Msg::Start)
     }
 
     #[test]

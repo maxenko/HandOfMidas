@@ -5,7 +5,9 @@ use std::time::Instant;
 use iced::widget::pane_grid;
 use iced::Task;
 
-use midas_core::config::{AppConfig, ChartConfig, LayoutNode, OrderPanelConfig, PanelSlot, ProviderConfig};
+use midas_core::config::{
+    AppConfig, ChartConfig, LayoutNode, OrderPanelConfig, PanelSlot, ProviderConfig,
+};
 
 use crate::layout::PanelContent;
 
@@ -38,49 +40,36 @@ impl MidasApp {
         for ps in self.workspace.panes.panes.values() {
             match &ps.content {
                 PanelContent::Chart(chart_id) => {
-                    if let Some(idx) = chart_configs
-                        .iter()
-                        .position(|c| self.charts.get(chart_id).is_some_and(|p| {
+                    if let Some(idx) = chart_configs.iter().position(|c| {
+                        self.charts.get(chart_id).is_some_and(|p| {
                             c.symbol == p.symbol && c.timeframe == p.timeframe.display_name()
-                        }))
-                    {
+                        })
+                    }) {
                         panel_order.push(PanelSlot::Chart { chart_index: idx });
                     }
                 }
                 PanelContent::Watchlist(wl_id) => {
-                    if let Some(idx) = watchlist_configs
-                        .iter()
-                        .enumerate()
-                        .position(|(i, _)| {
-                            self.watchlists
-                                .get(wl_id)
-                                .is_some_and(|wl| {
-                                    watchlist_configs.get(i).is_some_and(|wc: &midas_core::config::WatchlistConfig| {
-                                        wc.name == wl.name
-                                    })
-                                })
+                    if let Some(idx) = watchlist_configs.iter().enumerate().position(|(i, _)| {
+                        self.watchlists.get(wl_id).is_some_and(|wl| {
+                            watchlist_configs.get(i).is_some_and(
+                                |wc: &midas_core::config::WatchlistConfig| wc.name == wl.name,
+                            )
                         })
-                    {
+                    }) {
                         panel_order.push(PanelSlot::Watchlist {
                             watchlist_index: idx,
                         });
                     }
                 }
                 PanelContent::Order(op_id) => {
-                    if let Some(idx) = order_panel_configs
-                        .iter()
-                        .enumerate()
-                        .position(|(i, _)| {
-                            self.order_panels
-                                .get(op_id)
-                                .is_some_and(|panel| {
-                                    order_panel_configs.get(i).is_some_and(|cfg| {
-                                        cfg.symbol == panel.state.symbol
-                                            && cfg.symbol_link == panel.symbol_link
-                                    })
-                                })
+                    if let Some(idx) = order_panel_configs.iter().enumerate().position(|(i, _)| {
+                        self.order_panels.get(op_id).is_some_and(|panel| {
+                            order_panel_configs.get(i).is_some_and(|cfg| {
+                                cfg.symbol == panel.state.symbol
+                                    && cfg.symbol_link == panel.symbol_link
+                            })
                         })
-                    {
+                    }) {
                         panel_order.push(PanelSlot::OrderPanel {
                             order_panel_index: idx,
                         });
@@ -114,10 +103,7 @@ impl MidasApp {
             store: midas_core::config::StoreConfig::default(),
             providers: Some(ProviderConfig {
                 active_data: Some(self.providers.active_data_provider_name()),
-                active_broker: self
-                    .providers
-                    .active_broker()
-                    .map(|b| b.name().to_string()),
+                active_broker: self.providers.active_broker().map(|b| b.name().to_string()),
             }),
         }
     }
@@ -231,9 +217,7 @@ impl MidasApp {
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."))
             .to_path_buf();
-        if let Err(e) =
-            crate::annotation_persistence::save_all(&self.annotation_store, &data_dir)
-        {
+        if let Err(e) = crate::annotation_persistence::save_all(&self.annotation_store, &data_dir) {
             tracing::warn!("Failed to persist annotations: {e}");
         }
 

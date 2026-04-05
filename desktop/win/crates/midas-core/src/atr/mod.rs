@@ -83,11 +83,7 @@ pub struct GatrResult {
 /// Returns `None` if there are fewer than 2 bars or no history TRs.
 /// When all history bars are paranormal, returns `Some` with `pct`
 /// based on the raw average and empty `selected_bars`.
-pub fn gerchik_gatr_detail(
-    highs: &[f64],
-    lows: &[f64],
-    closes: &[f64],
-) -> Option<GatrResult> {
+pub fn gerchik_gatr_detail(highs: &[f64], lows: &[f64], closes: &[f64]) -> Option<GatrResult> {
     let len = highs.len().min(lows.len()).min(closes.len());
     if len < 2 {
         return None;

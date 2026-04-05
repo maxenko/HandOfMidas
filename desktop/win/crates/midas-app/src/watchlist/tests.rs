@@ -97,7 +97,10 @@ fn symbol_link_roundtrip() {
     wl.symbol_link = LinkMode::Color(midas_core::LinkColor::Blue);
     let config = wl.to_config();
     let restored = WatchlistPanel::from_config(WatchlistId::new(2), &config);
-    assert_eq!(restored.symbol_link, LinkMode::Color(midas_core::LinkColor::Blue));
+    assert_eq!(
+        restored.symbol_link,
+        LinkMode::Color(midas_core::LinkColor::Blue)
+    );
 }
 
 #[test]
@@ -121,7 +124,8 @@ fn from_config_empty() {
 #[test]
 fn column_widths_roundtrip() {
     let mut wl = WatchlistPanel::new(WatchlistId::new(1), "Test".into());
-    wl.grid_state.set_column_width(COL_TICKER, 120.0, 20.0, None); // widen ticker column
+    wl.grid_state
+        .set_column_width(COL_TICKER, 120.0, 20.0, None); // widen ticker column
     let config = wl.to_config();
     let restored = WatchlistPanel::from_config(WatchlistId::new(2), &config);
     assert_eq!(restored.grid_state.column_width(COL_TICKER), 120.0);

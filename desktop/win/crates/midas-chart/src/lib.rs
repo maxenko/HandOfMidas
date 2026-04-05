@@ -53,12 +53,12 @@ pub use instances::{
 pub use interaction::{
     handle_event, timeline_border_y, volume_handle_y, ChartAction, ChartEvent, Key, MouseButton,
 };
-pub use widget::{Annotation, AnnotationId, AnnotationKind};
 pub use level_tool::{LevelTool, LevelToolMode};
 pub use levels::{price_step_for, HorizontalLevel, LevelIcon};
 pub use scene::{ChartScene, SceneGenerations};
 pub use state::{ChartState, CursorClaim, InteractionMode, Momentum, YAnimation};
 pub use volume_profile::{VolumeProfile, VolumeProfileBin};
+pub use widget::{Annotation, AnnotationId, AnnotationKind};
 
 #[cfg(test)]
 mod tests {

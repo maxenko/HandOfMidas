@@ -147,17 +147,27 @@ mod tests {
     #[test]
     fn default_indicators_contains_gerchik_atr() {
         let defaults = default_indicators();
-        let gatr = defaults.iter().find(|c| c.kind == IndicatorKind::GerchikAtr);
+        let gatr = defaults
+            .iter()
+            .find(|c| c.kind == IndicatorKind::GerchikAtr);
         assert!(gatr.is_some(), "default set should include GerchikAtr");
-        assert!(gatr.unwrap().enabled, "GerchikAtr should be enabled by default");
+        assert!(
+            gatr.unwrap().enabled,
+            "GerchikAtr should be enabled by default"
+        );
     }
 
     #[test]
     fn default_indicators_volume_profile_disabled() {
         let defaults = default_indicators();
-        let vp = defaults.iter().find(|c| c.kind == IndicatorKind::VolumeProfile);
+        let vp = defaults
+            .iter()
+            .find(|c| c.kind == IndicatorKind::VolumeProfile);
         assert!(vp.is_some(), "default set should include VolumeProfile");
-        assert!(!vp.unwrap().enabled, "VolumeProfile should be disabled by default");
+        assert!(
+            !vp.unwrap().enabled,
+            "VolumeProfile should be disabled by default"
+        );
     }
 
     #[test]

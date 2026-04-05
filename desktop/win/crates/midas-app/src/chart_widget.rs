@@ -157,9 +157,9 @@ impl shader::Program<Message> for ChartProgram {
         cursor: mouse::Cursor,
     ) -> Option<shader::Action<Message>> {
         // Ensure the widget state has a ChartState for interaction.
-        let chart_state = state.chart_state.get_or_insert_with(|| {
-            ChartState::new(self.snapshot.camera.clone())
-        });
+        let chart_state = state
+            .chart_state
+            .get_or_insert_with(|| ChartState::new(self.snapshot.camera.clone()));
         // Sync camera from latest snapshot so interactions use current view.
         chart_state.camera = self.snapshot.camera.clone();
         // CRITICAL: Update camera viewport to match actual widget bounds.
@@ -489,9 +489,9 @@ impl shader::Program<Message> for ChartProgram {
         let scene = compute_chart_scene(&input);
 
         // Pre-compute ghost preview Y from sibling chart price.
-        let ghost_preview_y = snap.ghost_preview_price.map(|price| {
-            camera.snap_to_pixel(camera.price_to_y(price))
-        });
+        let ghost_preview_y = snap
+            .ghost_preview_price
+            .map(|price| camera.snap_to_pixel(camera.price_to_y(price)));
 
         // Pre-compute ghost crosshair from sibling chart. Filter off-screen.
         let ghost_crosshair = snap.ghost_crosshair.and_then(|(gx, gy)| {
@@ -1142,9 +1142,7 @@ fn action_to_message(
 /// into `Annotation` values for the new widget system. Used during the
 /// migration period while the app still stores levels in `LevelStore`.
 fn old_levels_to_annotations(levels: &[HorizontalLevel]) -> Vec<Annotation> {
-    use midas_chart::widget::level::{
-        HorizontalLevel as WidgetLevel, LevelExtend, LineStyle,
-    };
+    use midas_chart::widget::level::{HorizontalLevel as WidgetLevel, LevelExtend, LineStyle};
     levels
         .iter()
         .map(|l| Annotation {

@@ -38,22 +38,34 @@ fn fromstr_unknown_returns_error() {
 
 #[test]
 fn from_ib_status_api_pending() {
-    assert_eq!(OrderStatus::from_ib_status("ApiPending"), OrderStatus::PendingSubmit);
+    assert_eq!(
+        OrderStatus::from_ib_status("ApiPending"),
+        OrderStatus::PendingSubmit
+    );
 }
 
 #[test]
 fn from_ib_status_pending_submit() {
-    assert_eq!(OrderStatus::from_ib_status("PendingSubmit"), OrderStatus::PendingSubmit);
+    assert_eq!(
+        OrderStatus::from_ib_status("PendingSubmit"),
+        OrderStatus::PendingSubmit
+    );
 }
 
 #[test]
 fn from_ib_status_pre_submitted() {
-    assert_eq!(OrderStatus::from_ib_status("PreSubmitted"), OrderStatus::PreSubmitted);
+    assert_eq!(
+        OrderStatus::from_ib_status("PreSubmitted"),
+        OrderStatus::PreSubmitted
+    );
 }
 
 #[test]
 fn from_ib_status_submitted() {
-    assert_eq!(OrderStatus::from_ib_status("Submitted"), OrderStatus::Submitted);
+    assert_eq!(
+        OrderStatus::from_ib_status("Submitted"),
+        OrderStatus::Submitted
+    );
 }
 
 #[test]
@@ -63,23 +75,35 @@ fn from_ib_status_filled() {
 
 #[test]
 fn from_ib_status_pending_cancel() {
-    assert_eq!(OrderStatus::from_ib_status("PendingCancel"), OrderStatus::PendingCancel);
+    assert_eq!(
+        OrderStatus::from_ib_status("PendingCancel"),
+        OrderStatus::PendingCancel
+    );
 }
 
 #[test]
 fn from_ib_status_cancelled() {
-    assert_eq!(OrderStatus::from_ib_status("Cancelled"), OrderStatus::Cancelled);
+    assert_eq!(
+        OrderStatus::from_ib_status("Cancelled"),
+        OrderStatus::Cancelled
+    );
 }
 
 #[test]
 fn from_ib_status_api_cancelled() {
-    assert_eq!(OrderStatus::from_ib_status("ApiCancelled"), OrderStatus::Cancelled);
+    assert_eq!(
+        OrderStatus::from_ib_status("ApiCancelled"),
+        OrderStatus::Cancelled
+    );
 }
 
 /// CRITICAL: IB "Inactive" means the order was rejected, not our Inactive.
 #[test]
 fn from_ib_status_inactive_maps_to_rejected() {
-    assert_eq!(OrderStatus::from_ib_status("Inactive"), OrderStatus::Rejected);
+    assert_eq!(
+        OrderStatus::from_ib_status("Inactive"),
+        OrderStatus::Rejected
+    );
 }
 
 #[test]
@@ -92,7 +116,10 @@ fn from_ib_status_partially_filled() {
 
 #[test]
 fn from_ib_status_unknown_maps_to_rejected() {
-    assert_eq!(OrderStatus::from_ib_status("SomethingNew"), OrderStatus::Rejected);
+    assert_eq!(
+        OrderStatus::from_ib_status("SomethingNew"),
+        OrderStatus::Rejected
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -185,8 +212,7 @@ fn valid_draft_to_inactive() {
 
 #[test]
 fn valid_inactive_to_pending_submit() {
-    OrderStatus::validate_transition(OrderStatus::Inactive, OrderStatus::PendingSubmit)
-        .unwrap();
+    OrderStatus::validate_transition(OrderStatus::Inactive, OrderStatus::PendingSubmit).unwrap();
 }
 
 #[test]
@@ -207,14 +233,12 @@ fn valid_pending_submit_to_pre_submitted() {
 
 #[test]
 fn valid_pending_submit_to_submitted() {
-    OrderStatus::validate_transition(OrderStatus::PendingSubmit, OrderStatus::Submitted)
-        .unwrap();
+    OrderStatus::validate_transition(OrderStatus::PendingSubmit, OrderStatus::Submitted).unwrap();
 }
 
 #[test]
 fn valid_pending_submit_to_rejected() {
-    OrderStatus::validate_transition(OrderStatus::PendingSubmit, OrderStatus::Rejected)
-        .unwrap();
+    OrderStatus::validate_transition(OrderStatus::PendingSubmit, OrderStatus::Rejected).unwrap();
 }
 
 #[test]
@@ -230,8 +254,7 @@ fn valid_pending_submit_to_pending_cancel() {
 
 #[test]
 fn valid_pre_submitted_to_submitted() {
-    OrderStatus::validate_transition(OrderStatus::PreSubmitted, OrderStatus::Submitted)
-        .unwrap();
+    OrderStatus::validate_transition(OrderStatus::PreSubmitted, OrderStatus::Submitted).unwrap();
 }
 
 #[test]
@@ -247,14 +270,12 @@ fn valid_pre_submitted_to_filled() {
 
 #[test]
 fn valid_pre_submitted_to_rejected() {
-    OrderStatus::validate_transition(OrderStatus::PreSubmitted, OrderStatus::Rejected)
-        .unwrap();
+    OrderStatus::validate_transition(OrderStatus::PreSubmitted, OrderStatus::Rejected).unwrap();
 }
 
 #[test]
 fn valid_submitted_to_partially_filled() {
-    OrderStatus::validate_transition(OrderStatus::Submitted, OrderStatus::PartiallyFilled)
-        .unwrap();
+    OrderStatus::validate_transition(OrderStatus::Submitted, OrderStatus::PartiallyFilled).unwrap();
 }
 
 #[test]
@@ -264,8 +285,7 @@ fn valid_submitted_to_filled() {
 
 #[test]
 fn valid_submitted_to_pending_cancel() {
-    OrderStatus::validate_transition(OrderStatus::Submitted, OrderStatus::PendingCancel)
-        .unwrap();
+    OrderStatus::validate_transition(OrderStatus::Submitted, OrderStatus::PendingCancel).unwrap();
 }
 
 #[test]
@@ -275,8 +295,7 @@ fn valid_submitted_to_rejected() {
 
 #[test]
 fn valid_partially_filled_to_filled() {
-    OrderStatus::validate_transition(OrderStatus::PartiallyFilled, OrderStatus::Filled)
-        .unwrap();
+    OrderStatus::validate_transition(OrderStatus::PartiallyFilled, OrderStatus::Filled).unwrap();
 }
 
 #[test]
@@ -287,14 +306,12 @@ fn valid_partially_filled_to_pending_cancel() {
 
 #[test]
 fn valid_pending_cancel_to_cancelled() {
-    OrderStatus::validate_transition(OrderStatus::PendingCancel, OrderStatus::Cancelled)
-        .unwrap();
+    OrderStatus::validate_transition(OrderStatus::PendingCancel, OrderStatus::Cancelled).unwrap();
 }
 
 #[test]
 fn valid_pending_cancel_to_inactive() {
-    OrderStatus::validate_transition(OrderStatus::PendingCancel, OrderStatus::Inactive)
-        .unwrap();
+    OrderStatus::validate_transition(OrderStatus::PendingCancel, OrderStatus::Inactive).unwrap();
 }
 
 #[test]
@@ -306,8 +323,7 @@ fn valid_pending_cancel_to_filled_race() {
 #[test]
 fn valid_pre_submitted_to_cancelled_oca() {
     // IB OCA: server-side cancel when bracket sibling fills.
-    OrderStatus::validate_transition(OrderStatus::PreSubmitted, OrderStatus::Cancelled)
-        .unwrap();
+    OrderStatus::validate_transition(OrderStatus::PreSubmitted, OrderStatus::Cancelled).unwrap();
 }
 
 #[test]
@@ -323,8 +339,7 @@ fn valid_submitted_to_cancelled_oca() {
 #[test]
 fn invalid_draft_to_submitted() {
     let err =
-        OrderStatus::validate_transition(OrderStatus::Draft, OrderStatus::Submitted)
-            .unwrap_err();
+        OrderStatus::validate_transition(OrderStatus::Draft, OrderStatus::Submitted).unwrap_err();
     match err {
         BrokerError::InvalidTransition { from, to } => {
             assert_eq!(from, OrderStatus::Draft);
@@ -354,30 +369,24 @@ fn invalid_filled_to_anything() {
 #[test]
 fn invalid_cancelled_to_anything() {
     assert!(
-        OrderStatus::validate_transition(OrderStatus::Cancelled, OrderStatus::Inactive)
-            .is_err()
+        OrderStatus::validate_transition(OrderStatus::Cancelled, OrderStatus::Inactive).is_err()
     );
 }
 
 #[test]
 fn invalid_rejected_to_anything() {
-    assert!(
-        OrderStatus::validate_transition(OrderStatus::Rejected, OrderStatus::Error).is_err()
-    );
+    assert!(OrderStatus::validate_transition(OrderStatus::Rejected, OrderStatus::Error).is_err());
 }
 
 #[test]
 fn invalid_inactive_to_filled() {
-    assert!(
-        OrderStatus::validate_transition(OrderStatus::Inactive, OrderStatus::Filled).is_err()
-    );
+    assert!(OrderStatus::validate_transition(OrderStatus::Inactive, OrderStatus::Filled).is_err());
 }
 
 #[test]
 fn invalid_submitted_to_inactive() {
     assert!(
-        OrderStatus::validate_transition(OrderStatus::Submitted, OrderStatus::Inactive)
-            .is_err()
+        OrderStatus::validate_transition(OrderStatus::Submitted, OrderStatus::Inactive).is_err()
     );
 }
 
@@ -385,8 +394,7 @@ fn invalid_submitted_to_inactive() {
 fn valid_partially_filled_to_cancelled_oca() {
     // IB OCA: server-side cancel of a partially filled child when bracket
     // sibling fills. IB sends Cancelled directly without PendingCancel.
-    OrderStatus::validate_transition(OrderStatus::PartiallyFilled, OrderStatus::Cancelled)
-        .unwrap();
+    OrderStatus::validate_transition(OrderStatus::PartiallyFilled, OrderStatus::Cancelled).unwrap();
 }
 
 #[test]

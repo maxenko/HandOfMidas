@@ -19,15 +19,13 @@ fn make_bracket(
     BracketGroup {
         parent,
         take_profit: tp_status.map(|s| {
-            let mut o =
-                LocalOrder::new_draft("AAPL", OrderAction::Sell, OrderKind::Limit, 100.0);
+            let mut o = LocalOrder::new_draft("AAPL", OrderAction::Sell, OrderKind::Limit, 100.0);
             o.status = s;
             o.parent_id = Some(parent_id);
             o
         }),
         stop_loss: sl_status.map(|s| {
-            let mut o =
-                LocalOrder::new_draft("AAPL", OrderAction::Sell, OrderKind::Stop, 100.0);
+            let mut o = LocalOrder::new_draft("AAPL", OrderAction::Sell, OrderKind::Stop, 100.0);
             o.status = s;
             o.parent_id = Some(parent_id);
             o
@@ -443,10 +441,7 @@ fn derive_parent_cancelled() {
         Some(OrderStatus::Cancelled),
         Some(OrderStatus::Cancelled),
     );
-    assert_eq!(
-        derive_bracket_status(&g),
-        BracketLifecycleStatus::Cancelled
-    );
+    assert_eq!(derive_bracket_status(&g), BracketLifecycleStatus::Cancelled);
 }
 
 #[test]
@@ -456,10 +451,7 @@ fn derive_parent_rejected() {
         Some(OrderStatus::Rejected),
         Some(OrderStatus::Rejected),
     );
-    assert_eq!(
-        derive_bracket_status(&g),
-        BracketLifecycleStatus::Rejected
-    );
+    assert_eq!(derive_bracket_status(&g), BracketLifecycleStatus::Rejected);
 }
 
 #[test]

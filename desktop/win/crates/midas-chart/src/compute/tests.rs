@@ -4,8 +4,8 @@ use crate::dirty::DirtyFlags;
 use crate::input::ChartInput;
 use crate::level_tool::LevelTool;
 use crate::widget::{
-    Annotation, AnnotationId, AnnotationKind, Presence,
     level::{LevelExtend, LineStyle},
+    Annotation, AnnotationId, AnnotationKind, Presence,
 };
 use midas_core::CandleData;
 use std::ops::Range;

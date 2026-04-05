@@ -242,7 +242,11 @@ fn red_when_high_atr_usage() {
     match output {
         IndicatorOutput::TextBadge { text: _, color } => {
             // Close == prev_close -> price_up=true -> green.
-            assert_eq!(color, midas_core::GATR_COLOR_GREEN, "flat close should be green");
+            assert_eq!(
+                color,
+                midas_core::GATR_COLOR_GREEN,
+                "flat close should be green"
+            );
         }
         _ => panic!("expected TextBadge variant"),
     }

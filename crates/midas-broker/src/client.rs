@@ -55,10 +55,7 @@ pub enum BrokerCallback {
         side: String,
     },
     /// Order was rejected.
-    OrderRejected {
-        ib_order_id: i32,
-        reason: String,
-    },
+    OrderRejected { ib_order_id: i32, reason: String },
     /// Connection status changed.
     ConnectionStatus {
         connected: bool,
@@ -142,13 +139,17 @@ pub trait BrokerClient: Send + Sync {
     // -- Optional methods with defaults --
 
     /// Connect to the broker. Returns server version.
-    fn connect(&self) -> Result<i32, String> { Ok(176) }
+    fn connect(&self) -> Result<i32, String> {
+        Ok(176)
+    }
 
     /// Disconnect from the broker.
     fn disconnect(&self) {}
 
     /// Whether the client is currently connected.
-    fn is_connected(&self) -> bool { true }
+    fn is_connected(&self) -> bool {
+        true
+    }
 
     // ── Market data subscriptions ─────────────────────────────────
 
@@ -161,15 +162,21 @@ pub trait BrokerClient: Send + Sync {
     // ── Account queries ───────────────────────────────────────────
 
     /// Request current positions. Returns a snapshot.
-    fn request_positions(&self) -> Vec<PositionRecord> { Vec::new() }
+    fn request_positions(&self) -> Vec<PositionRecord> {
+        Vec::new()
+    }
 
     /// Request account summary (cash, P&L). Returns a snapshot.
-    fn request_account_summary(&self) -> AccountSummary { AccountSummary::default() }
+    fn request_account_summary(&self) -> AccountSummary {
+        AccountSummary::default()
+    }
 
     // ── Polling ───────────────────────────────────────────────────
 
     /// Poll for pending callbacks (status changes, fills, ticks).
-    fn poll_callbacks(&self) -> Vec<BrokerCallback> { Vec::new() }
+    fn poll_callbacks(&self) -> Vec<BrokerCallback> {
+        Vec::new()
+    }
 }
 
 /// A placed order record for inspection in tests.
@@ -286,7 +293,9 @@ mod tests {
     fn test_place_order_records() {
         let client = TestBrokerClient::new();
         client
-            .place_order(1, "AAPL", "BUY", "MKT", 100.0, None, None, None, true, "DAY", false)
+            .place_order(
+                1, "AAPL", "BUY", "MKT", 100.0, None, None, None, true, "DAY", false,
+            )
             .unwrap();
         let orders = client.placed_orders();
         assert_eq!(orders.len(), 1);
@@ -371,10 +380,24 @@ mod tests {
         let id1 = client.next_order_id();
         let id2 = client.next_order_id();
         client
-            .place_order(id1, "AAPL", "BUY", "MKT", 50.0, None, None, None, true, "DAY", false)
+            .place_order(
+                id1, "AAPL", "BUY", "MKT", 50.0, None, None, None, true, "DAY", false,
+            )
             .unwrap();
         client
-            .place_order(id2, "MSFT", "SELL", "LMT", 25.0, Some(400.0), None, None, true, "DAY", false)
+            .place_order(
+                id2,
+                "MSFT",
+                "SELL",
+                "LMT",
+                25.0,
+                Some(400.0),
+                None,
+                None,
+                true,
+                "DAY",
+                false,
+            )
             .unwrap();
         client.cancel_order(id1).unwrap();
 

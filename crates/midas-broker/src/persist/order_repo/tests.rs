@@ -50,7 +50,9 @@ fn test_insert_and_get_order() {
     let order = make_order("order-001", "Draft", "AAPL");
     insert_order(&conn, &order).unwrap();
 
-    let fetched = get_order(&conn, "order-001").unwrap().expect("order should exist");
+    let fetched = get_order(&conn, "order-001")
+        .unwrap()
+        .expect("order should exist");
 
     assert_eq!(fetched.local_id, "order-001");
     assert_eq!(fetched.status, "Draft");
@@ -82,8 +84,8 @@ fn test_update_order_status() {
     let order = make_order("order-002", "Draft", "MSFT");
     insert_order(&conn, &order).unwrap();
 
-    let updated = update_order_status(&conn, "order-002", "Submitted", "2026-03-25T12:01:00Z")
-        .unwrap();
+    let updated =
+        update_order_status(&conn, "order-002", "Submitted", "2026-03-25T12:01:00Z").unwrap();
     assert!(updated);
 
     let fetched = get_order(&conn, "order-002").unwrap().unwrap();
@@ -97,8 +99,7 @@ fn test_update_order_status_not_found() {
     let conn = db.conn().lock().unwrap();
 
     let updated =
-        update_order_status(&conn, "nonexistent", "Submitted", "2026-03-25T12:01:00Z")
-            .unwrap();
+        update_order_status(&conn, "nonexistent", "Submitted", "2026-03-25T12:01:00Z").unwrap();
     assert!(!updated);
 }
 
@@ -253,8 +254,7 @@ fn test_order_row_to_local_round_trip() {
     use crate::orders::types::{OrderAction, OrderKind};
 
     // Build a LocalOrder with many fields populated.
-    let mut order =
-        LocalOrder::new_draft("AAPL", OrderAction::Buy, OrderKind::Limit, 100.0);
+    let mut order = LocalOrder::new_draft("AAPL", OrderAction::Buy, OrderKind::Limit, 100.0);
     order.limit_price = Some(185.50);
     order.ib_order_id = Some(42);
     order.ib_perm_id = Some(123456);
@@ -358,11 +358,7 @@ fn test_order_row_to_local_hard_fail_on_bad_status() {
 
 #[test]
 fn test_order_row_to_local_soft_fail_on_bad_bracket_role() {
-    let mut row = make_order(
-        "019577a0-0000-7000-8000-000000000002",
-        "Inactive",
-        "AAPL",
-    );
+    let mut row = make_order("019577a0-0000-7000-8000-000000000002", "Inactive", "AAPL");
     row.bracket_role = Some("NOT_A_ROLE".to_string());
 
     let result = order_row_to_local(&row);
@@ -385,20 +381,17 @@ fn test_persist_and_transition_bracket() {
     let conn = db.conn().lock().unwrap();
 
     // Build a bracket group with parent + TP + SL, all Inactive.
-    let mut parent =
-        LocalOrder::new_draft("AAPL", OrderAction::Buy, OrderKind::Market, 100.0);
+    let mut parent = LocalOrder::new_draft("AAPL", OrderAction::Buy, OrderKind::Market, 100.0);
     parent.status = OrderStatus::Inactive;
     let parent_id = parent.id;
 
-    let mut tp =
-        LocalOrder::new_draft("AAPL", OrderAction::Sell, OrderKind::Limit, 100.0);
+    let mut tp = LocalOrder::new_draft("AAPL", OrderAction::Sell, OrderKind::Limit, 100.0);
     tp.status = OrderStatus::Inactive;
     tp.parent_id = Some(parent_id);
     tp.bracket_role = Some(BracketRole::TakeProfit);
     tp.limit_price = Some(195.0);
 
-    let mut sl =
-        LocalOrder::new_draft("AAPL", OrderAction::Sell, OrderKind::Stop, 100.0);
+    let mut sl = LocalOrder::new_draft("AAPL", OrderAction::Sell, OrderKind::Stop, 100.0);
     sl.status = OrderStatus::Inactive;
     sl.parent_id = Some(parent_id);
     sl.bracket_role = Some(BracketRole::StopLoss);
@@ -443,5 +436,8 @@ fn test_persist_and_transition_bracket() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(audit_count, 3, "should have 3 audit rows (parent + TP + SL)");
+    assert_eq!(
+        audit_count, 3,
+        "should have 3 audit rows (parent + TP + SL)"
+    );
 }

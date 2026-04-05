@@ -126,8 +126,7 @@ fn watchlist_pane_in_layout() {
     let first_pane = layout.focus.unwrap();
 
     // Split to get a new pane, then manually replace it with a watchlist.
-    let (_chart_id, new_pane) =
-        layout.split(pane_grid::Axis::Vertical, first_pane).unwrap();
+    let (_chart_id, new_pane) = layout.split(pane_grid::Axis::Vertical, first_pane).unwrap();
     let wl_id = layout.next_watchlist_id();
     if let Some(state) = layout.panes.get_mut(new_pane) {
         *state = PaneState::watchlist(wl_id);

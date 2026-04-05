@@ -28,7 +28,11 @@ pub fn run_migrations(conn: &Connection) -> Result<(), StoreError> {
         return Ok(());
     }
 
-    tracing::info!(from = current, to = CURRENT_VERSION, "applying schema migrations");
+    tracing::info!(
+        from = current,
+        to = CURRENT_VERSION,
+        "applying schema migrations"
+    );
 
     if current < 1 {
         migrate_v1(conn)?;

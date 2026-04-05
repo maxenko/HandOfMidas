@@ -155,11 +155,7 @@ impl OrderBracket {
                 1.0,
                 0.8,
             ),
-            BracketStatus::Pending => (
-                LineStyle::Dotted { dot_spacing: 4.0 },
-                1.0,
-                0.7,
-            ),
+            BracketStatus::Pending => (LineStyle::Dotted { dot_spacing: 4.0 }, 1.0, 0.7),
             BracketStatus::PartialFill => (LineStyle::Solid, 1.5, 0.9),
             BracketStatus::Active => (LineStyle::Solid, 1.5, 1.0),
             BracketStatus::Closed => (LineStyle::Solid, 1.0, 0.3),

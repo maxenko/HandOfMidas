@@ -374,10 +374,7 @@ impl std::error::Error for ConversionError {}
 
 /// Helper: parse a required field via `FromStr`, returning a `ConversionError`
 /// on failure.
-fn parse_required<T: FromStr>(
-    field: &'static str,
-    value: &str,
-) -> Result<T, ConversionError>
+fn parse_required<T: FromStr>(field: &'static str, value: &str) -> Result<T, ConversionError>
 where
     T::Err: std::fmt::Display,
 {
@@ -412,41 +409,42 @@ pub fn order_row_to_local(row: &OrderRow) -> Result<LocalOrder, ConversionError>
     })?;
 
     // -- Soft-fail fields --
-    let bracket_role: Option<BracketRole> = row.bracket_role.as_deref().and_then(|s| {
-        match BracketRole::from_str(s) {
-            Ok(role) => Some(role),
-            Err(e) => {
-                tracing::warn!(
-                    "order_row_to_local: bad bracket_role '{s}': {e}, defaulting to None"
-                );
-                None
-            }
-        }
-    });
+    let bracket_role: Option<BracketRole> =
+        row.bracket_role
+            .as_deref()
+            .and_then(|s| match BracketRole::from_str(s) {
+                Ok(role) => Some(role),
+                Err(e) => {
+                    tracing::warn!(
+                        "order_row_to_local: bad bracket_role '{s}': {e}, defaulting to None"
+                    );
+                    None
+                }
+            });
 
-    let parent_id: Option<Uuid> = row.parent_id.as_deref().and_then(|s| {
-        match Uuid::parse_str(s) {
+    let parent_id: Option<Uuid> = row
+        .parent_id
+        .as_deref()
+        .and_then(|s| match Uuid::parse_str(s) {
             Ok(id) => Some(id),
             Err(e) => {
-                tracing::warn!(
-                    "order_row_to_local: bad parent_id '{s}': {e}, defaulting to None"
-                );
+                tracing::warn!("order_row_to_local: bad parent_id '{s}': {e}, defaulting to None");
                 None
             }
-        }
-    });
+        });
 
-    let tags: Vec<String> = row.tags.as_deref().map_or_else(Vec::new, |s| {
-        match serde_json::from_str::<Vec<String>>(s) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(
-                    "order_row_to_local: bad tags JSON '{s}': {e}, defaulting to empty"
-                );
-                Vec::new()
+    let tags: Vec<String> =
+        row.tags.as_deref().map_or_else(Vec::new, |s| {
+            match serde_json::from_str::<Vec<String>>(s) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        "order_row_to_local: bad tags JSON '{s}': {e}, defaulting to empty"
+                    );
+                    Vec::new()
+                }
             }
-        }
-    });
+        });
 
     let algo_params: Option<serde_json::Value> = row.algo_params.as_deref().and_then(|s| {
         match serde_json::from_str::<serde_json::Value>(s) {
@@ -480,17 +478,16 @@ pub fn order_row_to_local(row: &OrderRow) -> Result<LocalOrder, ConversionError>
             Utc::now()
         });
 
-    let last_activated_at: Option<DateTime<Utc>> =
-        row.last_activated_at.as_deref().and_then(|s| {
-            DateTime::parse_from_rfc3339(s)
-                .map(|dt| dt.with_timezone(&Utc))
-                .inspect_err(|e| {
-                    tracing::warn!(
-                        "order_row_to_local: bad last_activated_at '{s}': {e}, defaulting to None"
-                    );
-                })
-                .ok()
-        });
+    let last_activated_at: Option<DateTime<Utc>> = row.last_activated_at.as_deref().and_then(|s| {
+        DateTime::parse_from_rfc3339(s)
+            .map(|dt| dt.with_timezone(&Utc))
+            .inspect_err(|e| {
+                tracing::warn!(
+                    "order_row_to_local: bad last_activated_at '{s}': {e}, defaulting to None"
+                );
+            })
+            .ok()
+    });
 
     let last_deactivated_at: Option<DateTime<Utc>> =
         row.last_deactivated_at.as_deref().and_then(|s| {
@@ -700,11 +697,7 @@ pub fn transition_bracket_to_error(
     let now = chrono::Utc::now().to_rfc3339();
     for leg in group.legs() {
         if leg.status.is_terminal() {
-            tracing::debug!(
-                "Skipping terminal leg {} (status: {})",
-                leg.id,
-                leg.status
-            );
+            tracing::debug!("Skipping terminal leg {} (status: {})", leg.id, leg.status);
             continue;
         }
         let id_str = leg.id.to_string();
@@ -734,11 +727,7 @@ pub fn transition_bracket_to_rejected(
     let now = chrono::Utc::now().to_rfc3339();
     for leg in group.legs() {
         if leg.status.is_terminal() {
-            tracing::debug!(
-                "Skipping terminal leg {} (status: {})",
-                leg.id,
-                leg.status
-            );
+            tracing::debug!("Skipping terminal leg {} (status: {})", leg.id, leg.status);
             continue;
         }
         let id_str = leg.id.to_string();

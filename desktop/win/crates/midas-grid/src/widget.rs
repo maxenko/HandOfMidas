@@ -57,7 +57,6 @@ where
         let header = grid_header(g.columns, g.state, &*g.on_grid);
         let body = grid_body(g.rows, g.columns, g.state, &*g.on_grid);
 
-        column![header, scrollable(body).height(Fill)]
-            .into()
+        column![header, scrollable(body).height(Fill)].into()
     }
 }

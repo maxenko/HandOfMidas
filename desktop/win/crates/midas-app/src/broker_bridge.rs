@@ -74,12 +74,11 @@ impl BrokerBridge {
     }
 
     /// Send `BrokerCommand::ModifyBracketLeg`.
-    pub fn modify_bracket_leg(
-        &self,
-        order_id: uuid::Uuid,
-        new_price: f64,
-    ) -> Result<(), String> {
-        self.send_command(BrokerCommand::ModifyBracketLeg { order_id, new_price })
+    pub fn modify_bracket_leg(&self, order_id: uuid::Uuid, new_price: f64) -> Result<(), String> {
+        self.send_command(BrokerCommand::ModifyBracketLeg {
+            order_id,
+            new_price,
+        })
     }
 
     /// Whether the broker engine reports a connected state.
@@ -192,9 +191,7 @@ pub fn broker_event_stream(
 }
 
 /// Build a stream of connection state changes for iced subscription.
-pub fn broker_conn_stream(
-    source: &BrokerConnSource,
-) -> impl iced::futures::Stream<Item = Message> {
+pub fn broker_conn_stream(source: &BrokerConnSource) -> impl iced::futures::Stream<Item = Message> {
     let mut conn_rx = source.receiver.clone();
     iced::stream::channel(16, async move |mut output| {
         loop {
@@ -250,9 +247,7 @@ fn translate_bracket_params(
 }
 
 /// Desktop `SecurityType` -> broker `SecurityType`.
-fn translate_security_type(
-    st: midas_core::SecurityType,
-) -> midas_broker::SecurityType {
+fn translate_security_type(st: midas_core::SecurityType) -> midas_broker::SecurityType {
     match st {
         midas_core::SecurityType::Stock => midas_broker::SecurityType::Stock,
         midas_core::SecurityType::Option => midas_broker::SecurityType::Option,
@@ -262,9 +257,7 @@ fn translate_security_type(
 }
 
 /// Desktop `OrderAction` -> broker `OrderAction`.
-fn translate_order_action(
-    a: midas_core::broker::OrderAction,
-) -> midas_broker::OrderAction {
+fn translate_order_action(a: midas_core::broker::OrderAction) -> midas_broker::OrderAction {
     match a {
         midas_core::broker::OrderAction::Buy => midas_broker::OrderAction::Buy,
         midas_core::broker::OrderAction::Sell => midas_broker::OrderAction::Sell,
@@ -272,9 +265,7 @@ fn translate_order_action(
 }
 
 /// Desktop `TimeInForce` -> broker `TimeInForce`.
-fn translate_tif(
-    tif: midas_core::broker::TimeInForce,
-) -> midas_broker::TimeInForce {
+fn translate_tif(tif: midas_core::broker::TimeInForce) -> midas_broker::TimeInForce {
     match tif {
         midas_core::broker::TimeInForce::Day => midas_broker::TimeInForce::Day,
         midas_core::broker::TimeInForce::Gtc => midas_broker::TimeInForce::Gtc,
@@ -300,13 +291,9 @@ fn translate_connection_state(
                 server_version: *server_version,
             }
         }
-        midas_broker::ConnectionState::Ready => {
-            midas_core::provider::ConnectionState::Ready
-        }
+        midas_broker::ConnectionState::Ready => midas_core::provider::ConnectionState::Ready,
         midas_broker::ConnectionState::Reconnecting { attempt } => {
-            midas_core::provider::ConnectionState::Reconnecting {
-                attempt: *attempt,
-            }
+            midas_core::provider::ConnectionState::Reconnecting { attempt: *attempt }
         }
     }
 }
@@ -316,12 +303,8 @@ pub fn translate_action_to_side(
     action: &midas_broker::OrderAction,
 ) -> midas_chart::widget::order_bracket::BracketSide {
     match action {
-        midas_broker::OrderAction::Buy => {
-            midas_chart::widget::order_bracket::BracketSide::Long
-        }
-        midas_broker::OrderAction::Sell => {
-            midas_chart::widget::order_bracket::BracketSide::Short
-        }
+        midas_broker::OrderAction::Buy => midas_chart::widget::order_bracket::BracketSide::Long,
+        midas_broker::OrderAction::Sell => midas_chart::widget::order_bracket::BracketSide::Short,
     }
 }
 

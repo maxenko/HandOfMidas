@@ -65,7 +65,9 @@ mod tests {
         assert!(!connecting.is_connected());
         assert!(!connecting.is_ready());
 
-        let connected = ConnectionState::Connected { server_version: 176 };
+        let connected = ConnectionState::Connected {
+            server_version: 176,
+        };
         assert!(connected.is_connected());
         assert!(!connected.is_ready());
 
@@ -83,7 +85,10 @@ mod tests {
         assert_eq!(ConnectionState::Disconnected.to_string(), "Disconnected");
         assert_eq!(ConnectionState::Connecting.to_string(), "Connecting");
         assert_eq!(
-            ConnectionState::Connected { server_version: 176 }.to_string(),
+            ConnectionState::Connected {
+                server_version: 176
+            }
+            .to_string(),
             "Connected (server v176)"
         );
         assert_eq!(ConnectionState::Ready.to_string(), "Ready");
@@ -98,18 +103,28 @@ mod tests {
         assert_eq!(ConnectionState::Ready, ConnectionState::Ready);
         assert_ne!(ConnectionState::Ready, ConnectionState::Disconnected);
         assert_eq!(
-            ConnectionState::Connected { server_version: 176 },
-            ConnectionState::Connected { server_version: 176 },
+            ConnectionState::Connected {
+                server_version: 176
+            },
+            ConnectionState::Connected {
+                server_version: 176
+            },
         );
         assert_ne!(
-            ConnectionState::Connected { server_version: 176 },
-            ConnectionState::Connected { server_version: 177 },
+            ConnectionState::Connected {
+                server_version: 176
+            },
+            ConnectionState::Connected {
+                server_version: 177
+            },
         );
     }
 
     #[test]
     fn test_connection_state_clone() {
-        let state = ConnectionState::Connected { server_version: 176 };
+        let state = ConnectionState::Connected {
+            server_version: 176,
+        };
         let cloned = state.clone();
         assert_eq!(state, cloned);
     }

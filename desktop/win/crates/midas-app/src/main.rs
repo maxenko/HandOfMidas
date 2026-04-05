@@ -96,8 +96,8 @@ fn subscription(state: &MidasApp) -> Subscription<Message> {
     });
 
     // Refresh watchlist market data every 60 seconds.
-    let market_refresh = iced::time::every(std::time::Duration::from_secs(60))
-        .map(|_| Message::RefreshMarketData);
+    let market_refresh =
+        iced::time::every(std::time::Duration::from_secs(60)).map(|_| Message::RefreshMarketData);
 
     // Always track cursor position so drag preview appears at the right spot.
     let cursor_sub = iced::event::listen_with(|event, _status, _id| match event {
@@ -119,9 +119,9 @@ fn subscription(state: &MidasApp) -> Subscription<Message> {
     // Global mouse-up detection during pending or active drag.
     if state.pending_drag.is_some() || state.dragging_ticker.is_some() {
         let mouse_up_sub = iced::event::listen_with(|event, _status, _id| match event {
-            iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
-                iced::mouse::Button::Left,
-            )) => Some(Message::DragMouseUp),
+            iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
+                Some(Message::DragMouseUp)
+            }
             _ => None,
         });
         subs.push(mouse_up_sub);
@@ -130,20 +130,15 @@ fn subscription(state: &MidasApp) -> Subscription<Message> {
     // Broker order event subscription.
     if let Some(ref bridge) = state.broker_bridge {
         let source = bridge.event_source();
-        let broker_sub = Subscription::run_with(
-            source,
-            crate::broker_bridge::broker_event_stream,
-        );
+        let broker_sub = Subscription::run_with(source, crate::broker_bridge::broker_event_stream);
         subs.push(broker_sub);
     }
 
     // Broker connection state subscription.
     if let Some(ref bridge) = state.broker_bridge {
         let conn_source = bridge.conn_source();
-        let conn_sub = Subscription::run_with(
-            conn_source,
-            crate::broker_bridge::broker_conn_stream,
-        );
+        let conn_sub =
+            Subscription::run_with(conn_source, crate::broker_bridge::broker_conn_stream);
         subs.push(conn_sub);
     }
 

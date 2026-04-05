@@ -175,11 +175,7 @@ fn generate_bridge_closes(rng: &mut impl Rng, daily: &OhlcvBar, n: usize) -> Vec
 /// - ~80% of bars have both wicks visible
 /// - Body is ~35-45% of range (median) at S30/M1
 /// - Wick sizes are lognormally distributed
-pub fn generate_intraday_for_day(
-    daily: &OhlcvBar,
-    seed: u64,
-    day_index: usize,
-) -> Vec<OhlcvBar> {
+pub fn generate_intraday_for_day(daily: &OhlcvBar, seed: u64, day_index: usize) -> Vec<OhlcvBar> {
     let mut rng = StdRng::seed_from_u64(seed ^ (day_index as u64).wrapping_mul(0x517CC1B727220A95));
 
     let n = INTRADAY_BARS;

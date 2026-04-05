@@ -19,7 +19,9 @@ use midas_chart::camera::Camera2D;
 use midas_chart::state::ChartState;
 use midas_chart::AnnotationId;
 use midas_core::config::{AppConfig, ChartConfig, LayoutNode, PanelSlot};
-use midas_core::{CandleBuffer, ChartId, DataProvider, LinkMode, OrderPanelId, Timeframe, WatchlistId};
+use midas_core::{
+    CandleBuffer, ChartId, DataProvider, LinkMode, OrderPanelId, Timeframe, WatchlistId,
+};
 
 use crate::registry::ProviderRegistry;
 
@@ -151,7 +153,13 @@ pub struct MidasApp {
     /// When the current toast was created. Used for auto-dismiss timing.
     pub toast_created_at: Option<Instant>,
     /// Bracket context menu state: (chart_id, annotation_id, leg_role, screen_x, screen_y).
-    pub bracket_context_menu: Option<(ChartId, u64, midas_chart::widget::order_bracket::LegRole, f32, f32)>,
+    pub bracket_context_menu: Option<(
+        ChartId,
+        u64,
+        midas_chart::widget::order_bracket::LegRole,
+        f32,
+        f32,
+    )>,
     /// Centralized per-symbol annotation store (order brackets, levels, etc.).
     pub annotation_store: AnnotationStore,
     /// In-memory market data cache for watchlist columns.
@@ -398,11 +406,22 @@ pub enum Message {
 
     // -- Bracket drag --
     /// A bracket leg was dragged on a chart.
-    ChartDragBracketLeg(ChartId, u64, midas_chart::widget::order_bracket::LegRole, f64),
+    ChartDragBracketLeg(
+        ChartId,
+        u64,
+        midas_chart::widget::order_bracket::LegRole,
+        f64,
+    ),
 
     // -- Bracket context menu --
     /// Right-click on a bracket leg — show context menu.
-    ChartBracketContextMenu(ChartId, u64, midas_chart::widget::order_bracket::LegRole, f32, f32),
+    ChartBracketContextMenu(
+        ChartId,
+        u64,
+        midas_chart::widget::order_bracket::LegRole,
+        f32,
+        f32,
+    ),
     /// Cancel a bracket from the context menu.
     BracketContextCancel(uuid::Uuid),
     /// Dismiss the bracket context menu.
@@ -563,13 +582,12 @@ impl MidasApp {
 
         if !config.layout_tree.is_empty() {
             // Full topology restoration from layout_tree.
-            let (ws, ch, wl, op) =
-                Self::restore_from_layout_tree(
-                    &config.layout_tree,
-                    &config.charts,
-                    &config.watchlists,
-                    &config.order_panels,
-                );
+            let (ws, ch, wl, op) = Self::restore_from_layout_tree(
+                &config.layout_tree,
+                &config.charts,
+                &config.watchlists,
+                &config.order_panels,
+            );
             let n = ch.len() + wl.len() + op.len();
             workspace = ws;
             charts = ch;
@@ -766,11 +784,8 @@ impl MidasApp {
             Ok(files) => {
                 let loaded_count: usize = files.values().map(|v| v.len()).sum();
                 if loaded_count > 0 {
-                    app.annotation_store =
-                        crate::annotation_persistence::store_from_files(files);
-                    tracing::info!(
-                        "Restored {loaded_count} annotation(s) from persistence"
-                    );
+                    app.annotation_store = crate::annotation_persistence::store_from_files(files);
+                    tracing::info!("Restored {loaded_count} annotation(s) from persistence");
                 }
             }
             Err(e) => {
@@ -1221,8 +1236,7 @@ impl MidasApp {
     /// and restoring the active selection from config.
     fn build_provider_registry(config: &AppConfig) -> ProviderRegistry {
         let mut registry = ProviderRegistry::new();
-        let test_provider: Arc<dyn DataProvider> =
-            Arc::new(midas_feed::TestProvider::new());
+        let test_provider: Arc<dyn DataProvider> = Arc::new(midas_feed::TestProvider::new());
         registry.register_data_provider(test_provider);
         if let Some(ref prov_cfg) = config.providers {
             if let Some(ref saved_name) = prov_cfg.active_data {
@@ -1249,7 +1263,7 @@ impl MidasApp {
             s if s >= Timeframe::D1.as_secs() => 730,  // ~2 years
             s if s >= Timeframe::H1.as_secs() => 90,   // ~3 months
             s if s >= Timeframe::M15.as_secs() => 30,  // ~1 month
-            _ => 10,                                    // <=M5: ~10 days
+            _ => 10,                                   // <=M5: ~10 days
         }
     }
 
@@ -1279,12 +1293,7 @@ impl MidasApp {
 
     /// Async-load chart data. On completion, sends `Message::DataLoaded`
     /// which resets the camera to show the last 200 candles.
-    fn load_chart_async(
-        &self,
-        chart_id: ChartId,
-        symbol: &str,
-        tf: Timeframe,
-    ) -> Task<Message> {
+    fn load_chart_async(&self, chart_id: ChartId, symbol: &str, tf: Timeframe) -> Task<Message> {
         self.load_chart_with(chart_id, symbol, tf, Message::DataLoaded)
     }
 
@@ -1339,11 +1348,7 @@ impl MidasApp {
 
     /// Apply loaded candle data to a chart panel, optionally resetting
     /// the camera to show the last 200 candles.
-    fn apply_candle_data(
-        chart: &mut ChartPanel,
-        buffer: Arc<CandleBuffer>,
-        reset_camera: bool,
-    ) {
+    fn apply_candle_data(chart: &mut ChartPanel, buffer: Arc<CandleBuffer>, reset_camera: bool) {
         chart.data = Some(Arc::clone(&buffer));
         chart.load_state = LoadState::Loaded;
         chart.chart_state.dirty.mark_data();
@@ -1371,8 +1376,7 @@ impl MidasApp {
                 let last_ts = buffer.timestamps[len - 1] as f64;
                 let first_visible_ts = buffer.timestamps[len - visible_count] as f64;
                 chart.chart_state.camera.time_start = first_visible_ts;
-                chart.chart_state.camera.time_end =
-                    last_ts + (last_ts - first_visible_ts) * 0.05;
+                chart.chart_state.camera.time_end = last_ts + (last_ts - first_visible_ts) * 0.05;
             }
             let range = (len - visible_count)..len;
             let (low, high) = buffer.price_range(range);
@@ -1513,12 +1517,8 @@ impl MidasApp {
                             let count = buffer.len();
                             let tf = chart.timeframe;
                             Self::apply_candle_data(chart, buffer, true);
-                            self.status_message = format!(
-                                "{}: {} candles at {}",
-                                sym,
-                                count,
-                                tf.display_name()
-                            );
+                            self.status_message =
+                                format!("{}: {} candles at {}", sym, count, tf.display_name());
                             loaded_symbol = Some(sym);
                         } else if chart_id == ChartId::new(0) {
                             // Floating chart sentinel: apply to the first
@@ -1654,8 +1654,7 @@ impl MidasApp {
                         _ => None,
                     })
                     .collect();
-                self.watchlists
-                    .retain(|id, _| active_wl_ids.contains(id));
+                self.watchlists.retain(|id, _| active_wl_ids.contains(id));
                 // Clean up orphaned order panels (presets create chart-only layouts).
                 self.order_panels.clear();
                 self.mark_config_dirty();
@@ -2322,10 +2321,8 @@ impl MidasApp {
                         }
                         // Remove the chart entry that split() created.
                         self.charts.remove(&chart_id);
-                        self.watchlists.insert(
-                            wl_id,
-                            WatchlistPanel::new(wl_id, "Watchlist".into()),
-                        );
+                        self.watchlists
+                            .insert(wl_id, WatchlistPanel::new(wl_id, "Watchlist".into()));
                         self.status_message = format!("Added {wl_id}");
                         return self.flush_config();
                     }
@@ -2351,10 +2348,8 @@ impl MidasApp {
                             .and_then(|id| self.charts.get(&id))
                             .map(|p| p.symbol.clone())
                             .unwrap_or_default();
-                        self.order_panels.insert(
-                            op_id,
-                            crate::order_panel::OrderPanel::new(op_id, symbol),
-                        );
+                        self.order_panels
+                            .insert(op_id, crate::order_panel::OrderPanel::new(op_id, symbol));
                         self.status_message = format!("Added {op_id}");
                         return self.flush_config();
                     }
@@ -2384,9 +2379,8 @@ impl MidasApp {
                         Some(p) => p,
                         None => {
                             if let Some(p) = self.order_panels.get_mut(&panel_id) {
-                                p.state.errors = vec![
-                                    ("price".into(), "Market data not loaded".into()),
-                                ];
+                                p.state.errors =
+                                    vec![("price".into(), "Market data not loaded".into())];
                                 p.state.showing_confirmation = false;
                             }
                             return Task::none();
@@ -2397,7 +2391,11 @@ impl MidasApp {
                     let tp_price = if state.tp_enabled {
                         state.tp_value.parse::<f64>().ok().map(|val| {
                             crate::order_panel::resolve_price(
-                                state.tp_mode, val, last_price, state.side, true,
+                                state.tp_mode,
+                                val,
+                                last_price,
+                                state.side,
+                                true,
                             )
                         })
                     } else {
@@ -2406,7 +2404,11 @@ impl MidasApp {
                     let sl_price = if state.sl_enabled {
                         state.sl_value.parse::<f64>().ok().map(|val| {
                             crate::order_panel::resolve_price(
-                                state.sl_mode, val, last_price, state.side, false,
+                                state.sl_mode,
+                                val,
+                                last_price,
+                                state.side,
+                                false,
                             )
                         })
                     } else {
@@ -2423,7 +2425,10 @@ impl MidasApp {
 
                     tracing::info!(
                         "Order confirmed: {} {} {} (TP: {}, SL: {})",
-                        match side { OrderSide::Buy => "BUY", OrderSide::Sell => "SELL" },
+                        match side {
+                            OrderSide::Buy => "BUY",
+                            OrderSide::Sell => "SELL",
+                        },
                         quantity,
                         symbol,
                         tp_price.is_some(),
@@ -2479,7 +2484,10 @@ impl MidasApp {
 
                     self.status_message = format!(
                         "Order submitted: {} {} {}",
-                        match side { OrderSide::Buy => "BUY", OrderSide::Sell => "SELL" },
+                        match side {
+                            OrderSide::Buy => "BUY",
+                            OrderSide::Sell => "SELL",
+                        },
                         quantity,
                         symbol,
                     );
@@ -2679,8 +2687,7 @@ impl MidasApp {
                         if let Some(ps) = self.workspace.panes.get(*pane) {
                             if let Some(chart_id) = ps.chart_id() {
                                 self.workspace.set_focus(*pane);
-                                let load =
-                                    self.load_symbol_for_chart(chart_id, &drag.symbol);
+                                let load = self.load_symbol_for_chart(chart_id, &drag.symbol);
                                 let propagate =
                                     self.propagate_symbol_change(chart_id, &drag.symbol);
                                 self.mark_config_dirty();
@@ -2793,9 +2800,7 @@ impl MidasApp {
             }
 
             Message::WatchlistColumnResizing(current_x) => {
-                if let Some((wl_id, col, ref mut start_x, orig_w)) =
-                    self.resizing_column
-                {
+                if let Some((wl_id, col, ref mut start_x, orig_w)) = self.resizing_column {
                     if start_x.is_nan() {
                         *start_x = current_x;
                     }
@@ -2968,14 +2973,12 @@ impl MidasApp {
                 }
                 // Adopt group symbol when joining a link group.
                 let siblings = || {
-                    self.charts
-                        .values()
-                        .chain(
-                            self.floating_charts
-                                .iter()
-                                .filter(|(id, _)| **id != wid)
-                                .map(|(_, p)| p),
-                        )
+                    self.charts.values().chain(
+                        self.floating_charts
+                            .iter()
+                            .filter(|(id, _)| **id != wid)
+                            .map(|(_, p)| p),
+                    )
                 };
                 let group_symbol = if let LinkMode::Color(color) = mode {
                     siblings()
@@ -3018,14 +3021,12 @@ impl MidasApp {
                 }
                 // Adopt group timeframe when joining a link group.
                 let siblings = || {
-                    self.charts
-                        .values()
-                        .chain(
-                            self.floating_charts
-                                .iter()
-                                .filter(|(id, _)| **id != wid)
-                                .map(|(_, p)| p),
-                        )
+                    self.charts.values().chain(
+                        self.floating_charts
+                            .iter()
+                            .filter(|(id, _)| **id != wid)
+                            .map(|(_, p)| p),
+                    )
                 };
                 let group_tf = if let LinkMode::Color(color) = mode {
                     siblings()
@@ -3138,33 +3139,28 @@ impl MidasApp {
                 // annotation in the per-symbol store.
                 let ticker = self.chart_ticker(chart_id).map(str::to_owned);
                 if let Some(ref ticker) = ticker {
-                    let updated = self.annotation_store.update(
-                        ticker,
-                        ann_id,
-                        |ann| {
-                            if let midas_chart::widget::AnnotationKind::OrderBracket(
-                                ref mut bracket,
-                            ) = ann.kind
-                            {
-                                match leg {
-                                    LegRole::Entry => {
-                                        // Unreachable: guarded by early return above.
-                                        bracket.entry.price = new_price;
+                    let updated = self.annotation_store.update(ticker, ann_id, |ann| {
+                        if let midas_chart::widget::AnnotationKind::OrderBracket(ref mut bracket) =
+                            ann.kind
+                        {
+                            match leg {
+                                LegRole::Entry => {
+                                    // Unreachable: guarded by early return above.
+                                    bracket.entry.price = new_price;
+                                }
+                                LegRole::TakeProfit => {
+                                    if let Some(ref mut tp) = bracket.take_profit {
+                                        tp.price = new_price;
                                     }
-                                    LegRole::TakeProfit => {
-                                        if let Some(ref mut tp) = bracket.take_profit {
-                                            tp.price = new_price;
-                                        }
-                                    }
-                                    LegRole::StopLoss => {
-                                        if let Some(ref mut sl) = bracket.stop_loss {
-                                            sl.price = new_price;
-                                        }
+                                }
+                                LegRole::StopLoss => {
+                                    if let Some(ref mut sl) = bracket.stop_loss {
+                                        sl.price = new_price;
                                     }
                                 }
                             }
-                        },
-                    );
+                        }
+                    });
                     if updated {
                         tracing::debug!(
                             "Bracket leg drag: chart={chart_id:?} ann={annotation_id} \
@@ -3186,9 +3182,7 @@ impl MidasApp {
                                     LegRole::Entry => None,
                                 });
                             if let Some(order_id) = order_id {
-                                if let Err(e) =
-                                    bridge.modify_bracket_leg(order_id, new_price)
-                                {
+                                if let Err(e) = bridge.modify_bracket_leg(order_id, new_price) {
                                     tracing::error!(
                                         "Failed to send ModifyBracketLeg to broker: {e}"
                                     );
@@ -3224,7 +3218,9 @@ impl MidasApp {
                     // Visually mark the annotation as Cancelled immediately.
                     let ann_id = midas_chart::AnnotationId(link.annotation_id);
                     self.annotation_store.update(&link.symbol, ann_id, |ann| {
-                        if let midas_chart::widget::AnnotationKind::OrderBracket(ref mut b) = ann.kind {
+                        if let midas_chart::widget::AnnotationKind::OrderBracket(ref mut b) =
+                            ann.kind
+                        {
                             b.status = midas_chart::widget::order_bracket::BracketStatus::Cancelled;
                         }
                     });
@@ -3240,9 +3236,7 @@ impl MidasApp {
                                 );
                             }
                             Err(e) => {
-                                tracing::error!(
-                                    "Failed to send CancelBracket to broker: {e}"
-                                );
+                                tracing::error!("Failed to send CancelBracket to broker: {e}");
                             }
                         }
                     } else {
@@ -3293,16 +3287,16 @@ impl MidasApp {
                     quantity,
                     created_at: std::time::Instant::now(),
                 };
-                self.order_annotation_links.insert(link.parent_order_id, link);
+                self.order_annotation_links
+                    .insert(link.parent_order_id, link);
 
                 tracing::info!(
                     "Bracket annotation created: {annotation_id} for {symbol} \
                      (parent={parent_id}, entry={entry:.2})"
                 );
 
-                self.status_message = format!(
-                    "Bracket annotation {annotation_id} created for {symbol}"
-                );
+                self.status_message =
+                    format!("Bracket annotation {annotation_id} created for {symbol}");
                 Task::none()
             }
 
@@ -3339,9 +3333,7 @@ impl MidasApp {
                         let matching_key = candidates.first().map(|(key, _)| **key);
 
                         if let Some(old_key) = matching_key {
-                            if let Some(mut link) =
-                                self.order_annotation_links.remove(&old_key)
-                            {
+                            if let Some(mut link) = self.order_annotation_links.remove(&old_key) {
                                 link.parent_order_id = parent_id;
                                 link.tp_order_id = take_profit_id;
                                 link.sl_order_id = stop_loss_id;
@@ -3392,12 +3384,8 @@ impl MidasApp {
                             midas_broker::BracketLifecycleStatus::Rejected => {
                                 BracketStatus::Cancelled
                             }
-                            midas_broker::BracketLifecycleStatus::Error => {
-                                BracketStatus::Cancelled
-                            }
-                            midas_broker::BracketLifecycleStatus::Closed => {
-                                BracketStatus::Closed
-                            }
+                            midas_broker::BracketLifecycleStatus::Error => BracketStatus::Cancelled,
+                            midas_broker::BracketLifecycleStatus::Closed => BracketStatus::Closed,
                         };
                         return self.update(Message::BrokerBracketStatusChanged {
                             parent_id,
@@ -3435,18 +3423,14 @@ impl MidasApp {
                     }
                     BrokerEvent::Connected { server_version } => {
                         tracing::info!("Broker connected (server v{server_version})");
-                        self.status_message =
-                            format!("Broker connected (v{server_version})");
+                        self.status_message = format!("Broker connected (v{server_version})");
                     }
                     BrokerEvent::Disconnected { reason } => {
                         tracing::warn!("Broker disconnected: {reason}");
-                        self.status_message =
-                            format!("Broker disconnected: {reason}");
+                        self.status_message = format!("Broker disconnected: {reason}");
                     }
                     BrokerEvent::OrderValidationFailed { message, code } => {
-                        tracing::warn!(
-                            "Order validation failed [{code}]: {message}"
-                        );
+                        tracing::warn!("Order validation failed [{code}]: {message}");
                         self.toast_message = Some(format!("Validation: {message}"));
                         self.toast_created_at = Some(Instant::now());
                     }
@@ -3463,27 +3447,18 @@ impl MidasApp {
                 entry_fill_price,
             } => {
                 // Find the annotation link by parent broker order ID.
-                if let Some(link) = self
-                    .order_annotation_links
-                    .get(&parent_id)
-                    .cloned()
-                {
+                if let Some(link) = self.order_annotation_links.get(&parent_id).cloned() {
                     let ann_id = midas_chart::widget::AnnotationId(link.annotation_id);
-                    let updated = self.annotation_store.update(
-                        &link.symbol,
-                        ann_id,
-                        |ann| {
-                            if let midas_chart::widget::AnnotationKind::OrderBracket(
-                                ref mut bracket,
-                            ) = ann.kind
-                            {
-                                bracket.status = status;
-                                if let Some(fill_price) = entry_fill_price {
-                                    bracket.entry.price = fill_price;
-                                }
+                    let updated = self.annotation_store.update(&link.symbol, ann_id, |ann| {
+                        if let midas_chart::widget::AnnotationKind::OrderBracket(ref mut bracket) =
+                            ann.kind
+                        {
+                            bracket.status = status;
+                            if let Some(fill_price) = entry_fill_price {
+                                bracket.entry.price = fill_price;
                             }
-                        },
-                    );
+                        }
+                    });
                     if updated {
                         tracing::info!(
                             "Bracket {ann_id} status -> {status:?} \
@@ -3499,10 +3474,7 @@ impl MidasApp {
                                 let price_str = entry_fill_price
                                     .map(|p| format!(" @ ${p:.2}"))
                                     .unwrap_or_default();
-                                Some(format!(
-                                    "{} entry filled{price_str}",
-                                    link.symbol
-                                ))
+                                Some(format!("{} entry filled{price_str}", link.symbol))
                             }
                             BracketStatus::Closed => {
                                 Some(format!("{} bracket closed", link.symbol))
@@ -3533,9 +3505,7 @@ impl MidasApp {
                         );
                     }
                 } else {
-                    tracing::warn!(
-                        "No annotation link found for parent_id={parent_id}"
-                    );
+                    tracing::warn!("No annotation link found for parent_id={parent_id}");
                 }
                 Task::none()
             }
@@ -3559,7 +3529,8 @@ impl MidasApp {
 
             Message::Tick => {
                 // Auto-dismiss toast after 4 seconds.
-                if let (Some(_toast), Some(created)) = (&self.toast_message, self.toast_created_at) {
+                if let (Some(_toast), Some(created)) = (&self.toast_message, self.toast_created_at)
+                {
                     if created.elapsed() > std::time::Duration::from_secs(4) {
                         self.toast_message = None;
                         self.toast_created_at = None;

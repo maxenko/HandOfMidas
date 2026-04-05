@@ -243,12 +243,9 @@ impl WorkspaceLayout {
 
     /// Find the first order panel pane in the workspace (any ID).
     pub fn find_any_order_pane(&self) -> Option<pane_grid::Pane> {
-        self.panes
-            .panes
-            .iter()
-            .find_map(|(pane, state)| {
-                matches!(state.content, PanelContent::Order(_)).then_some(*pane)
-            })
+        self.panes.panes.iter().find_map(|(pane, state)| {
+            matches!(state.content, PanelContent::Order(_)).then_some(*pane)
+        })
     }
 
     /// Get the first pane in the state (by BTreeMap order).

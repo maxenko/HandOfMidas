@@ -7,10 +7,12 @@ fn make_broker() -> TestBroker {
 /// Helper: count callbacks of a specific status string.
 fn count_status(cbs: &[BrokerCallback], status_str: &str) -> usize {
     cbs.iter()
-        .filter(|cb| matches!(
-            cb,
-            BrokerCallback::OrderStatus { status, .. } if status == status_str
-        ))
+        .filter(|cb| {
+            matches!(
+                cb,
+                BrokerCallback::OrderStatus { status, .. } if status == status_str
+            )
+        })
         .count()
 }
 
@@ -42,7 +44,9 @@ fn test_place_market_order_instant_fill() {
 
     let id = broker.next_order_id();
     broker
-        .place_order(id, "AAPL", "BUY", "MKT", 100.0, None, None, None, true, "DAY", false)
+        .place_order(
+            id, "AAPL", "BUY", "MKT", 100.0, None, None, None, true, "DAY", false,
+        )
         .unwrap();
 
     let cbs = broker.poll_callbacks();
@@ -55,7 +59,8 @@ fn test_place_market_order_instant_fill() {
     // Verify execution details (BUY fills at ask = base + half_spread)
     let half_spread = 0.005; // default_spread=0.01 / 2
     let expected_fill = 185.50 + half_spread;
-    let exec = cbs.iter()
+    let exec = cbs
+        .iter()
         .find(|cb| matches!(cb, BrokerCallback::Execution { .. }))
         .unwrap();
     if let BrokerCallback::Execution { shares, price, .. } = exec {
@@ -67,14 +72,20 @@ fn test_place_market_order_instant_fill() {
     }
 
     // Verify filled status
-    let filled = cbs.iter()
-        .find(|cb| matches!(
-            cb,
-            BrokerCallback::OrderStatus { status, .. } if status == "Filled"
-        ))
+    let filled = cbs
+        .iter()
+        .find(|cb| {
+            matches!(
+                cb,
+                BrokerCallback::OrderStatus { status, .. } if status == "Filled"
+            )
+        })
         .unwrap();
     if let BrokerCallback::OrderStatus {
-        filled: f, remaining, avg_fill_price, ..
+        filled: f,
+        remaining,
+        avg_fill_price,
+        ..
     } = filled
     {
         assert_eq!(*f, 100.0);
@@ -99,56 +110,93 @@ fn test_bracket_held_until_transmit() {
 
     // Parent: MKT BUY, transmit=false
     broker
-        .place_order(parent_id, "AAPL", "BUY", "MKT", 100.0, None, None, None, false, "DAY", false)
+        .place_order(
+            parent_id, "AAPL", "BUY", "MKT", 100.0, None, None, None, false, "DAY", false,
+        )
         .unwrap();
-    assert!(broker.poll_callbacks().is_empty(), "no callbacks before transmit");
+    assert!(
+        broker.poll_callbacks().is_empty(),
+        "no callbacks before transmit"
+    );
 
     // TP: LMT SELL, transmit=false
     broker
         .place_order(
-            tp_id, "AAPL", "SELL", "LMT", 100.0, Some(192.0), None,
-            Some(parent_id), false, "DAY", false,
+            tp_id,
+            "AAPL",
+            "SELL",
+            "LMT",
+            100.0,
+            Some(192.0),
+            None,
+            Some(parent_id),
+            false,
+            "DAY",
+            false,
         )
         .unwrap();
-    assert!(broker.poll_callbacks().is_empty(), "no callbacks before transmit");
+    assert!(
+        broker.poll_callbacks().is_empty(),
+        "no callbacks before transmit"
+    );
 
     // SL: STP SELL, transmit=true -- activates the bracket
     broker
         .place_order(
-            sl_id, "AAPL", "SELL", "STP", 100.0, None, Some(182.0),
-            Some(parent_id), true, "DAY", false,
+            sl_id,
+            "AAPL",
+            "SELL",
+            "STP",
+            100.0,
+            None,
+            Some(182.0),
+            Some(parent_id),
+            true,
+            "DAY",
+            false,
         )
         .unwrap();
 
     let cbs = broker.poll_callbacks();
-    assert!(!cbs.is_empty(), "callbacks should exist after transmit=true");
+    assert!(
+        !cbs.is_empty(),
+        "callbacks should exist after transmit=true"
+    );
 
     // Parent: Submitted + Execution + Filled
-    let parent_submitted = cbs.iter().any(|cb| matches!(
-        cb,
-        BrokerCallback::OrderStatus { ib_order_id, status, .. }
-        if *ib_order_id == parent_id && status == "Submitted"
-    ));
+    let parent_submitted = cbs.iter().any(|cb| {
+        matches!(
+            cb,
+            BrokerCallback::OrderStatus { ib_order_id, status, .. }
+            if *ib_order_id == parent_id && status == "Submitted"
+        )
+    });
     assert!(parent_submitted, "parent should get Submitted");
 
-    let parent_filled = cbs.iter().any(|cb| matches!(
-        cb,
-        BrokerCallback::OrderStatus { ib_order_id, status, .. }
-        if *ib_order_id == parent_id && status == "Filled"
-    ));
+    let parent_filled = cbs.iter().any(|cb| {
+        matches!(
+            cb,
+            BrokerCallback::OrderStatus { ib_order_id, status, .. }
+            if *ib_order_id == parent_id && status == "Filled"
+        )
+    });
     assert!(parent_filled, "parent should get Filled (MKT instant)");
 
     // Children should be activated
-    let tp_activated = cbs.iter().any(|cb| matches!(
-        cb,
-        BrokerCallback::OrderStatus { ib_order_id, .. } if *ib_order_id == tp_id
-    ));
+    let tp_activated = cbs.iter().any(|cb| {
+        matches!(
+            cb,
+            BrokerCallback::OrderStatus { ib_order_id, .. } if *ib_order_id == tp_id
+        )
+    });
     assert!(tp_activated, "TP child should be activated");
 
-    let sl_activated = cbs.iter().any(|cb| matches!(
-        cb,
-        BrokerCallback::OrderStatus { ib_order_id, .. } if *ib_order_id == sl_id
-    ));
+    let sl_activated = cbs.iter().any(|cb| {
+        matches!(
+            cb,
+            BrokerCallback::OrderStatus { ib_order_id, .. } if *ib_order_id == sl_id
+        )
+    });
     assert!(sl_activated, "SL child should be activated");
 }
 
@@ -165,37 +213,64 @@ fn test_bracket_parent_fill_activates_children() {
 
     // Place bracket
     broker
-        .place_order(parent_id, "AAPL", "BUY", "MKT", 100.0, None, None, None, false, "DAY", false)
-        .unwrap();
-    broker
         .place_order(
-            tp_id, "AAPL", "SELL", "LMT", 100.0, Some(192.0), None,
-            Some(parent_id), false, "DAY", false,
+            parent_id, "AAPL", "BUY", "MKT", 100.0, None, None, None, false, "DAY", false,
         )
         .unwrap();
     broker
         .place_order(
-            sl_id, "AAPL", "SELL", "STP", 100.0, None, Some(182.0),
-            Some(parent_id), true, "DAY", false,
+            tp_id,
+            "AAPL",
+            "SELL",
+            "LMT",
+            100.0,
+            Some(192.0),
+            None,
+            Some(parent_id),
+            false,
+            "DAY",
+            false,
+        )
+        .unwrap();
+    broker
+        .place_order(
+            sl_id,
+            "AAPL",
+            "SELL",
+            "STP",
+            100.0,
+            None,
+            Some(182.0),
+            Some(parent_id),
+            true,
+            "DAY",
+            false,
         )
         .unwrap();
 
     let cbs = broker.poll_callbacks();
 
     // After parent fills (MKT instant), TP should be Submitted, SL should be PreSubmitted
-    let tp_submitted = cbs.iter().any(|cb| matches!(
-        cb,
-        BrokerCallback::OrderStatus { ib_order_id, status, .. }
-        if *ib_order_id == tp_id && status == "Submitted"
-    ));
+    let tp_submitted = cbs.iter().any(|cb| {
+        matches!(
+            cb,
+            BrokerCallback::OrderStatus { ib_order_id, status, .. }
+            if *ib_order_id == tp_id && status == "Submitted"
+        )
+    });
     assert!(tp_submitted, "TP should get Submitted after parent fills");
 
-    let sl_presubmitted = cbs.iter().any(|cb| matches!(
-        cb,
-        BrokerCallback::OrderStatus { ib_order_id, status, .. }
-        if *ib_order_id == sl_id && status == "PreSubmitted"
-    ));
-    assert!(sl_presubmitted, "SL should get PreSubmitted after parent fills");
+    let sl_presubmitted = cbs.iter().any(|cb| {
+        matches!(
+            cb,
+            BrokerCallback::OrderStatus { ib_order_id, status, .. }
+            if *ib_order_id == sl_id && status == "PreSubmitted"
+        )
+    });
+    assert!(
+        sl_presubmitted,
+        "SL should get PreSubmitted after parent fills"
+    );
 }
 
 // ── 5. TP fill cancels SL (OCA) ─────────────────────────────────────
@@ -211,18 +286,38 @@ fn test_bracket_tp_fill_cancels_sl() {
 
     // Place and activate bracket
     broker
-        .place_order(parent_id, "AAPL", "BUY", "MKT", 100.0, None, None, None, false, "DAY", false)
-        .unwrap();
-    broker
         .place_order(
-            tp_id, "AAPL", "SELL", "LMT", 100.0, Some(192.0), None,
-            Some(parent_id), false, "DAY", false,
+            parent_id, "AAPL", "BUY", "MKT", 100.0, None, None, None, false, "DAY", false,
         )
         .unwrap();
     broker
         .place_order(
-            sl_id, "AAPL", "SELL", "STP", 100.0, None, Some(182.0),
-            Some(parent_id), true, "DAY", false,
+            tp_id,
+            "AAPL",
+            "SELL",
+            "LMT",
+            100.0,
+            Some(192.0),
+            None,
+            Some(parent_id),
+            false,
+            "DAY",
+            false,
+        )
+        .unwrap();
+    broker
+        .place_order(
+            sl_id,
+            "AAPL",
+            "SELL",
+            "STP",
+            100.0,
+            None,
+            Some(182.0),
+            Some(parent_id),
+            true,
+            "DAY",
+            false,
         )
         .unwrap();
 
@@ -235,19 +330,23 @@ fn test_bracket_tp_fill_cancels_sl() {
     let cbs = broker.poll_callbacks();
 
     // TP should be filled
-    let tp_filled = cbs.iter().any(|cb| matches!(
-        cb,
-        BrokerCallback::OrderStatus { ib_order_id, status, .. }
-        if *ib_order_id == tp_id && status == "Filled"
-    ));
+    let tp_filled = cbs.iter().any(|cb| {
+        matches!(
+            cb,
+            BrokerCallback::OrderStatus { ib_order_id, status, .. }
+            if *ib_order_id == tp_id && status == "Filled"
+        )
+    });
     assert!(tp_filled, "TP should be Filled");
 
     // SL should be cancelled (OCA)
-    let sl_cancelled = cbs.iter().any(|cb| matches!(
-        cb,
-        BrokerCallback::OrderStatus { ib_order_id, status, .. }
-        if *ib_order_id == sl_id && status == "Cancelled"
-    ));
+    let sl_cancelled = cbs.iter().any(|cb| {
+        matches!(
+            cb,
+            BrokerCallback::OrderStatus { ib_order_id, status, .. }
+            if *ib_order_id == sl_id && status == "Cancelled"
+        )
+    });
     assert!(sl_cancelled, "SL should be Cancelled via OCA when TP fills");
 }
 
@@ -264,18 +363,38 @@ fn test_bracket_sl_fill_cancels_tp() {
 
     // Place and activate bracket
     broker
-        .place_order(parent_id, "AAPL", "BUY", "MKT", 100.0, None, None, None, false, "DAY", false)
-        .unwrap();
-    broker
         .place_order(
-            tp_id, "AAPL", "SELL", "LMT", 100.0, Some(192.0), None,
-            Some(parent_id), false, "DAY", false,
+            parent_id, "AAPL", "BUY", "MKT", 100.0, None, None, None, false, "DAY", false,
         )
         .unwrap();
     broker
         .place_order(
-            sl_id, "AAPL", "SELL", "STP", 100.0, None, Some(182.0),
-            Some(parent_id), true, "DAY", false,
+            tp_id,
+            "AAPL",
+            "SELL",
+            "LMT",
+            100.0,
+            Some(192.0),
+            None,
+            Some(parent_id),
+            false,
+            "DAY",
+            false,
+        )
+        .unwrap();
+    broker
+        .place_order(
+            sl_id,
+            "AAPL",
+            "SELL",
+            "STP",
+            100.0,
+            None,
+            Some(182.0),
+            Some(parent_id),
+            true,
+            "DAY",
+            false,
         )
         .unwrap();
 
@@ -288,19 +407,23 @@ fn test_bracket_sl_fill_cancels_tp() {
     let cbs = broker.poll_callbacks();
 
     // SL should be filled
-    let sl_filled = cbs.iter().any(|cb| matches!(
-        cb,
-        BrokerCallback::OrderStatus { ib_order_id, status, .. }
-        if *ib_order_id == sl_id && status == "Filled"
-    ));
+    let sl_filled = cbs.iter().any(|cb| {
+        matches!(
+            cb,
+            BrokerCallback::OrderStatus { ib_order_id, status, .. }
+            if *ib_order_id == sl_id && status == "Filled"
+        )
+    });
     assert!(sl_filled, "SL should be Filled");
 
     // TP should be cancelled (OCA)
-    let tp_cancelled = cbs.iter().any(|cb| matches!(
-        cb,
-        BrokerCallback::OrderStatus { ib_order_id, status, .. }
-        if *ib_order_id == tp_id && status == "Cancelled"
-    ));
+    let tp_cancelled = cbs.iter().any(|cb| {
+        matches!(
+            cb,
+            BrokerCallback::OrderStatus { ib_order_id, status, .. }
+            if *ib_order_id == tp_id && status == "Cancelled"
+        )
+    });
     assert!(tp_cancelled, "TP should be Cancelled via OCA when SL fills");
 }
 
@@ -318,19 +441,47 @@ fn test_bracket_parent_cancel_cancels_children() {
     // Place bracket with LMT parent (so it doesn't auto-fill)
     broker
         .place_order(
-            parent_id, "AAPL", "BUY", "LMT", 100.0, Some(180.0), None, None, false, "DAY", false,
+            parent_id,
+            "AAPL",
+            "BUY",
+            "LMT",
+            100.0,
+            Some(180.0),
+            None,
+            None,
+            false,
+            "DAY",
+            false,
         )
         .unwrap();
     broker
         .place_order(
-            tp_id, "AAPL", "SELL", "LMT", 100.0, Some(192.0), None,
-            Some(parent_id), false, "DAY", false,
+            tp_id,
+            "AAPL",
+            "SELL",
+            "LMT",
+            100.0,
+            Some(192.0),
+            None,
+            Some(parent_id),
+            false,
+            "DAY",
+            false,
         )
         .unwrap();
     broker
         .place_order(
-            sl_id, "AAPL", "SELL", "STP", 100.0, None, Some(182.0),
-            Some(parent_id), true, "DAY", false,
+            sl_id,
+            "AAPL",
+            "SELL",
+            "STP",
+            100.0,
+            None,
+            Some(182.0),
+            Some(parent_id),
+            true,
+            "DAY",
+            false,
         )
         .unwrap();
 
@@ -342,26 +493,38 @@ fn test_bracket_parent_cancel_cancels_children() {
 
     let cbs = broker.poll_callbacks();
 
-    let parent_cancelled = cbs.iter().any(|cb| matches!(
-        cb,
-        BrokerCallback::OrderStatus { ib_order_id, status, .. }
-        if *ib_order_id == parent_id && status == "Cancelled"
-    ));
+    let parent_cancelled = cbs.iter().any(|cb| {
+        matches!(
+            cb,
+            BrokerCallback::OrderStatus { ib_order_id, status, .. }
+            if *ib_order_id == parent_id && status == "Cancelled"
+        )
+    });
     assert!(parent_cancelled, "parent should be Cancelled");
 
-    let tp_cancelled = cbs.iter().any(|cb| matches!(
-        cb,
-        BrokerCallback::OrderStatus { ib_order_id, status, .. }
-        if *ib_order_id == tp_id && status == "Cancelled"
-    ));
-    assert!(tp_cancelled, "TP should be Cancelled when parent is cancelled");
+    let tp_cancelled = cbs.iter().any(|cb| {
+        matches!(
+            cb,
+            BrokerCallback::OrderStatus { ib_order_id, status, .. }
+            if *ib_order_id == tp_id && status == "Cancelled"
+        )
+    });
+    assert!(
+        tp_cancelled,
+        "TP should be Cancelled when parent is cancelled"
+    );
 
-    let sl_cancelled = cbs.iter().any(|cb| matches!(
-        cb,
-        BrokerCallback::OrderStatus { ib_order_id, status, .. }
-        if *ib_order_id == sl_id && status == "Cancelled"
-    ));
-    assert!(sl_cancelled, "SL should be Cancelled when parent is cancelled");
+    let sl_cancelled = cbs.iter().any(|cb| {
+        matches!(
+            cb,
+            BrokerCallback::OrderStatus { ib_order_id, status, .. }
+            if *ib_order_id == sl_id && status == "Cancelled"
+        )
+    });
+    assert!(
+        sl_cancelled,
+        "SL should be Cancelled when parent is cancelled"
+    );
 }
 
 // ── 8. Manual simulate_fill ──────────────────────────────────────────
@@ -374,7 +537,19 @@ fn test_simulate_fill_manual() {
     let id = broker.next_order_id();
     // Place a limit order (won't auto-fill)
     broker
-        .place_order(id, "AAPL", "BUY", "LMT", 50.0, Some(180.0), None, None, true, "DAY", false)
+        .place_order(
+            id,
+            "AAPL",
+            "BUY",
+            "LMT",
+            50.0,
+            Some(180.0),
+            None,
+            None,
+            true,
+            "DAY",
+            false,
+        )
         .unwrap();
 
     // Drain activation callbacks
@@ -387,10 +562,15 @@ fn test_simulate_fill_manual() {
 
     // Should have Execution + Filled
     assert_eq!(count_executions(&cbs), 1, "expected 1 Execution callback");
-    assert_eq!(count_status(&cbs, "Filled"), 1, "expected 1 Filled callback");
+    assert_eq!(
+        count_status(&cbs, "Filled"),
+        1,
+        "expected 1 Filled callback"
+    );
 
     // Verify fill price
-    let exec = cbs.iter()
+    let exec = cbs
+        .iter()
         .find(|cb| matches!(cb, BrokerCallback::Execution { .. }))
         .unwrap();
     if let BrokerCallback::Execution { shares, price, .. } = exec {
@@ -413,20 +593,29 @@ fn test_partial_fill_tranches() {
 
     let id = broker.next_order_id();
     broker
-        .place_order(id, "AAPL", "BUY", "MKT", 300.0, None, None, None, true, "DAY", false)
+        .place_order(
+            id, "AAPL", "BUY", "MKT", 300.0, None, None, None, true, "DAY", false,
+        )
         .unwrap();
 
     let cbs = broker.poll_callbacks();
 
     // Should have: 1 Submitted (activation) + 3 Executions + 2 intermediate "PartiallyFilled" + 1 "Filled"
     let exec_count = count_executions(&cbs);
-    assert_eq!(exec_count, 3, "expected 3 Execution callbacks for 3 tranches");
+    assert_eq!(
+        exec_count, 3,
+        "expected 3 Execution callbacks for 3 tranches"
+    );
 
     // The final callback should be Filled
     assert_eq!(count_status(&cbs, "Filled"), 1, "expected exactly 1 Filled");
 
     // 1 Submitted from activation
-    assert_eq!(count_status(&cbs, "Submitted"), 1, "expected 1 Submitted (activation)");
+    assert_eq!(
+        count_status(&cbs, "Submitted"),
+        1,
+        "expected 1 Submitted (activation)"
+    );
 
     // 2 PartiallyFilled from intermediate tranches
     assert_eq!(
@@ -458,7 +647,9 @@ fn test_position_long_buy() {
 
     let id = broker.next_order_id();
     broker
-        .place_order(id, "AAPL", "BUY", "MKT", 100.0, None, None, None, true, "DAY", false)
+        .place_order(
+            id, "AAPL", "BUY", "MKT", 100.0, None, None, None, true, "DAY", false,
+        )
         .unwrap();
     let _ = broker.poll_callbacks();
 
@@ -466,7 +657,10 @@ fn test_position_long_buy() {
     assert_eq!(positions.len(), 1);
     let (symbol, qty, avg_cost) = &positions[0];
     assert_eq!(symbol, "AAPL");
-    assert!((qty - 100.0).abs() < f64::EPSILON, "expected +100 shares, got {qty}");
+    assert!(
+        (qty - 100.0).abs() < f64::EPSILON,
+        "expected +100 shares, got {qty}"
+    );
     // BUY fills at ask = 185.50 + 0.005 (half of default spread 0.01)
     let expected_avg = 185.505;
     assert!(
@@ -483,20 +677,27 @@ fn test_position_close_sell() {
     // Open long position
     let id1 = broker.next_order_id();
     broker
-        .place_order(id1, "AAPL", "BUY", "MKT", 100.0, None, None, None, true, "DAY", false)
+        .place_order(
+            id1, "AAPL", "BUY", "MKT", 100.0, None, None, None, true, "DAY", false,
+        )
         .unwrap();
     let _ = broker.poll_callbacks();
 
     // Close position by selling
     let id2 = broker.next_order_id();
     broker
-        .place_order(id2, "AAPL", "SELL", "MKT", 100.0, None, None, None, true, "DAY", false)
+        .place_order(
+            id2, "AAPL", "SELL", "MKT", 100.0, None, None, None, true, "DAY", false,
+        )
         .unwrap();
     let _ = broker.poll_callbacks();
 
     // Position should be flat
     let positions = broker.positions();
-    assert!(positions.is_empty(), "expected no open positions after close, got {positions:?}");
+    assert!(
+        positions.is_empty(),
+        "expected no open positions after close, got {positions:?}"
+    );
 }
 
 #[test]
@@ -512,7 +713,9 @@ fn test_account_cash_decreases_on_buy() {
 
     let id = broker.next_order_id();
     broker
-        .place_order(id, "AAPL", "BUY", "MKT", 100.0, None, None, None, true, "DAY", false)
+        .place_order(
+            id, "AAPL", "BUY", "MKT", 100.0, None, None, None, true, "DAY", false,
+        )
         .unwrap();
     let _ = broker.poll_callbacks();
 
@@ -547,15 +750,21 @@ fn test_rejection_by_configuration() {
     for _ in 0..4 {
         let id = broker.next_order_id();
         broker
-            .place_order(id, "AAPL", "BUY", "MKT", 10.0, None, None, None, true, "DAY", false)
+            .place_order(
+                id, "AAPL", "BUY", "MKT", 10.0, None, None, None, true, "DAY", false,
+            )
             .unwrap();
 
         let cbs = broker.poll_callbacks();
-        let has_rejection = cbs.iter().any(|cb| matches!(cb, BrokerCallback::OrderRejected { .. }));
-        let has_fill = cbs.iter().any(|cb| matches!(
-            cb,
-            BrokerCallback::OrderStatus { status, .. } if status == "Filled"
-        ));
+        let has_rejection = cbs
+            .iter()
+            .any(|cb| matches!(cb, BrokerCallback::OrderRejected { .. }));
+        let has_fill = cbs.iter().any(|cb| {
+            matches!(
+                cb,
+                BrokerCallback::OrderStatus { status, .. } if status == "Filled"
+            )
+        });
 
         if has_rejection {
             rejected_count += 1;
@@ -565,9 +774,19 @@ fn test_rejection_by_configuration() {
         }
     }
 
-    assert!(rejected_count > 0, "expected at least 1 rejection with rate=0.5");
-    assert!(accepted_count > 0, "expected at least 1 accepted order with rate=0.5");
-    assert_eq!(rejected_count + accepted_count, 4, "all orders should be either rejected or filled");
+    assert!(
+        rejected_count > 0,
+        "expected at least 1 rejection with rate=0.5"
+    );
+    assert!(
+        accepted_count > 0,
+        "expected at least 1 accepted order with rate=0.5"
+    );
+    assert_eq!(
+        rejected_count + accepted_count,
+        4,
+        "all orders should be either rejected or filled"
+    );
 }
 
 #[test]
@@ -577,25 +796,44 @@ fn test_disconnect_reconnect() {
 
     // Disconnect
     broker.simulate_disconnect();
-    assert!(!broker.is_connected(), "should be disconnected after simulate_disconnect");
+    assert!(
+        !broker.is_connected(),
+        "should be disconnected after simulate_disconnect"
+    );
 
     let cbs = broker.poll_callbacks();
-    let disconnected = cbs.iter().any(|cb| matches!(
-        cb,
-        BrokerCallback::ConnectionStatus { connected: false, .. }
-    ));
+    let disconnected = cbs.iter().any(|cb| {
+        matches!(
+            cb,
+            BrokerCallback::ConnectionStatus {
+                connected: false,
+                ..
+            }
+        )
+    });
     assert!(disconnected, "should get ConnectionStatus(false) callback");
 
     // Reconnect
     broker.simulate_reconnect();
-    assert!(broker.is_connected(), "should be connected after simulate_reconnect");
+    assert!(
+        broker.is_connected(),
+        "should be connected after simulate_reconnect"
+    );
 
     let cbs = broker.poll_callbacks();
-    let reconnected = cbs.iter().any(|cb| matches!(
-        cb,
-        BrokerCallback::ConnectionStatus { connected: true, server_version: Some(176) }
-    ));
-    assert!(reconnected, "should get ConnectionStatus(true, 176) callback");
+    let reconnected = cbs.iter().any(|cb| {
+        matches!(
+            cb,
+            BrokerCallback::ConnectionStatus {
+                connected: true,
+                server_version: Some(176)
+            }
+        )
+    });
+    assert!(
+        reconnected,
+        "should get ConnectionStatus(true, 176) callback"
+    );
 }
 
 // ── Phase 2: Limit order fills ──────────────────────────────────────
@@ -607,7 +845,19 @@ fn test_limit_buy_fills_at_price() {
 
     let id = broker.next_order_id();
     broker
-        .place_order(id, "AAPL", "BUY", "LMT", 100.0, Some(180.0), None, None, true, "DAY", false)
+        .place_order(
+            id,
+            "AAPL",
+            "BUY",
+            "LMT",
+            100.0,
+            Some(180.0),
+            None,
+            None,
+            true,
+            "DAY",
+            false,
+        )
         .unwrap();
 
     let cbs = broker.poll_callbacks();
@@ -636,7 +886,19 @@ fn test_limit_sell_fills_at_price() {
 
     let id = broker.next_order_id();
     broker
-        .place_order(id, "AAPL", "SELL", "LMT", 100.0, Some(192.0), None, None, true, "DAY", false)
+        .place_order(
+            id,
+            "AAPL",
+            "SELL",
+            "LMT",
+            100.0,
+            Some(192.0),
+            None,
+            None,
+            true,
+            "DAY",
+            false,
+        )
         .unwrap();
 
     let cbs = broker.poll_callbacks();
@@ -649,7 +911,11 @@ fn test_limit_sell_fills_at_price() {
 
     broker.set_market_price("AAPL", 193.0);
     let cbs = broker.poll_callbacks();
-    assert_eq!(count_executions(&cbs), 1, "expected fill when price crosses");
+    assert_eq!(
+        count_executions(&cbs),
+        1,
+        "expected fill when price crosses"
+    );
     assert_eq!(count_status(&cbs, "Filled"), 1);
 
     let exec = cbs
@@ -670,7 +936,19 @@ fn test_limit_buy_no_fill_when_price_above() {
 
     let id = broker.next_order_id();
     broker
-        .place_order(id, "AAPL", "BUY", "LMT", 100.0, Some(180.0), None, None, true, "DAY", false)
+        .place_order(
+            id,
+            "AAPL",
+            "BUY",
+            "LMT",
+            100.0,
+            Some(180.0),
+            None,
+            None,
+            true,
+            "DAY",
+            false,
+        )
         .unwrap();
     let _ = broker.poll_callbacks();
 
@@ -701,14 +979,32 @@ fn test_stop_triggers_at_price() {
         .unwrap();
     broker
         .place_order(
-            tp_id, "AAPL", "SELL", "LMT", 100.0, Some(192.0), None,
-            Some(parent_id), false, "DAY", false,
+            tp_id,
+            "AAPL",
+            "SELL",
+            "LMT",
+            100.0,
+            Some(192.0),
+            None,
+            Some(parent_id),
+            false,
+            "DAY",
+            false,
         )
         .unwrap();
     broker
         .place_order(
-            sl_id, "AAPL", "SELL", "STP", 100.0, None, Some(182.0),
-            Some(parent_id), true, "DAY", false,
+            sl_id,
+            "AAPL",
+            "SELL",
+            "STP",
+            100.0,
+            None,
+            Some(182.0),
+            Some(parent_id),
+            true,
+            "DAY",
+            false,
         )
         .unwrap();
     let _ = broker.poll_callbacks();
@@ -756,10 +1052,12 @@ fn test_stop_triggers_at_price() {
 
     let exec = cbs
         .iter()
-        .find(|cb| matches!(
-            cb,
-            BrokerCallback::Execution { ib_order_id, .. } if *ib_order_id == sl_id
-        ))
+        .find(|cb| {
+            matches!(
+                cb,
+                BrokerCallback::Execution { ib_order_id, .. } if *ib_order_id == sl_id
+            )
+        })
         .unwrap();
     if let BrokerCallback::Execution { price, shares, .. } = exec {
         // SELL STP fills at bid = market - half_spread = 181.50 - 0.005
@@ -790,14 +1088,30 @@ fn test_set_market_price_triggers_fills() {
 
     let id = broker.next_order_id();
     broker
-        .place_order(id, "AAPL", "BUY", "LMT", 50.0, Some(183.0), None, None, true, "DAY", false)
+        .place_order(
+            id,
+            "AAPL",
+            "BUY",
+            "LMT",
+            50.0,
+            Some(183.0),
+            None,
+            None,
+            true,
+            "DAY",
+            false,
+        )
         .unwrap();
     let _ = broker.poll_callbacks();
 
     broker.set_market_price("AAPL", 182.0);
     let cbs = broker.poll_callbacks();
 
-    assert_eq!(count_executions(&cbs), 1, "limit should fill when price crosses");
+    assert_eq!(
+        count_executions(&cbs),
+        1,
+        "limit should fill when price crosses"
+    );
     assert_eq!(count_status(&cbs, "Filled"), 1);
 
     let exec = cbs
@@ -827,14 +1141,32 @@ fn test_set_market_price_triggers_stop_in_bracket() {
         .unwrap();
     broker
         .place_order(
-            tp_id, "MSFT", "SELL", "LMT", 50.0, Some(420.0), None,
-            Some(parent_id), false, "DAY", false,
+            tp_id,
+            "MSFT",
+            "SELL",
+            "LMT",
+            50.0,
+            Some(420.0),
+            None,
+            Some(parent_id),
+            false,
+            "DAY",
+            false,
         )
         .unwrap();
     broker
         .place_order(
-            sl_id, "MSFT", "SELL", "STP", 50.0, None, Some(390.0),
-            Some(parent_id), true, "DAY", false,
+            sl_id,
+            "MSFT",
+            "SELL",
+            "STP",
+            50.0,
+            None,
+            Some(390.0),
+            Some(parent_id),
+            true,
+            "DAY",
+            false,
         )
         .unwrap();
     let _ = broker.poll_callbacks();
@@ -877,14 +1209,32 @@ fn test_set_market_price_triggers_limit_fill_in_bracket() {
         .unwrap();
     broker
         .place_order(
-            tp_id, "AAPL", "SELL", "LMT", 100.0, Some(192.0), None,
-            Some(parent_id), false, "DAY", false,
+            tp_id,
+            "AAPL",
+            "SELL",
+            "LMT",
+            100.0,
+            Some(192.0),
+            None,
+            Some(parent_id),
+            false,
+            "DAY",
+            false,
         )
         .unwrap();
     broker
         .place_order(
-            sl_id, "AAPL", "SELL", "STP", 100.0, None, Some(182.0),
-            Some(parent_id), true, "DAY", false,
+            sl_id,
+            "AAPL",
+            "SELL",
+            "STP",
+            100.0,
+            None,
+            Some(182.0),
+            Some(parent_id),
+            true,
+            "DAY",
+            false,
         )
         .unwrap();
     let _ = broker.poll_callbacks();
@@ -903,10 +1253,12 @@ fn test_set_market_price_triggers_limit_fill_in_bracket() {
 
     let exec = cbs
         .iter()
-        .find(|cb| matches!(
-            cb,
-            BrokerCallback::Execution { ib_order_id, .. } if *ib_order_id == tp_id
-        ))
+        .find(|cb| {
+            matches!(
+                cb,
+                BrokerCallback::Execution { ib_order_id, .. } if *ib_order_id == tp_id
+            )
+        })
         .unwrap();
     if let BrokerCallback::Execution { price, .. } = exec {
         // SELL LMT fills at better-of limit and market: max(192.0, 193.0) = 193.0
@@ -941,14 +1293,32 @@ fn test_stop_limit_triggers_and_fills() {
         .unwrap();
     broker
         .place_order(
-            tp_id, "AAPL", "SELL", "LMT", 100.0, Some(192.0), None,
-            Some(parent_id), false, "DAY", false,
+            tp_id,
+            "AAPL",
+            "SELL",
+            "LMT",
+            100.0,
+            Some(192.0),
+            None,
+            Some(parent_id),
+            false,
+            "DAY",
+            false,
         )
         .unwrap();
     broker
         .place_order(
-            sl_id, "AAPL", "SELL", "STP LMT", 100.0, Some(181.50), Some(182.0),
-            Some(parent_id), true, "DAY", false,
+            sl_id,
+            "AAPL",
+            "SELL",
+            "STP LMT",
+            100.0,
+            Some(181.50),
+            Some(182.0),
+            Some(parent_id),
+            true,
+            "DAY",
+            false,
         )
         .unwrap();
     let _ = broker.poll_callbacks();
@@ -967,10 +1337,12 @@ fn test_stop_limit_triggers_and_fills() {
 
     let exec = cbs
         .iter()
-        .find(|cb| matches!(
-            cb,
-            BrokerCallback::Execution { ib_order_id, .. } if *ib_order_id == sl_id
-        ))
+        .find(|cb| {
+            matches!(
+                cb,
+                BrokerCallback::Execution { ib_order_id, .. } if *ib_order_id == sl_id
+            )
+        })
         .unwrap();
     if let BrokerCallback::Execution { price, .. } = exec {
         assert_eq!(*price, 181.50, "STP LMT fills at limit price");
@@ -993,14 +1365,32 @@ fn test_stop_limit_triggers_but_gaps_through() {
         .unwrap();
     broker
         .place_order(
-            tp_id, "AAPL", "SELL", "LMT", 100.0, Some(192.0), None,
-            Some(parent_id), false, "DAY", false,
+            tp_id,
+            "AAPL",
+            "SELL",
+            "LMT",
+            100.0,
+            Some(192.0),
+            None,
+            Some(parent_id),
+            false,
+            "DAY",
+            false,
         )
         .unwrap();
     broker
         .place_order(
-            sl_id, "AAPL", "SELL", "STP LMT", 100.0, Some(181.50), Some(182.0),
-            Some(parent_id), true, "DAY", false,
+            sl_id,
+            "AAPL",
+            "SELL",
+            "STP LMT",
+            100.0,
+            Some(181.50),
+            Some(182.0),
+            Some(parent_id),
+            true,
+            "DAY",
+            false,
         )
         .unwrap();
     let _ = broker.poll_callbacks();
@@ -1044,7 +1434,19 @@ fn test_filled_limit_not_retriggered() {
 
     let id = broker.next_order_id();
     broker
-        .place_order(id, "AAPL", "BUY", "LMT", 100.0, Some(183.0), None, None, true, "DAY", false)
+        .place_order(
+            id,
+            "AAPL",
+            "BUY",
+            "LMT",
+            100.0,
+            Some(183.0),
+            None,
+            None,
+            true,
+            "DAY",
+            false,
+        )
         .unwrap();
     let _ = broker.poll_callbacks();
 
@@ -1054,7 +1456,10 @@ fn test_filled_limit_not_retriggered() {
 
     broker.set_market_price("AAPL", 181.0);
     let cbs = broker.poll_callbacks();
-    assert!(cbs.is_empty(), "filled order should not generate more callbacks");
+    assert!(
+        cbs.is_empty(),
+        "filled order should not generate more callbacks"
+    );
 }
 
 #[test]
@@ -1074,14 +1479,32 @@ fn test_stop_buy_triggers_at_price() {
         .unwrap();
     broker
         .place_order(
-            tp_id, "AAPL", "BUY", "LMT", 100.0, Some(180.0), None,
-            Some(parent_id), false, "DAY", false,
+            tp_id,
+            "AAPL",
+            "BUY",
+            "LMT",
+            100.0,
+            Some(180.0),
+            None,
+            Some(parent_id),
+            false,
+            "DAY",
+            false,
         )
         .unwrap();
     broker
         .place_order(
-            sl_id, "AAPL", "BUY", "STP", 100.0, None, Some(190.0),
-            Some(parent_id), true, "DAY", false,
+            sl_id,
+            "AAPL",
+            "BUY",
+            "STP",
+            100.0,
+            None,
+            Some(190.0),
+            Some(parent_id),
+            true,
+            "DAY",
+            false,
         )
         .unwrap();
     let _ = broker.poll_callbacks();
@@ -1100,10 +1523,12 @@ fn test_stop_buy_triggers_at_price() {
 
     let exec = cbs
         .iter()
-        .find(|cb| matches!(
-            cb,
-            BrokerCallback::Execution { ib_order_id, .. } if *ib_order_id == sl_id
-        ))
+        .find(|cb| {
+            matches!(
+                cb,
+                BrokerCallback::Execution { ib_order_id, .. } if *ib_order_id == sl_id
+            )
+        })
         .unwrap();
     if let BrokerCallback::Execution { price, .. } = exec {
         // BUY STP fills at ask = market + half_spread = 191.0 + 0.005
@@ -1132,12 +1557,25 @@ fn test_subscribe_produces_initial_tick() {
     broker.subscribe_market_data("AAPL", 265598);
 
     let cbs = broker.poll_callbacks();
-    assert!(!cbs.is_empty(), "subscribe should produce at least one callback");
+    assert!(
+        !cbs.is_empty(),
+        "subscribe should produce at least one callback"
+    );
 
-    let tick = cbs.iter().find(|cb| matches!(cb, BrokerCallback::Tick { .. }));
+    let tick = cbs
+        .iter()
+        .find(|cb| matches!(cb, BrokerCallback::Tick { .. }));
     assert!(tick.is_some(), "subscribe should produce a Tick callback");
 
-    if let Some(BrokerCallback::Tick { symbol, con_id, bid, ask, last, volume }) = tick {
+    if let Some(BrokerCallback::Tick {
+        symbol,
+        con_id,
+        bid,
+        ask,
+        last,
+        volume,
+    }) = tick
+    {
         assert_eq!(symbol, "AAPL");
         assert_eq!(*con_id, 265598);
         assert!(bid.is_some(), "bid should be set");
@@ -1161,14 +1599,20 @@ fn test_unsubscribe_stops_ticks() {
 
     // generate_tick should work while subscribed
     let tick = broker.generate_tick("AAPL");
-    assert!(tick.is_some(), "generate_tick should return Some while subscribed");
+    assert!(
+        tick.is_some(),
+        "generate_tick should return Some while subscribed"
+    );
 
     // Unsubscribe
     broker.unsubscribe_market_data("AAPL");
 
     // generate_tick should return None after unsubscribe
     let tick = broker.generate_tick("AAPL");
-    assert!(tick.is_none(), "generate_tick should return None after unsubscribe");
+    assert!(
+        tick.is_none(),
+        "generate_tick should return None after unsubscribe"
+    );
 }
 
 #[test]
@@ -1179,9 +1623,20 @@ fn test_generate_tick_for_subscribed() {
     let _ = broker.poll_callbacks(); // drain initial tick
 
     let tick = broker.generate_tick("MSFT");
-    assert!(tick.is_some(), "generate_tick should return Some for subscribed symbol");
+    assert!(
+        tick.is_some(),
+        "generate_tick should return Some for subscribed symbol"
+    );
 
-    if let Some(BrokerCallback::Tick { symbol, bid, ask, last, volume, .. }) = tick {
+    if let Some(BrokerCallback::Tick {
+        symbol,
+        bid,
+        ask,
+        last,
+        volume,
+        ..
+    }) = tick
+    {
         assert_eq!(symbol, "MSFT");
         assert_eq!(last.unwrap(), 400.0, "last should match set market price");
         let spread = broker.config.default_spread;
@@ -1197,7 +1652,10 @@ fn test_generate_tick_for_subscribed() {
     }
 
     // Non-subscribed symbol returns None
-    assert!(broker.generate_tick("GOOG").is_none(), "non-subscribed symbol should return None");
+    assert!(
+        broker.generate_tick("GOOG").is_none(),
+        "non-subscribed symbol should return None"
+    );
 }
 
 #[test]
@@ -1216,18 +1674,38 @@ fn test_auto_tick_triggers_stop_loss_fill() {
     let sl_id = broker.next_order_id();
 
     broker
-        .place_order(parent_id, "AAPL", "BUY", "MKT", 100.0, None, None, None, false, "DAY", false)
-        .unwrap();
-    broker
         .place_order(
-            tp_id, "AAPL", "SELL", "LMT", 100.0, Some(192.0), None,
-            Some(parent_id), false, "DAY", false,
+            parent_id, "AAPL", "BUY", "MKT", 100.0, None, None, None, false, "DAY", false,
         )
         .unwrap();
     broker
         .place_order(
-            sl_id, "AAPL", "SELL", "STP", 100.0, None, Some(182.0),
-            Some(parent_id), true, "DAY", false,
+            tp_id,
+            "AAPL",
+            "SELL",
+            "LMT",
+            100.0,
+            Some(192.0),
+            None,
+            Some(parent_id),
+            false,
+            "DAY",
+            false,
+        )
+        .unwrap();
+    broker
+        .place_order(
+            sl_id,
+            "AAPL",
+            "SELL",
+            "STP",
+            100.0,
+            None,
+            Some(182.0),
+            Some(parent_id),
+            true,
+            "DAY",
+            false,
         )
         .unwrap();
     let _ = broker.poll_callbacks(); // drain bracket activation
@@ -1241,25 +1719,37 @@ fn test_auto_tick_triggers_stop_loss_fill() {
     let cbs = broker.poll_callbacks();
 
     // SL should have been triggered and filled
-    let sl_filled = cbs.iter().any(|cb| matches!(
-        cb,
-        BrokerCallback::OrderStatus { ib_order_id, status, .. }
-        if *ib_order_id == sl_id && status == "Filled"
-    ));
-    assert!(sl_filled, "SL should be Filled after price drops below stop");
+    let sl_filled = cbs.iter().any(|cb| {
+        matches!(
+            cb,
+            BrokerCallback::OrderStatus { ib_order_id, status, .. }
+            if *ib_order_id == sl_id && status == "Filled"
+        )
+    });
+    assert!(
+        sl_filled,
+        "SL should be Filled after price drops below stop"
+    );
 
     // TP should be OCA-cancelled
-    let tp_cancelled = cbs.iter().any(|cb| matches!(
-        cb,
-        BrokerCallback::OrderStatus { ib_order_id, status, .. }
-        if *ib_order_id == tp_id && status == "Cancelled"
-    ));
+    let tp_cancelled = cbs.iter().any(|cb| {
+        matches!(
+            cb,
+            BrokerCallback::OrderStatus { ib_order_id, status, .. }
+            if *ib_order_id == tp_id && status == "Cancelled"
+        )
+    });
     assert!(tp_cancelled, "TP should be Cancelled via OCA when SL fills");
 
     // Verify that auto-ticks were generated for the subscribed symbol
-    let has_tick = cbs.iter().any(|cb| matches!(
-        cb,
-        BrokerCallback::Tick { symbol, .. } if symbol == "AAPL"
-    ));
-    assert!(has_tick, "auto-tick should be generated for subscribed AAPL");
+    let has_tick = cbs.iter().any(|cb| {
+        matches!(
+            cb,
+            BrokerCallback::Tick { symbol, .. } if symbol == "AAPL"
+        )
+    });
+    assert!(
+        has_tick,
+        "auto-tick should be generated for subscribed AAPL"
+    );
 }

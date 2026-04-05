@@ -67,10 +67,22 @@ pub struct StockPersonality {
 const GROWTH: StockPersonality = StockPersonality {
     start_price: 15.0,
     regimes: [
-        RegimeParams { drift: 0.0012, volatility: 0.025 },  // bull
-        RegimeParams { drift: -0.0006, volatility: 0.030 },  // bear
-        RegimeParams { drift: 0.0001, volatility: 0.018 },   // consol
-        RegimeParams { drift: -0.006, volatility: 0.055 },    // crash
+        RegimeParams {
+            drift: 0.0012,
+            volatility: 0.025,
+        }, // bull
+        RegimeParams {
+            drift: -0.0006,
+            volatility: 0.030,
+        }, // bear
+        RegimeParams {
+            drift: 0.0001,
+            volatility: 0.018,
+        }, // consol
+        RegimeParams {
+            drift: -0.006,
+            volatility: 0.055,
+        }, // crash
     ],
     transitions: [
         [0.970, 0.010, 0.015, 0.005],
@@ -90,10 +102,22 @@ const GROWTH: StockPersonality = StockPersonality {
 const BLUE_CHIP: StockPersonality = StockPersonality {
     start_price: 120.0,
     regimes: [
-        RegimeParams { drift: 0.0004, volatility: 0.012 },
-        RegimeParams { drift: -0.0002, volatility: 0.016 },
-        RegimeParams { drift: 0.0001, volatility: 0.008 },
-        RegimeParams { drift: -0.004, volatility: 0.035 },
+        RegimeParams {
+            drift: 0.0004,
+            volatility: 0.012,
+        },
+        RegimeParams {
+            drift: -0.0002,
+            volatility: 0.016,
+        },
+        RegimeParams {
+            drift: 0.0001,
+            volatility: 0.008,
+        },
+        RegimeParams {
+            drift: -0.004,
+            volatility: 0.035,
+        },
     ],
     transitions: [
         [0.980, 0.005, 0.012, 0.003],
@@ -113,10 +137,22 @@ const BLUE_CHIP: StockPersonality = StockPersonality {
 const VOLATILE: StockPersonality = StockPersonality {
     start_price: 8.0,
     regimes: [
-        RegimeParams { drift: 0.002, volatility: 0.040 },
-        RegimeParams { drift: -0.001, volatility: 0.045 },
-        RegimeParams { drift: 0.0, volatility: 0.028 },
-        RegimeParams { drift: -0.010, volatility: 0.070 },
+        RegimeParams {
+            drift: 0.002,
+            volatility: 0.040,
+        },
+        RegimeParams {
+            drift: -0.001,
+            volatility: 0.045,
+        },
+        RegimeParams {
+            drift: 0.0,
+            volatility: 0.028,
+        },
+        RegimeParams {
+            drift: -0.010,
+            volatility: 0.070,
+        },
     ],
     transitions: [
         [0.940, 0.020, 0.030, 0.010],
@@ -136,10 +172,22 @@ const VOLATILE: StockPersonality = StockPersonality {
 const STEADY: StockPersonality = StockPersonality {
     start_price: 55.0,
     regimes: [
-        RegimeParams { drift: 0.0003, volatility: 0.007 },
-        RegimeParams { drift: -0.0002, volatility: 0.010 },
-        RegimeParams { drift: 0.0001, volatility: 0.005 },
-        RegimeParams { drift: -0.003, volatility: 0.025 },
+        RegimeParams {
+            drift: 0.0003,
+            volatility: 0.007,
+        },
+        RegimeParams {
+            drift: -0.0002,
+            volatility: 0.010,
+        },
+        RegimeParams {
+            drift: 0.0001,
+            volatility: 0.005,
+        },
+        RegimeParams {
+            drift: -0.003,
+            volatility: 0.025,
+        },
     ],
     transitions: [
         [0.975, 0.005, 0.018, 0.002],
@@ -159,10 +207,22 @@ const STEADY: StockPersonality = StockPersonality {
 const CYCLICAL: StockPersonality = StockPersonality {
     start_price: 70.0,
     regimes: [
-        RegimeParams { drift: 0.0005, volatility: 0.015 },
-        RegimeParams { drift: -0.0004, volatility: 0.020 },
-        RegimeParams { drift: 0.0, volatility: 0.012 },
-        RegimeParams { drift: -0.005, volatility: 0.040 },
+        RegimeParams {
+            drift: 0.0005,
+            volatility: 0.015,
+        },
+        RegimeParams {
+            drift: -0.0004,
+            volatility: 0.020,
+        },
+        RegimeParams {
+            drift: 0.0,
+            volatility: 0.012,
+        },
+        RegimeParams {
+            drift: -0.005,
+            volatility: 0.040,
+        },
     ],
     transitions: [
         [0.960, 0.015, 0.020, 0.005],

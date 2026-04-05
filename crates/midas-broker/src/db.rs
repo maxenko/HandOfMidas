@@ -20,9 +20,7 @@ pub enum BrokerDbError {
 
 /// Embedded migration scripts, applied in order.
 /// Each entry is `(version, sql)` where version starts at 1.
-const MIGRATIONS: &[(u32, &str)] = &[
-    (1, include_str!("../migrations/001_initial.sql")),
-];
+const MIGRATIONS: &[(u32, &str)] = &[(1, include_str!("../migrations/001_initial.sql"))];
 
 /// Handle to the broker SQLite database.
 ///
@@ -91,12 +89,12 @@ impl BrokerDb {
             }
 
             // Use unchecked_transaction so we can embed PRAGMA inside.
-            let tx = conn.unchecked_transaction().map_err(BrokerDbError::Rusqlite)?;
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(BrokerDbError::Rusqlite)?;
 
             tx.execute_batch(sql).map_err(|e| {
-                BrokerDbError::Migration(format!(
-                    "migration v{version} failed: {e}"
-                ))
+                BrokerDbError::Migration(format!("migration v{version} failed: {e}"))
             })?;
 
             tx.pragma_update(None, "user_version", version)
@@ -107,9 +105,7 @@ impl BrokerDb {
                 })?;
 
             tx.commit().map_err(|e| {
-                BrokerDbError::Migration(format!(
-                    "failed to commit migration v{version}: {e}"
-                ))
+                BrokerDbError::Migration(format!("failed to commit migration v{version}: {e}"))
             })?;
         }
 
@@ -139,9 +135,7 @@ mod tests {
 
         for table in &expected_tables {
             let exists: bool = conn
-                .prepare(
-                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
-                )
+                .prepare("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1")
                 .unwrap()
                 .query_row(rusqlite::params![table], |row| row.get::<_, i64>(0))
                 .map(|c| c == 1)

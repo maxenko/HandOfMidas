@@ -4,9 +4,9 @@
 //! brackets with optional Take Profit and Stop Loss legs.
 //! Follows TradingView's bracket order model (1 TP + 1 SL per bracket).
 
+use midas_core::link::LinkMode;
 use midas_core::ChartId;
 use midas_core::OrderPanelId;
-use midas_core::link::LinkMode;
 
 // ===========================================================================
 // State
@@ -173,9 +173,7 @@ pub fn calculate_risk_reward(
         return None;
     }
 
-    let reward_per_share = tp_price
-        .map(|tp| (tp - entry_price).abs())
-        .unwrap_or(0.0);
+    let reward_per_share = tp_price.map(|tp| (tp - entry_price).abs()).unwrap_or(0.0);
 
     Some(RiskReward {
         risk_per_share,
@@ -207,11 +205,17 @@ pub fn validate_panel(state: &OrderPanelState) -> Vec<(String, String)> {
     let _qty: f64 = match state.quantity.parse() {
         Ok(q) if q > 0.0 => q,
         Ok(_) => {
-            errors.push(("quantity".to_string(), "Quantity must be positive".to_string()));
+            errors.push((
+                "quantity".to_string(),
+                "Quantity must be positive".to_string(),
+            ));
             0.0
         }
         Err(_) => {
-            errors.push(("quantity".to_string(), "Invalid quantity (not a number)".to_string()));
+            errors.push((
+                "quantity".to_string(),
+                "Invalid quantity (not a number)".to_string(),
+            ));
             0.0
         }
     };
@@ -221,7 +225,10 @@ pub fn validate_panel(state: &OrderPanelState) -> Vec<(String, String)> {
             let tp_val: f64 = match state.tp_value.parse() {
                 Ok(v) => v,
                 Err(_) => {
-                    errors.push(("tp".to_string(), "Invalid TP value (not a number)".to_string()));
+                    errors.push((
+                        "tp".to_string(),
+                        "Invalid TP value (not a number)".to_string(),
+                    ));
                     0.0
                 }
             };
@@ -234,10 +241,16 @@ pub fn validate_panel(state: &OrderPanelState) -> Vec<(String, String)> {
             if !tp_has_error {
                 match state.side {
                     OrderSide::Buy if tp_price <= last_price => {
-                        errors.push(("tp".to_string(), "TP must be above current price for BUY".to_string()));
+                        errors.push((
+                            "tp".to_string(),
+                            "TP must be above current price for BUY".to_string(),
+                        ));
                     }
                     OrderSide::Sell if tp_price >= last_price => {
-                        errors.push(("tp".to_string(), "TP must be below current price for SELL".to_string()));
+                        errors.push((
+                            "tp".to_string(),
+                            "TP must be below current price for SELL".to_string(),
+                        ));
                     }
                     _ => {}
                 }
@@ -248,7 +261,10 @@ pub fn validate_panel(state: &OrderPanelState) -> Vec<(String, String)> {
             let sl_val: f64 = match state.sl_value.parse() {
                 Ok(v) => v,
                 Err(_) => {
-                    errors.push(("sl".to_string(), "Invalid SL value (not a number)".to_string()));
+                    errors.push((
+                        "sl".to_string(),
+                        "Invalid SL value (not a number)".to_string(),
+                    ));
                     0.0
                 }
             };
@@ -261,10 +277,16 @@ pub fn validate_panel(state: &OrderPanelState) -> Vec<(String, String)> {
             if !sl_has_error {
                 match state.side {
                     OrderSide::Buy if sl_price >= last_price => {
-                        errors.push(("sl".to_string(), "SL must be below current price for BUY".to_string()));
+                        errors.push((
+                            "sl".to_string(),
+                            "SL must be below current price for BUY".to_string(),
+                        ));
                     }
                     OrderSide::Sell if sl_price <= last_price => {
-                        errors.push(("sl".to_string(), "SL must be above current price for SELL".to_string()));
+                        errors.push((
+                            "sl".to_string(),
+                            "SL must be above current price for SELL".to_string(),
+                        ));
                     }
                     _ => {}
                 }

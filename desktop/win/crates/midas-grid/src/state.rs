@@ -83,7 +83,10 @@ impl GridState {
 
     /// Effective column order: uses `column_order` if non-empty, otherwise
     /// falls back to definition order from the provided columns.
-    pub fn effective_order<T, M, C: crate::column::GridColumn<T, M>>(&self, columns: &[C]) -> Vec<ColumnId> {
+    pub fn effective_order<T, M, C: crate::column::GridColumn<T, M>>(
+        &self,
+        columns: &[C],
+    ) -> Vec<ColumnId> {
         if self.column_order.is_empty() {
             columns.iter().map(|c| c.id()).collect()
         } else {

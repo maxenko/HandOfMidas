@@ -12,8 +12,8 @@ use crate::error::BrokerError;
 use crate::events::BrokerEvent;
 use crate::market_data::MarketDataSource;
 use crate::orders::bracket::{
-    BracketGroup, BracketLifecycleStatus, MarketBracketParams, derive_bracket_status,
-    validate_market_bracket, check_bracket_direction,
+    check_bracket_direction, derive_bracket_status, validate_market_bracket, BracketGroup,
+    BracketLifecycleStatus, MarketBracketParams,
 };
 use crate::orders::state::OrderStatus;
 use crate::orders::types::{BracketRole, LocalOrder, OrderAction, OrderKind, TimeInForce};
@@ -55,16 +55,14 @@ pub fn start_broker_engine(config: BrokerConfig) -> BrokerHandle {
     let order_tx_clone = order_event_tx.clone();
 
     let data_source: Option<Box<dyn MarketDataSource>> = match &config.data_source {
-        DataSourceConfig::Test => {
-            Some(Box::new(crate::testdata::TestDataProvider::new()))
-        }
+        DataSourceConfig::Test => Some(Box::new(crate::testdata::TestDataProvider::new())),
         DataSourceConfig::Live => None, // IB data source created after connect
     };
 
     let client: Option<Box<dyn BrokerClient>> = match &config.data_source {
-        DataSourceConfig::Test => {
-            Some(Box::new(crate::test_broker::TestBroker::new(config.test_broker.clone())))
-        }
+        DataSourceConfig::Test => Some(Box::new(crate::test_broker::TestBroker::new(
+            config.test_broker.clone(),
+        ))),
         DataSourceConfig::Live => {
             let conn_cfg = &config.connection;
             Some(Box::new(crate::ib_client::IbClient::new(
@@ -219,7 +217,10 @@ impl BrokerEngine {
                 self.handle_cancel_bracket(parent_id);
                 false
             }
-            BrokerCommand::ModifyBracketLeg { order_id, new_price } => {
+            BrokerCommand::ModifyBracketLeg {
+                order_id,
+                new_price,
+            } => {
                 self.handle_modify_bracket_leg(order_id, new_price);
                 false
             }
@@ -299,7 +300,11 @@ impl BrokerEngine {
                 self.handle_cancel_order(order_id);
                 false
             }
-            BrokerCommand::ModifyOrder { order_id, new_price, new_qty } => {
+            BrokerCommand::ModifyOrder {
+                order_id,
+                new_price,
+                new_qty,
+            } => {
                 self.handle_modify_order(order_id, new_price, new_qty);
                 false
             }
@@ -354,22 +359,30 @@ impl BrokerEngine {
     fn handle_create_market_bracket(&mut self, params: MarketBracketParams) {
         // 1. Validate params
         if let Err(errors) = validate_market_bracket(&params) {
-            let msg = errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; ");
+            let msg = errors
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; ");
             tracing::warn!("Market bracket validation failed: {msg}");
-            let _ = self.order_event_tx.send(BrokerEvent::OrderValidationFailed {
-                code: -1,
-                message: format!("bracket validation failed: {msg}"),
-            });
+            let _ = self
+                .order_event_tx
+                .send(BrokerEvent::OrderValidationFailed {
+                    code: -1,
+                    message: format!("bracket validation failed: {msg}"),
+                });
             return;
         }
 
         // 2. Order size guard
         if let Err(e) = validate_order_size(&params, &self.config.trading_limits) {
             tracing::warn!("Order size guard rejected bracket: {e}");
-            let _ = self.order_event_tx.send(BrokerEvent::OrderValidationFailed {
-                code: -2,
-                message: format!("order size rejected: {e}"),
-            });
+            let _ = self
+                .order_event_tx
+                .send(BrokerEvent::OrderValidationFailed {
+                    code: -2,
+                    message: format!("order size rejected: {e}"),
+                });
             return;
         }
 
@@ -394,7 +407,9 @@ impl BrokerEngine {
         //    Uses a single SQLite transaction with audit trail.
         if let Some(ref store) = self.store {
             let conn = store.conn().lock().expect("db mutex poisoned");
-            if let Err(e) = crate::persist::order_repo::persist_and_transition_to_pending_submit(&conn, &mut group) {
+            if let Err(e) = crate::persist::order_repo::persist_and_transition_to_pending_submit(
+                &conn, &mut group,
+            ) {
                 tracing::error!("Failed to persist bracket {parent_id}: {e}");
                 let _ = self.order_event_tx.send(BrokerEvent::OrderError {
                     order_id: parent_id,
@@ -419,9 +434,7 @@ impl BrokerEngine {
             // Transition all legs to Error in DB
             if let Some(ref store) = self.store {
                 let conn = store.conn().lock().expect("db mutex poisoned");
-                let _ = crate::persist::order_repo::transition_bracket_to_error(
-                    &conn, &group, &e,
-                );
+                let _ = crate::persist::order_repo::transition_bracket_to_error(&conn, &group, &e);
             }
             let _ = self.order_event_tx.send(BrokerEvent::OrderError {
                 order_id: parent_id,
@@ -498,19 +511,21 @@ impl BrokerEngine {
         }
 
         // Step 2: Place parent (transmit=false if has children)
-        client.place_order(
-            parent_ib_id,
-            &group.parent.symbol,
-            &group.parent.action.to_string(),
-            &group.parent.order_type.to_string(),
-            group.parent.quantity,
-            group.parent.limit_price,
-            group.parent.stop_price,
-            None,
-            !has_children,
-            &group.parent.tif.to_string(),
-            group.parent.outside_rth,
-        ).map_err(|e| format!("parent placement failed: {e}"))?;
+        client
+            .place_order(
+                parent_ib_id,
+                &group.parent.symbol,
+                &group.parent.action.to_string(),
+                &group.parent.order_type.to_string(),
+                group.parent.quantity,
+                group.parent.limit_price,
+                group.parent.stop_price,
+                None,
+                !has_children,
+                &group.parent.tif.to_string(),
+                group.parent.outside_rth,
+            )
+            .map_err(|e| format!("parent placement failed: {e}"))?;
 
         // Emit OrderSubmitted for parent
         // ib_perm_id is set to 0; the real perm_id arrives via OrderStatus callback.
@@ -522,26 +537,29 @@ impl BrokerEngine {
 
         // Step 3: Place TP (transmit=false if SL follows, true if last child)
         if let Some(ref tp) = group.take_profit {
-            let tp_ib_id = tp.ib_order_id
+            let tp_ib_id = tp
+                .ib_order_id
                 .ok_or_else(|| "TP leg missing ib_order_id after allocation".to_string())?;
             let is_last_child = group.stop_loss.is_none();
-            client.place_order(
-                tp_ib_id,
-                &tp.symbol,
-                &tp.action.to_string(),
-                &tp.order_type.to_string(),
-                tp.quantity,
-                tp.limit_price,
-                tp.stop_price,
-                Some(parent_ib_id),
-                is_last_child,
-                &tp.tif.to_string(),
-                tp.outside_rth,
-            ).map_err(|e| {
-                // Cancel parent on TP failure
-                let _ = client.cancel_order(parent_ib_id);
-                format!("TP placement failed: {e}")
-            })?;
+            client
+                .place_order(
+                    tp_ib_id,
+                    &tp.symbol,
+                    &tp.action.to_string(),
+                    &tp.order_type.to_string(),
+                    tp.quantity,
+                    tp.limit_price,
+                    tp.stop_price,
+                    Some(parent_ib_id),
+                    is_last_child,
+                    &tp.tif.to_string(),
+                    tp.outside_rth,
+                )
+                .map_err(|e| {
+                    // Cancel parent on TP failure
+                    let _ = client.cancel_order(parent_ib_id);
+                    format!("TP placement failed: {e}")
+                })?;
 
             // ib_perm_id is set to 0; the real perm_id arrives via OrderStatus callback.
             let _ = self.order_event_tx.send(BrokerEvent::OrderSubmitted {
@@ -553,30 +571,33 @@ impl BrokerEngine {
 
         // Step 4: Place SL (always transmit=true — triggers entire bracket)
         if let Some(ref sl) = group.stop_loss {
-            let sl_ib_id = sl.ib_order_id
+            let sl_ib_id = sl
+                .ib_order_id
                 .ok_or_else(|| "SL leg missing ib_order_id after allocation".to_string())?;
-            client.place_order(
-                sl_ib_id,
-                &sl.symbol,
-                &sl.action.to_string(),
-                &sl.order_type.to_string(),
-                sl.quantity,
-                sl.limit_price,
-                sl.stop_price,
-                Some(parent_ib_id),
-                true,
-                &sl.tif.to_string(),
-                sl.outside_rth,
-            ).map_err(|e| {
-                // Cancel parent and TP on SL failure
-                let _ = client.cancel_order(parent_ib_id);
-                if let Some(ref tp) = group.take_profit {
-                    if let Some(tp_id) = tp.ib_order_id {
-                        let _ = client.cancel_order(tp_id);
+            client
+                .place_order(
+                    sl_ib_id,
+                    &sl.symbol,
+                    &sl.action.to_string(),
+                    &sl.order_type.to_string(),
+                    sl.quantity,
+                    sl.limit_price,
+                    sl.stop_price,
+                    Some(parent_ib_id),
+                    true,
+                    &sl.tif.to_string(),
+                    sl.outside_rth,
+                )
+                .map_err(|e| {
+                    // Cancel parent and TP on SL failure
+                    let _ = client.cancel_order(parent_ib_id);
+                    if let Some(ref tp) = group.take_profit {
+                        if let Some(tp_id) = tp.ib_order_id {
+                            let _ = client.cancel_order(tp_id);
+                        }
                     }
-                }
-                format!("SL placement failed: {e}")
-            })?;
+                    format!("SL placement failed: {e}")
+                })?;
 
             // ib_perm_id is set to 0; the real perm_id arrives via OrderStatus callback.
             let _ = self.order_event_tx.send(BrokerEvent::OrderSubmitted {
@@ -599,22 +620,30 @@ impl BrokerEngine {
             let (parent_row, children) = {
                 let conn = store.conn().lock().expect("db mutex poisoned");
 
-                let parent_row = match crate::persist::order_repo::get_order(&conn, &parent_id.to_string()) {
-                    Ok(Some(row)) => row,
-                    Ok(None) => {
-                        tracing::warn!("CancelBracket: parent {parent_id} not found");
-                        return;
-                    }
-                    Err(e) => {
-                        tracing::error!("CancelBracket: DB error loading parent {parent_id}: {e}");
-                        return;
-                    }
-                };
+                let parent_row =
+                    match crate::persist::order_repo::get_order(&conn, &parent_id.to_string()) {
+                        Ok(Some(row)) => row,
+                        Ok(None) => {
+                            tracing::warn!("CancelBracket: parent {parent_id} not found");
+                            return;
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "CancelBracket: DB error loading parent {parent_id}: {e}"
+                            );
+                            return;
+                        }
+                    };
 
-                let children = match crate::persist::order_repo::get_orders_by_parent_id(&conn, &parent_id.to_string()) {
+                let children = match crate::persist::order_repo::get_orders_by_parent_id(
+                    &conn,
+                    &parent_id.to_string(),
+                ) {
                     Ok(rows) => rows,
                     Err(e) => {
-                        tracing::error!("CancelBracket: DB error loading children for {parent_id}: {e}");
+                        tracing::error!(
+                            "CancelBracket: DB error loading children for {parent_id}: {e}"
+                        );
                         return;
                     }
                 };
@@ -645,8 +674,20 @@ impl BrokerEngine {
                 let now = chrono::Utc::now().to_rfc3339();
 
                 if !["Filled", "Cancelled", "Rejected"].contains(&parent_row.status.as_str()) {
-                    let _ = crate::persist::order_repo::update_order_status(&conn, &parent_row.local_id, "Cancelled", &now);
-                    let _ = crate::persist::order_repo::write_audit(&conn, &parent_row.local_id, &parent_row.status, "Cancelled", Some("bracket cancel"), "engine");
+                    let _ = crate::persist::order_repo::update_order_status(
+                        &conn,
+                        &parent_row.local_id,
+                        "Cancelled",
+                        &now,
+                    );
+                    let _ = crate::persist::order_repo::write_audit(
+                        &conn,
+                        &parent_row.local_id,
+                        &parent_row.status,
+                        "Cancelled",
+                        Some("bracket cancel"),
+                        "engine",
+                    );
                     let _ = self.order_event_tx.send(BrokerEvent::OrderCancelled {
                         order_id: parent_id,
                         reason: "bracket cancelled".to_string(),
@@ -655,8 +696,20 @@ impl BrokerEngine {
 
                 for child in &children {
                     if !["Filled", "Cancelled", "Rejected"].contains(&child.status.as_str()) {
-                        let _ = crate::persist::order_repo::update_order_status(&conn, &child.local_id, "Cancelled", &now);
-                        let _ = crate::persist::order_repo::write_audit(&conn, &child.local_id, &child.status, "Cancelled", Some("bracket cancel"), "engine");
+                        let _ = crate::persist::order_repo::update_order_status(
+                            &conn,
+                            &child.local_id,
+                            "Cancelled",
+                            &now,
+                        );
+                        let _ = crate::persist::order_repo::write_audit(
+                            &conn,
+                            &child.local_id,
+                            &child.status,
+                            "Cancelled",
+                            Some("bracket cancel"),
+                            "engine",
+                        );
                         if let Ok(child_id) = child.local_id.parse::<Uuid>() {
                             let _ = self.order_event_tx.send(BrokerEvent::OrderCancelled {
                                 order_id: child_id,
@@ -671,17 +724,24 @@ impl BrokerEngine {
             //    Re-load the bracket group with updated statuses to derive correctly.
             let lifecycle = {
                 let conn = store.conn().lock().expect("db mutex poisoned");
-                let parent_row = crate::persist::order_repo::get_order(&conn, &parent_id.to_string())
-                    .ok().flatten();
-                let children = crate::persist::order_repo::get_orders_by_parent_id(&conn, &parent_id.to_string())
-                    .unwrap_or_default();
+                let parent_row =
+                    crate::persist::order_repo::get_order(&conn, &parent_id.to_string())
+                        .ok()
+                        .flatten();
+                let children = crate::persist::order_repo::get_orders_by_parent_id(
+                    &conn,
+                    &parent_id.to_string(),
+                )
+                .unwrap_or_default();
 
                 if let Some(pr) = parent_row {
                     if let Ok(parent_local) = crate::persist::order_repo::order_row_to_local(&pr) {
                         let mut tp = None;
                         let mut sl = None;
                         for child in &children {
-                            if let Ok(child_local) = crate::persist::order_repo::order_row_to_local(child) {
+                            if let Ok(child_local) =
+                                crate::persist::order_repo::order_row_to_local(child)
+                            {
                                 match child.bracket_role.as_deref() {
                                     Some("TAKE_PROFIT") => tp = Some(child_local),
                                     Some("STOP_LOSS") => sl = Some(child_local),
@@ -689,7 +749,11 @@ impl BrokerEngine {
                                 }
                             }
                         }
-                        let group = BracketGroup { parent: parent_local, take_profit: tp, stop_loss: sl };
+                        let group = BracketGroup {
+                            parent: parent_local,
+                            take_profit: tp,
+                            stop_loss: sl,
+                        };
                         Some((derive_bracket_status(&group), group.parent.avg_fill_price))
                     } else {
                         None
@@ -707,10 +771,14 @@ impl BrokerEngine {
                     entry_fill_price,
                 });
                 if status.is_terminal() {
-                    self.terminal_cleanups.push_back((std::time::Instant::now(), parent_id));
+                    self.terminal_cleanups
+                        .push_back((std::time::Instant::now(), parent_id));
                 }
             }
-            tracing::info!("Bracket {parent_id} cancelled ({} children)", children.len());
+            tracing::info!(
+                "Bracket {parent_id} cancelled ({} children)",
+                children.len()
+            );
         } else {
             tracing::warn!("CancelBracket: no store available");
         }
@@ -725,7 +793,8 @@ impl BrokerEngine {
             let row = {
                 let conn = store.conn().lock().expect("db mutex poisoned");
 
-                let row = match crate::persist::order_repo::get_order(&conn, &order_id.to_string()) {
+                let row = match crate::persist::order_repo::get_order(&conn, &order_id.to_string())
+                {
                     Ok(Some(row)) => row,
                     Ok(None) => {
                         tracing::warn!("ModifyBracketLeg: order {order_id} not found");
@@ -740,22 +809,30 @@ impl BrokerEngine {
                 // Verify this is a bracket child (TP or SL)
                 let role = row.bracket_role.as_deref();
                 if role != Some("TAKE_PROFIT") && role != Some("STOP_LOSS") {
-                    tracing::warn!("ModifyBracketLeg: order {order_id} is not a bracket child (role={role:?})");
+                    tracing::warn!(
+                        "ModifyBracketLeg: order {order_id} is not a bracket child (role={role:?})"
+                    );
                     return;
                 }
 
                 // Verify order is in a modifiable state
                 let modifiable = ["PreSubmitted", "Submitted", "PartiallyFilled"];
                 if !modifiable.contains(&row.status.as_str()) {
-                    tracing::warn!("ModifyBracketLeg: order {order_id} is not modifiable (status={})", row.status);
+                    tracing::warn!(
+                        "ModifyBracketLeg: order {order_id} is not modifiable (status={})",
+                        row.status
+                    );
                     return;
                 }
 
                 // Update price in DB (W6: handle StopLimit with both prices)
                 let now = chrono::Utc::now().to_rfc3339();
                 if role == Some("TAKE_PROFIT") {
-                    let sql = "UPDATE orders SET limit_price = ?1, updated_at = ?2 WHERE local_id = ?3";
-                    if let Err(e) = conn.execute(sql, rusqlite::params![new_price, now, order_id.to_string()]) {
+                    let sql =
+                        "UPDATE orders SET limit_price = ?1, updated_at = ?2 WHERE local_id = ?3";
+                    if let Err(e) =
+                        conn.execute(sql, rusqlite::params![new_price, now, order_id.to_string()])
+                    {
                         tracing::error!("ModifyBracketLeg: DB update failed: {e}");
                         return;
                     }
@@ -763,23 +840,36 @@ impl BrokerEngine {
                     // STOP_LOSS: for STP LMT, update both stop_price and limit_price
                     if row.order_type == "STP LMT" {
                         let sql = "UPDATE orders SET stop_price = ?1, limit_price = ?2, updated_at = ?3 WHERE local_id = ?4";
-                        if let Err(e) = conn.execute(sql, rusqlite::params![new_price, new_price, now, order_id.to_string()]) {
+                        if let Err(e) = conn.execute(
+                            sql,
+                            rusqlite::params![new_price, new_price, now, order_id.to_string()],
+                        ) {
                             tracing::error!("ModifyBracketLeg: DB update failed: {e}");
                             return;
                         }
                     } else {
                         let sql = "UPDATE orders SET stop_price = ?1, updated_at = ?2 WHERE local_id = ?3";
-                        if let Err(e) = conn.execute(sql, rusqlite::params![new_price, now, order_id.to_string()]) {
+                        if let Err(e) = conn
+                            .execute(sql, rusqlite::params![new_price, now, order_id.to_string()])
+                        {
                             tracing::error!("ModifyBracketLeg: DB update failed: {e}");
                             return;
                         }
                     }
                 }
 
-                let price_field = if role == Some("TAKE_PROFIT") { "limit_price" } else { "stop_price" };
+                let price_field = if role == Some("TAKE_PROFIT") {
+                    "limit_price"
+                } else {
+                    "stop_price"
+                };
                 let _ = crate::persist::order_repo::write_audit(
-                    &conn, &order_id.to_string(), &row.status, &row.status,
-                    Some(&format!("{price_field} changed to {new_price}")), "engine"
+                    &conn,
+                    &order_id.to_string(),
+                    &row.status,
+                    &row.status,
+                    Some(&format!("{price_field} changed to {new_price}")),
+                    "engine",
                 );
 
                 row
@@ -788,7 +878,11 @@ impl BrokerEngine {
 
             // 2. Make IB client calls (no lock held)
             let role = row.bracket_role.as_deref();
-            let price_field = if role == Some("TAKE_PROFIT") { "limit_price" } else { "stop_price" };
+            let price_field = if role == Some("TAKE_PROFIT") {
+                "limit_price"
+            } else {
+                "stop_price"
+            };
 
             if let Some(ref client) = self.client {
                 if let Some(ib_id) = row.ib_order_id {
@@ -854,7 +948,10 @@ impl BrokerEngine {
 
             // Only cancel non-terminal orders
             if ["Filled", "Cancelled", "Rejected", "Error"].contains(&row.status.as_str()) {
-                tracing::warn!("CancelOrder: order {order_id} is already terminal ({})", row.status);
+                tracing::warn!(
+                    "CancelOrder: order {order_id} is already terminal ({})",
+                    row.status
+                );
                 return;
             }
 
@@ -870,11 +967,18 @@ impl BrokerEngine {
             // Update DB
             let now = chrono::Utc::now().to_rfc3339();
             let _ = crate::persist::order_repo::update_order_status(
-                &conn, &order_id.to_string(), "PendingCancel", &now,
+                &conn,
+                &order_id.to_string(),
+                "PendingCancel",
+                &now,
             );
             let _ = crate::persist::order_repo::write_audit(
-                &conn, &order_id.to_string(), &row.status, "PendingCancel",
-                Some("user cancel"), "engine",
+                &conn,
+                &order_id.to_string(),
+                &row.status,
+                "PendingCancel",
+                Some("user cancel"),
+                "engine",
             );
 
             let _ = self.order_event_tx.send(BrokerEvent::OrderStatusChanged {
@@ -891,12 +995,18 @@ impl BrokerEngine {
     // ── Modify Order Handling ─────────────────────────────────────────
 
     /// Handle ModifyOrder: modify price or quantity of a standalone order.
-    fn handle_modify_order(&mut self, order_id: Uuid, new_price: Option<f64>, new_qty: Option<f64>) {
+    fn handle_modify_order(
+        &mut self,
+        order_id: Uuid,
+        new_price: Option<f64>,
+        new_qty: Option<f64>,
+    ) {
         if let Some(ref store) = self.store {
             let row = {
                 let conn = store.conn().lock().expect("db mutex poisoned");
 
-                let row = match crate::persist::order_repo::get_order(&conn, &order_id.to_string()) {
+                let row = match crate::persist::order_repo::get_order(&conn, &order_id.to_string())
+                {
                     Ok(Some(row)) => row,
                     Ok(None) => {
                         tracing::warn!("ModifyOrder: order {order_id} not found");
@@ -911,7 +1021,10 @@ impl BrokerEngine {
                 // Only modify live orders
                 let modifiable = ["PreSubmitted", "Submitted", "PartiallyFilled"];
                 if !modifiable.contains(&row.status.as_str()) {
-                    tracing::warn!("ModifyOrder: order {order_id} not modifiable ({})", row.status);
+                    tracing::warn!(
+                        "ModifyOrder: order {order_id} not modifiable ({})",
+                        row.status
+                    );
                     return;
                 }
 
@@ -927,16 +1040,20 @@ impl BrokerEngine {
                 if let Some(qty) = new_qty {
                     let sql = "UPDATE orders SET quantity = ?1, remaining_qty = ?2, updated_at = ?3 WHERE local_id = ?4";
                     let remaining = qty - row.filled_qty;
-                    let _ = conn.execute(sql, rusqlite::params![qty, remaining, now, order_id.to_string()]);
+                    let _ = conn.execute(
+                        sql,
+                        rusqlite::params![qty, remaining, now, order_id.to_string()],
+                    );
                 }
 
-                let details = format!(
-                    "modified: price={:?}, qty={:?}",
-                    new_price, new_qty,
-                );
+                let details = format!("modified: price={:?}, qty={:?}", new_price, new_qty,);
                 let _ = crate::persist::order_repo::write_audit(
-                    &conn, &order_id.to_string(), &row.status, &row.status,
-                    Some(&details), "engine",
+                    &conn,
+                    &order_id.to_string(),
+                    &row.status,
+                    &row.status,
+                    Some(&details),
+                    "engine",
                 );
 
                 row
@@ -984,12 +1101,18 @@ impl BrokerEngine {
 
             // Emit all non-terminal orders as status events for UI sync
             let active_statuses = [
-                "Inactive", "PendingSubmit", "PreSubmitted", "Submitted",
-                "PartiallyFilled", "PendingCancel",
+                "Inactive",
+                "PendingSubmit",
+                "PreSubmitted",
+                "Submitted",
+                "PartiallyFilled",
+                "PendingCancel",
             ];
 
             for status_str in &active_statuses {
-                if let Ok(rows) = crate::persist::order_repo::get_orders_by_status(&conn, status_str) {
+                if let Ok(rows) =
+                    crate::persist::order_repo::get_orders_by_status(&conn, status_str)
+                {
                     for row in &rows {
                         if let Ok(order_id) = row.local_id.parse::<Uuid>() {
                             let _ = self.order_event_tx.send(BrokerEvent::OrderStatusChanged {
@@ -1053,13 +1176,14 @@ impl BrokerEngine {
                         // W2: Idempotency guard — skip duplicate status updates
                         if let Ok(old_status) = old_status_str.parse::<OrderStatus>() {
                             if new_status == old_status {
-                                tracing::debug!("Ignoring duplicate status {new_status} for order {local_id}");
+                                tracing::debug!(
+                                    "Ignoring duplicate status {new_status} for order {local_id}"
+                                );
                                 return;
                             }
 
                             // Validate transition (log warning but proceed — IB is authoritative)
-                            if let Err(e) =
-                                OrderStatus::validate_transition(old_status, new_status)
+                            if let Err(e) = OrderStatus::validate_transition(old_status, new_status)
                             {
                                 tracing::warn!(
                                     "Invalid status transition for order {local_id}: {e}"
@@ -1107,8 +1231,7 @@ impl BrokerEngine {
 
                         // Stash bracket info for post-lock bracket status check
                         if row.bracket_role.is_some() {
-                            bracket_info =
-                                Some((row.bracket_role.clone(), row.parent_id.clone()));
+                            bracket_info = Some((row.bracket_role.clone(), row.parent_id.clone()));
                         }
                     }
                     // MutexGuard (conn) drops here
@@ -1180,9 +1303,7 @@ impl BrokerEngine {
                 let local_id = match self.ib_to_local.get(&ib_order_id) {
                     Some(&id) => id,
                     None => {
-                        tracing::warn!(
-                            "Rejection callback for unknown IB order ID {ib_order_id}"
-                        );
+                        tracing::warn!("Rejection callback for unknown IB order ID {ib_order_id}");
                         return;
                     }
                 };
@@ -1305,7 +1426,11 @@ impl BrokerEngine {
                 });
             }
 
-            BrokerCallback::Position { symbol, quantity, avg_cost } => {
+            BrokerCallback::Position {
+                symbol,
+                quantity,
+                avg_cost,
+            } => {
                 let _ = self.order_event_tx.send(BrokerEvent::PositionUpdate {
                     account: String::new(),
                     symbol,
@@ -1315,7 +1440,11 @@ impl BrokerEngine {
                 });
             }
 
-            BrokerCallback::Account { cash_balance, unrealized_pnl, realized_pnl } => {
+            BrokerCallback::Account {
+                cash_balance,
+                unrealized_pnl,
+                realized_pnl,
+            } => {
                 let _ = self.order_event_tx.send(BrokerEvent::PnlUpdate {
                     daily_pnl: 0.0,
                     unrealized_pnl,
@@ -1335,16 +1464,19 @@ impl BrokerEngine {
 
     /// Post-processing: check if a bracket's lifecycle status has changed.
     /// Called after any individual order status update for bracket members.
-    fn check_bracket_status_change(&mut self, order_id: Uuid, bracket_role: Option<&str>, parent_id_str: Option<&str>) {
+    fn check_bracket_status_change(
+        &mut self,
+        order_id: Uuid,
+        bracket_role: Option<&str>,
+        parent_id_str: Option<&str>,
+    ) {
         // Determine the bracket's parent_id
         let parent_id = match bracket_role {
             Some("PARENT") => order_id,
-            Some(_) => {
-                match parent_id_str.and_then(|s| s.parse::<Uuid>().ok()) {
-                    Some(pid) => pid,
-                    None => return,
-                }
-            }
+            Some(_) => match parent_id_str.and_then(|s| s.parse::<Uuid>().ok()) {
+                Some(pid) => pid,
+                None => return,
+            },
             None => return, // Not a bracket member
         };
 
@@ -1352,13 +1484,17 @@ impl BrokerEngine {
             let conn = store.conn().lock().expect("db mutex poisoned");
 
             // Load parent
-            let parent_row = match crate::persist::order_repo::get_order(&conn, &parent_id.to_string()) {
-                Ok(Some(row)) => row,
-                _ => return,
-            };
+            let parent_row =
+                match crate::persist::order_repo::get_order(&conn, &parent_id.to_string()) {
+                    Ok(Some(row)) => row,
+                    _ => return,
+                };
 
             // Load children
-            let children = match crate::persist::order_repo::get_orders_by_parent_id(&conn, &parent_id.to_string()) {
+            let children = match crate::persist::order_repo::get_orders_by_parent_id(
+                &conn,
+                &parent_id.to_string(),
+            ) {
                 Ok(rows) => rows,
                 _ => return,
             };
@@ -1381,7 +1517,11 @@ impl BrokerEngine {
                 }
             }
 
-            let group = BracketGroup { parent: parent_local, take_profit: tp, stop_loss: sl };
+            let group = BracketGroup {
+                parent: parent_local,
+                take_profit: tp,
+                stop_loss: sl,
+            };
             let new_status = derive_bracket_status(&group);
 
             // Compare with cached status
@@ -1398,7 +1538,8 @@ impl BrokerEngine {
                 // Queue deferred cleanup for terminal brackets. We keep the cache
                 // entries for 60s to absorb late IB callbacks, then sweep.
                 if new_status.is_terminal() {
-                    self.terminal_cleanups.push_back((std::time::Instant::now(), parent_id));
+                    self.terminal_cleanups
+                        .push_back((std::time::Instant::now(), parent_id));
                 }
             }
         }
@@ -1534,12 +1675,8 @@ fn build_market_bracket(params: &MarketBracketParams) -> BracketGroup {
             OrderAction::Buy => OrderAction::Sell,
             OrderAction::Sell => OrderAction::Buy,
         };
-        let mut order = LocalOrder::new_draft(
-            &params.symbol,
-            opposite,
-            OrderKind::Limit,
-            params.quantity,
-        );
+        let mut order =
+            LocalOrder::new_draft(&params.symbol, opposite, OrderKind::Limit, params.quantity);
         order.status = OrderStatus::Inactive;
         order.con_id = params.con_id;
         order.sec_type = params.sec_type;
@@ -1565,12 +1702,7 @@ fn build_market_bracket(params: &MarketBracketParams) -> BracketGroup {
         } else {
             OrderKind::Stop
         };
-        let mut order = LocalOrder::new_draft(
-            &params.symbol,
-            opposite,
-            kind,
-            params.quantity,
-        );
+        let mut order = LocalOrder::new_draft(&params.symbol, opposite, kind, params.quantity);
         order.status = OrderStatus::Inactive;
         order.con_id = params.con_id;
         order.sec_type = params.sec_type;
@@ -1586,7 +1718,11 @@ fn build_market_bracket(params: &MarketBracketParams) -> BracketGroup {
         order
     });
 
-    BracketGroup { parent, take_profit, stop_loss }
+    BracketGroup {
+        parent,
+        take_profit,
+        stop_loss,
+    }
 }
 
 // ===========================================================================
@@ -1611,7 +1747,10 @@ impl std::fmt::Display for OrderSizeError {
                 write!(f, "notional ${notional:.0} exceeds limit ${limit:.0}")
             }
             Self::MissingReferencePrice { symbol } => {
-                write!(f, "no reference price for {symbol} — notional guard requires price")
+                write!(
+                    f,
+                    "no reference price for {symbol} — notional guard requires price"
+                )
             }
         }
     }

@@ -119,7 +119,10 @@ fn snap_to_ohlc_beyond_threshold_returns_raw() {
 
 #[test]
 fn snap_to_ohlc_alt_held_returns_raw() {
-    let mut tool = LevelTool { alt_held: true, ..Default::default() };
+    let mut tool = LevelTool {
+        alt_held: true,
+        ..Default::default()
+    };
     let camera = test_camera();
     let data = test_data();
 

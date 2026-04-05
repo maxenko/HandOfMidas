@@ -647,8 +647,7 @@ fn handle_mouse_pressed(
             let over_draggable_level = hit_test_levels(annotations, y, &state.camera)
                 .map(|(id, _)| !annotations.iter().any(|a| a.id == id && a.locked))
                 .unwrap_or(false);
-            let over_bracket_leg =
-                hit_test_bracket_legs(annotations, y, &state.camera).is_some();
+            let over_bracket_leg = hit_test_bracket_legs(annotations, y, &state.camera).is_some();
             if over_draggable_level || over_bracket_leg {
                 state.crosshair.suppress();
                 #[allow(deprecated)]
@@ -1233,4 +1232,3 @@ fn hit_test_bracket_legs(
 #[cfg(test)]
 #[allow(deprecated)]
 mod tests;
-

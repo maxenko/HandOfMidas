@@ -73,8 +73,7 @@ fn build_volume_profile(
     if !input.show_volume_profile {
         return Vec::new();
     }
-    let num_bins = ((input.viewport_height as f32 * 0.8) / 3.0)
-        .clamp(20.0, 200.0) as usize;
+    let num_bins = ((input.viewport_height as f32 * 0.8) / 3.0).clamp(20.0, 200.0) as usize;
     match crate::volume_profile::compute_volume_profile(
         data,
         vis_start,
@@ -385,8 +384,7 @@ fn compute_collapsed_scene(
             return None;
         }
         let global_idx_f = camera.x_to_time(cx);
-        let idx = (global_idx_f.round().max(0.0) as usize)
-            .clamp(vis_start, vis_end - 1);
+        let idx = (global_idx_f.round().max(0.0) as usize).clamp(vis_start, vis_end - 1);
         let local_idx = idx - vis_start;
         let sx = index_to_x(local_idx);
         Some((sx, idx))
@@ -1306,4 +1304,3 @@ fn format_time_ms(ts_ms: i64) -> String {
 
 #[cfg(test)]
 mod tests;
-

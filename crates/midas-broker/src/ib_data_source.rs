@@ -65,16 +65,18 @@ impl MarketDataSource for IbDataSource {
                 })
         })?;
 
-        let ohlcv_bars: Vec<OhlcvBar> = bars.bars.iter().map(|bar| {
-            OhlcvBar {
+        let ohlcv_bars: Vec<OhlcvBar> = bars
+            .bars
+            .iter()
+            .map(|bar| OhlcvBar {
                 timestamp: bar.date.unix_timestamp(),
                 open: bar.open,
                 high: bar.high,
                 low: bar.low,
                 close: bar.close,
                 volume: bar.volume as i64,
-            }
-        }).collect();
+            })
+            .collect();
 
         Ok(HistoricalBarsResult {
             symbol: SymbolKey {

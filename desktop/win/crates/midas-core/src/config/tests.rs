@@ -8,8 +8,7 @@ static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
 /// Helper to create a unique temp directory for each test.
 fn temp_dir() -> std::path::PathBuf {
     let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir =
-        std::env::temp_dir().join(format!("midas_config_test_{}_{id}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("midas_config_test_{}_{id}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     dir
 }
@@ -25,8 +24,7 @@ fn default_produces_valid_toml() {
     let toml_str = toml::to_string_pretty(&config).expect("serialize default config");
     assert!(!toml_str.is_empty());
     // Round-trip through TOML parser.
-    let _parsed: AppConfig =
-        toml::from_str(&toml_str).expect("parse serialized default config");
+    let _parsed: AppConfig = toml::from_str(&toml_str).expect("parse serialized default config");
 }
 
 #[test]
@@ -796,9 +794,7 @@ fn watchlist_config_roundtrip() {
         }],
         panel_order: vec![
             PanelSlot::Chart { chart_index: 0 },
-            PanelSlot::Watchlist {
-                watchlist_index: 0,
-            },
+            PanelSlot::Watchlist { watchlist_index: 0 },
         ],
         ..Default::default()
     };
@@ -884,12 +880,18 @@ fn non_default_link_modes_roundtrip() {
     config.save(&path).expect("save");
     let loaded = AppConfig::load(&path).expect("load");
 
-    assert_eq!(loaded.charts[0].symbol_link, LinkMode::Color(LinkColor::Blue));
+    assert_eq!(
+        loaded.charts[0].symbol_link,
+        LinkMode::Color(LinkColor::Blue)
+    );
     assert_eq!(loaded.charts[0].timeframe_link, LinkMode::ListenAll);
 
     // Verify the TOML contains the flat string representation.
     let raw = std::fs::read_to_string(&path).expect("read");
-    assert!(raw.contains("symbol_link = \"blue\""), "expected flat string, got:\n{raw}");
+    assert!(
+        raw.contains("symbol_link = \"blue\""),
+        "expected flat string, got:\n{raw}"
+    );
     assert!(
         raw.contains("timeframe_link = \"listen_all\""),
         "expected flat string, got:\n{raw}"

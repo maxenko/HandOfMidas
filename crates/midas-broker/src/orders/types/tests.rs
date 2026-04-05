@@ -123,7 +123,10 @@ fn bracket_role_display_stop_loss() {
 
 #[test]
 fn bracket_role_parse_parent() {
-    assert_eq!("PARENT".parse::<BracketRole>().unwrap(), BracketRole::Parent);
+    assert_eq!(
+        "PARENT".parse::<BracketRole>().unwrap(),
+        BracketRole::Parent
+    );
 }
 
 #[test]
@@ -136,17 +139,26 @@ fn bracket_role_parse_take_profit() {
 
 #[test]
 fn bracket_role_parse_legacy_profit() {
-    assert_eq!("PROFIT".parse::<BracketRole>().unwrap(), BracketRole::TakeProfit);
+    assert_eq!(
+        "PROFIT".parse::<BracketRole>().unwrap(),
+        BracketRole::TakeProfit
+    );
 }
 
 #[test]
 fn bracket_role_parse_legacy_stop() {
-    assert_eq!("STOP".parse::<BracketRole>().unwrap(), BracketRole::StopLoss);
+    assert_eq!(
+        "STOP".parse::<BracketRole>().unwrap(),
+        BracketRole::StopLoss
+    );
 }
 
 #[test]
 fn bracket_role_parse_lowercase_parent() {
-    assert_eq!("parent".parse::<BracketRole>().unwrap(), BracketRole::Parent);
+    assert_eq!(
+        "parent".parse::<BracketRole>().unwrap(),
+        BracketRole::Parent
+    );
 }
 
 #[test]

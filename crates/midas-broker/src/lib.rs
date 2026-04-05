@@ -22,7 +22,6 @@ pub mod testdata;
 
 // Re-exports for the public API surface
 pub use client::{AccountSummary, BrokerCallback, BrokerClient, PositionRecord, TestBrokerClient};
-pub use test_broker::{TestBroker, TestBrokerConfig};
 pub use commands::BrokerCommand;
 pub use config::BrokerConfig;
 pub use connection::ConnectionState;
@@ -35,6 +34,7 @@ pub use orders::bracket::{
 };
 pub use orders::state::OrderStatus;
 pub use orders::types::{BracketRole, LocalOrder};
+pub use test_broker::{TestBroker, TestBrokerConfig};
 
 pub use engine::start_broker_engine;
 pub use midas_core::SecurityType;

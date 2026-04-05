@@ -53,20 +53,18 @@ impl DbHandle {
                         );
                         return ConnState::Failed(msg.clone());
                     }
-                    ConnState::Uninit => {
-                        match init_connection(&path, memory_limit_mb, threads) {
-                            Ok(c) => {
-                                tracing::info!("DuckDB store ready");
-                                c
-                            }
-                            Err(e) => {
-                                let msg = e.to_string();
-                                tracing::error!("DuckDB init failed: {msg}");
-                                send_reply(reply_channel, DbReply::Error(e));
-                                return ConnState::Failed(msg);
-                            }
+                    ConnState::Uninit => match init_connection(&path, memory_limit_mb, threads) {
+                        Ok(c) => {
+                            tracing::info!("DuckDB store ready");
+                            c
                         }
-                    }
+                        Err(e) => {
+                            let msg = e.to_string();
+                            tracing::error!("DuckDB init failed: {msg}");
+                            send_reply(reply_channel, DbReply::Error(e));
+                            return ConnState::Failed(msg);
+                        }
+                    },
                 };
 
                 // Dispatch command.
@@ -192,10 +190,10 @@ fn init_connection(
     threads: u8,
 ) -> Result<Connection, StoreError> {
     let conn = match path {
-        Some(p) => Connection::open(p)
-            .map_err(|e| StoreError::ConnectionFailed(e.to_string()))?,
-        None => Connection::open_in_memory()
-            .map_err(|e| StoreError::ConnectionFailed(e.to_string()))?,
+        Some(p) => Connection::open(p).map_err(|e| StoreError::ConnectionFailed(e.to_string()))?,
+        None => {
+            Connection::open_in_memory().map_err(|e| StoreError::ConnectionFailed(e.to_string()))?
+        }
     };
 
     // Configure — propagate errors instead of silently ignoring them.

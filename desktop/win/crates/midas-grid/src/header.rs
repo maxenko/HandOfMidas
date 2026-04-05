@@ -99,16 +99,9 @@ where
 
         // Interleave 4px resize handle between columns (Phase 0 width).
         if i < col_order.len() - 1 {
-            header_cells.push(
-                Space::new()
-                    .width(4)
-                    .height(Fill)
-                    .into(),
-            );
+            header_cells.push(Space::new().width(4).height(Fill).into());
         }
     }
 
-    Row::with_children(header_cells)
-        .padding([0, 4])
-        .into()
+    Row::with_children(header_cells).padding([0, 4]).into()
 }

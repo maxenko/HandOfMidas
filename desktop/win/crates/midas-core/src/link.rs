@@ -179,7 +179,10 @@ mod tests {
             let mode = LinkMode::Color(color);
             let json = serde_json::to_string(&mode).unwrap();
             // Custom impl produces a flat string, not a sub-object
-            assert!(json.starts_with('"'), "expected flat string for {color:?}, got: {json}");
+            assert!(
+                json.starts_with('"'),
+                "expected flat string for {color:?}, got: {json}"
+            );
             let back: LinkMode = serde_json::from_str(&json).unwrap();
             assert_eq!(mode, back, "roundtrip failed for {color:?} (json: {json})");
         }

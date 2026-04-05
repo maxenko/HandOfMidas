@@ -88,7 +88,10 @@ mod tests {
             .await
             .unwrap();
         assert!(!buf.is_empty());
-        assert!(buf.len() >= 100, "should return a reasonable amount of data");
+        assert!(
+            buf.len() >= 100,
+            "should return a reasonable amount of data"
+        );
     }
 
     #[tokio::test]
@@ -110,8 +113,14 @@ mod tests {
     #[tokio::test]
     async fn test_provider_different_tickers() {
         let provider = TestProvider::new();
-        let aapl = provider.get_candles("AAPL", Timeframe::D1, 90).await.unwrap();
-        let tsla = provider.get_candles("TSLA", Timeframe::D1, 90).await.unwrap();
+        let aapl = provider
+            .get_candles("AAPL", Timeframe::D1, 90)
+            .await
+            .unwrap();
+        let tsla = provider
+            .get_candles("TSLA", Timeframe::D1, 90)
+            .await
+            .unwrap();
         assert_ne!(aapl.opens[0], tsla.opens[0]);
     }
 
@@ -119,8 +128,12 @@ mod tests {
     async fn test_provider_multiple_timeframes() {
         let provider = TestProvider::new();
         for tf in [
-            Timeframe::S30, Timeframe::M1, Timeframe::M5,
-            Timeframe::H1, Timeframe::D1, Timeframe::W1,
+            Timeframe::S30,
+            Timeframe::M1,
+            Timeframe::M5,
+            Timeframe::H1,
+            Timeframe::D1,
+            Timeframe::W1,
         ] {
             let buf = provider.get_candles("MSFT", tf, 30).await.unwrap();
             assert!(!buf.is_empty(), "{tf} returned no data");
@@ -132,13 +145,22 @@ mod tests {
         let provider = TestProvider::new();
         let mut raw = TestDataProvider::new();
 
-        let via_trait = provider.get_candles("AAPL", Timeframe::D1, 365).await.unwrap();
+        let via_trait = provider
+            .get_candles("AAPL", Timeframe::D1, 365)
+            .await
+            .unwrap();
         let via_raw = raw.get_candles("AAPL", Timeframe::D1, 365);
 
         assert_eq!(via_trait.len(), via_raw.len());
         for i in 0..via_trait.len() {
-            assert_eq!(via_trait.timestamps[i], via_raw.timestamps[i], "timestamp mismatch at index {i}");
-            assert_eq!(via_trait.closes[i], via_raw.closes[i], "close mismatch at index {i}");
+            assert_eq!(
+                via_trait.timestamps[i], via_raw.timestamps[i],
+                "timestamp mismatch at index {i}"
+            );
+            assert_eq!(
+                via_trait.closes[i], via_raw.closes[i],
+                "close mismatch at index {i}"
+            );
         }
     }
 

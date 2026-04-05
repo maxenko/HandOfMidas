@@ -103,7 +103,7 @@ fn gatr_pct_gap_up_does_not_inflate_today() {
     l.push(108.0); // today
     let mut c = vec![100.0; 8];
     c.push(112.0); // today's close
-    // Today H-L = 7, avg TR = 15, pct = 7/15*100 ≈ 46.7%.
+                   // Today H-L = 7, avg TR = 15, pct = 7/15*100 ≈ 46.7%.
     let pct = gerchik_gatr_pct(&h, &l, &c).unwrap();
     let expected = 7.0 / 15.0 * 100.0;
     assert!(
@@ -124,13 +124,21 @@ fn gatr_pct_walks_past_paranormal_to_collect_7() {
     let mut l = Vec::new();
 
     // Bar 0: seed.
-    h.push(120.0); l.push(80.0);
+    h.push(120.0);
+    l.push(80.0);
     // Bars 1-8: normal TR=40 (close=100, H=120, L=80).
-    for _ in 0..8 { h.push(120.0); l.push(80.0); }
+    for _ in 0..8 {
+        h.push(120.0);
+        l.push(80.0);
+    }
     // Bars 9-10: paranormal TR=200 (H=200, L=0).
-    for _ in 0..2 { h.push(200.0); l.push(0.0); }
+    for _ in 0..2 {
+        h.push(200.0);
+        l.push(0.0);
+    }
     // Today: TR=40.
-    h.push(120.0); l.push(80.0);
+    h.push(120.0);
+    l.push(80.0);
 
     let pct = gerchik_gatr_pct(&h, &l, &c).unwrap();
     // Paranormal bars (TR=200) skipped. 7 normal bars (TR=40) collected.
@@ -175,10 +183,18 @@ fn gatr_detail_skips_paranormal_in_selected() {
     let c = vec![100.0; 12];
     let mut h = Vec::new();
     let mut l = Vec::new();
-    h.push(120.0); l.push(80.0); // bar 0: seed
-    for _ in 0..8 { h.push(120.0); l.push(80.0); } // bars 1-8: normal
-    for _ in 0..2 { h.push(200.0); l.push(0.0); }  // bars 9-10: paranormal
-    h.push(120.0); l.push(80.0); // today
+    h.push(120.0);
+    l.push(80.0); // bar 0: seed
+    for _ in 0..8 {
+        h.push(120.0);
+        l.push(80.0);
+    } // bars 1-8: normal
+    for _ in 0..2 {
+        h.push(200.0);
+        l.push(0.0);
+    } // bars 9-10: paranormal
+    h.push(120.0);
+    l.push(80.0); // today
 
     let result = gerchik_gatr_detail(&h, &l, &c).unwrap();
     assert_eq!(result.selected_bars.len(), 7);

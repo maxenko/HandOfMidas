@@ -94,7 +94,8 @@ impl<Msg: 'static + Send, ReplyMsg: 'static + Send> MailboxProcessor<Msg, ReplyM
             })?;
 
         r.recv().await.ok_or(MailboxProcessorError {
-            msg: "the response channel is closed (did you mean to call fire_and_forget()?)".to_owned(),
+            msg: "the response channel is closed (did you mean to call fire_and_forget()?)"
+                .to_owned(),
         })
     }
 
@@ -134,7 +135,8 @@ mod tests {
                 match msg {
                     SendMessageTypes::Increment(x) => {
                         OptionFuture::from(
-                            reply_channel.map(|rc| async move { rc.send(state + x).await.unwrap() }),
+                            reply_channel
+                                .map(|rc| async move { rc.send(state + x).await.unwrap() }),
                         )
                         .await;
                         state + x
@@ -148,7 +150,8 @@ mod tests {
                     }
                     SendMessageTypes::Decrement(x) => {
                         OptionFuture::from(
-                            reply_channel.map(|rc| async move { rc.send(state - x).await.unwrap() }),
+                            reply_channel
+                                .map(|rc| async move { rc.send(state - x).await.unwrap() }),
                         )
                         .await;
                         state - x
@@ -166,14 +169,8 @@ mod tests {
             mb.send(SendMessageTypes::GetCurrentCount).await.unwrap(),
             55
         );
-        assert_eq!(
-            mb.send(SendMessageTypes::Increment(55)).await.unwrap(),
-            110
-        );
-        assert_eq!(
-            mb.send(SendMessageTypes::Decrement(10)).await.unwrap(),
-            100
-        );
+        assert_eq!(mb.send(SendMessageTypes::Increment(55)).await.unwrap(), 110);
+        assert_eq!(mb.send(SendMessageTypes::Decrement(10)).await.unwrap(), 100);
     }
 
     #[tokio::test]

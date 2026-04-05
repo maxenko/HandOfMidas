@@ -125,7 +125,9 @@ fn apply_zoom_at_left_edge() {
 #[test]
 fn apply_select_and_deselect_level() {
     let mut state = ChartState::new(test_camera());
-    state.apply_action(&ChartAction::SelectLevel { id: AnnotationId(1) });
+    state.apply_action(&ChartAction::SelectLevel {
+        id: AnnotationId(1),
+    });
     assert_eq!(state.selected_level, Some(AnnotationId(1)));
     state.apply_action(&ChartAction::DeselectLevel);
     assert_eq!(state.selected_level, None);

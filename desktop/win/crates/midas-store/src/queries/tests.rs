@@ -20,7 +20,14 @@ fn sample_buffer(n: usize) -> CandleBuffer {
     for i in 0..n {
         let ts = 1_700_000_000_000i64 + (i as i64 * 86_400_000);
         let price = 150.0 + (i as f32 * 0.01);
-        buf.push(ts, price, price + 2.0, price - 1.5, price + 0.5, (1000 + i) as u32);
+        buf.push(
+            ts,
+            price,
+            price + 2.0,
+            price - 1.5,
+            price + 0.5,
+            (1000 + i) as u32,
+        );
     }
     buf
 }
@@ -150,7 +157,10 @@ fn test_large_buffer_insert() {
     let loaded = query_all(&conn, &key).unwrap();
     assert_eq!(loaded.len(), 50_000);
     assert_eq!(loaded.timestamps[0], buf.timestamps[0]);
-    assert_eq!(loaded.timestamps[loaded.len() - 1], buf.timestamps[buf.len() - 1]);
+    assert_eq!(
+        loaded.timestamps[loaded.len() - 1],
+        buf.timestamps[buf.len() - 1]
+    );
 }
 
 #[test]
@@ -178,8 +188,16 @@ fn test_f32_roundtrip() {
     let key = sample_key();
 
     let test_values: Vec<f32> = vec![
-        0.0, -0.0, 1.0, -1.0, f32::MIN_POSITIVE, f32::MAX, f32::MIN,
-        std::f32::consts::PI, 0.1, 100.005,
+        0.0,
+        -0.0,
+        1.0,
+        -1.0,
+        f32::MIN_POSITIVE,
+        f32::MAX,
+        f32::MIN,
+        std::f32::consts::PI,
+        0.1,
+        100.005,
     ];
 
     let mut buf = CandleBuffer::with_capacity(test_values.len());
