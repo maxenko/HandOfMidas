@@ -44,6 +44,7 @@ impl LevelStore {
 
     /// Returns a mutable reference to the levels for a ticker,
     /// creating an empty entry if needed.
+    #[allow(dead_code)] // part of planned API
     pub fn levels_for_mut(&mut self, ticker: &str) -> &mut Vec<HorizontalLevel> {
         self.levels.entry(ticker.to_owned()).or_default()
     }
@@ -68,6 +69,7 @@ impl LevelStore {
     }
 
     /// Returns the current generation counter for a ticker.
+    #[allow(dead_code)] // part of planned API
     pub fn generation(&self, ticker: &str) -> u64 {
         self.generations.get(ticker).copied().unwrap_or(0)
     }

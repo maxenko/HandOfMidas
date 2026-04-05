@@ -194,11 +194,12 @@ mod tests {
     use super::*;
 
     #[derive(Debug, Clone)]
+    #[allow(dead_code)] // String payloads used structurally by EditableLabel; not destructured in tests
     enum Msg {
-        EditStart,
-        EditChanged(String),
-        EditConfirm(String),
-        EditCancel,
+        Start,
+        Changed(String),
+        Confirm(String),
+        Cancel,
     }
 
     fn make_display_label<'a>() -> EditableLabel<'a, Msg> {
@@ -206,9 +207,9 @@ mod tests {
             "AAPL",
             "",
             false,
-            Msg::EditChanged,
-            Msg::EditConfirm,
-            Msg::EditStart,
+            Msg::Changed,
+            Msg::Confirm,
+            Msg::Start,
         )
     }
 
@@ -217,9 +218,9 @@ mod tests {
             "AAPL",
             "MSFT",
             true,
-            Msg::EditChanged,
-            Msg::EditConfirm,
-            Msg::EditStart,
+            Msg::Changed,
+            Msg::Confirm,
+            Msg::Start,
         )
     }
 
@@ -245,7 +246,7 @@ mod tests {
     #[test]
     fn builder_methods_chain() {
         let label = make_display_label()
-            .on_cancel(Msg::EditCancel)
+            .on_cancel(Msg::Cancel)
             .size(14.0)
             .color(Color::WHITE)
             .bold();

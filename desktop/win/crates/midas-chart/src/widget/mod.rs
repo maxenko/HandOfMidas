@@ -127,7 +127,7 @@ pub enum AnnotationKind {
     /// Horizontal line at a price. The most common annotation type.
     Level(HorizontalLevel),
     /// Entry + optional TP/SL bracket for order visualization.
-    OrderBracket(OrderBracket),
+    OrderBracket(Box<OrderBracket>),
     /// Text note anchored to a price/time point.
     TextNote(TextNote),
     /// Icon or stamp at a specific price/time.

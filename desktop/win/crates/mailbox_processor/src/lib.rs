@@ -170,6 +170,10 @@ mod tests {
             mb.send(SendMessageTypes::Increment(55)).await.unwrap(),
             110
         );
+        assert_eq!(
+            mb.send(SendMessageTypes::Decrement(10)).await.unwrap(),
+            100
+        );
     }
 
     #[tokio::test]

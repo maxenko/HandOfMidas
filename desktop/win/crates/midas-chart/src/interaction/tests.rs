@@ -251,9 +251,7 @@ fn left_press_enters_pending_drag() {
         &[],
     );
     // Left press now also sets crosshair.
-    assert!(actions
-        .iter()
-        .any(|a| *a == ChartAction::SetCrosshair { x: 100.0, y: 200.0 }));
+    assert!(actions.contains(&ChartAction::SetCrosshair { x: 100.0, y: 200.0 }));
     assert!(state.left_mouse_down);
     assert_eq!(
         state.interaction_mode,
@@ -1424,14 +1422,14 @@ fn make_bracket_leg(price: f64) -> BracketLeg {
 fn test_bracket_annotation(id: u64, entry: f64, tp: f64, sl: f64) -> Annotation {
     Annotation {
         id: AnnotationId(id),
-        kind: AnnotationKind::OrderBracket(OrderBracket {
+        kind: AnnotationKind::OrderBracket(Box::new(OrderBracket {
             entry: make_bracket_leg(entry),
             take_profit: Some(make_bracket_leg(tp)),
             stop_loss: Some(make_bracket_leg(sl)),
             side: BracketSide::Long,
             status: BracketStatus::Active,
             quantity: Some(100.0),
-        }),
+        })),
         presence: Presence::Active,
         visible_timeframes: None,
         locked: false,
@@ -1660,7 +1658,7 @@ fn pending_drag_transitions_to_dragging_bracket_leg() {
     );
     // Should emit ClearCrosshair (crosshair suppressed during drag).
     assert!(
-        actions.iter().any(|a| *a == ChartAction::ClearCrosshair),
+        actions.contains(&ChartAction::ClearCrosshair),
         "should emit ClearCrosshair"
     );
 }
@@ -1783,7 +1781,7 @@ fn releasing_bracket_leg_drag_returns_to_idle() {
         "should return to Idle"
     );
     assert!(
-        actions.iter().any(|a| *a == ChartAction::ClearCrosshair),
+        actions.contains(&ChartAction::ClearCrosshair),
         "should emit ClearCrosshair on release"
     );
 }

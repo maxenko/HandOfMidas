@@ -20,6 +20,7 @@ impl MarketDataCache {
     }
 
     /// Get a mutable snapshot for a symbol (e.g., to merge GATR from intraday data).
+    #[allow(dead_code)] // part of planned API
     pub fn get_mut(&mut self, symbol: &str) -> Option<&mut MarketSnapshot> {
         self.snapshots.get_mut(symbol)
     }
@@ -35,6 +36,7 @@ impl MarketDataCache {
     }
 
     /// Iterate over all cached symbols.
+    #[allow(dead_code)] // part of planned API
     pub fn symbols(&self) -> impl Iterator<Item = &String> {
         self.snapshots.keys()
     }

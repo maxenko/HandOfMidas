@@ -992,7 +992,7 @@ impl MidasApp {
     /// appropriate `Message` for each option.
     fn build_link_picker(
         &self,
-        dimension: LinkDimension,
+        _dimension: LinkDimension,
         msg_builder: impl Fn(LinkMode) -> Message,
     ) -> Element<'_, Message> {
         let mut items: Vec<Element<'_, Message>> = Vec::with_capacity(10);
@@ -1217,7 +1217,7 @@ impl MidasApp {
                 let gatr_color = snap
                     .gatr_pct
                     .map(|_| {
-                        let price_up = snap.change_pct.map_or(true, |c| c >= 0.0);
+                        let price_up = snap.change_pct.is_none_or(|c| c >= 0.0);
                         let c = midas_core::gatr_color(price_up);
                         Color::from_rgba(c[0], c[1], c[2], c[3])
                     })
@@ -2137,7 +2137,7 @@ impl MidasApp {
         let is_connected = self
             .providers
             .active_data_provider()
-            .map_or(false, |p| p.is_connected());
+            .is_some_and(|p| p.is_connected());
         let dot_color = if is_connected {
             Color::from_rgb(0.2, 0.8, 0.2) // green
         } else {
@@ -2799,9 +2799,9 @@ fn compute_ghost_crosshair(
     let gy = cam.snap_to_pixel(cam.price_to_y(*price));
     let gx = if chart_state.collapse_gaps {
         let idx = data.find_index_by_time(*ts);
-        cam.time_to_x(idx as f64 + 0.5) as f32
+        cam.time_to_x(idx as f64 + 0.5)
     } else {
-        cam.time_to_x(*ts as f64) as f32
+        cam.time_to_x(*ts as f64)
     };
     Some((gx, gy))
 }
@@ -2945,7 +2945,7 @@ fn gatr_render_from_cache(
 ) -> Option<midas_chart::GerchikAtrRender> {
     let snap = cache.get(symbol)?;
     let pct = snap.gatr_pct?;
-    let price_up = snap.change_pct.map_or(true, |c| c >= 0.0);
+    let price_up = snap.change_pct.is_none_or(|c| c >= 0.0);
     let color = midas_core::gatr_color(price_up);
     Some(midas_chart::GerchikAtrRender {
         pct,

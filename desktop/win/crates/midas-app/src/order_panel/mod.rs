@@ -16,6 +16,7 @@ use midas_core::link::LinkMode;
 #[derive(Debug, Clone)]
 pub struct OrderPanelState {
     /// Whether the panel is visible.
+    #[allow(dead_code)] // part of planned API
     pub visible: bool,
     /// Current side selection.
     pub side: OrderSide,
@@ -44,6 +45,7 @@ pub struct OrderPanelState {
     /// Last known price (from chart candle data).
     pub last_price: Option<f64>,
     /// Which chart this panel is attached to.
+    #[allow(dead_code)] // part of planned API
     pub source_chart: Option<ChartId>,
     /// Whether the confirmation dialog is showing.
     pub showing_confirmation: bool,
@@ -89,8 +91,10 @@ pub enum PriceInputMode {
     /// Absolute price level (e.g., 192.00).
     Absolute,
     /// Dollar offset from last price (e.g., +6.50).
+    #[allow(dead_code)] // part of planned UI
     Offset,
     /// Percentage from last price (e.g., +3.5%).
+    #[allow(dead_code)] // part of planned UI
     Percent,
 }
 
@@ -100,6 +104,7 @@ pub enum StopLossType {
     /// Becomes market order when stop price is hit.
     Stop,
     /// Becomes limit order when stop price is hit.
+    #[allow(dead_code)] // part of planned UI
     StopLimit,
 }
 
@@ -142,11 +147,15 @@ pub fn resolve_price(
 /// Real-time risk/reward calculation.
 #[derive(Debug, Clone)]
 pub struct RiskReward {
+    #[allow(dead_code)] // part of planned UI
     pub risk_per_share: f64,
+    #[allow(dead_code)] // part of planned UI
     pub reward_per_share: f64,
     pub total_risk: f64,
     pub total_reward: f64,
+    #[allow(dead_code)] // part of planned UI
     pub risk_pct: f64,
+    #[allow(dead_code)] // part of planned UI
     pub reward_pct: f64,
     pub ratio: f64,
 }
@@ -195,7 +204,7 @@ pub fn validate_panel(state: &OrderPanelState) -> Vec<(String, String)> {
         errors.push(("symbol".to_string(), "No symbol selected".to_string()));
     }
 
-    let qty: f64 = match state.quantity.parse() {
+    let _qty: f64 = match state.quantity.parse() {
         Ok(q) if q > 0.0 => q,
         Ok(_) => {
             errors.push(("quantity".to_string(), "Quantity must be positive".to_string()));
@@ -340,6 +349,7 @@ pub fn create_bracket_annotation(
 /// type in `midas-broker`. This function bridges the string
 /// representation to the chart-side enum without creating a hard
 /// dependency between `midas-app` and `midas-broker`.
+#[allow(dead_code)] // part of planned API
 pub fn map_lifecycle_to_chart_status(
     status: &str,
 ) -> midas_chart::widget::order_bracket::BracketStatus {
@@ -362,6 +372,7 @@ pub fn map_lifecycle_to_chart_status(
 #[derive(Debug, Clone)]
 pub struct OrderPanel {
     /// Unique identifier within the workspace.
+    #[allow(dead_code)] // part of planned API
     pub id: OrderPanelId,
     /// Form state (side, quantity, TP/SL, validation, confirmation).
     pub state: OrderPanelState,
@@ -372,9 +383,11 @@ pub struct OrderPanel {
 impl OrderPanel {
     /// Create a new dockable order panel with the given symbol.
     pub fn new(id: OrderPanelId, symbol: String) -> Self {
-        let mut state = OrderPanelState::default();
-        state.symbol = symbol;
-        state.visible = true; // always visible in docked mode
+        let state = OrderPanelState {
+            symbol,
+            visible: true, // always visible in docked mode
+            ..Default::default()
+        };
         Self {
             id,
             state,
@@ -397,15 +410,17 @@ impl OrderPanel {
 
     /// Restore a panel from a saved config.
     pub fn from_config(id: OrderPanelId, config: &midas_core::config::OrderPanelConfig) -> Self {
-        let mut state = OrderPanelState::default();
-        state.symbol = config.symbol.clone();
-        state.side = if config.side == "SELL" {
-            OrderSide::Sell
-        } else {
-            OrderSide::Buy
+        let state = OrderPanelState {
+            symbol: config.symbol.clone(),
+            side: if config.side == "SELL" {
+                OrderSide::Sell
+            } else {
+                OrderSide::Buy
+            },
+            quantity: config.quantity.clone(),
+            visible: true,
+            ..Default::default()
         };
-        state.quantity = config.quantity.clone();
-        state.visible = true;
         Self {
             id,
             state,
@@ -424,18 +439,22 @@ pub enum OrderPanelAction {
     /// Toggle Take Profit enabled.
     ToggleTp(bool),
     /// Set TP price input mode.
+    #[allow(dead_code)] // part of planned UI
     SetTpMode(PriceInputMode),
     /// Update TP value input text.
     SetTpValue(String),
     /// Toggle Stop Loss enabled.
     ToggleSl(bool),
     /// Set SL price input mode.
+    #[allow(dead_code)] // part of planned UI
     SetSlMode(PriceInputMode),
     /// Update SL value input text.
     SetSlValue(String),
     /// Set SL type (Stop vs StopLimit).
+    #[allow(dead_code)] // part of planned UI
     SetSlType(StopLossType),
     /// Update SL limit price input text.
+    #[allow(dead_code)] // part of planned UI
     SetSlLimit(String),
     /// Submit the order (triggers confirmation dialog).
     Submit,
@@ -444,6 +463,7 @@ pub enum OrderPanelAction {
     /// User cancelled the confirmation dialog.
     ConfirmNo,
     /// Dismiss the order panel (close confirmation or clear errors).
+    #[allow(dead_code)] // part of planned UI
     Dismiss,
 }
 

@@ -40,7 +40,7 @@ impl MidasApp {
                 PanelContent::Chart(chart_id) => {
                     if let Some(idx) = chart_configs
                         .iter()
-                        .position(|c| self.charts.get(chart_id).map_or(false, |p| {
+                        .position(|c| self.charts.get(chart_id).is_some_and(|p| {
                             c.symbol == p.symbol && c.timeframe == p.timeframe.display_name()
                         }))
                     {
@@ -54,8 +54,8 @@ impl MidasApp {
                         .position(|(i, _)| {
                             self.watchlists
                                 .get(wl_id)
-                                .map_or(false, |wl| {
-                                    watchlist_configs.get(i).map_or(false, |wc: &midas_core::config::WatchlistConfig| {
+                                .is_some_and(|wl| {
+                                    watchlist_configs.get(i).is_some_and(|wc: &midas_core::config::WatchlistConfig| {
                                         wc.name == wl.name
                                     })
                                 })
@@ -73,8 +73,8 @@ impl MidasApp {
                         .position(|(i, _)| {
                             self.order_panels
                                 .get(op_id)
-                                .map_or(false, |panel| {
-                                    order_panel_configs.get(i).map_or(false, |cfg| {
+                                .is_some_and(|panel| {
+                                    order_panel_configs.get(i).is_some_and(|cfg| {
                                         cfg.symbol == panel.state.symbol
                                             && cfg.symbol_link == panel.symbol_link
                                     })

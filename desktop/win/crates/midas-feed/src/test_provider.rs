@@ -155,7 +155,7 @@ mod tests {
         }
         for handle in handles {
             let buf = handle.await.unwrap();
-            assert!(buf.len() > 0);
+            assert!(!buf.is_empty());
         }
     }
 }

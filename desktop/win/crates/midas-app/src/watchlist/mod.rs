@@ -61,6 +61,7 @@ pub struct WatchlistTicker {
 #[derive(Debug, Clone)]
 pub struct WatchlistPanel {
     /// Unique identifier for this watchlist within the workspace.
+    #[allow(dead_code)] // part of planned API
     pub id: WatchlistId,
     /// User-visible name (e.g. `"Main"`).
     pub name: String,

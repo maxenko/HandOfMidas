@@ -127,6 +127,7 @@ pub struct MidasApp {
     /// Registry of all available data providers and order brokers.
     pub providers: ProviderRegistry,
     /// DuckDB persistent cache handle. None if disabled or failed to open.
+    #[allow(dead_code)] // part of planned API
     pub store: Option<midas_store::DbHandle>,
     /// All watchlist panels keyed by stable WatchlistId.
     pub watchlists: HashMap<WatchlistId, WatchlistPanel>,
@@ -809,6 +810,7 @@ impl MidasApp {
     ///
     /// Parses the pre-order traversal, builds a `pane_grid::Configuration`,
     /// and creates the `WorkspaceLayout` with correct axes and ratios.
+    #[expect(clippy::type_complexity, reason = "used only in one internal method")]
     fn restore_from_layout_tree(
         tree: &[LayoutNode],
         chart_cfgs: &[ChartConfig],
@@ -869,7 +871,7 @@ impl MidasApp {
                         self.next_chart_id += 1;
                         let panel = chart_cfgs
                             .get(*chart_index)
-                            .map(|cfg| MidasApp::restore_panel(cfg))
+                            .map(MidasApp::restore_panel)
                             .unwrap_or_else(MidasApp::make_empty_panel);
                         self.charts.insert(id, panel);
                         self.cursor += 1;
@@ -1848,7 +1850,7 @@ impl MidasApp {
                         if self
                             .crosshair_sync
                             .as_ref()
-                            .map_or(false, |(src, _, _, _)| *src == chart_id)
+                            .is_some_and(|(src, _, _, _)| *src == chart_id)
                         {
                             self.crosshair_sync = None;
                         }
@@ -3277,7 +3279,7 @@ impl MidasApp {
                 // Add the annotation to the centralized store for this symbol.
                 let annotation_id = self.annotation_store.add(
                     &symbol,
-                    midas_chart::widget::AnnotationKind::OrderBracket(bracket),
+                    midas_chart::widget::AnnotationKind::OrderBracket(Box::new(bracket)),
                 );
 
                 // Store the mapping from annotation to broker order IDs.

@@ -19,10 +19,13 @@ use crate::watchlist::{COL_CHANGE, COL_DELETE, COL_DRAG, COL_FAV, COL_GATR, COL_
 // ── Colors ──────────────────────────────────────────────────────────
 
 /// Positive change color (green).
+#[allow(dead_code)] // part of planned API
 const COLOR_POSITIVE: Color = Color::from_rgb(0.2, 0.8, 0.3);
 /// Negative change color (red).
+#[allow(dead_code)] // part of planned API
 const COLOR_NEGATIVE: Color = Color::from_rgb(0.9, 0.25, 0.2);
 /// Neutral / no-data color (grey).
+#[allow(dead_code)] // part of planned API
 const COLOR_NEUTRAL: Color = Color::from_rgb(0.6, 0.6, 0.6);
 
 // ── Row data ────────────────────────────────────────────────────────
@@ -65,6 +68,7 @@ pub struct WatchlistRow {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WatchlistColumn {
     /// Drag grip for row reordering.
+    #[allow(dead_code)] // part of planned UI
     DragHandle,
     /// Favorite star toggle.
     Favorite,
@@ -75,6 +79,7 @@ pub enum WatchlistColumn {
     /// Daily change percent.
     ChangePercent,
     /// Generalized ATR value.
+    #[expect(clippy::upper_case_acronyms, reason = "GATR is a domain-specific indicator name")]
     GATR,
     /// Delete (remove from watchlist) button.
     Delete,

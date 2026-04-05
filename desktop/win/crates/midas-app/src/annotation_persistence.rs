@@ -5,7 +5,7 @@
 //! then rename) and debounced (500ms after last mutation).
 
 use crate::annotation_store::AnnotationStore;
-use midas_chart::widget::{Annotation, AnnotationId, AnnotationKind};
+use midas_chart::widget::Annotation;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -155,7 +155,7 @@ pub fn load_all(data_dir: &Path) -> anyhow::Result<HashMap<String, Vec<Annotatio
     for entry in std::fs::read_dir(&dir)? {
         let entry = entry?;
         let path = entry.path();
-        if path.extension().map_or(true, |ext| ext != "json") {
+        if path.extension().is_none_or(|ext| ext != "json") {
             continue;
         }
 
@@ -191,7 +191,7 @@ pub fn store_from_files(files: HashMap<String, Vec<Annotation>>) -> AnnotationSt
     for (symbol, annotations) in &files {
         for ann in annotations {
             max_id = max_id.max(ann.id.0);
-            store.add_raw(&symbol, ann.clone());
+            store.add_raw(symbol, ann.clone());
         }
     }
 
@@ -205,7 +205,7 @@ mod tests {
     use midas_chart::levels::LevelIcon;
     use midas_chart::widget::{
         level::{LevelExtend, LineStyle},
-        HorizontalLevel, Presence,
+        AnnotationId, AnnotationKind, HorizontalLevel, Presence,
     };
     use tempfile::TempDir;
 

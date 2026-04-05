@@ -74,8 +74,7 @@ fn build_volume_profile(
         return Vec::new();
     }
     let num_bins = ((input.viewport_height as f32 * 0.8) / 3.0)
-        .min(200.0)
-        .max(20.0) as usize;
+        .clamp(20.0, 200.0) as usize;
     match crate::volume_profile::compute_volume_profile(
         data,
         vis_start,
@@ -1142,13 +1141,10 @@ fn compute_widget_annotations(
             continue;
         }
         let alpha = ann.presence.alpha();
-        match &ann.kind {
-            crate::widget::AnnotationKind::OrderBracket(bracket) => {
-                let out = compute_bracket(bracket, ann.id, &ctx, alpha);
-                merged.merge(out);
-            }
-            // Level is handled by compute_levels(); other kinds are future work.
-            _ => {}
+        // Level is handled by compute_levels(); other kinds are future work.
+        if let crate::widget::AnnotationKind::OrderBracket(bracket) = &ann.kind {
+            let out = compute_bracket(bracket, ann.id, &ctx, alpha);
+            merged.merge(out);
         }
     }
 

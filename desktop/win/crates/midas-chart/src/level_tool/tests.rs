@@ -119,8 +119,7 @@ fn snap_to_ohlc_beyond_threshold_returns_raw() {
 
 #[test]
 fn snap_to_ohlc_alt_held_returns_raw() {
-    let mut tool = LevelTool::default();
-    tool.alt_held = true;
+    let mut tool = LevelTool { alt_held: true, ..Default::default() };
     let camera = test_camera();
     let data = test_data();
 
@@ -229,10 +228,12 @@ fn activate_sets_placing_mode() {
 
 #[test]
 fn activate_noop_during_drag() {
-    let mut tool = LevelTool::default();
-    tool.mode = LevelToolMode::Dragging {
-        level_id: AnnotationId(1),
-        grab_offset: 0.0,
+    let mut tool = LevelTool {
+        mode: LevelToolMode::Dragging {
+            level_id: AnnotationId(1),
+            grab_offset: 0.0,
+        },
+        ..Default::default()
     };
     tool.activate();
     assert!(tool.is_dragging()); // still dragging
@@ -240,11 +241,13 @@ fn activate_noop_during_drag() {
 
 #[test]
 fn cancel_clears_all_state() {
-    let mut tool = LevelTool::default();
-    tool.mode = LevelToolMode::Placing;
-    tool.alt_held = true;
-    tool.snapped_price = Some(150.0);
-    tool.was_placing = true;
+    let mut tool = LevelTool {
+        mode: LevelToolMode::Placing,
+        alt_held: true,
+        snapped_price: Some(150.0),
+        was_placing: true,
+        ..Default::default()
+    };
 
     tool.cancel();
 

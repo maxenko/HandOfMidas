@@ -442,7 +442,7 @@ impl shader::Program<Message> for ChartProgram {
         // preview_price to avoid stale previews (handles cross-window jumps).
         let is_placing_source = snap
             .placing_cursor_chart
-            .map_or(true, |src| src == self.chart_id);
+            .is_none_or(|src| src == self.chart_id);
         let mut effective_level_tool = state
             .chart_state
             .as_ref()

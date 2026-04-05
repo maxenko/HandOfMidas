@@ -173,6 +173,7 @@ mod tests {
     }
 
     #[derive(Debug, Clone)]
+    #[allow(dead_code)] // Tf payload used structurally by ButtonGroup; not destructured in tests
     enum Msg {
         Selected(Tf),
     }
@@ -182,7 +183,7 @@ mod tests {
         let _group = ButtonGroup::new(
             vec![("1m", Tf::M1), ("5m", Tf::M5), ("1D", Tf::D1)],
             Tf::D1,
-            |tf| Msg::Selected(tf),
+            Msg::Selected,
         );
     }
 
@@ -191,7 +192,7 @@ mod tests {
         let group = ButtonGroup::new(
             vec![("1m", Tf::M1), ("5m", Tf::M5), ("1D", Tf::D1)],
             Tf::D1,
-            |tf| Msg::Selected(tf),
+            Msg::Selected,
         );
         assert_eq!(group.item_count(), 3);
     }
@@ -199,7 +200,7 @@ mod tests {
     #[test]
     fn button_group_empty_items() {
         let group: ButtonGroup<'_, Tf, Msg> =
-            ButtonGroup::new(vec![], Tf::D1, |tf| Msg::Selected(tf));
+            ButtonGroup::new(vec![], Tf::D1, Msg::Selected);
         assert_eq!(group.item_count(), 0);
     }
 

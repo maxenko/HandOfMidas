@@ -115,6 +115,7 @@ impl AnnotationStore {
     }
 
     /// Returns annotations visible on a specific timeframe.
+    #[allow(dead_code)] // part of planned API
     pub fn get_visible(&self, symbol: &str, timeframe: Timeframe) -> Vec<&Annotation> {
         self.get(symbol)
             .iter()
@@ -123,6 +124,7 @@ impl AnnotationStore {
     }
 
     /// Returns the generation counter for a symbol.
+    #[allow(dead_code)] // part of planned API
     pub fn generation(&self, symbol: &str) -> u64 {
         let key = SymbolKey::new(symbol);
         self.by_symbol
@@ -131,11 +133,13 @@ impl AnnotationStore {
     }
 
     /// Returns the global generation counter.
+    #[allow(dead_code)] // part of planned API
     pub fn global_generation(&self) -> u64 {
         self.global_generation
     }
 
     /// Finds an annotation by ID across all symbols.
+    #[allow(dead_code)] // part of planned API
     pub fn find(&self, id: AnnotationId) -> Option<(&str, &Annotation)> {
         for (key, sa) in &self.by_symbol {
             if let Some(ann) = sa.annotations.iter().find(|a| a.id == id) {
@@ -176,6 +180,7 @@ impl AnnotationStore {
 
     /// Removes an annotation by ID from a symbol.
     /// Returns `true` if the annotation was found and removed.
+    #[allow(dead_code)] // part of planned API
     pub fn remove(&mut self, symbol: &str, id: AnnotationId) -> bool {
         let key = SymbolKey::new(symbol);
         let Some(sa) = self.by_symbol.get_mut(&key) else {
@@ -213,6 +218,7 @@ impl AnnotationStore {
     }
 
     /// Removes all annotations for a symbol.
+    #[allow(dead_code)] // part of planned API
     pub fn clear(&mut self, symbol: &str) {
         let key = SymbolKey::new(symbol);
         if let Some(sa) = self.by_symbol.get_mut(&key) {
@@ -225,6 +231,7 @@ impl AnnotationStore {
 
     /// Removes annotations matching a predicate for a symbol.
     /// Returns the number of annotations removed.
+    #[allow(dead_code)] // part of planned API
     pub fn retain(
         &mut self,
         symbol: &str,

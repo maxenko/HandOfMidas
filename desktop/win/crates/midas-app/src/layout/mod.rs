@@ -222,6 +222,7 @@ impl WorkspaceLayout {
     }
 
     /// Find the pane displaying the given `WatchlistId`.
+    #[allow(dead_code)] // part of planned API
     pub fn find_watchlist_pane(&self, wl_id: WatchlistId) -> Option<pane_grid::Pane> {
         self.panes
             .panes
@@ -231,6 +232,7 @@ impl WorkspaceLayout {
     }
 
     /// Find the pane displaying the given `OrderPanelId`.
+    #[allow(dead_code)] // part of planned API
     pub fn find_order_pane(&self, op_id: OrderPanelId) -> Option<pane_grid::Pane> {
         self.panes
             .panes

@@ -97,11 +97,11 @@ pub fn compute_volume_profile(
         let vol_per_bin = volume / bins_touched.max(1);
         let remainder = volume - vol_per_bin * bins_touched;
 
-        for b in bin_lo..=bin_hi {
+        for bin in bins.iter_mut().take(bin_hi + 1).skip(bin_lo) {
             if is_bull {
-                bins[b].buy_volume += vol_per_bin;
+                bin.buy_volume += vol_per_bin;
             } else {
-                bins[b].sell_volume += vol_per_bin;
+                bin.sell_volume += vol_per_bin;
             }
         }
 

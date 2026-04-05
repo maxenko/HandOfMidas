@@ -71,26 +71,30 @@ fn validate_missing_symbol() {
 
 #[test]
 fn validate_buy_tp_below_price_rejected() {
-    let mut state = OrderPanelState::default();
-    state.symbol = "AAPL".to_string();
-    state.last_price = Some(185.0);
-    state.tp_enabled = true;
-    state.tp_value = "180.0".to_string();
-    state.sl_enabled = false;
+    let state = OrderPanelState {
+        symbol: "AAPL".to_string(),
+        last_price: Some(185.0),
+        tp_enabled: true,
+        tp_value: "180.0".to_string(),
+        sl_enabled: false,
+        ..Default::default()
+    };
     let errors = validate_panel(&state);
     assert!(errors.iter().any(|(f, _)| f == "tp"));
 }
 
 #[test]
 fn validate_valid_bracket() {
-    let mut state = OrderPanelState::default();
-    state.symbol = "AAPL".to_string();
-    state.last_price = Some(185.0);
-    state.quantity = "100".to_string();
-    state.tp_enabled = true;
-    state.tp_value = "192.0".to_string();
-    state.sl_enabled = true;
-    state.sl_value = "182.0".to_string();
+    let state = OrderPanelState {
+        symbol: "AAPL".to_string(),
+        last_price: Some(185.0),
+        quantity: "100".to_string(),
+        tp_enabled: true,
+        tp_value: "192.0".to_string(),
+        sl_enabled: true,
+        sl_value: "182.0".to_string(),
+        ..Default::default()
+    };
     let errors = validate_panel(&state);
     assert!(errors.is_empty(), "expected no errors, got: {errors:?}");
 }
@@ -198,10 +202,12 @@ fn lifecycle_unknown_defaults_to_pending() {
 
 #[test]
 fn validate_non_numeric_quantity() {
-    let mut state = OrderPanelState::default();
-    state.symbol = "AAPL".to_string();
-    state.last_price = Some(185.0);
-    state.quantity = "abc".to_string();
+    let state = OrderPanelState {
+        symbol: "AAPL".to_string(),
+        last_price: Some(185.0),
+        quantity: "abc".to_string(),
+        ..Default::default()
+    };
     let errors = validate_panel(&state);
     assert!(
         errors.iter().any(|(f, msg)| f == "quantity" && msg.contains("not a number")),
@@ -211,13 +217,15 @@ fn validate_non_numeric_quantity() {
 
 #[test]
 fn validate_non_numeric_tp_value() {
-    let mut state = OrderPanelState::default();
-    state.symbol = "AAPL".to_string();
-    state.last_price = Some(185.0);
-    state.quantity = "100".to_string();
-    state.tp_enabled = true;
-    state.tp_value = "xyz".to_string();
-    state.sl_enabled = false;
+    let state = OrderPanelState {
+        symbol: "AAPL".to_string(),
+        last_price: Some(185.0),
+        quantity: "100".to_string(),
+        tp_enabled: true,
+        tp_value: "xyz".to_string(),
+        sl_enabled: false,
+        ..Default::default()
+    };
     let errors = validate_panel(&state);
     assert!(
         errors.iter().any(|(f, msg)| f == "tp" && msg.contains("not a number")),
@@ -230,13 +238,15 @@ fn validate_non_numeric_tp_value() {
 
 #[test]
 fn validate_non_numeric_sl_value() {
-    let mut state = OrderPanelState::default();
-    state.symbol = "AAPL".to_string();
-    state.last_price = Some(185.0);
-    state.quantity = "100".to_string();
-    state.tp_enabled = false;
-    state.sl_enabled = true;
-    state.sl_value = "???".to_string();
+    let state = OrderPanelState {
+        symbol: "AAPL".to_string(),
+        last_price: Some(185.0),
+        quantity: "100".to_string(),
+        tp_enabled: false,
+        sl_enabled: true,
+        sl_value: "???".to_string(),
+        ..Default::default()
+    };
     let errors = validate_panel(&state);
     assert!(
         errors.iter().any(|(f, msg)| f == "sl" && msg.contains("not a number")),

@@ -129,8 +129,7 @@ fn full_long_bracket_correct_order() {
 
 #[test]
 fn full_short_bracket_correct_order() {
-    let mut tool = BracketTool::default();
-    tool.side = BracketSide::Short;
+    let mut tool = BracketTool { side: BracketSide::Short, ..Default::default() };
     tool.activate();
 
     // Click 1: entry at 100
@@ -183,8 +182,7 @@ fn long_bracket_swaps_when_tp_below_sl_above() {
 fn short_bracket_swaps_when_tp_above_sl_below() {
     // User clicks TP above entry and SL below entry for a Short.
     // Tool should swap them.
-    let mut tool = BracketTool::default();
-    tool.side = BracketSide::Short;
+    let mut tool = BracketTool { side: BracketSide::Short, ..Default::default() };
     tool.activate();
     tool.click(100.0); // entry
     tool.click(110.0); // "TP" above entry (wrong for Short)
@@ -249,8 +247,7 @@ fn long_bracket_both_below_entry_sorts_correctly() {
 fn short_bracket_both_above_entry_sorts_correctly() {
     // Both TP and SL clicked above entry for a Short.
     // Lower one becomes TP, higher one becomes SL.
-    let mut tool = BracketTool::default();
-    tool.side = BracketSide::Short;
+    let mut tool = BracketTool { side: BracketSide::Short, ..Default::default() };
     tool.activate();
     tool.click(100.0); // entry
     tool.click(108.0); // "TP" above entry
@@ -272,8 +269,7 @@ fn short_bracket_both_above_entry_sorts_correctly() {
 fn short_bracket_both_below_entry_sorts_correctly() {
     // Both TP and SL clicked below entry for a Short.
     // Lower one becomes TP, higher one becomes SL.
-    let mut tool = BracketTool::default();
-    tool.side = BracketSide::Short;
+    let mut tool = BracketTool { side: BracketSide::Short, ..Default::default() };
     tool.activate();
     tool.click(100.0); // entry
     tool.click(92.0); // "TP" below entry
@@ -417,8 +413,7 @@ fn activate_resets_in_progress_bracket() {
 
 #[test]
 fn side_captured_at_entry_click() {
-    let mut tool = BracketTool::default();
-    tool.side = BracketSide::Short;
+    let mut tool = BracketTool { side: BracketSide::Short, ..Default::default() };
     tool.activate();
     tool.click(100.0);
 
