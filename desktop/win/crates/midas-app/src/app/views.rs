@@ -1408,14 +1408,16 @@ impl MidasApp {
 
                 let w = |col_id| view_state.column_width(col_id);
 
+                use iced::widget::text::Wrapping;
                 let inner_row = Row::with_children(vec![
                     grid_data_cell(drag_btn.into(), w(COL_DRAG)),
                     grid_data_cell(fav_btn.into(), w(COL_FAV)),
-                    grid_data_cell(text(row_data.symbol.clone()).size(13).color(theme::TEXT_PRIMARY).into(), w(COL_TICKER)),
-                    grid_data_cell(text(row_data.price_text.clone()).size(13).color(theme::TEXT_PRIMARY).into(), w(COL_PRICE)),
+                    grid_data_cell(text(row_data.symbol.clone()).size(13).wrapping(Wrapping::None).color(theme::TEXT_PRIMARY).into(), w(COL_TICKER)),
+                    grid_data_cell(text(row_data.price_text.clone()).size(13).wrapping(Wrapping::None).color(theme::TEXT_PRIMARY).into(), w(COL_PRICE)),
                     grid_data_cell(
                         text(row_data.change_text.clone())
                             .size(13)
+                            .wrapping(Wrapping::None)
                             .color(row_data.change_color)
                             .into(),
                         w(COL_CHANGE),
@@ -1423,6 +1425,7 @@ impl MidasApp {
                     grid_data_cell(
                         text(row_data.gatr_text.clone())
                             .size(13)
+                            .wrapping(Wrapping::None)
                             .color(row_data.gatr_color)
                             .into(),
                         w(COL_GATR),
@@ -2831,10 +2834,14 @@ fn build_gerchik_atr_overlay<'a>(
 // ── Grid cell helpers ──────────────────────────────────────────────
 
 /// Wrap content in a grid data cell with border styling.
+/// Uses a fixed row height and clips overflow so text never wraps.
 fn grid_data_cell<'a>(content: Element<'a, Message>, width: f32) -> Element<'a, Message> {
     container(content)
         .width(width)
+        .height(28.0)
         .padding([2, 4])
+        .align_y(iced::alignment::Vertical::Center)
+        .clip(true)
         .style(|_| container::Style {
             border: iced::Border {
                 color: midas_grid::GRID_BORDER_COLOR,

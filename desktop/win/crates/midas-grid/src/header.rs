@@ -31,6 +31,8 @@ where
         .map(|(i, c)| (c.id(), i))
         .collect();
 
+    let header_height = style::GridStyle::default().header_height;
+
     let mut header_cells: Vec<Element<'a, M>> = Vec::with_capacity(col_order.len() * 2);
 
     for (i, &col_id) in col_order.iter().enumerate() {
@@ -58,8 +60,11 @@ where
             mouse_area(
                 container(row![col.header(), text(sort_indicator).size(12)])
                     .width(width)
+                    .height(header_height)
                     .padding([2, 4])
                     .align_x(h_align)
+                    .align_y(iced::alignment::Vertical::Center)
+                    .clip(true)
                     .style(|_| container::Style {
                         border: iced::Border {
                             color: style::GRID_HEADER_BORDER_COLOR,
@@ -74,8 +79,11 @@ where
         } else {
             container(col.header())
                 .width(width)
+                .height(header_height)
                 .padding([2, 4])
                 .align_x(h_align)
+                .align_y(iced::alignment::Vertical::Center)
+                .clip(true)
                 .style(|_| container::Style {
                     border: iced::Border {
                         color: style::GRID_HEADER_BORDER_COLOR,

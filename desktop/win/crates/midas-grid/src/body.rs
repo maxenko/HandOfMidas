@@ -32,7 +32,9 @@ where
         .map(|(i, c)| (c.id(), i))
         .collect();
 
-    let selected_bg = style::GridStyle::default().selected_bg;
+    let grid_style = style::GridStyle::default();
+    let selected_bg = grid_style.selected_bg;
+    let row_height = grid_style.row_height;
 
     let mut body = Column::new();
 
@@ -65,8 +67,11 @@ where
             cells.push(
                 container(cell_content)
                     .width(width)
+                    .height(row_height)
                     .padding([2, 4])
                     .align_x(h_align)
+                    .align_y(iced::alignment::Vertical::Center)
+                    .clip(true)
                     .style(|_| container::Style {
                         border: iced::Border {
                             color: style::GRID_BORDER_COLOR,

@@ -6,7 +6,7 @@
 //! render the watchlist without knowing anything about market data
 //! plumbing.
 
-use iced::widget::{button, text, Space};
+use iced::widget::{button, text, text::Wrapping, Space};
 use iced::{Color, Element};
 use std::cmp::Ordering;
 
@@ -144,16 +144,16 @@ impl GridColumn<WatchlistRow, Message> for WatchlistColumn {
                     .into()
             }
             Self::Ticker => {
-                text(&row.symbol).size(13).into()
+                text(&row.symbol).size(13).wrapping(Wrapping::None).into()
             }
             Self::Price => {
-                text(&row.price_text).size(13).into()
+                text(&row.price_text).size(13).wrapping(Wrapping::None).into()
             }
             Self::ChangePercent => {
-                text(&row.change_text).size(13).color(row.change_color).into()
+                text(&row.change_text).size(13).wrapping(Wrapping::None).color(row.change_color).into()
             }
             Self::GATR => {
-                text(&row.gatr_text).size(13).color(row.gatr_color).into()
+                text(&row.gatr_text).size(13).wrapping(Wrapping::None).color(row.gatr_color).into()
             }
             Self::Delete => {
                 button(text("\u{00D7}").size(12))
