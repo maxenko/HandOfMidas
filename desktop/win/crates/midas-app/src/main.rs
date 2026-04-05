@@ -7,6 +7,7 @@
 mod annotation_persistence;
 mod annotation_store;
 mod app;
+mod broker_bridge;
 mod chart_widget;
 mod layout;
 mod level_store;
@@ -124,6 +125,26 @@ fn subscription(state: &MidasApp) -> Subscription<Message> {
             _ => None,
         });
         subs.push(mouse_up_sub);
+    }
+
+    // Broker order event subscription.
+    if let Some(ref bridge) = state.broker_bridge {
+        let source = bridge.event_source();
+        let broker_sub = Subscription::run_with(
+            source,
+            crate::broker_bridge::broker_event_stream,
+        );
+        subs.push(broker_sub);
+    }
+
+    // Broker connection state subscription.
+    if let Some(ref bridge) = state.broker_bridge {
+        let conn_source = bridge.conn_source();
+        let conn_sub = Subscription::run_with(
+            conn_source,
+            crate::broker_bridge::broker_conn_stream,
+        );
+        subs.push(conn_sub);
     }
 
     Subscription::batch(subs)

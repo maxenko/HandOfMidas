@@ -153,6 +153,10 @@ pub struct MidasApp {
     pub annotation_store: AnnotationStore,
     /// In-memory market data cache for watchlist columns.
     pub market_cache: crate::market_cache::MarketDataCache,
+    /// Bridge to the midas-broker engine. None if engine failed to start.
+    pub broker_bridge: Option<Arc<crate::broker_bridge::BrokerBridge>>,
+    /// Current broker connection state display string.
+    pub broker_connection_display: String,
 }
 
 /// Pending drag: press started but hold threshold not yet reached.
@@ -439,6 +443,12 @@ pub enum Message {
         entry_fill_price: Option<f64>,
     },
 
+    /// Raw broker event received from the subscription channel.
+    /// Boxed to keep Message size small (BrokerEvent is large).
+    BrokerEventReceived(Box<midas_broker::BrokerEvent>),
+    /// Broker connection state changed.
+    BrokerConnectionChanged(String),
+
     // -- Toast notifications --
     /// Show a toast notification.
     ShowToast(String),
@@ -686,6 +696,18 @@ impl MidasApp {
             None
         };
 
+        // Start the broker engine with TestBroker defaults.
+        let broker_bridge = {
+            let broker_config = midas_broker::BrokerConfig::default();
+            let handle = midas_broker::start_broker_engine(broker_config);
+            let bridge = Arc::new(crate::broker_bridge::BrokerBridge::new(
+                handle,
+                "Test Broker",
+            ));
+            tracing::info!("Broker engine started (Test Broker, data_source=test)");
+            Some(bridge)
+        };
+
         let mut app = Self {
             charts,
             workspace,
@@ -719,7 +741,23 @@ impl MidasApp {
             bracket_context_menu: None,
             annotation_store: AnnotationStore::new(),
             market_cache: crate::market_cache::MarketDataCache::default(),
+            broker_bridge: broker_bridge.clone(),
+            broker_connection_display: "Disconnected".to_string(),
         };
+
+        // Register broker bridge in provider registry.
+        if let Some(ref bridge) = app.broker_bridge {
+            app.providers.register_order_broker(bridge.clone());
+            app.providers.set_active_broker(Some(0));
+        }
+
+        // Connect to broker (TestBroker auto-connects, but the command
+        // ensures the engine state machine transitions properly).
+        if let Some(ref bridge) = app.broker_bridge {
+            if let Err(e) = bridge.connect() {
+                tracing::warn!("Failed to send initial Connect: {e}");
+            }
+        }
 
         // Restore bracket annotations from persistence.
         let data_dir = app
@@ -2147,7 +2185,12 @@ impl MidasApp {
                 Task::none()
             }
 
-            Message::WindowCloseRequested => self.flush_config(),
+            Message::WindowCloseRequested => {
+                if let Some(ref bridge) = self.broker_bridge {
+                    let _ = bridge.shutdown();
+                }
+                self.flush_config()
+            }
 
             Message::PopOut(pane) => {
                 if let Some(pane_state) = self.workspace.panes.get(pane) {
@@ -2867,11 +2910,52 @@ impl MidasApp {
                 let quantity: f64 = panel.quantity.parse().unwrap_or(100.0);
                 let symbol = panel.symbol.clone();
 
-                // Broker bridge not yet wired — order is visualized but not submitted.
-                tracing::warn!(
-                    "Broker bridge not connected: CreateMarketBracket for {} not sent",
-                    panel.symbol,
-                );
+                // Send to broker engine.
+                if let Some(ref bridge) = self.broker_bridge {
+                    let broker_params = midas_core::broker::MarketBracketParams {
+                        symbol: symbol.clone(),
+                        con_id: None,
+                        sec_type: midas_core::SecurityType::Stock,
+                        exchange: "SMART".to_string(),
+                        currency: "USD".to_string(),
+                        action: match panel.side {
+                            OrderSide::Buy => midas_core::broker::OrderAction::Buy,
+                            OrderSide::Sell => midas_core::broker::OrderAction::Sell,
+                        },
+                        quantity,
+                        outside_rth: false,
+                        take_profit: tp_price.map(|p| midas_core::broker::TakeProfitParams {
+                            price: p,
+                            tif: None,
+                        }),
+                        stop_loss: sl_price.map(|p| midas_core::broker::StopLossParams {
+                            stop_price: p,
+                            limit_price: None,
+                            tif: None,
+                        }),
+                        reference_price: Some(last_price),
+                        strategy: None,
+                        tags: Vec::new(),
+                    };
+                    match bridge.create_market_bracket(broker_params) {
+                        Ok(()) => {
+                            tracing::info!(
+                                "CreateMarketBracket sent to broker engine for {}",
+                                symbol
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to send bracket to broker: {e}");
+                            self.toast_message = Some(format!("Broker error: {e}"));
+                            self.toast_created_at = Some(Instant::now());
+                        }
+                    }
+                } else {
+                    tracing::warn!(
+                        "No broker bridge: CreateMarketBracket for {} not sent",
+                        symbol,
+                    );
+                }
                 self.status_message = format!(
                     "Order submitted: {} {} {}",
                     match panel.side { OrderSide::Buy => "BUY", OrderSide::Sell => "SELL" },
@@ -2959,6 +3043,33 @@ impl MidasApp {
                         // Mark levels dirty on all charts showing this symbol
                         // so the GPU re-renders the bracket lines.
                         self.mark_levels_dirty_for_ticker(ticker);
+
+                        // Send price modification to broker engine.
+                        if let Some(ref bridge) = self.broker_bridge {
+                            let order_id = self
+                                .order_annotation_links
+                                .values()
+                                .find(|link| link.annotation_id == annotation_id)
+                                .and_then(|link| match leg {
+                                    LegRole::TakeProfit => link.tp_order_id,
+                                    LegRole::StopLoss => link.sl_order_id,
+                                    LegRole::Entry => None,
+                                });
+                            if let Some(order_id) = order_id {
+                                if let Err(e) =
+                                    bridge.modify_bracket_leg(order_id, new_price)
+                                {
+                                    tracing::error!(
+                                        "Failed to send ModifyBracketLeg to broker: {e}"
+                                    );
+                                } else {
+                                    tracing::debug!(
+                                        "ModifyBracketLeg sent: order={order_id} \
+                                         price={new_price:.4}"
+                                    );
+                                }
+                            }
+                        }
                     } else {
                         tracing::warn!(
                             "Bracket leg drag: annotation {annotation_id} not found \
@@ -2976,9 +3087,11 @@ impl MidasApp {
             }
             Message::BracketContextCancel(parent_id) => {
                 self.bracket_context_menu = None;
-                // Find and remove the bracket annotation link
-                if let Some(link) = self.order_annotation_links.remove(&parent_id) {
-                    // Update annotation to Cancelled before removing the link
+
+                // Look up the link but do NOT remove it yet.
+                // The link stays alive until the engine confirms cancellation.
+                if let Some(link) = self.order_annotation_links.get(&parent_id).cloned() {
+                    // Visually mark the annotation as Cancelled immediately.
                     let ann_id = midas_chart::AnnotationId(link.annotation_id);
                     self.annotation_store.update(&link.symbol, ann_id, |ann| {
                         if let midas_chart::widget::AnnotationKind::OrderBracket(ref mut b) = ann.kind {
@@ -2986,12 +3099,26 @@ impl MidasApp {
                         }
                     });
                     self.mark_levels_dirty_for_ticker(&link.symbol);
-                    tracing::info!("Bracket {} cancelled from context menu", link.parent_order_id);
-                    // Broker bridge not yet wired — cancellation is visual only.
-                    tracing::warn!(
-                        "Broker bridge not connected: CancelBracket for {} not sent",
-                        parent_id,
-                    );
+                    tracing::info!("Bracket {parent_id} cancel requested from context menu");
+
+                    // Send cancellation to broker engine.
+                    if let Some(ref bridge) = self.broker_bridge {
+                        match bridge.cancel_bracket(parent_id) {
+                            Ok(()) => {
+                                tracing::info!(
+                                    "CancelBracket sent to broker engine for {parent_id}"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "Failed to send CancelBracket to broker: {e}"
+                                );
+                            }
+                        }
+                    } else {
+                        // No engine — remove link now since there will be no confirmation.
+                        self.order_annotation_links.remove(&parent_id);
+                    }
                 }
                 self.toast_message = Some("Bracket cancelled".to_string());
                 self.toast_created_at = Some(Instant::now());
@@ -3032,6 +3159,9 @@ impl MidasApp {
                     tp_order_id: take_profit_id,
                     sl_order_id: stop_loss_id,
                     symbol: symbol.clone(),
+                    side: action,
+                    quantity,
+                    created_at: std::time::Instant::now(),
                 };
                 self.order_annotation_links.insert(link.parent_order_id, link);
 
@@ -3043,6 +3173,157 @@ impl MidasApp {
                 self.status_message = format!(
                     "Bracket annotation {annotation_id} created for {symbol}"
                 );
+                Task::none()
+            }
+
+            Message::BrokerEventReceived(boxed_event) => {
+                use midas_broker::BrokerEvent;
+
+                match *boxed_event {
+                    BrokerEvent::BracketCreated {
+                        parent_id,
+                        take_profit_id,
+                        stop_loss_id,
+                        symbol,
+                        action,
+                        quantity,
+                        tp_price,
+                        sl_price,
+                        reference_price,
+                    } => {
+                        // Reconcile: find the existing annotation created locally
+                        // by matching symbol + side + quantity using cached fields.
+                        let side = crate::broker_bridge::translate_action_to_side(&action);
+
+                        let mut candidates: Vec<_> = self
+                            .order_annotation_links
+                            .iter()
+                            .filter(|(_, link)| {
+                                link.symbol == symbol
+                                    && link.side == side
+                                    && (link.quantity - quantity).abs() < 0.01
+                            })
+                            .collect();
+                        candidates.sort_by_key(|(_, link)| link.created_at);
+
+                        let matching_key = candidates.first().map(|(key, _)| **key);
+
+                        if let Some(old_key) = matching_key {
+                            if let Some(mut link) =
+                                self.order_annotation_links.remove(&old_key)
+                            {
+                                link.parent_order_id = parent_id;
+                                link.tp_order_id = take_profit_id;
+                                link.sl_order_id = stop_loss_id;
+                                self.order_annotation_links.insert(parent_id, link);
+                                tracing::info!(
+                                    "Reconciled bracket annotation: provisional \
+                                     {old_key} -> engine {parent_id} for {symbol}"
+                                );
+                            }
+                        } else {
+                            // No local annotation — create from engine event.
+                            let entry_price = reference_price.unwrap_or(0.0);
+                            return self.update(Message::BrokerBracketCreated {
+                                parent_id,
+                                take_profit_id,
+                                stop_loss_id,
+                                symbol,
+                                action: side,
+                                quantity,
+                                entry_price: Some(entry_price),
+                                tp_price,
+                                sl_price,
+                            });
+                        }
+                    }
+                    BrokerEvent::BracketStatusChanged {
+                        parent_id,
+                        status,
+                        entry_fill_price,
+                    } => {
+                        use midas_chart::widget::order_bracket::BracketStatus;
+                        let chart_status = match status {
+                            midas_broker::BracketLifecycleStatus::Submitted => {
+                                BracketStatus::Pending
+                            }
+                            midas_broker::BracketLifecycleStatus::EntryFilled => {
+                                BracketStatus::Active
+                            }
+                            midas_broker::BracketLifecycleStatus::TakeProfitHit => {
+                                BracketStatus::Closed
+                            }
+                            midas_broker::BracketLifecycleStatus::StopLossHit => {
+                                BracketStatus::Closed
+                            }
+                            midas_broker::BracketLifecycleStatus::Cancelled => {
+                                BracketStatus::Cancelled
+                            }
+                            midas_broker::BracketLifecycleStatus::Rejected => {
+                                BracketStatus::Cancelled
+                            }
+                            midas_broker::BracketLifecycleStatus::Error => {
+                                BracketStatus::Cancelled
+                            }
+                            midas_broker::BracketLifecycleStatus::Closed => {
+                                BracketStatus::Closed
+                            }
+                        };
+                        return self.update(Message::BrokerBracketStatusChanged {
+                            parent_id,
+                            status: chart_status,
+                            entry_fill_price,
+                        });
+                    }
+                    BrokerEvent::OrderFilled {
+                        order_id,
+                        shares,
+                        price,
+                        commission,
+                        ..
+                    } => {
+                        tracing::info!(
+                            "Order filled: {order_id} {shares} shares @ {price:.2} \
+                             (commission: {commission:?})"
+                        );
+                        let msg = format!(
+                            "Filled: {shares} @ ${price:.2}{}",
+                            commission
+                                .map(|c| format!(" (comm ${c:.2})"))
+                                .unwrap_or_default()
+                        );
+                        self.toast_message = Some(msg);
+                        self.toast_created_at = Some(Instant::now());
+                    }
+                    BrokerEvent::OrderRejected { order_id, reason } => {
+                        tracing::warn!("Order rejected: {order_id}: {reason}");
+                        self.toast_message = Some(format!("Order rejected: {reason}"));
+                        self.toast_created_at = Some(Instant::now());
+                    }
+                    BrokerEvent::OrderCancelled { order_id, reason } => {
+                        tracing::info!("Order cancelled: {order_id}: {reason}");
+                    }
+                    BrokerEvent::Connected { server_version } => {
+                        tracing::info!("Broker connected (server v{server_version})");
+                        self.status_message =
+                            format!("Broker connected (v{server_version})");
+                    }
+                    BrokerEvent::Disconnected { reason } => {
+                        tracing::warn!("Broker disconnected: {reason}");
+                        self.status_message =
+                            format!("Broker disconnected: {reason}");
+                    }
+                    BrokerEvent::OrderValidationFailed { message, code } => {
+                        tracing::warn!(
+                            "Order validation failed [{code}]: {message}"
+                        );
+                        self.toast_message = Some(format!("Validation: {message}"));
+                        self.toast_created_at = Some(Instant::now());
+                    }
+                    other => {
+                        tracing::trace!("Unhandled broker event: {other:?}");
+                    }
+                }
                 Task::none()
             }
 
@@ -3078,6 +3359,42 @@ impl MidasApp {
                             "Bracket {ann_id} status -> {status:?} \
                              (parent={parent_id})"
                         );
+                        // Mark charts dirty so GPU re-renders bracket lines.
+                        self.mark_levels_dirty_for_ticker(&link.symbol);
+
+                        // Toast notification for significant status changes.
+                        use midas_chart::widget::order_bracket::BracketStatus;
+                        let toast = match status {
+                            BracketStatus::Active => {
+                                let price_str = entry_fill_price
+                                    .map(|p| format!(" @ ${p:.2}"))
+                                    .unwrap_or_default();
+                                Some(format!(
+                                    "{} entry filled{price_str}",
+                                    link.symbol
+                                ))
+                            }
+                            BracketStatus::Closed => {
+                                Some(format!("{} bracket closed", link.symbol))
+                            }
+                            BracketStatus::Cancelled => {
+                                Some(format!("{} bracket cancelled", link.symbol))
+                            }
+                            _ => None,
+                        };
+                        if let Some(msg) = toast {
+                            self.toast_message = Some(msg);
+                            self.toast_created_at = Some(Instant::now());
+                        }
+
+                        // Remove link when engine confirms cancellation (S9).
+                        if status == BracketStatus::Cancelled {
+                            self.order_annotation_links.remove(&parent_id);
+                            tracing::info!(
+                                "Annotation link removed for cancelled bracket \
+                                 {parent_id}"
+                            );
+                        }
                     } else {
                         tracing::warn!(
                             "Bracket annotation {ann_id} not found in store for \
@@ -3090,6 +3407,11 @@ impl MidasApp {
                         "No annotation link found for parent_id={parent_id}"
                     );
                 }
+                Task::none()
+            }
+
+            Message::BrokerConnectionChanged(state_str) => {
+                self.broker_connection_display = state_str;
                 Task::none()
             }
 

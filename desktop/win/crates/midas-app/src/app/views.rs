@@ -1585,8 +1585,37 @@ impl MidasApp {
         // Connection indicator: green dot + provider name.
         let conn = self.connection_indicator();
 
+        // Broker connection indicator: colored dot + broker name.
+        let broker_indicator = {
+            let (dot_color, label) = if self.broker_connection_display == "Ready" {
+                let broker_name = self
+                    .providers
+                    .active_broker()
+                    .map(|b| b.name().to_string())
+                    .unwrap_or_else(|| "Broker".to_string());
+                (Color::from_rgb(0.2, 0.8, 0.2), format!("Broker: {broker_name}"))
+            } else if self.broker_connection_display == "Disconnected" {
+                (
+                    Color::from_rgb(0.6, 0.6, 0.6),
+                    format!("Broker: {}", self.broker_connection_display),
+                )
+            } else {
+                (
+                    Color::from_rgb(0.9, 0.7, 0.2),
+                    format!("Broker: {}", self.broker_connection_display),
+                )
+            };
+            row![
+                text("\u{25CF}").size(10).color(dot_color),
+                text(format!(" {label}")).size(12).color(theme::TEXT_SECONDARY),
+            ]
+            .align_y(iced::Alignment::Center)
+        };
+
         let status_row = row![
             conn,
+            text(" | ").size(12).color(theme::TEXT_MUTED),
+            broker_indicator,
             text(" | ").size(12).color(theme::TEXT_MUTED),
             text(&self.status_message)
                 .size(12)

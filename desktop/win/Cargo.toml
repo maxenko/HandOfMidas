@@ -87,6 +87,9 @@ chrono = { version = "0.4", features = ["serde"] }
 # Identity
 uuid = { version = "1", features = ["v7", "serde"] }
 
+# Broker engine (root workspace crate, path dependency)
+midas-broker = { path = "../../crates/midas-broker" }
+
 # Concurrency primitives
 parking_lot = "0.12"
 

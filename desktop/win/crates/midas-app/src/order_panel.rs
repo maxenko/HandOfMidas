@@ -284,6 +284,12 @@ pub struct OrderAnnotationLink {
     pub sl_order_id: Option<uuid::Uuid>,
     /// Symbol (for quick lookup without loading orders).
     pub symbol: String,
+    /// Side of the bracket (Long/Short), cached at creation time for reconciliation.
+    pub side: midas_chart::widget::order_bracket::BracketSide,
+    /// Quantity submitted, cached at creation time for reconciliation.
+    pub quantity: f64,
+    /// When this link was created, for FIFO ordering during reconciliation.
+    pub created_at: std::time::Instant,
 }
 
 // ===========================================================================
