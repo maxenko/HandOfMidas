@@ -9,7 +9,7 @@
 
 use iced::widget::pane_grid;
 
-use midas_core::{ChartId, WatchlistId};
+use midas_core::{ChartId, OrderPanelId, WatchlistId};
 
 // ── Panel content ────────────────────────────────────────────────────
 
@@ -20,6 +20,8 @@ pub enum PanelContent {
     Chart(ChartId),
     /// A watchlist panel identified by a stable `WatchlistId`.
     Watchlist(WatchlistId),
+    /// An order panel identified by a stable `OrderPanelId`.
+    Order(OrderPanelId),
 }
 
 // ── Per-pane state ───────────────────────────────────────────────────
@@ -54,11 +56,19 @@ impl PaneState {
         }
     }
 
+    /// Create a new pane state for an order panel.
+    pub fn order(id: OrderPanelId) -> Self {
+        Self {
+            content: PanelContent::Order(id),
+            is_focused: false,
+        }
+    }
+
     /// Convenience: returns `Some(chart_id)` if this pane holds a chart.
     pub fn chart_id(&self) -> Option<ChartId> {
         match self.content {
             PanelContent::Chart(id) => Some(id),
-            PanelContent::Watchlist(_) => None,
+            PanelContent::Watchlist(_) | PanelContent::Order(_) => None,
         }
     }
 }
@@ -79,6 +89,8 @@ pub struct WorkspaceLayout {
     pub(crate) next_chart_id: u32,
     /// Monotonic counter for generating unique `WatchlistId` values.
     pub(crate) next_watchlist_id: u32,
+    /// Monotonic counter for generating unique `OrderPanelId` values.
+    pub(crate) next_order_panel_id: u32,
 }
 
 impl WorkspaceLayout {
@@ -94,6 +106,7 @@ impl WorkspaceLayout {
             focus: Some(pane),
             next_chart_id: 2,
             next_watchlist_id: 1,
+            next_order_panel_id: 1,
         };
 
         // Mark the initial pane as focused.
@@ -115,6 +128,13 @@ impl WorkspaceLayout {
     pub fn next_watchlist_id(&mut self) -> WatchlistId {
         let id = WatchlistId::new(self.next_watchlist_id);
         self.next_watchlist_id += 1;
+        id
+    }
+
+    /// Allocate a new unique `OrderPanelId`.
+    pub fn next_order_panel_id(&mut self) -> OrderPanelId {
+        let id = OrderPanelId::new(self.next_order_panel_id);
+        self.next_order_panel_id += 1;
         id
     }
 
@@ -208,6 +228,25 @@ impl WorkspaceLayout {
             .iter()
             .find(|(_, state)| matches!(state.content, PanelContent::Watchlist(id) if id == wl_id))
             .map(|(pane, _)| *pane)
+    }
+
+    /// Find the pane displaying the given `OrderPanelId`.
+    pub fn find_order_pane(&self, op_id: OrderPanelId) -> Option<pane_grid::Pane> {
+        self.panes
+            .panes
+            .iter()
+            .find(|(_, state)| matches!(state.content, PanelContent::Order(id) if id == op_id))
+            .map(|(pane, _)| *pane)
+    }
+
+    /// Find the first order panel pane in the workspace (any ID).
+    pub fn find_any_order_pane(&self) -> Option<pane_grid::Pane> {
+        self.panes
+            .panes
+            .iter()
+            .find_map(|(pane, state)| {
+                matches!(state.content, PanelContent::Order(_)).then_some(*pane)
+            })
     }
 
     /// Get the first pane in the state (by BTreeMap order).

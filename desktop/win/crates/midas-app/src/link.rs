@@ -5,7 +5,7 @@
 //! target-matching function used by propagation logic.
 
 use iced::window;
-use midas_core::{ChartId, LinkColor, LinkMode, WatchlistId};
+use midas_core::{ChartId, LinkColor, LinkMode, OrderPanelId, WatchlistId};
 
 // ── Picker target ──────────────────────────────────────────────────
 
@@ -15,6 +15,7 @@ pub enum PickerTarget {
     Docked(ChartId),
     Floating(window::Id),
     Watchlist(WatchlistId),
+    Order(OrderPanelId),
 }
 
 // ── Link dimension ──────────────────────────────────────────────────

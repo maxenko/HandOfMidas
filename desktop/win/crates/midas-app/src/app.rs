@@ -19,7 +19,7 @@ use midas_chart::camera::Camera2D;
 use midas_chart::state::ChartState;
 use midas_chart::AnnotationId;
 use midas_core::config::{AppConfig, ChartConfig, LayoutNode, PanelSlot};
-use midas_core::{CandleBuffer, ChartId, DataProvider, LinkMode, Timeframe, WatchlistId};
+use midas_core::{CandleBuffer, ChartId, DataProvider, LinkMode, OrderPanelId, Timeframe, WatchlistId};
 
 use crate::registry::ProviderRegistry;
 
@@ -27,7 +27,7 @@ use crate::annotation_store::AnnotationStore;
 use crate::layout::{LayoutPresetKind, PanelContent, WorkspaceLayout};
 use crate::level_store::LevelStore;
 use crate::link::{LinkDimension, PickerTarget};
-use crate::order_panel::{OrderPanelState, OrderSide, PriceInputMode, StopLossType};
+use crate::order_panel::OrderSide;
 use crate::watchlist::WatchlistPanel;
 
 // ── Load state ────────────────────────────────────────────────────────
@@ -138,8 +138,8 @@ pub struct MidasApp {
     pub link_picker_open: Option<(PickerTarget, LinkDimension)>,
     /// Active column resize: (watchlist_id, column_index, start_x, original_width).
     pub resizing_column: Option<(WatchlistId, usize, f32, f32)>,
-    /// Order entry panel state.
-    pub order_panel: OrderPanelState,
+    /// Dockable order panels keyed by stable OrderPanelId.
+    pub order_panels: HashMap<OrderPanelId, crate::order_panel::OrderPanel>,
     /// Links between chart bracket annotations and broker orders,
     /// keyed by the parent (entry) order UUID for O(1) lookup.
     pub order_annotation_links: HashMap<uuid::Uuid, crate::order_panel::OrderAnnotationLink>,
@@ -379,37 +379,13 @@ pub enum Message {
     /// Dismiss any open link picker.
     DismissLinkPicker,
 
-    // -- Order panel --
-    /// Toggle the order panel visibility.
-    OrderPanelToggle,
-    /// Set the order side (Buy/Sell).
-    OrderPanelSetSide(OrderSide),
-    /// Update the quantity input text.
-    OrderPanelSetQuantity(String),
-    /// Toggle Take Profit enabled.
-    OrderPanelToggleTp(bool),
-    /// Set TP price input mode.
-    OrderPanelSetTpMode(PriceInputMode),
-    /// Update TP value input text.
-    OrderPanelSetTpValue(String),
-    /// Toggle Stop Loss enabled.
-    OrderPanelToggleSl(bool),
-    /// Set SL price input mode.
-    OrderPanelSetSlMode(PriceInputMode),
-    /// Update SL value input text.
-    OrderPanelSetSlValue(String),
-    /// Set SL type (Stop vs StopLimit).
-    OrderPanelSetSlType(StopLossType),
-    /// Update SL limit price input text.
-    OrderPanelSetSlLimit(String),
-    /// Submit the order (triggers confirmation dialog).
-    OrderPanelSubmit,
-    /// User confirmed the order in the confirmation dialog.
-    OrderPanelConfirmYes,
-    /// User cancelled the confirmation dialog.
-    OrderPanelConfirmNo,
-    /// Dismiss the order panel.
-    OrderPanelDismiss,
+    // -- Dockable order panel --
+    /// Add a new dockable order panel to the workspace.
+    AddOrderPanel,
+    /// Action on a specific dockable order panel.
+    OrderPanelMsg(OrderPanelId, crate::order_panel::OrderPanelAction),
+    /// Set the symbol link mode for a dockable order panel.
+    OrderPanelSetSymbolLink(OrderPanelId, LinkMode),
 
     // -- Bracket drag --
     /// A bracket leg was dragged on a chart.
@@ -573,17 +549,23 @@ impl MidasApp {
 
         let open_task = open_task.map(Message::MainWindowOpened);
 
-        // Build workspace, charts, and watchlists from config.
-        let (workspace, charts, watchlists, status_message);
+        // Build workspace, charts, watchlists, and order panels from config.
+        let (workspace, charts, watchlists, restored_order_panels, status_message);
 
         if !config.layout_tree.is_empty() {
             // Full topology restoration from layout_tree.
-            let (ws, ch, wl) =
-                Self::restore_from_layout_tree(&config.layout_tree, &config.charts, &config.watchlists);
-            let n = ch.len() + wl.len();
+            let (ws, ch, wl, op) =
+                Self::restore_from_layout_tree(
+                    &config.layout_tree,
+                    &config.charts,
+                    &config.watchlists,
+                    &config.order_panels,
+                );
+            let n = ch.len() + wl.len() + op.len();
             workspace = ws;
             charts = ch;
             watchlists = wl;
+            restored_order_panels = op;
             status_message = format!("Restored {n} panel(s) from layout tree");
         } else if !config.panel_order.is_empty() {
             // Legacy: panel_order-driven restoration (flat, no topology).
@@ -632,6 +614,10 @@ impl MidasApp {
                             wl.insert(wl_id, panel);
                         }
                     }
+                    PanelSlot::OrderPanel { .. } => {
+                        // TODO: Slice 5 will restore order panels from legacy panel_order.
+                        continue;
+                    }
                 }
             }
 
@@ -644,6 +630,7 @@ impl MidasApp {
             workspace = ws;
             charts = ch;
             watchlists = wl;
+            restored_order_panels = HashMap::new();
             status_message = format!("Restored {n} panel(s) from config");
         } else if !config.charts.is_empty() {
             // Legacy path: charts only (backward compat).
@@ -666,6 +653,7 @@ impl MidasApp {
             workspace = ws;
             charts = ch;
             watchlists = HashMap::new();
+            restored_order_panels = HashMap::new();
             status_message = format!("Restored {n} chart(s) from config");
         } else {
             let (ws, first_id) = WorkspaceLayout::single();
@@ -674,6 +662,7 @@ impl MidasApp {
             workspace = ws;
             charts = ch;
             watchlists = HashMap::new();
+            restored_order_panels = HashMap::new();
             status_message = "Ready".to_string();
         };
 
@@ -734,7 +723,7 @@ impl MidasApp {
             dragging_ticker: None,
             link_picker_open: None,
             resizing_column: None,
-            order_panel: OrderPanelState::default(),
+            order_panels: restored_order_panels,
             order_annotation_links: HashMap::new(),
             toast_message: None,
             toast_created_at: None,
@@ -816,14 +805,22 @@ impl MidasApp {
         tree: &[LayoutNode],
         chart_cfgs: &[ChartConfig],
         watchlist_cfgs: &[midas_core::config::WatchlistConfig],
-    ) -> (WorkspaceLayout, HashMap<ChartId, ChartPanel>, HashMap<WatchlistId, WatchlistPanel>) {
+        order_panel_cfgs: &[midas_core::config::OrderPanelConfig],
+    ) -> (
+        WorkspaceLayout,
+        HashMap<ChartId, ChartPanel>,
+        HashMap<WatchlistId, WatchlistPanel>,
+        HashMap<OrderPanelId, crate::order_panel::OrderPanel>,
+    ) {
         use crate::layout::PaneState;
 
         struct RestoreCtx {
             charts: HashMap<ChartId, ChartPanel>,
             watchlists: HashMap<WatchlistId, WatchlistPanel>,
+            order_panels: HashMap<OrderPanelId, crate::order_panel::OrderPanel>,
             next_chart_id: u32,
             next_wl_id: u32,
+            next_order_id: u32,
             cursor: usize,
         }
 
@@ -833,6 +830,7 @@ impl MidasApp {
                 tree: &[LayoutNode],
                 chart_cfgs: &[ChartConfig],
                 watchlist_cfgs: &[midas_core::config::WatchlistConfig],
+                order_panel_cfgs: &[midas_core::config::OrderPanelConfig],
             ) -> pane_grid::Configuration<PaneState> {
                 if self.cursor >= tree.len() {
                     let id = ChartId::new(self.next_chart_id);
@@ -849,8 +847,8 @@ impl MidasApp {
                         };
                         let r = *ratio;
                         self.cursor += 1;
-                        let a = self.parse_node(tree, chart_cfgs, watchlist_cfgs);
-                        let b = self.parse_node(tree, chart_cfgs, watchlist_cfgs);
+                        let a = self.parse_node(tree, chart_cfgs, watchlist_cfgs, order_panel_cfgs);
+                        let b = self.parse_node(tree, chart_cfgs, watchlist_cfgs, order_panel_cfgs);
                         pane_grid::Configuration::Split {
                             axis: ax,
                             ratio: r,
@@ -879,6 +877,25 @@ impl MidasApp {
                         self.cursor += 1;
                         pane_grid::Configuration::Pane(PaneState::watchlist(wl_id))
                     }
+                    LayoutNode::OrderPanel { order_panel_index } => {
+                        let op_id = OrderPanelId::new(self.next_order_id);
+                        self.next_order_id += 1;
+                        if let Some(op_cfg) = order_panel_cfgs.get(*order_panel_index) {
+                            let panel = crate::order_panel::OrderPanel::from_config(op_id, op_cfg);
+                            self.order_panels.insert(op_id, panel);
+                        }
+                        self.cursor += 1;
+                        pane_grid::Configuration::Pane(PaneState::order(op_id))
+                    }
+                    LayoutNode::Unknown => {
+                        // Forward-compatibility: skip unknown node types gracefully.
+                        tracing::warn!("Skipping unknown layout node at index {}", self.cursor);
+                        let id = ChartId::new(self.next_chart_id);
+                        self.next_chart_id += 1;
+                        self.charts.insert(id, MidasApp::make_empty_panel());
+                        self.cursor += 1;
+                        pane_grid::Configuration::Pane(PaneState::chart(id))
+                    }
                 }
             }
         }
@@ -886,12 +903,14 @@ impl MidasApp {
         let mut ctx = RestoreCtx {
             charts: HashMap::new(),
             watchlists: HashMap::new(),
+            order_panels: HashMap::new(),
             next_chart_id: 1,
             next_wl_id: 1,
+            next_order_id: 1,
             cursor: 0,
         };
 
-        let config = ctx.parse_node(tree, chart_cfgs, watchlist_cfgs);
+        let config = ctx.parse_node(tree, chart_cfgs, watchlist_cfgs, order_panel_cfgs);
 
         let panes = pane_grid::State::with_configuration(config);
         let first_pane = panes.panes.keys().next().copied();
@@ -900,9 +919,10 @@ impl MidasApp {
             focus: first_pane,
             next_chart_id: ctx.next_chart_id,
             next_watchlist_id: ctx.next_wl_id,
+            next_order_panel_id: ctx.next_order_id,
         };
 
-        (ws, ctx.charts, ctx.watchlists)
+        (ws, ctx.charts, ctx.watchlists, ctx.order_panels)
     }
 
     /// Restore a single chart panel from config.
@@ -1079,6 +1099,22 @@ impl MidasApp {
                 chart.chart_state.dirty.mark_data();
             }
             tasks.push(self.load_floating_chart_async(wid, &symbol, tf));
+        }
+
+        // Order panels.
+        let order_targets: Vec<OrderPanelId> = find_link_targets(
+            source_link,
+            self.order_panels.iter().map(|(id, p)| (*id, p.symbol_link)),
+        );
+        for op_id in order_targets {
+            if let Some(panel) = self.order_panels.get_mut(&op_id) {
+                panel.state.symbol = symbol.clone();
+                panel.state.tp_value.clear();
+                panel.state.sl_value.clear();
+                panel.state.sl_limit_value.clear();
+                panel.state.last_price = None;
+                panel.state.errors.clear();
+            }
         }
 
         if tasks.is_empty() {
@@ -1599,6 +1635,8 @@ impl MidasApp {
                     .collect();
                 self.watchlists
                     .retain(|id, _| active_wl_ids.contains(id));
+                // Clean up orphaned order panels (presets create chart-only layouts).
+                self.order_panels.clear();
                 self.mark_config_dirty();
                 Task::none()
             }
@@ -1655,6 +1693,14 @@ impl MidasApp {
                     Some(PanelContent::Watchlist(wl_id)) => {
                         self.watchlists.remove(&wl_id);
                         self.status_message = format!("Closed {wl_id}");
+                    }
+                    Some(PanelContent::Order(order_id)) => {
+                        self.order_panels.remove(&order_id);
+                        if matches!(self.link_picker_open, Some((PickerTarget::Order(pid), _)) if pid == order_id)
+                        {
+                            self.link_picker_open = None;
+                        }
+                        self.status_message = format!("Closed {order_id}");
                     }
                     None => return Task::none(),
                 }
@@ -2268,6 +2314,218 @@ impl MidasApp {
                 Task::none()
             }
 
+            // -- Dockable order panel --
+            Message::AddOrderPanel => {
+                if let Some(focused) = self.workspace.focus {
+                    let op_id = self.workspace.next_order_panel_id();
+                    if let Some((chart_id, new_pane)) =
+                        self.workspace.split(pane_grid::Axis::Vertical, focused)
+                    {
+                        // split() always creates a chart pane — replace it with an order panel.
+                        if let Some(state) = self.workspace.panes.get_mut(new_pane) {
+                            state.content = PanelContent::Order(op_id);
+                        }
+                        // Remove the chart entry that split() created.
+                        self.charts.remove(&chart_id);
+                        let symbol = self
+                            .active_chart_id()
+                            .and_then(|id| self.charts.get(&id))
+                            .map(|p| p.symbol.clone())
+                            .unwrap_or_default();
+                        self.order_panels.insert(
+                            op_id,
+                            crate::order_panel::OrderPanel::new(op_id, symbol),
+                        );
+                        self.status_message = format!("Added {op_id}");
+                        return self.flush_config();
+                    }
+                }
+                Task::none()
+            }
+
+            Message::OrderPanelMsg(panel_id, action) => {
+                use crate::order_panel::OrderPanelAction;
+
+                // ConfirmYes needs broader access to self (broker_bridge, market_cache),
+                // so handle it outside the panel borrow.
+                if matches!(action, OrderPanelAction::ConfirmYes) {
+                    let panel = match self.order_panels.get(&panel_id) {
+                        Some(p) => p,
+                        None => return Task::none(),
+                    };
+                    let state = &panel.state;
+
+                    // Get last_price from market_cache (authoritative source).
+                    let last_price = self
+                        .market_cache
+                        .get(&state.symbol)
+                        .and_then(|snap| snap.last_price);
+
+                    let last_price = match last_price {
+                        Some(p) => p,
+                        None => {
+                            if let Some(p) = self.order_panels.get_mut(&panel_id) {
+                                p.state.errors = vec![
+                                    ("price".into(), "Market data not loaded".into()),
+                                ];
+                                p.state.showing_confirmation = false;
+                            }
+                            return Task::none();
+                        }
+                    };
+
+                    // Resolve TP/SL prices from panel inputs.
+                    let tp_price = if state.tp_enabled {
+                        state.tp_value.parse::<f64>().ok().map(|val| {
+                            crate::order_panel::resolve_price(
+                                state.tp_mode, val, last_price, state.side, true,
+                            )
+                        })
+                    } else {
+                        None
+                    };
+                    let sl_price = if state.sl_enabled {
+                        state.sl_value.parse::<f64>().ok().map(|val| {
+                            crate::order_panel::resolve_price(
+                                state.sl_mode, val, last_price, state.side, false,
+                            )
+                        })
+                    } else {
+                        None
+                    };
+
+                    let action = match state.side {
+                        OrderSide::Buy => midas_chart::widget::order_bracket::BracketSide::Long,
+                        OrderSide::Sell => midas_chart::widget::order_bracket::BracketSide::Short,
+                    };
+                    let quantity: f64 = state.quantity.parse().unwrap_or(100.0);
+                    let symbol = state.symbol.clone();
+                    let side = state.side;
+
+                    tracing::info!(
+                        "Order confirmed: {} {} {} (TP: {}, SL: {})",
+                        match side { OrderSide::Buy => "BUY", OrderSide::Sell => "SELL" },
+                        quantity,
+                        symbol,
+                        tp_price.is_some(),
+                        sl_price.is_some(),
+                    );
+
+                    // Send to broker engine.
+                    if let Some(ref bridge) = self.broker_bridge {
+                        let broker_params = midas_core::broker::MarketBracketParams {
+                            symbol: symbol.clone(),
+                            con_id: None,
+                            sec_type: midas_core::SecurityType::Stock,
+                            exchange: "SMART".to_string(),
+                            currency: "USD".to_string(),
+                            action: match side {
+                                OrderSide::Buy => midas_core::broker::OrderAction::Buy,
+                                OrderSide::Sell => midas_core::broker::OrderAction::Sell,
+                            },
+                            quantity,
+                            outside_rth: false,
+                            take_profit: tp_price.map(|p| midas_core::broker::TakeProfitParams {
+                                price: p,
+                                tif: None,
+                            }),
+                            stop_loss: sl_price.map(|p| midas_core::broker::StopLossParams {
+                                stop_price: p,
+                                limit_price: None,
+                                tif: None,
+                            }),
+                            reference_price: Some(last_price),
+                            strategy: None,
+                            tags: Vec::new(),
+                        };
+                        match bridge.create_market_bracket(broker_params) {
+                            Ok(()) => {
+                                tracing::info!(
+                                    "CreateMarketBracket sent to broker engine for {}",
+                                    symbol
+                                );
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to send bracket to broker: {e}");
+                                self.toast_message = Some(format!("Broker error: {e}"));
+                                self.toast_created_at = Some(Instant::now());
+                            }
+                        }
+                    } else {
+                        tracing::warn!(
+                            "No broker bridge: CreateMarketBracket for {} not sent",
+                            symbol,
+                        );
+                    }
+
+                    self.status_message = format!(
+                        "Order submitted: {} {} {}",
+                        match side { OrderSide::Buy => "BUY", OrderSide::Sell => "SELL" },
+                        quantity,
+                        symbol,
+                    );
+
+                    // Clear confirmation on the panel.
+                    if let Some(p) = self.order_panels.get_mut(&panel_id) {
+                        p.state.showing_confirmation = false;
+                    }
+
+                    // Create chart annotation via self-message so the bracket is
+                    // visible on all charts displaying this symbol.
+                    return self.update(Message::BrokerBracketCreated {
+                        parent_id: uuid::Uuid::now_v7(),
+                        take_profit_id: tp_price.map(|_| uuid::Uuid::now_v7()),
+                        stop_loss_id: sl_price.map(|_| uuid::Uuid::now_v7()),
+                        symbol,
+                        action,
+                        quantity,
+                        entry_price: Some(last_price),
+                        tp_price,
+                        sl_price,
+                    });
+                }
+
+                if let Some(panel) = self.order_panels.get_mut(&panel_id) {
+                    match action {
+                        OrderPanelAction::SetSide(side) => panel.state.side = side,
+                        OrderPanelAction::SetQuantity(qty) => panel.state.quantity = qty,
+                        OrderPanelAction::ToggleTp(enabled) => panel.state.tp_enabled = enabled,
+                        OrderPanelAction::SetTpMode(mode) => panel.state.tp_mode = mode,
+                        OrderPanelAction::SetTpValue(val) => panel.state.tp_value = val,
+                        OrderPanelAction::ToggleSl(enabled) => panel.state.sl_enabled = enabled,
+                        OrderPanelAction::SetSlMode(mode) => panel.state.sl_mode = mode,
+                        OrderPanelAction::SetSlValue(val) => panel.state.sl_value = val,
+                        OrderPanelAction::SetSlType(sl_type) => panel.state.sl_type = sl_type,
+                        OrderPanelAction::SetSlLimit(val) => panel.state.sl_limit_value = val,
+                        OrderPanelAction::Submit => {
+                            // Sync last_price from market_cache so validate_panel
+                            // can check TP/SL direction against current price.
+                            panel.state.last_price = self
+                                .market_cache
+                                .get(&panel.state.symbol)
+                                .and_then(|snap| snap.last_price);
+                            let errors = crate::order_panel::validate_panel(&panel.state);
+                            let valid = errors.is_empty();
+                            panel.state.errors = errors;
+                            if valid {
+                                panel.state.showing_confirmation = true;
+                            }
+                        }
+                        OrderPanelAction::ConfirmNo => {
+                            panel.state.showing_confirmation = false;
+                        }
+                        OrderPanelAction::Dismiss => {
+                            panel.state.showing_confirmation = false;
+                        }
+                        OrderPanelAction::ConfirmYes => {
+                            // Handled above (outside the panel borrow).
+                            unreachable!();
+                        }
+                    }
+                }
+                Task::none()
+            }
+
             Message::WatchlistTickerInputChanged(wl_id, value) => {
                 if let Some(wl) = self.watchlists.get_mut(&wl_id) {
                     wl.add_ticker_input = value;
@@ -2461,6 +2719,22 @@ impl MidasApp {
                     tasks.push(self.load_floating_chart_async(wid, &symbol, tf));
                 }
 
+                // Propagate to order panels.
+                let order_targets: Vec<OrderPanelId> = find_link_targets(
+                    wl_link,
+                    self.order_panels.iter().map(|(id, p)| (*id, p.symbol_link)),
+                );
+                for op_id in order_targets {
+                    if let Some(panel) = self.order_panels.get_mut(&op_id) {
+                        panel.state.symbol = symbol.clone();
+                        panel.state.tp_value.clear();
+                        panel.state.sl_value.clear();
+                        panel.state.sl_limit_value.clear();
+                        panel.state.last_price = None;
+                        panel.state.errors.clear();
+                    }
+                }
+
                 if tasks.is_empty() {
                     Task::none()
                 } else {
@@ -2472,6 +2746,14 @@ impl MidasApp {
                 self.link_picker_open = None;
                 if let Some(wl) = self.watchlists.get_mut(&wl_id) {
                     wl.symbol_link = mode;
+                }
+                self.flush_config()
+            }
+
+            Message::OrderPanelSetSymbolLink(op_id, mode) => {
+                self.link_picker_open = None;
+                if let Some(panel) = self.order_panels.get_mut(&op_id) {
+                    panel.symbol_link = mode;
                 }
                 self.flush_config()
             }
@@ -2791,204 +3073,6 @@ impl MidasApp {
                 if self.main_window == Some(id) {
                     return self.flush_config().chain(iced::exit());
                 }
-                Task::none()
-            }
-
-            // -- Order panel --
-            Message::OrderPanelToggle => {
-                self.order_panel.visible = !self.order_panel.visible;
-                if self.order_panel.visible {
-                    // Populate from focused chart (not arbitrary)
-                    let focused = self.active_chart_id();
-                    if let Some(panel) = focused.and_then(|id| self.charts.get(&id)) {
-                        self.order_panel.symbol = panel.symbol.clone();
-                        self.order_panel.source_chart = focused;
-                        // Get last price from chart data
-                        if let Some(ref data) = panel.data {
-                            use midas_core::CandleData;
-                            let len = data.len();
-                            if len > 0 {
-                                self.order_panel.last_price = Some(data.close(len - 1) as f64);
-                            }
-                        }
-                    }
-                }
-                Task::none()
-            }
-            Message::OrderPanelSetSide(side) => {
-                self.order_panel.side = side;
-                Task::none()
-            }
-            Message::OrderPanelSetQuantity(qty) => {
-                self.order_panel.quantity = qty;
-                Task::none()
-            }
-            Message::OrderPanelToggleTp(enabled) => {
-                self.order_panel.tp_enabled = enabled;
-                Task::none()
-            }
-            Message::OrderPanelSetTpMode(mode) => {
-                self.order_panel.tp_mode = mode;
-                Task::none()
-            }
-            Message::OrderPanelSetTpValue(val) => {
-                self.order_panel.tp_value = val;
-                Task::none()
-            }
-            Message::OrderPanelToggleSl(enabled) => {
-                self.order_panel.sl_enabled = enabled;
-                Task::none()
-            }
-            Message::OrderPanelSetSlMode(mode) => {
-                self.order_panel.sl_mode = mode;
-                Task::none()
-            }
-            Message::OrderPanelSetSlValue(val) => {
-                self.order_panel.sl_value = val;
-                Task::none()
-            }
-            Message::OrderPanelSetSlType(sl_type) => {
-                self.order_panel.sl_type = sl_type;
-                Task::none()
-            }
-            Message::OrderPanelSetSlLimit(val) => {
-                self.order_panel.sl_limit_value = val;
-                Task::none()
-            }
-            Message::OrderPanelSubmit => {
-                // Validate first
-                let errors = crate::order_panel::validate_panel(&self.order_panel);
-                if !errors.is_empty() {
-                    self.order_panel.errors = errors;
-                    return Task::none();
-                }
-                self.order_panel.errors.clear();
-                // Show confirmation dialog instead of submitting directly
-                self.order_panel.showing_confirmation = true;
-                Task::none()
-            }
-
-            Message::OrderPanelConfirmYes => {
-                self.order_panel.showing_confirmation = false;
-
-                // Build params (would send to broker bridge in production)
-                let panel = &self.order_panel;
-                let last_price = panel.last_price.unwrap_or(0.0);
-                tracing::info!(
-                    "Order confirmed: {} {} {} (TP: {}, SL: {})",
-                    match panel.side { OrderSide::Buy => "BUY", OrderSide::Sell => "SELL" },
-                    panel.quantity,
-                    panel.symbol,
-                    panel.tp_enabled,
-                    panel.sl_enabled,
-                );
-
-                // Resolve TP/SL prices from panel inputs.
-                let tp_price = if panel.tp_enabled {
-                    panel.tp_value.parse::<f64>().ok().map(|val| {
-                        crate::order_panel::resolve_price(
-                            panel.tp_mode, val, last_price, panel.side, true,
-                        )
-                    })
-                } else {
-                    None
-                };
-                let sl_price = if panel.sl_enabled {
-                    panel.sl_value.parse::<f64>().ok().map(|val| {
-                        crate::order_panel::resolve_price(
-                            panel.sl_mode, val, last_price, panel.side, false,
-                        )
-                    })
-                } else {
-                    None
-                };
-
-                let action = match panel.side {
-                    OrderSide::Buy => midas_chart::widget::order_bracket::BracketSide::Long,
-                    OrderSide::Sell => midas_chart::widget::order_bracket::BracketSide::Short,
-                };
-                let quantity: f64 = panel.quantity.parse().unwrap_or(100.0);
-                let symbol = panel.symbol.clone();
-
-                // Send to broker engine.
-                if let Some(ref bridge) = self.broker_bridge {
-                    let broker_params = midas_core::broker::MarketBracketParams {
-                        symbol: symbol.clone(),
-                        con_id: None,
-                        sec_type: midas_core::SecurityType::Stock,
-                        exchange: "SMART".to_string(),
-                        currency: "USD".to_string(),
-                        action: match panel.side {
-                            OrderSide::Buy => midas_core::broker::OrderAction::Buy,
-                            OrderSide::Sell => midas_core::broker::OrderAction::Sell,
-                        },
-                        quantity,
-                        outside_rth: false,
-                        take_profit: tp_price.map(|p| midas_core::broker::TakeProfitParams {
-                            price: p,
-                            tif: None,
-                        }),
-                        stop_loss: sl_price.map(|p| midas_core::broker::StopLossParams {
-                            stop_price: p,
-                            limit_price: None,
-                            tif: None,
-                        }),
-                        reference_price: Some(last_price),
-                        strategy: None,
-                        tags: Vec::new(),
-                    };
-                    match bridge.create_market_bracket(broker_params) {
-                        Ok(()) => {
-                            tracing::info!(
-                                "CreateMarketBracket sent to broker engine for {}",
-                                symbol
-                            );
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to send bracket to broker: {e}");
-                            self.toast_message = Some(format!("Broker error: {e}"));
-                            self.toast_created_at = Some(Instant::now());
-                        }
-                    }
-                } else {
-                    tracing::warn!(
-                        "No broker bridge: CreateMarketBracket for {} not sent",
-                        symbol,
-                    );
-                }
-                self.status_message = format!(
-                    "Order submitted: {} {} {}",
-                    match panel.side { OrderSide::Buy => "BUY", OrderSide::Sell => "SELL" },
-                    panel.quantity,
-                    panel.symbol,
-                );
-
-                self.order_panel.visible = false;
-
-                // Create chart annotation via self-message so the bracket is
-                // visible on all charts displaying this symbol.
-                return self.update(Message::BrokerBracketCreated {
-                    parent_id: uuid::Uuid::now_v7(),
-                    take_profit_id: tp_price.map(|_| uuid::Uuid::now_v7()),
-                    stop_loss_id: sl_price.map(|_| uuid::Uuid::now_v7()),
-                    symbol,
-                    action,
-                    quantity,
-                    entry_price: Some(last_price),
-                    tp_price,
-                    sl_price,
-                });
-            }
-
-            Message::OrderPanelConfirmNo => {
-                self.order_panel.showing_confirmation = false;
-                Task::none()
-            }
-
-            Message::OrderPanelDismiss => {
-                self.order_panel.visible = false;
-                self.order_panel.showing_confirmation = false;
-                self.order_panel.errors.clear();
                 Task::none()
             }
 
@@ -3457,22 +3541,11 @@ impl MidasApp {
                     self.level_placing = !self.level_placing;
                 }
                 "t" | "T" => {
-                    // Toggle order panel with full population (same as OrderPanelToggle)
-                    self.order_panel.visible = !self.order_panel.visible;
-                    if self.order_panel.visible {
-                        let focused = self.active_chart_id();
-                        if let Some(panel) = focused.and_then(|id| self.charts.get(&id)) {
-                            self.order_panel.symbol = panel.symbol.clone();
-                            self.order_panel.source_chart = focused;
-                            if let Some(ref data) = panel.data {
-                                use midas_core::CandleData;
-                                let len = data.len();
-                                if len > 0 {
-                                    self.order_panel.last_price =
-                                        Some(data.close(len - 1) as f64);
-                                }
-                            }
-                        }
+                    // Focus nearest order panel, or create one if none exists.
+                    if let Some(pane) = self.workspace.find_any_order_pane() {
+                        self.workspace.set_focus(pane);
+                    } else {
+                        return self.update(Message::AddOrderPanel);
                     }
                 }
                 _ => {}
@@ -3484,11 +3557,6 @@ impl MidasApp {
                 self.bracket_context_menu = None;
                 self.toast_message = None;
                 self.toast_created_at = None;
-                if self.order_panel.visible {
-                    self.order_panel.visible = false;
-                    self.order_panel.showing_confirmation = false;
-                    self.order_panel.errors.clear();
-                }
                 self.pending_drag = None;
                 if self.dragging_ticker.is_some() {
                     self.dragging_ticker = None;

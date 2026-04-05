@@ -5,7 +5,7 @@ use std::time::Instant;
 use iced::widget::pane_grid;
 use iced::Task;
 
-use midas_core::config::{AppConfig, ChartConfig, LayoutNode, PanelSlot, ProviderConfig};
+use midas_core::config::{AppConfig, ChartConfig, LayoutNode, OrderPanelConfig, PanelSlot, ProviderConfig};
 
 use crate::layout::PanelContent;
 
@@ -20,6 +20,7 @@ impl MidasApp {
     pub(crate) fn build_config(&self) -> AppConfig {
         let mut chart_configs: Vec<ChartConfig> = Vec::new();
         let mut watchlist_configs = Vec::new();
+        let mut order_panel_configs: Vec<OrderPanelConfig> = Vec::new();
         let mut panel_order: Vec<PanelSlot> = Vec::new();
         let mut layout_tree: Vec<LayoutNode> = Vec::new();
 
@@ -29,6 +30,7 @@ impl MidasApp {
             node,
             &mut chart_configs,
             &mut watchlist_configs,
+            &mut order_panel_configs,
             &mut layout_tree,
         );
 
@@ -64,6 +66,26 @@ impl MidasApp {
                         });
                     }
                 }
+                PanelContent::Order(op_id) => {
+                    if let Some(idx) = order_panel_configs
+                        .iter()
+                        .enumerate()
+                        .position(|(i, _)| {
+                            self.order_panels
+                                .get(op_id)
+                                .map_or(false, |panel| {
+                                    order_panel_configs.get(i).map_or(false, |cfg| {
+                                        cfg.symbol == panel.state.symbol
+                                            && cfg.symbol_link == panel.symbol_link
+                                    })
+                                })
+                        })
+                    {
+                        panel_order.push(PanelSlot::OrderPanel {
+                            order_panel_index: idx,
+                        });
+                    }
+                }
             }
         }
 
@@ -86,6 +108,7 @@ impl MidasApp {
             charts: chart_configs,
             levels: self.level_store.to_config(),
             watchlists: watchlist_configs,
+            order_panels: order_panel_configs,
             panel_order,
             layout_tree,
             store: midas_core::config::StoreConfig::default(),
@@ -106,6 +129,7 @@ impl MidasApp {
         node: &pane_grid::Node,
         charts: &mut Vec<ChartConfig>,
         watchlists: &mut Vec<midas_core::config::WatchlistConfig>,
+        order_panels: &mut Vec<OrderPanelConfig>,
         tree: &mut Vec<LayoutNode>,
     ) {
         match node {
@@ -120,8 +144,8 @@ impl MidasApp {
                     axis: axis_str.to_string(),
                     ratio: *ratio,
                 });
-                self.walk_node(a, charts, watchlists, tree);
-                self.walk_node(b, charts, watchlists, tree);
+                self.walk_node(a, charts, watchlists, order_panels, tree);
+                self.walk_node(b, charts, watchlists, order_panels, tree);
             }
             pane_grid::Node::Pane(pane) => {
                 if let Some(ps) = self.workspace.panes.get(*pane) {
@@ -157,6 +181,15 @@ impl MidasApp {
                                 watchlists.push(wl.to_config());
                                 tree.push(LayoutNode::Watchlist {
                                     watchlist_index: idx,
+                                });
+                            }
+                        }
+                        PanelContent::Order(order_id) => {
+                            if let Some(panel) = self.order_panels.get(order_id) {
+                                let idx = order_panels.len();
+                                order_panels.push(panel.to_config());
+                                tree.push(LayoutNode::OrderPanel {
+                                    order_panel_index: idx,
                                 });
                             }
                         }

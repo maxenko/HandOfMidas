@@ -5,6 +5,8 @@
 //! Follows TradingView's bracket order model (1 TP + 1 SL per bracket).
 
 use midas_core::ChartId;
+use midas_core::OrderPanelId;
+use midas_core::link::LinkMode;
 
 // ===========================================================================
 // State
@@ -353,6 +355,99 @@ pub fn map_lifecycle_to_chart_status(
 }
 
 // ===========================================================================
+// Dockable order panel (first-class pane)
+// ===========================================================================
+
+/// Dockable order entry panel (first-class pane like Chart/Watchlist).
+#[derive(Debug, Clone)]
+pub struct OrderPanel {
+    /// Unique identifier within the workspace.
+    pub id: OrderPanelId,
+    /// Form state (side, quantity, TP/SL, validation, confirmation).
+    pub state: OrderPanelState,
+    /// Symbol link group for cross-panel symbol propagation.
+    pub symbol_link: LinkMode,
+}
+
+impl OrderPanel {
+    /// Create a new dockable order panel with the given symbol.
+    pub fn new(id: OrderPanelId, symbol: String) -> Self {
+        let mut state = OrderPanelState::default();
+        state.symbol = symbol;
+        state.visible = true; // always visible in docked mode
+        Self {
+            id,
+            state,
+            symbol_link: LinkMode::default(),
+        }
+    }
+
+    /// Serialize this panel's state to a config struct for persistence.
+    pub fn to_config(&self) -> midas_core::config::OrderPanelConfig {
+        midas_core::config::OrderPanelConfig {
+            symbol: self.state.symbol.clone(),
+            side: match self.state.side {
+                OrderSide::Buy => "BUY".to_string(),
+                OrderSide::Sell => "SELL".to_string(),
+            },
+            quantity: self.state.quantity.clone(),
+            symbol_link: self.symbol_link,
+        }
+    }
+
+    /// Restore a panel from a saved config.
+    pub fn from_config(id: OrderPanelId, config: &midas_core::config::OrderPanelConfig) -> Self {
+        let mut state = OrderPanelState::default();
+        state.symbol = config.symbol.clone();
+        state.side = if config.side == "SELL" {
+            OrderSide::Sell
+        } else {
+            OrderSide::Buy
+        };
+        state.quantity = config.quantity.clone();
+        state.visible = true;
+        Self {
+            id,
+            state,
+            symbol_link: config.symbol_link,
+        }
+    }
+}
+
+/// Actions for a specific order panel instance.
+#[derive(Debug, Clone)]
+pub enum OrderPanelAction {
+    /// Set the order side (Buy/Sell).
+    SetSide(OrderSide),
+    /// Update the quantity input text.
+    SetQuantity(String),
+    /// Toggle Take Profit enabled.
+    ToggleTp(bool),
+    /// Set TP price input mode.
+    SetTpMode(PriceInputMode),
+    /// Update TP value input text.
+    SetTpValue(String),
+    /// Toggle Stop Loss enabled.
+    ToggleSl(bool),
+    /// Set SL price input mode.
+    SetSlMode(PriceInputMode),
+    /// Update SL value input text.
+    SetSlValue(String),
+    /// Set SL type (Stop vs StopLimit).
+    SetSlType(StopLossType),
+    /// Update SL limit price input text.
+    SetSlLimit(String),
+    /// Submit the order (triggers confirmation dialog).
+    Submit,
+    /// User confirmed the order in the confirmation dialog.
+    ConfirmYes,
+    /// User cancelled the confirmation dialog.
+    ConfirmNo,
+    /// Dismiss the order panel (close confirmation or clear errors).
+    Dismiss,
+}
+
+// ===========================================================================
 // Tests
 // ===========================================================================
 
@@ -604,5 +699,50 @@ mod tests {
         );
         let sl_errors: Vec<_> = errors.iter().filter(|(f, _)| f == "sl").collect();
         assert_eq!(sl_errors.len(), 1, "SL should have exactly one error, got: {sl_errors:?}");
+    }
+
+    // -- OrderPanel (dockable) tests --
+
+    #[test]
+    fn order_panel_new_sets_symbol() {
+        let id = OrderPanelId::new(1);
+        let panel = OrderPanel::new(id, "AAPL".to_string());
+        assert_eq!(panel.id, id);
+        assert_eq!(panel.state.symbol, "AAPL");
+        assert!(panel.state.visible);
+        assert_eq!(panel.state.side, OrderSide::Buy);
+        assert_eq!(panel.state.quantity, "100");
+    }
+
+    #[test]
+    fn order_panel_to_config_roundtrip() {
+        let id = OrderPanelId::new(5);
+        let mut panel = OrderPanel::new(id, "MSFT".to_string());
+        panel.state.side = OrderSide::Sell;
+        panel.state.quantity = "250".to_string();
+        panel.symbol_link = LinkMode::ListenAll;
+
+        let config = panel.to_config();
+        assert_eq!(config.symbol, "MSFT");
+        assert_eq!(config.side, "SELL");
+        assert_eq!(config.quantity, "250");
+        assert_eq!(config.symbol_link, LinkMode::ListenAll);
+
+        let restored = OrderPanel::from_config(id, &config);
+        assert_eq!(restored.id, id);
+        assert_eq!(restored.state.symbol, "MSFT");
+        assert_eq!(restored.state.side, OrderSide::Sell);
+        assert_eq!(restored.state.quantity, "250");
+        assert_eq!(restored.symbol_link, LinkMode::ListenAll);
+        assert!(restored.state.visible);
+    }
+
+    #[test]
+    fn order_panel_from_config_defaults() {
+        let config = midas_core::config::OrderPanelConfig::default();
+        let panel = OrderPanel::from_config(OrderPanelId::new(1), &config);
+        assert_eq!(panel.state.side, OrderSide::Buy);
+        assert_eq!(panel.state.quantity, "100");
+        assert!(panel.state.symbol.is_empty());
     }
 }

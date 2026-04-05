@@ -31,6 +31,12 @@ pub struct SymbolId(pub u32);
 )]
 pub struct WatchlistId(pub u32);
 
+/// Unique identifier for an order panel within the workspace layout.
+#[derive(
+    Copy, Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
+pub struct OrderPanelId(pub u32);
+
 impl ChartId {
     /// Create a new `ChartId` from a raw `u32` value.
     pub const fn new(id: u32) -> Self {
@@ -59,6 +65,13 @@ impl WatchlistId {
     }
 }
 
+impl OrderPanelId {
+    /// Create a new `OrderPanelId` from a raw `u32` value.
+    pub const fn new(id: u32) -> Self {
+        Self(id)
+    }
+}
+
 impl fmt::Display for ChartId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Chart({})", self.0)
@@ -80,6 +93,12 @@ impl fmt::Display for SymbolId {
 impl fmt::Display for WatchlistId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Watchlist({})", self.0)
+    }
+}
+
+impl fmt::Display for OrderPanelId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Order({})", self.0)
     }
 }
 
@@ -169,11 +188,32 @@ mod tests {
     }
 
     #[test]
+    fn order_panel_id_equality() {
+        assert_eq!(OrderPanelId::new(1), OrderPanelId::new(1));
+        assert_ne!(OrderPanelId::new(1), OrderPanelId::new(2));
+    }
+
+    #[test]
+    fn order_panel_id_hash() {
+        let mut set = HashSet::new();
+        set.insert(OrderPanelId::new(3));
+        set.insert(OrderPanelId::new(4));
+        set.insert(OrderPanelId::new(3)); // duplicate
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn order_panel_id_display() {
+        assert_eq!(OrderPanelId::new(5).to_string(), "Order(5)");
+    }
+
+    #[test]
     fn ordering() {
         assert!(ChartId::new(1) < ChartId::new(2));
         assert!(PaneId::new(10) < PaneId::new(20));
         assert!(SymbolId::new(0) < SymbolId::new(1));
         assert!(WatchlistId::new(1) < WatchlistId::new(2));
+        assert!(OrderPanelId::new(1) < OrderPanelId::new(2));
     }
 
     #[test]
@@ -185,6 +225,10 @@ mod tests {
         let w = WatchlistId::new(3);
         let w2 = w;
         assert_eq!(w, w2);
+
+        let o = OrderPanelId::new(7);
+        let o2 = o;
+        assert_eq!(o, o2);
     }
 
     #[test]
@@ -208,5 +252,10 @@ mod tests {
         let json = serde_json::to_string(&wid).unwrap();
         let back: WatchlistId = serde_json::from_str(&json).unwrap();
         assert_eq!(wid, back);
+
+        let oid = OrderPanelId::new(99);
+        let json = serde_json::to_string(&oid).unwrap();
+        let back: OrderPanelId = serde_json::from_str(&json).unwrap();
+        assert_eq!(oid, back);
     }
 }

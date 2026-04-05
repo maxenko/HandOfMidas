@@ -53,6 +53,9 @@ pub struct AppConfig {
     /// Watchlist configurations, persisted across sessions.
     #[serde(default)]
     pub watchlists: Vec<WatchlistConfig>,
+    /// Order panel configurations, persisted across sessions.
+    #[serde(default)]
+    pub order_panels: Vec<OrderPanelConfig>,
     /// Ordered list of panel types in the pane grid, in BTreeMap key order
     /// (pane creation order — NOT spatial position). Save and restore both
     /// use the same iteration order, so the mapping is self-consistent.
@@ -192,6 +195,43 @@ pub struct LevelConfig {
     pub locked: bool,
 }
 
+/// Order panel configuration for session persistence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderPanelConfig {
+    /// Ticker symbol (e.g. `"AAPL"`).
+    pub symbol: String,
+    /// Order side: `"BUY"` or `"SELL"`.
+    #[serde(default = "default_order_side")]
+    pub side: String,
+    /// Quantity input value (string for text input; parsed on submit).
+    #[serde(default = "default_order_quantity")]
+    pub quantity: String,
+    /// Symbol link mode for cross-panel symbol synchronization.
+    #[serde(default)]
+    pub symbol_link: LinkMode,
+}
+
+impl Default for OrderPanelConfig {
+    fn default() -> Self {
+        Self {
+            symbol: String::new(),
+            side: default_order_side(),
+            quantity: default_order_quantity(),
+            symbol_link: LinkMode::default(),
+        }
+    }
+}
+
+/// Default order side for configs missing the field.
+fn default_order_side() -> String {
+    "BUY".to_string()
+}
+
+/// Default order quantity for configs missing the field.
+fn default_order_quantity() -> String {
+    "100".to_string()
+}
+
 /// Watchlist configuration for session persistence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WatchlistConfig {
@@ -235,6 +275,12 @@ pub enum PanelSlot {
         /// Index into `AppConfig::watchlists`.
         watchlist_index: usize,
     },
+    /// An order panel — index into `AppConfig::order_panels`.
+    #[serde(rename = "order_panel")]
+    OrderPanel {
+        /// Index into `AppConfig::order_panels`.
+        order_panel_index: usize,
+    },
 }
 
 /// Flattened layout tree node for pane grid topology persistence.
@@ -262,6 +308,16 @@ pub enum LayoutNode {
         /// Index into `AppConfig::watchlists`.
         watchlist_index: usize,
     },
+    /// An order panel pane — index into `AppConfig::order_panels`.
+    #[serde(rename = "order_panel")]
+    OrderPanel {
+        /// Index into `AppConfig::order_panels`.
+        order_panel_index: usize,
+    },
+    /// Forward-compatibility catch-all for unknown panel types.
+    /// Prevents deserialization failure if a newer config format is loaded.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Configuration for the DuckDB persistent cache store.
@@ -348,6 +404,7 @@ impl Default for AppConfig {
             charts: Vec::new(),
             levels: HashMap::new(),
             watchlists: Vec::new(),
+            order_panels: Vec::new(),
             panel_order: Vec::new(),
             layout_tree: Vec::new(),
             store: StoreConfig::default(),
@@ -539,6 +596,7 @@ mod tests {
             }],
             levels: msft_levels,
             watchlists: Vec::new(),
+            order_panels: Vec::new(),
             panel_order: Vec::new(),
             layout_tree: Vec::new(),
             store: StoreConfig::default(),
@@ -695,6 +753,7 @@ mod tests {
             ],
             levels: aapl_levels,
             watchlists: Vec::new(),
+            order_panels: Vec::new(),
             panel_order: Vec::new(),
             layout_tree: Vec::new(),
             store: StoreConfig::default(),
@@ -871,6 +930,7 @@ color = [1.0, 0.843, 0.0, 1.0]
             }],
             levels: HashMap::new(),
             watchlists: Vec::new(),
+            order_panels: Vec::new(),
             panel_order: Vec::new(),
             layout_tree: Vec::new(),
             store: StoreConfig::default(),
@@ -985,6 +1045,7 @@ color = [1.0, 0.843, 0.0, 1.0]
             ],
             levels: spy_levels,
             watchlists: Vec::new(),
+            order_panels: Vec::new(),
             panel_order: Vec::new(),
             layout_tree: Vec::new(),
             store: StoreConfig::default(),

@@ -13,11 +13,7 @@ use iced::widget::{
 use iced::{window, Color, Element, Fill, Length};
 
 use midas_chart::AnnotationId;
-use midas_core::{ChartId, LinkColor, LinkMode, Timeframe, WatchlistId};
-
-// Order panel overlay positioning
-const ORDER_PANEL_TOP_PADDING: f32 = 60.0;
-const ORDER_PANEL_RIGHT_PADDING: f32 = 20.0;
+use midas_core::{ChartId, LinkColor, LinkMode, OrderPanelId, Timeframe, WatchlistId};
 
 use crate::layout::PanelContent;
 use crate::link::{link_color_rgba, link_mode_indicator_rgba, LinkDimension, PickerTarget};
@@ -74,26 +70,6 @@ impl MidasApp {
 
             let base = column![toolbar, content, status_bar];
             return stack![base, drag_preview].into();
-        }
-
-        // Order panel overlay: floats on top of the main layout.
-        if self.order_panel.visible {
-            let panel_widget = self.view_order_panel();
-            let positioned = container(panel_widget)
-                .width(Fill)
-                .align_x(iced::alignment::Horizontal::Right)
-                .padding(iced::Padding {
-                    top: ORDER_PANEL_TOP_PADDING,
-                    right: ORDER_PANEL_RIGHT_PADDING,
-                    bottom: 0.0,
-                    left: 0.0,
-                });
-
-            return stack![
-                column![toolbar, content, status_bar],
-                positioned,
-            ]
-            .into();
         }
 
         column![toolbar, content, status_bar].into()
@@ -433,6 +409,11 @@ impl MidasApp {
             .padding([4, 10])
             .style(hover_text_button_style);
 
+        let order_btn = button(text("Order").size(12))
+            .on_press(Message::AddOrderPanel)
+            .padding([4, 10])
+            .style(hover_text_button_style);
+
         // Provider dropdowns (pushed to the right).
         let data_names = self.providers.data_provider_names();
         let active_data = self.providers.active_data_provider_name();
@@ -454,6 +435,7 @@ impl MidasApp {
             split_buttons,
             add_btn,
             wl_btn,
+            order_btn,
             Space::new().width(Fill),
             text("Data:").size(11).color(theme::TEXT_SECONDARY),
             data_picker,
@@ -495,6 +477,11 @@ impl MidasApp {
                     PanelContent::Watchlist(wl_id) => {
                         let tb = self.view_watchlist_title_bar(wl_id, pane);
                         let bd = self.view_watchlist_body(wl_id);
+                        (tb, bd)
+                    }
+                    PanelContent::Order(order_id) => {
+                        let tb = self.view_order_title_bar(order_id, pane);
+                        let bd = self.view_order_body(order_id);
                         (tb, bd)
                     }
                 };
@@ -1556,6 +1543,500 @@ impl MidasApp {
 
 }
 
+// ── Dockable order panel ───────────────────────────────────────────
+
+impl MidasApp {
+    /// Build the title bar for a dockable order panel pane.
+    fn view_order_title_bar(
+        &self,
+        order_id: OrderPanelId,
+        pane: pane_grid::Pane,
+    ) -> pane_grid::TitleBar<'_, Message> {
+        let title_text = self
+            .order_panels
+            .get(&order_id)
+            .map(|p| {
+                if p.state.symbol.is_empty() {
+                    "Order".to_string()
+                } else {
+                    format!("Order: {}", p.state.symbol)
+                }
+            })
+            .unwrap_or_else(|| "Order".to_string());
+
+        // Symbol link [S] button.
+        let op_link = self
+            .order_panels
+            .get(&order_id)
+            .map(|p| p.symbol_link)
+            .unwrap_or(LinkMode::Unlinked);
+        let op_color = link_mode_indicator_rgba(op_link);
+        let bold_font = iced::Font {
+            weight: iced::font::Weight::Bold,
+            ..iced::Font::default()
+        };
+        let op_s_btn: Element<'_, Message> = button(
+            text("S").size(10).color(Color::WHITE).font(bold_font),
+        )
+        .on_press(Message::ToggleLinkPicker(
+            PickerTarget::Order(order_id),
+            LinkDimension::Symbol,
+        ))
+        .padding([2, 5])
+        .style(move |_theme, _status| button::Style {
+            background: Some(
+                Color::from_rgba(op_color[0], op_color[1], op_color[2], op_color[3])
+                    .into(),
+            ),
+            text_color: Color::WHITE,
+            border: iced::Border {
+                radius: 2.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .into();
+
+        let close_btn: Element<'_, Message> = button(text("X").size(10))
+            .on_press(Message::PaneClose(pane))
+            .padding([2, 6])
+            .style(hover_text_button_style)
+            .into();
+
+        pane_grid::TitleBar::new(
+            row![
+                text(title_text).size(14),
+                Space::new().width(Fill),
+            ]
+            .align_y(iced::Alignment::Center),
+        )
+        .controls(
+            Element::from(
+                row![op_s_btn, Space::new().width(4), close_btn]
+                    .spacing(2)
+                    .align_y(iced::Alignment::Center),
+            ),
+        )
+        .padding([2, 4])
+        .always_show_controls()
+        .style(|_theme| container::Style::default())
+    }
+
+    /// Build the body of a dockable order panel pane.
+    fn view_order_body(&self, order_id: OrderPanelId) -> Element<'_, Message> {
+        use crate::order_panel::OrderPanelAction;
+
+        let panel = match self.order_panels.get(&order_id) {
+            Some(p) => p,
+            None => {
+                return container(text("Order panel not found").size(14))
+                    .center_x(Fill)
+                    .center_y(Fill)
+                    .into();
+            }
+        };
+        let state = &panel.state;
+
+        // Fetch last_price from the market cache (authoritative source).
+        let last_price = self
+            .market_cache
+            .get(&state.symbol)
+            .and_then(|snap| snap.last_price);
+
+        // Side toggle buttons.
+        let buy_style: fn(&iced::Theme, button::Status) -> button::Style =
+            if state.side == crate::order_panel::OrderSide::Buy {
+                active_buy_button_style
+            } else {
+                inactive_side_button_style
+            };
+        let sell_style: fn(&iced::Theme, button::Status) -> button::Style =
+            if state.side == crate::order_panel::OrderSide::Sell {
+                active_sell_button_style
+            } else {
+                inactive_side_button_style
+            };
+
+        let oid = order_id;
+        let side_row = row![
+            button(text("BUY").size(14))
+                .on_press(Message::OrderPanelMsg(
+                    oid,
+                    OrderPanelAction::SetSide(crate::order_panel::OrderSide::Buy),
+                ))
+                .padding([8, 20])
+                .style(buy_style),
+            button(text("SELL").size(14))
+                .on_press(Message::OrderPanelMsg(
+                    oid,
+                    OrderPanelAction::SetSide(crate::order_panel::OrderSide::Sell),
+                ))
+                .padding([8, 20])
+                .style(sell_style),
+            Space::new().width(Fill),
+            text("Market")
+                .size(12)
+                .color(Color::from_rgb(0.6, 0.6, 0.6)),
+        ]
+        .spacing(4)
+        .align_y(iced::Alignment::Center);
+
+        // Symbol and price display.
+        let price_text = last_price
+            .map(|p| format!("Last: {p:.2}"))
+            .unwrap_or_else(|| "Last: --".to_string());
+        let symbol_row = row![
+            text(format!("Symbol: {}", state.symbol)).size(12),
+            Space::new().width(Fill),
+            text(price_text).size(12),
+        ];
+
+        // Quantity input.
+        let qty_row = row![
+            text("Qty:").size(12).width(40),
+            text_input("100", &state.quantity)
+                .on_input(move |val| Message::OrderPanelMsg(
+                    oid,
+                    OrderPanelAction::SetQuantity(val),
+                ))
+                .size(12)
+                .width(100),
+            text("shares")
+                .size(11)
+                .color(Color::from_rgb(0.5, 0.5, 0.5)),
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center);
+
+        // Take Profit section.
+        let tp_section = {
+            let mut col = Column::new().spacing(4);
+            let tp_check = row![iced::widget::checkbox(state.tp_enabled,)
+                .label("Take Profit")
+                .on_toggle(move |val| Message::OrderPanelMsg(
+                    oid,
+                    OrderPanelAction::ToggleTp(val),
+                ))
+                .size(14),];
+            col = col.push(tp_check);
+            if state.tp_enabled {
+                let tp_input = row![
+                    text("Price:").size(11).width(40),
+                    text_input("0.00", &state.tp_value)
+                        .on_input(move |val| Message::OrderPanelMsg(
+                            oid,
+                            OrderPanelAction::SetTpValue(val),
+                        ))
+                        .size(12)
+                        .width(100),
+                ]
+                .spacing(6)
+                .align_y(iced::Alignment::Center);
+                col = col.push(tp_input);
+            }
+            col
+        };
+
+        // Stop Loss section.
+        let sl_section = {
+            let mut col = Column::new().spacing(4);
+            let sl_check = row![iced::widget::checkbox(state.sl_enabled,)
+                .label("Stop Loss")
+                .on_toggle(move |val| Message::OrderPanelMsg(
+                    oid,
+                    OrderPanelAction::ToggleSl(val),
+                ))
+                .size(14),];
+            col = col.push(sl_check);
+            if state.sl_enabled {
+                let sl_input = row![
+                    text("Price:").size(11).width(40),
+                    text_input("0.00", &state.sl_value)
+                        .on_input(move |val| Message::OrderPanelMsg(
+                            oid,
+                            OrderPanelAction::SetSlValue(val),
+                        ))
+                        .size(12)
+                        .width(100),
+                ]
+                .spacing(6)
+                .align_y(iced::Alignment::Center);
+                col = col.push(sl_input);
+            }
+            col
+        };
+
+        // Risk/Reward display.
+        let rr_row = if let Some(last) = last_price {
+            let tp_price = if state.tp_enabled {
+                state.tp_value.parse::<f64>().ok().map(|val| {
+                    crate::order_panel::resolve_price(
+                        state.tp_mode,
+                        val,
+                        last,
+                        state.side,
+                        true,
+                    )
+                })
+            } else {
+                None
+            };
+            let sl_price = if state.sl_enabled {
+                state.sl_value.parse::<f64>().ok().map(|val| {
+                    crate::order_panel::resolve_price(
+                        state.sl_mode,
+                        val,
+                        last,
+                        state.side,
+                        false,
+                    )
+                })
+            } else {
+                None
+            };
+            let qty = state.quantity.parse::<f64>().unwrap_or(0.0);
+            if let Some(rr) =
+                crate::order_panel::calculate_risk_reward(last, tp_price, sl_price, qty)
+            {
+                row![
+                    text(format!("Risk: ${:.0}", rr.total_risk))
+                        .size(11)
+                        .color(Color::from_rgb(0.9, 0.3, 0.3)),
+                    Space::new().width(10),
+                    text(format!("Reward: ${:.0}", rr.total_reward))
+                        .size(11)
+                        .color(Color::from_rgb(0.3, 0.8, 0.4)),
+                    Space::new().width(10),
+                    text(format!("R:R {:.2}:1", rr.ratio)).size(11),
+                ]
+                .spacing(4)
+            } else {
+                row![text("").size(11)]
+            }
+        } else {
+            row![text("").size(11)]
+        };
+
+        // Error display.
+        let error_col = if !state.errors.is_empty() {
+            let mut col = Column::new().spacing(2);
+            for (_field, msg) in &state.errors {
+                col = col
+                    .push(text(msg).size(11).color(Color::from_rgb(0.9, 0.3, 0.2)));
+            }
+            col
+        } else {
+            Column::new()
+        };
+
+        // Submit button (disabled when no symbol or market data not available).
+        let submit_section: Element<'_, Message> = if state.symbol.is_empty() {
+            text("No symbol")
+                .size(12)
+                .color(Color::from_rgb(0.5, 0.5, 0.5))
+                .into()
+        } else if last_price.is_none() {
+            text("Market data loading...")
+                .size(12)
+                .color(Color::from_rgb(0.6, 0.6, 0.3))
+                .into()
+        } else {
+            let submit_label = match state.side {
+                crate::order_panel::OrderSide::Buy => "Place Market BUY",
+                crate::order_panel::OrderSide::Sell => "Place Market SELL",
+            };
+            row![
+                Space::new().width(Fill),
+                button(text(submit_label).size(13))
+                    .on_press(Message::OrderPanelMsg(oid, OrderPanelAction::Submit))
+                    .padding([8, 16]),
+            ]
+            .align_y(iced::Alignment::Center)
+            .into()
+        };
+
+        // Account type indicator.
+        let account_label = text("PAPER TRADING")
+            .size(10)
+            .color(Color::from_rgb(0.9, 0.7, 0.2));
+
+        // Separator helper.
+        let sep = || {
+            container(Space::new().height(1))
+                .width(Fill)
+                .style(|_t| container::Style {
+                    background: Some(iced::Background::Color(Color::from_rgb(
+                        0.25, 0.25, 0.30,
+                    ))),
+                    ..Default::default()
+                })
+        };
+
+        // Assemble form column.
+        let mut form = Column::new()
+            .spacing(6)
+            .padding(12)
+            .width(Fill);
+
+        form = form
+            .push(side_row)
+            .push(sep())
+            .push(symbol_row)
+            .push(sep())
+            .push(qty_row)
+            .push(tp_section)
+            .push(sep())
+            .push(sl_section)
+            .push(sep())
+            .push(rr_row)
+            .push(error_col)
+            .push(sep())
+            .push(account_label)
+            .push(submit_section);
+
+        // Confirmation dialog rendered inline (not as overlay).
+        if state.showing_confirmation {
+            let side_label = match state.side {
+                crate::order_panel::OrderSide::Buy => "BUY",
+                crate::order_panel::OrderSide::Sell => "SELL",
+            };
+            let order_summary = format!(
+                "{} {} {} at Market",
+                side_label, state.quantity, state.symbol,
+            );
+
+            let mut details = Column::new().spacing(4);
+            details = details.push(text(order_summary).size(12));
+            if state.tp_enabled && !state.tp_value.is_empty() {
+                let tp_display = if let (Some(last), Ok(val)) =
+                    (last_price, state.tp_value.parse::<f64>())
+                {
+                    let resolved = crate::order_panel::resolve_price(
+                        state.tp_mode,
+                        val,
+                        last,
+                        state.side,
+                        true,
+                    );
+                    format!("TP: {:.2}", resolved)
+                } else {
+                    format!("TP: {}", state.tp_value)
+                };
+                details = details.push(
+                    text(tp_display)
+                        .size(11)
+                        .color(Color::from_rgb(0.3, 0.8, 0.4)),
+                );
+            }
+            if state.sl_enabled && !state.sl_value.is_empty() {
+                let sl_display = if let (Some(last), Ok(val)) =
+                    (last_price, state.sl_value.parse::<f64>())
+                {
+                    let resolved = crate::order_panel::resolve_price(
+                        state.sl_mode,
+                        val,
+                        last,
+                        state.side,
+                        false,
+                    );
+                    format!("SL: {:.2}", resolved)
+                } else {
+                    format!("SL: {}", state.sl_value)
+                };
+                details = details.push(
+                    text(sl_display)
+                        .size(11)
+                        .color(Color::from_rgb(0.9, 0.3, 0.3)),
+                );
+            }
+
+            let confirm_content = column![
+                text("Confirm Market Order").size(14),
+                container(Space::new().height(1))
+                    .width(Fill)
+                    .style(|_t| container::Style {
+                        background: Some(iced::Background::Color(Color::from_rgb(
+                            0.3, 0.3, 0.35,
+                        ))),
+                        ..Default::default()
+                    }),
+                details,
+                container(Space::new().height(1))
+                    .width(Fill)
+                    .style(|_t| container::Style {
+                        background: Some(iced::Background::Color(Color::from_rgb(
+                            0.3, 0.3, 0.35,
+                        ))),
+                        ..Default::default()
+                    }),
+                row![
+                    button(text("Cancel").size(12))
+                        .on_press(Message::OrderPanelMsg(oid, OrderPanelAction::ConfirmNo))
+                        .padding([6, 16]),
+                    Space::new().width(Fill),
+                    button(text("Confirm & Submit").size(12))
+                        .on_press(Message::OrderPanelMsg(
+                            oid,
+                            OrderPanelAction::ConfirmYes
+                        ))
+                        .padding([6, 16]),
+                ]
+                .spacing(8),
+            ]
+            .spacing(8)
+            .padding(16)
+            .width(Fill);
+
+            let confirm_section = container(confirm_content)
+                .style(|_theme| container::Style {
+                    background: Some(iced::Background::Color(Color::from_rgb(
+                        0.12, 0.12, 0.16,
+                    ))),
+                    border: iced::Border {
+                        color: Color::from_rgb(0.4, 0.4, 0.5),
+                        width: 1.5,
+                        radius: 8.0.into(),
+                    },
+                    ..Default::default()
+                });
+
+            form = form.push(confirm_section);
+        }
+
+        let main_content: Element<'_, Message> = scrollable(form).into();
+
+        // Link picker overlay (when open for this order panel).
+        if let Some((PickerTarget::Order(picker_op_id), dim)) = self.link_picker_open {
+            if picker_op_id == order_id {
+                let backdrop = iced::widget::mouse_area(
+                    Space::new().width(Fill).height(Fill),
+                )
+                .on_press(Message::DismissLinkPicker);
+
+                let picker = self.build_link_picker(dim, move |mode| {
+                    Message::OrderPanelSetSymbolLink(order_id, mode)
+                });
+
+                return stack![
+                    main_content,
+                    backdrop,
+                    container(picker)
+                        .align_x(iced::alignment::Horizontal::Right)
+                        .align_y(iced::alignment::Vertical::Top)
+                        .padding([4, 4])
+                        .width(Fill)
+                        .height(Fill)
+                ]
+                .width(Fill)
+                .height(Fill)
+                .into();
+            }
+        }
+
+        main_content
+    }
+}
+
 // ── Status bar ──────────────────────────────────────────────────────
 
 impl MidasApp {
@@ -1662,387 +2143,6 @@ impl MidasApp {
         ]
         .align_y(iced::Alignment::Center)
         .into()
-    }
-}
-
-// ── Order panel ────────────────────────────────────────────────────
-
-impl MidasApp {
-    /// Build the order panel overlay widget.
-    fn view_order_panel(&self) -> Element<'_, Message> {
-        let panel = &self.order_panel;
-
-        // Side toggle buttons.
-        let buy_style: fn(&iced::Theme, button::Status) -> button::Style =
-            if panel.side == crate::order_panel::OrderSide::Buy {
-                active_buy_button_style
-            } else {
-                inactive_side_button_style
-            };
-        let sell_style: fn(&iced::Theme, button::Status) -> button::Style =
-            if panel.side == crate::order_panel::OrderSide::Sell {
-                active_sell_button_style
-            } else {
-                inactive_side_button_style
-            };
-
-        let side_row = row![
-            button(text("BUY").size(14))
-                .on_press(Message::OrderPanelSetSide(
-                    crate::order_panel::OrderSide::Buy,
-                ))
-                .padding([8, 20])
-                .style(buy_style),
-            button(text("SELL").size(14))
-                .on_press(Message::OrderPanelSetSide(
-                    crate::order_panel::OrderSide::Sell,
-                ))
-                .padding([8, 20])
-                .style(sell_style),
-            Space::new().width(Fill),
-            text("Market")
-                .size(12)
-                .color(Color::from_rgb(0.6, 0.6, 0.6)),
-        ]
-        .spacing(4)
-        .align_y(iced::Alignment::Center);
-
-        // Symbol and price display.
-        let price_text = panel
-            .last_price
-            .map(|p| format!("Last: {p:.2}"))
-            .unwrap_or_else(|| "Last: --".to_string());
-        let symbol_row = row![
-            text(format!("Symbol: {}", panel.symbol)).size(12),
-            Space::new().width(Fill),
-            text(price_text).size(12),
-        ];
-
-        // Quantity input.
-        let qty_row = row![
-            text("Qty:").size(12).width(40),
-            text_input("100", &panel.quantity)
-                .on_input(Message::OrderPanelSetQuantity)
-                .size(12)
-                .width(100),
-            text("shares")
-                .size(11)
-                .color(Color::from_rgb(0.5, 0.5, 0.5)),
-        ]
-        .spacing(6)
-        .align_y(iced::Alignment::Center);
-
-        // Take Profit section.
-        let tp_section = {
-            let mut col = Column::new().spacing(4);
-            let tp_check = row![iced::widget::checkbox(
-                panel.tp_enabled,
-            )
-            .label("Take Profit")
-            .on_toggle(Message::OrderPanelToggleTp)
-            .size(14),];
-            col = col.push(tp_check);
-            if panel.tp_enabled {
-                let tp_input = row![
-                    text("Price:").size(11).width(40),
-                    text_input("0.00", &panel.tp_value)
-                        .on_input(Message::OrderPanelSetTpValue)
-                        .size(12)
-                        .width(100),
-                ]
-                .spacing(6)
-                .align_y(iced::Alignment::Center);
-                col = col.push(tp_input);
-            }
-            col
-        };
-
-        // Stop Loss section.
-        let sl_section = {
-            let mut col = Column::new().spacing(4);
-            let sl_check = row![iced::widget::checkbox(
-                panel.sl_enabled,
-            )
-            .label("Stop Loss")
-            .on_toggle(Message::OrderPanelToggleSl)
-            .size(14),];
-            col = col.push(sl_check);
-            if panel.sl_enabled {
-                let sl_input = row![
-                    text("Price:").size(11).width(40),
-                    text_input("0.00", &panel.sl_value)
-                        .on_input(Message::OrderPanelSetSlValue)
-                        .size(12)
-                        .width(100),
-                ]
-                .spacing(6)
-                .align_y(iced::Alignment::Center);
-                col = col.push(sl_input);
-            }
-            col
-        };
-
-        // Risk/Reward display.
-        let rr_row = if let Some(last) = panel.last_price {
-            let tp_price = if panel.tp_enabled {
-                panel.tp_value.parse::<f64>().ok().map(|val| {
-                    crate::order_panel::resolve_price(
-                        panel.tp_mode,
-                        val,
-                        last,
-                        panel.side,
-                        true,
-                    )
-                })
-            } else {
-                None
-            };
-            let sl_price = if panel.sl_enabled {
-                panel.sl_value.parse::<f64>().ok().map(|val| {
-                    crate::order_panel::resolve_price(
-                        panel.sl_mode,
-                        val,
-                        last,
-                        panel.side,
-                        false,
-                    )
-                })
-            } else {
-                None
-            };
-            let qty = panel.quantity.parse::<f64>().unwrap_or(0.0);
-            if let Some(rr) =
-                crate::order_panel::calculate_risk_reward(last, tp_price, sl_price, qty)
-            {
-                row![
-                    text(format!("Risk: ${:.0}", rr.total_risk))
-                        .size(11)
-                        .color(Color::from_rgb(0.9, 0.3, 0.3)),
-                    Space::new().width(10),
-                    text(format!("Reward: ${:.0}", rr.total_reward))
-                        .size(11)
-                        .color(Color::from_rgb(0.3, 0.8, 0.4)),
-                    Space::new().width(10),
-                    text(format!("R:R {:.2}:1", rr.ratio)).size(11),
-                ]
-                .spacing(4)
-            } else {
-                row![text("").size(11)]
-            }
-        } else {
-            row![text("").size(11)]
-        };
-
-        // Error display.
-        let error_col = if !panel.errors.is_empty() {
-            let mut col = Column::new().spacing(2);
-            for (_field, msg) in &panel.errors {
-                col = col
-                    .push(text(msg).size(11).color(Color::from_rgb(0.9, 0.3, 0.2)));
-            }
-            col
-        } else {
-            Column::new()
-        };
-
-        // Submit button.
-        let submit_label = match panel.side {
-            crate::order_panel::OrderSide::Buy => "Place Market BUY",
-            crate::order_panel::OrderSide::Sell => "Place Market SELL",
-        };
-        let submit_row = row![
-            Space::new().width(Fill),
-            button(text(submit_label).size(13))
-                .on_press(Message::OrderPanelSubmit)
-                .padding([8, 16]),
-            Space::new().width(4),
-            button(text("\u{00D7}").size(14))
-                .on_press(Message::OrderPanelDismiss)
-                .padding([6, 10])
-                .style(hover_text_button_style),
-        ]
-        .align_y(iced::Alignment::Center);
-
-        // Account type indicator.
-        let account_label = text("PAPER TRADING")
-            .size(10)
-            .color(Color::from_rgb(0.9, 0.7, 0.2));
-
-        // Assemble full panel.
-        let panel_content = column![
-            side_row,
-            container(Space::new().height(1)).width(Fill).style(|_t| container::Style {
-                background: Some(iced::Background::Color(Color::from_rgb(0.25, 0.25, 0.30))),
-                ..Default::default()
-            }),
-            symbol_row,
-            container(Space::new().height(1)).width(Fill).style(|_t| container::Style {
-                background: Some(iced::Background::Color(Color::from_rgb(0.25, 0.25, 0.30))),
-                ..Default::default()
-            }),
-            qty_row,
-            tp_section,
-            container(Space::new().height(1)).width(Fill).style(|_t| container::Style {
-                background: Some(iced::Background::Color(Color::from_rgb(0.25, 0.25, 0.30))),
-                ..Default::default()
-            }),
-            sl_section,
-            container(Space::new().height(1)).width(Fill).style(|_t| container::Style {
-                background: Some(iced::Background::Color(Color::from_rgb(0.25, 0.25, 0.30))),
-                ..Default::default()
-            }),
-            rr_row,
-            error_col,
-            container(Space::new().height(1)).width(Fill).style(|_t| container::Style {
-                background: Some(iced::Background::Color(Color::from_rgb(0.25, 0.25, 0.30))),
-                ..Default::default()
-            }),
-            account_label,
-            submit_row,
-        ]
-        .spacing(6)
-        .padding(12)
-        .width(320);
-
-        let base_panel: Element<'_, Message> = container(panel_content)
-            .style(|_theme| container::Style {
-                background: Some(iced::Background::Color(Color::from_rgb(
-                    0.10, 0.10, 0.13,
-                ))),
-                border: iced::Border {
-                    color: Color::from_rgb(0.3, 0.3, 0.35),
-                    width: 1.0,
-                    radius: 6.0.into(),
-                },
-                ..Default::default()
-            })
-            .into();
-
-        // Confirmation dialog overlay
-        if panel.showing_confirmation {
-            let side_label = match panel.side {
-                crate::order_panel::OrderSide::Buy => "BUY",
-                crate::order_panel::OrderSide::Sell => "SELL",
-            };
-            let order_summary = format!(
-                "{} {} {} at Market",
-                side_label, panel.quantity, panel.symbol,
-            );
-
-            let mut details = Column::new().spacing(4);
-            details = details.push(text(order_summary).size(12));
-            if panel.tp_enabled && !panel.tp_value.is_empty() {
-                let tp_display = if let (Some(last), Ok(val)) =
-                    (panel.last_price, panel.tp_value.parse::<f64>())
-                {
-                    let resolved = crate::order_panel::resolve_price(
-                        panel.tp_mode,
-                        val,
-                        last,
-                        panel.side,
-                        true,
-                    );
-                    format!("TP: {:.2}", resolved)
-                } else {
-                    format!("TP: {}", panel.tp_value)
-                };
-                details = details.push(
-                    text(tp_display)
-                        .size(11)
-                        .color(Color::from_rgb(0.3, 0.8, 0.4)),
-                );
-            }
-            if panel.sl_enabled && !panel.sl_value.is_empty() {
-                let sl_display = if let (Some(last), Ok(val)) =
-                    (panel.last_price, panel.sl_value.parse::<f64>())
-                {
-                    let resolved = crate::order_panel::resolve_price(
-                        panel.sl_mode,
-                        val,
-                        last,
-                        panel.side,
-                        false,
-                    );
-                    format!("SL: {:.2}", resolved)
-                } else {
-                    format!("SL: {}", panel.sl_value)
-                };
-                details = details.push(
-                    text(sl_display)
-                        .size(11)
-                        .color(Color::from_rgb(0.9, 0.3, 0.3)),
-                );
-            }
-
-            let confirm_content = column![
-                text("Confirm Market Order").size(14),
-                container(Space::new().height(1))
-                    .width(Fill)
-                    .style(|_t| container::Style {
-                        background: Some(iced::Background::Color(Color::from_rgb(
-                            0.3, 0.3, 0.35,
-                        ))),
-                        ..Default::default()
-                    }),
-                details,
-                container(Space::new().height(1))
-                    .width(Fill)
-                    .style(|_t| container::Style {
-                        background: Some(iced::Background::Color(Color::from_rgb(
-                            0.3, 0.3, 0.35,
-                        ))),
-                        ..Default::default()
-                    }),
-                row![
-                    button(text("Cancel").size(12))
-                        .on_press(Message::OrderPanelConfirmNo)
-                        .padding([6, 16]),
-                    Space::new().width(Fill),
-                    button(text("Confirm & Submit").size(12))
-                        .on_press(Message::OrderPanelConfirmYes)
-                        .padding([6, 16]),
-                ]
-                .spacing(8),
-            ]
-            .spacing(8)
-            .padding(16)
-            .width(300);
-
-            let confirm_dialog: Element<'_, Message> = container(confirm_content)
-                .style(|_theme| container::Style {
-                    background: Some(iced::Background::Color(Color::from_rgb(
-                        0.12, 0.12, 0.16,
-                    ))),
-                    border: iced::Border {
-                        color: Color::from_rgb(0.4, 0.4, 0.5),
-                        width: 1.5,
-                        radius: 8.0.into(),
-                    },
-                    ..Default::default()
-                })
-                .into();
-
-            let dialog_positioned = container(confirm_dialog)
-                .width(Fill)
-                .height(Fill)
-                .align_x(iced::alignment::Horizontal::Center)
-                .align_y(iced::alignment::Vertical::Center);
-
-            // Dark semi-transparent backdrop over the panel
-            let backdrop: Element<'_, Message> = container(dialog_positioned)
-                .width(320)
-                .style(|_theme| container::Style {
-                    background: Some(iced::Background::Color(Color::from_rgba(
-                        0.0, 0.0, 0.0, 0.6,
-                    ))),
-                    ..Default::default()
-                })
-                .into();
-
-            return stack![base_panel, backdrop].into();
-        }
-
-        base_panel
     }
 }
 
