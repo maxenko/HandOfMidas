@@ -34,7 +34,7 @@ calls in `app.rs` (lines ~2674, ~2794) mark the gaps.
 - Route `BracketContextCancel` → `BrokerCommand::CancelBracket`
 - Subscribe to `BrokerEvent`s and update chart annotations on status changes
 
-**Reference:** `plan/broker-trait-redesign.md` (implemented), `plan/archive/market-order-bracket/`
+**Reference:** `plan/archive/broker-trait-redesign.md` (implemented), `plan/archive/market-order-bracket/`
 
 ### 2. Grid Component Polish
 

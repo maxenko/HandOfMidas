@@ -88,8 +88,9 @@ HandOfMidas/
 │   └── mailbox_processor/          # Async actor pattern
 │
 ├── plan/                           # Active plans + plan/archive/
-│   ├── broker/                     # Broker architecture docs (5 files)
+│   ├── broker/                     # Broker architecture docs (6 files)
 │   ├── widget-system/              # Chart widget system design
+│   ├── TODO.md                     # Current state and next steps
 │   └── archive/                    # Implemented plans
 ├── desktop/win/plan/               # UI-specific plans + archive/
 │   └── grid-component/             # Trading-grade grid widget design
