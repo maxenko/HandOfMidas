@@ -2302,10 +2302,11 @@ impl MidasApp {
 
             // -- Market data cache --
             Message::MarketSnapshotLoaded(symbol, Ok(buffer)) => {
-                // Only insert if a watchlist still references this symbol.
-                // The ticker may have been removed while the async load was in-flight.
-                let still_used = self.watchlists.values().any(|wl| wl.has_ticker(&symbol));
-                if still_used {
+                // Insert if any watchlist or chart still references this symbol.
+                let in_watchlist = self.watchlists.values().any(|wl| wl.has_ticker(&symbol));
+                let in_chart = self.charts.values().any(|c| c.symbol == symbol)
+                    || self.floating_charts.values().any(|c| c.symbol == symbol);
+                if in_watchlist || in_chart {
                     let snapshot = crate::market_cache::snapshot_from_candles(&buffer);
                     self.market_cache.insert(symbol, snapshot);
                 }
