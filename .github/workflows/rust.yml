@@ -14,7 +14,7 @@ jobs:
     name: Broker workspace
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Format check
         run: cargo fmt --check
       - name: Clippy
@@ -28,7 +28,7 @@ jobs:
     name: Desktop workspace
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Format check
         run: cd desktop/win && cargo fmt --check
       - name: Clippy
