@@ -43,28 +43,37 @@ impl MidasApp {
         let content = self.view_content();
         let status_bar = self.view_status_bar();
 
-        // Drag banner: shown when a ticker drag is active.
+        // Drag overlay: floating label near cursor when dragging a ticker.
         if let Some(ref drag) = self.dragging_ticker {
-            let banner = container(
-                row![
-                    text(format!("Drop {} on a chart panel", drag.symbol)).size(13),
-                    Space::new().width(10),
-                    button(text("Cancel").size(12))
-                        .on_press(Message::WatchlistDragCancel)
-                        .padding([3, 8])
-                        .style(hover_text_button_style),
-                ]
-                .align_y(iced::Alignment::Center),
+            let label = container(
+                text(drag.symbol.clone())
+                    .size(13)
+                    .color(Color::WHITE),
             )
-            .padding([4, 12])
-            .width(Fill)
-            .style(|_theme| container::Style {
-                background: Some(iced::Background::Color(Color::from_rgb(
-                    0.15, 0.25, 0.45,
+            .padding([4, 8])
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(Color::from_rgba(
+                    0.15, 0.35, 0.65, 0.92,
                 ))),
+                border: iced::Border {
+                    color: Color::from_rgb(0.3, 0.5, 0.8),
+                    width: 1.0,
+                    radius: 4.0.into(),
+                },
                 ..Default::default()
             });
-            return column![toolbar, banner, content, status_bar].into();
+
+            // Position the label offset from the current cursor.
+            let pos = self.cursor_position;
+            let drag_preview = container(label)
+                .width(Length::Shrink)
+                .height(Length::Shrink)
+                .padding(iced::Padding::ZERO
+                    .top(pos.y + 16.0)
+                    .left(pos.x + 12.0));
+
+            let base = column![toolbar, content, status_bar];
+            return stack![base, drag_preview].into();
         }
 
         // Order panel overlay: floats on top of the main layout.
@@ -513,7 +522,10 @@ impl MidasApp {
                         }
                     })
             })
+            .on_click(Message::PaneFocused)
             .on_resize(6, Message::PaneResized)
+            // Note: on_click fires PaneFocused for pane selection.
+            // Drag-drop uses DragMouseUp with global hit-testing instead.
             .on_drag(Message::PaneDragged)
             .style(|_theme| pane_grid::Style {
                 hovered_region: pane_grid::Highlight {
@@ -1391,11 +1403,6 @@ impl MidasApp {
                 let sym_del = row_data.symbol.clone();
                 let sym_drag = row_data.symbol.clone();
 
-                let drag_btn = button(text("\u{2807}").size(12))
-                    .on_press(Message::WatchlistDragStart(wl_id, sym_drag))
-                    .padding([2, 4])
-                    .style(hover_text_button_style);
-
                 let fav_btn = button(text(fav_label).size(12))
                     .on_press(Message::WatchlistToggleFavorite(wl_id, sym))
                     .padding([2, 4])
@@ -1406,13 +1413,21 @@ impl MidasApp {
                     .padding([2, 4])
                     .style(hover_text_button_style);
 
+                // Ticker cell is a drag handle — clicking it starts a drag.
+                let ticker_cell = iced::widget::mouse_area(
+                    text(row_data.symbol.clone())
+                        .size(13)
+                        .wrapping(iced::widget::text::Wrapping::None)
+                        .color(theme::TEXT_PRIMARY),
+                )
+                .on_press(Message::WatchlistTickerPressed(wl_id, sym_drag));
+
                 let w = |col_id| view_state.column_width(col_id);
 
                 use iced::widget::text::Wrapping;
                 let inner_row = Row::with_children(vec![
-                    grid_data_cell(drag_btn.into(), w(COL_DRAG)),
                     grid_data_cell(fav_btn.into(), w(COL_FAV)),
-                    grid_data_cell(text(row_data.symbol.clone()).size(13).wrapping(Wrapping::None).color(theme::TEXT_PRIMARY).into(), w(COL_TICKER)),
+                    grid_data_cell(ticker_cell.into(), w(COL_TICKER)),
                     grid_data_cell(text(row_data.price_text.clone()).size(13).wrapping(Wrapping::None).color(theme::TEXT_PRIMARY).into(), w(COL_PRICE)),
                     grid_data_cell(
                         text(row_data.change_text.clone())

@@ -62,7 +62,7 @@ fn view(state: &MidasApp, window_id: window::Id) -> Element<'_, Message> {
 
 /// iced subscription -- listens for keyboard events, periodic ticks,
 /// and window close events.
-fn subscription(_state: &MidasApp) -> Subscription<Message> {
+fn subscription(state: &MidasApp) -> Subscription<Message> {
     let keyboard_sub = keyboard::listen().map(|event| match event {
         keyboard::Event::KeyPressed { key, modifiers, .. } => {
             // Ctrl+N: add new chart.
@@ -98,11 +98,33 @@ fn subscription(_state: &MidasApp) -> Subscription<Message> {
     let market_refresh = iced::time::every(std::time::Duration::from_secs(60))
         .map(|_| Message::RefreshMarketData);
 
-    Subscription::batch([
+    // Always track cursor position so drag preview appears at the right spot.
+    let cursor_sub = iced::event::listen_with(|event, _status, _id| match event {
+        iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+            Some(Message::DragCursorMoved(position))
+        }
+        _ => None,
+    });
+
+    let mut subs = vec![
         keyboard_sub,
         tick_sub,
         close_sub,
         window_events_sub,
         market_refresh,
-    ])
+        cursor_sub,
+    ];
+
+    // Global mouse-up detection during pending or active drag.
+    if state.pending_drag.is_some() || state.dragging_ticker.is_some() {
+        let mouse_up_sub = iced::event::listen_with(|event, _status, _id| match event {
+            iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                iced::mouse::Button::Left,
+            )) => Some(Message::DragMouseUp),
+            _ => None,
+        });
+        subs.push(mouse_up_sub);
+    }
+
+    Subscription::batch(subs)
 }

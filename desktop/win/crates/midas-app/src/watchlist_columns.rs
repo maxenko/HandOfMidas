@@ -81,10 +81,9 @@ pub enum WatchlistColumn {
 }
 
 impl WatchlistColumn {
-    /// All seven columns in their default display order.
-    pub fn all() -> [WatchlistColumn; 7] {
+    /// All columns in their default display order.
+    pub fn all() -> [WatchlistColumn; 6] {
         [
-            WatchlistColumn::DragHandle,
             WatchlistColumn::Favorite,
             WatchlistColumn::Ticker,
             WatchlistColumn::Price,
@@ -124,7 +123,7 @@ impl GridColumn<WatchlistRow, Message> for WatchlistColumn {
         match self {
             Self::DragHandle => {
                 button(text("\u{2807}").size(12))
-                    .on_press(Message::WatchlistDragStart(
+                    .on_press(Message::WatchlistTickerPressed(
                         row.wl_id,
                         row.symbol.clone(),
                     ))
@@ -289,14 +288,14 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn all_returns_seven_columns() {
-        assert_eq!(WatchlistColumn::all().len(), 7);
+    fn all_returns_six_columns() {
+        assert_eq!(WatchlistColumn::all().len(), 6);
     }
 
     #[test]
     fn all_column_ids_are_unique() {
         let ids: HashSet<ColumnId> = WatchlistColumn::all().iter().map(|c| c.id()).collect();
-        assert_eq!(ids.len(), 7, "every column must have a unique ColumnId");
+        assert_eq!(ids.len(), 6, "every column must have a unique ColumnId");
     }
 
     #[test]
@@ -345,7 +344,6 @@ mod tests {
 
     #[test]
     fn fixed_columns_have_correct_widths() {
-        assert_eq!(WatchlistColumn::DragHandle.width(), ColumnWidth::Fixed(26.0));
         assert_eq!(WatchlistColumn::Favorite.width(), ColumnWidth::Fixed(30.0));
         assert_eq!(WatchlistColumn::Delete.width(), ColumnWidth::Fixed(30.0));
     }
@@ -356,7 +354,6 @@ mod tests {
         assert_eq!(WatchlistColumn::ChangePercent.align(), Alignment::End);
         assert_eq!(WatchlistColumn::GATR.align(), Alignment::End);
         assert_eq!(WatchlistColumn::Ticker.align(), Alignment::Start);
-        assert_eq!(WatchlistColumn::DragHandle.align(), Alignment::Start);
     }
 
     #[test]

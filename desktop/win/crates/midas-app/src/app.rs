@@ -128,8 +128,11 @@ pub struct MidasApp {
     pub store: Option<midas_store::DbHandle>,
     /// All watchlist panels keyed by stable WatchlistId.
     pub watchlists: HashMap<WatchlistId, WatchlistPanel>,
-    /// Active drag-drop state: when set, the user has clicked a ticker
-    /// grip and is choosing a chart pane to drop it onto.
+    /// Last known cursor position (tracked globally for drag preview placement).
+    pub cursor_position: iced::Point,
+    /// Pending drag: user pressed a ticker but 250ms hasn't elapsed yet.
+    pub pending_drag: Option<PendingDragState>,
+    /// Active drag-drop state: promoted from pending after hold threshold.
     pub dragging_ticker: Option<DragTickerState>,
     /// Which link picker dropdown is currently open, if any.
     pub link_picker_open: Option<(PickerTarget, LinkDimension)>,
@@ -152,11 +155,22 @@ pub struct MidasApp {
     pub market_cache: crate::market_cache::MarketDataCache,
 }
 
+/// Pending drag: press started but hold threshold not yet reached.
+#[derive(Debug, Clone)]
+pub struct PendingDragState {
+    /// The ticker symbol that might be dragged.
+    pub symbol: String,
+    /// Watchlist the press originated from.
+    pub wl_id: WatchlistId,
+}
+
 /// State for an in-progress ticker drag from a watchlist to a chart.
 #[derive(Debug, Clone)]
 pub struct DragTickerState {
     /// The ticker symbol being dragged.
     pub symbol: String,
+    /// Current cursor position for the floating drag preview.
+    pub cursor_pos: iced::Point,
 }
 
 /// Minimum interval between debounced config saves (in seconds).
@@ -324,10 +338,16 @@ pub enum Message {
     WatchlistRemoveTicker(WatchlistId, String),
     /// Toggle the favorite status of a ticker in a watchlist.
     WatchlistToggleFavorite(WatchlistId, String),
-    /// User clicked the drag grip on a watchlist ticker row.
-    WatchlistDragStart(WatchlistId, String),
-    /// User cancelled the drag (Escape or cancel button).
+    /// User pressed down on a ticker cell — starts the hold timer.
+    WatchlistTickerPressed(WatchlistId, String),
+    /// Hold threshold reached — promote pending drag to active drag.
+    WatchlistDragConfirm(String),
+    /// User cancelled the drag (Escape key).
     WatchlistDragCancel,
+    /// Mouse moved during drag (cursor tracking for preview).
+    DragCursorMoved(iced::Point),
+    /// Global mouse-up — attempt drop or cancel.
+    DragMouseUp,
     /// User clicked a ticker row in a watchlist.
     WatchlistTickerSelected(WatchlistId, String),
     /// Set the symbol link mode for a watchlist panel.
@@ -687,6 +707,8 @@ impl MidasApp {
             providers: Self::build_provider_registry(&config),
             store,
             watchlists,
+            cursor_position: iced::Point::ORIGIN,
+            pending_drag: None,
             dragging_ticker: None,
             link_picker_open: None,
             resizing_column: None,
@@ -1544,27 +1566,6 @@ impl MidasApp {
             }
 
             Message::PaneFocused(pane) => {
-                self.link_picker_open = None;
-                // If in drag-drop mode, treat the click as a drop target.
-                if let Some(drag) = self.dragging_ticker.take() {
-                    if let Some(pane_state) = self.workspace.panes.get(pane) {
-                        if let Some(chart_id) = pane_state.chart_id() {
-                            self.status_message =
-                                format!("Loaded {} into {chart_id}", drag.symbol);
-                            self.workspace.set_focus(pane);
-                            let load = self.load_symbol_for_chart(chart_id, &drag.symbol);
-                            let propagate =
-                                self.propagate_symbol_change(chart_id, &drag.symbol);
-                            self.mark_config_dirty();
-                            return Task::batch([load, propagate]);
-                        }
-                        // Dropped on a non-chart pane — restore drag state.
-                        self.dragging_ticker = Some(drag);
-                        self.status_message =
-                            "Drop on a chart pane, not a watchlist".into();
-                        return Task::none();
-                    }
-                }
                 self.workspace.set_focus(pane);
                 Task::none()
             }
@@ -1581,18 +1582,16 @@ impl MidasApp {
             }
 
             Message::PaneDragged(pane_grid::DragEvent::Dropped { pane, target }) => {
-                if self.dragging_ticker.is_some() {
-                    self.dragging_ticker = None;
-                }
+                self.pending_drag = None;
+                self.dragging_ticker = None;
                 self.workspace.panes.drop(pane, target);
                 self.mark_config_dirty();
                 Task::none()
             }
 
             Message::PaneDragged(_) => {
-                if self.dragging_ticker.is_some() {
-                    self.dragging_ticker = None;
-                }
+                self.pending_drag = None;
+                self.dragging_ticker = None;
                 Task::none()
             }
 
@@ -2275,15 +2274,103 @@ impl MidasApp {
                 Task::none()
             }
 
-            Message::WatchlistDragStart(_wl_id, symbol) => {
-                self.dragging_ticker = Some(DragTickerState { symbol });
-                self.status_message = "Click a chart pane to drop the ticker".into();
+            Message::WatchlistTickerPressed(wl_id, symbol) => {
+                self.pending_drag = Some(PendingDragState {
+                    symbol: symbol.clone(),
+                    wl_id,
+                });
+                // Fire confirmation after 250ms hold.
+                Task::perform(
+                    async {
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    },
+                    move |_| Message::WatchlistDragConfirm(symbol),
+                )
+            }
+
+            Message::WatchlistDragConfirm(symbol) => {
+                // Only promote if the pending drag matches (hasn't been cancelled).
+                if self.pending_drag.as_ref().map(|p| &p.symbol) == Some(&symbol) {
+                    self.pending_drag = None;
+                    self.dragging_ticker = Some(DragTickerState {
+                        symbol,
+                        cursor_pos: self.cursor_position,
+                    });
+                }
                 Task::none()
             }
 
             Message::WatchlistDragCancel => {
+                self.pending_drag = None;
                 self.dragging_ticker = None;
-                self.status_message = "Drag cancelled".into();
+                Task::none()
+            }
+
+            Message::DragCursorMoved(pos) => {
+                self.cursor_position = pos;
+                if let Some(ref mut drag) = self.dragging_ticker {
+                    drag.cursor_pos = pos;
+                }
+                Task::none()
+            }
+
+            Message::DragMouseUp => {
+                // If still in pending state (released before 250ms), treat as
+                // a regular ticker click — select the ticker in the watchlist.
+                if let Some(pending) = self.pending_drag.take() {
+                    return self.update(Message::WatchlistTickerSelected(
+                        pending.wl_id,
+                        pending.symbol,
+                    ));
+                }
+
+                let drag = match self.dragging_ticker.take() {
+                    Some(d) => d,
+                    None => return Task::none(),
+                };
+
+                // Hit-test: find the chart pane under the cursor.
+                // The pane grid sits below the toolbar (~32px) and above the
+                // status bar (~26px). We compute pane regions relative to the
+                // pane grid origin, then offset to window coordinates.
+                const TOOLBAR_H: f32 = 32.0;
+                const STATUS_H: f32 = 26.0;
+                let (win_w, win_h) = self.window_size;
+                let grid_w = win_w as f32;
+                let grid_h = (win_h as f32 - TOOLBAR_H - STATUS_H).max(1.0);
+
+                let regions = self.workspace.panes.layout().pane_regions(
+                    1.0, // spacing
+                    0.0, // min_size
+                    iced::Size::new(grid_w, grid_h),
+                );
+
+                let cursor = drag.cursor_pos;
+                // Translate cursor from window-space to pane-grid-space.
+                let local_x = cursor.x;
+                let local_y = cursor.y - TOOLBAR_H;
+
+                for (pane, rect) in &regions {
+                    if local_x >= rect.x
+                        && local_x <= rect.x + rect.width
+                        && local_y >= rect.y
+                        && local_y <= rect.y + rect.height
+                    {
+                        if let Some(ps) = self.workspace.panes.get(*pane) {
+                            if let Some(chart_id) = ps.chart_id() {
+                                self.workspace.set_focus(*pane);
+                                let load =
+                                    self.load_symbol_for_chart(chart_id, &drag.symbol);
+                                let propagate =
+                                    self.propagate_symbol_change(chart_id, &drag.symbol);
+                                self.mark_config_dirty();
+                                return Task::batch([load, propagate]);
+                            }
+                        }
+                    }
+                }
+
+                // Mouse-up was not on a chart pane — cancel drag.
                 Task::none()
             }
 
@@ -3080,9 +3167,9 @@ impl MidasApp {
                     self.order_panel.showing_confirmation = false;
                     self.order_panel.errors.clear();
                 }
+                self.pending_drag = None;
                 if self.dragging_ticker.is_some() {
                     self.dragging_ticker = None;
-                    self.status_message = "Drag cancelled".into();
                 }
             }
             Key::Named(Named::F11) => {
