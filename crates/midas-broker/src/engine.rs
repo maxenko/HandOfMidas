@@ -459,6 +459,9 @@ impl BrokerEngine {
             symbol: params.symbol.clone(),
             action: params.action,
             quantity: params.quantity,
+            tp_price: params.take_profit.as_ref().map(|tp| tp.price),
+            sl_price: params.stop_loss.as_ref().map(|sl| sl.stop_price),
+            reference_price: params.reference_price,
         });
 
         tracing::info!(
@@ -2147,6 +2150,9 @@ mod tests {
                 symbol,
                 action,
                 quantity,
+                tp_price: _,
+                sl_price: _,
+                reference_price: _,
             } => {
                 assert!(!parent_id.is_nil(), "parent_id should be a valid UUID");
                 assert!(take_profit_id.is_some(), "full bracket should have TP");

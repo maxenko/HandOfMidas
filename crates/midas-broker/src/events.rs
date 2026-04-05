@@ -76,6 +76,12 @@ pub enum BrokerEvent {
         symbol: String,
         action: OrderAction,
         quantity: f64,
+        /// Take profit limit price (if TP leg exists).
+        tp_price: Option<f64>,
+        /// Stop loss trigger price (if SL leg exists).
+        sl_price: Option<f64>,
+        /// Last traded price at submission time (from MarketBracketParams).
+        reference_price: Option<f64>,
     },
     /// A bracket's lifecycle status changed (derived from leg statuses).
     BracketStatusChanged {
