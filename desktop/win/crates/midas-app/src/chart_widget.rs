@@ -101,6 +101,9 @@ pub struct ChartRenderSnapshot {
     /// Which chart currently has the placing cursor. Used to clear stale
     /// previews on non-source charts (handles cross-window cursor jumps).
     pub placing_cursor_chart: Option<ChartId>,
+    /// G.ATR hover: intraday candle index ranges to keep bright.
+    /// Empty when hover is inactive.
+    pub gatr_bright_ranges: Vec<(usize, usize)>,
 }
 
 // ── ChartProgram ─────────────────────────────────────────────────────
@@ -480,6 +483,7 @@ impl shader::Program<Message> for ChartProgram {
             show_volume_profile: snap.show_volume_profile,
             dirty: &dirty,
             level_tool: &effective_level_tool,
+            gatr_bright_ranges: &snap.gatr_bright_ranges,
         };
 
         let scene = compute_chart_scene(&input);

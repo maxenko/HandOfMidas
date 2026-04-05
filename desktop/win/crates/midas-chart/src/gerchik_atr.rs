@@ -31,6 +31,11 @@ pub struct GerchikAtrRender {
     pub text: String,
     /// RGBA color: green if below threshold, red if at/above.
     pub color: [f32; 4],
+    /// Intraday candle index ranges that should remain bright during
+    /// hover highlighting. Each tuple is `(start_idx, end_idx)` inclusive.
+    /// Includes the 7 selected non-paranormal daily bars + today.
+    /// Sorted ascending by start_idx, non-overlapping.
+    pub bright_ranges: Vec<(usize, usize)>,
 }
 
 /// Compute the Gerchik ATR overlay from intraday candle data.
@@ -63,15 +68,31 @@ pub fn compute_gerchik_atr(
     let lows: Vec<f64> = daily_bars.iter().map(|b| b.low as f64).collect();
     let closes: Vec<f64> = daily_bars.iter().map(|b| b.close as f64).collect();
 
-    // Use the canonical Gerchik algorithm: skip today, walk 7 sessions,
-    // filter paranormal candles, return percentage.
-    let pct = midas_core::gerchik_gatr_pct(&highs, &lows, &closes)?;
+    // Use the detail variant to get both percentage and selected bar indices.
+    let result = midas_core::gerchik_gatr_detail(&highs, &lows, &closes)?;
     let n = closes.len();
     let price_up = n >= 2 && closes[n - 1] >= closes[n - 2];
     let color = midas_core::gatr_color(price_up);
-    let text = format!("G.ATR {:.0}%", pct);
+    let text = format!("G.ATR {:.0}%", result.pct);
 
-    Some(GerchikAtrRender { pct, text, color })
+    // Map selected daily bar indices → intraday candle index ranges.
+    // Always include today (last daily bar).
+    let mut bright_ranges: Vec<(usize, usize)> = result
+        .selected_bars
+        .iter()
+        .map(|&bar_idx| (daily_bars[bar_idx].start_idx, daily_bars[bar_idx].end_idx))
+        .collect();
+    // Add today's range (last daily bar).
+    let today = &daily_bars[daily_bars.len() - 1];
+    bright_ranges.push((today.start_idx, today.end_idx));
+    bright_ranges.sort_unstable_by_key(|r| r.0);
+
+    Some(GerchikAtrRender {
+        pct: result.pct,
+        text,
+        color,
+        bright_ranges,
+    })
 }
 
 /// A synthetic daily bar aggregated from intraday candles.
@@ -80,12 +101,17 @@ struct DailyBar {
     high: f32,
     low: f32,
     close: f32,
+    /// First intraday candle index (inclusive) in the source `CandleData`.
+    start_idx: usize,
+    /// Last intraday candle index (inclusive) in the source `CandleData`.
+    end_idx: usize,
 }
 
 /// Aggregate intraday candles into daily bars by UTC calendar day.
 ///
 /// Groups consecutive candles that share the same `timestamp / DAY_MS`
-/// value into a single bar with the day's high, low, and last close.
+/// value into a single bar with the day's high, low, last close, and
+/// the source candle index range.
 fn aggregate_daily_bars(data: &dyn CandleData) -> Vec<DailyBar> {
     if data.is_empty() {
         return Vec::new();
@@ -96,6 +122,7 @@ fn aggregate_daily_bars(data: &dyn CandleData) -> Vec<DailyBar> {
     let mut day_low = data.low(0);
     let mut day_close = data.close(0);
     let mut current_day = data.timestamp(0).div_euclid(DAY_MS);
+    let mut day_start_idx: usize = 0;
 
     for i in 1..data.len() {
         let day = data.timestamp(i).div_euclid(DAY_MS);
@@ -104,10 +131,13 @@ fn aggregate_daily_bars(data: &dyn CandleData) -> Vec<DailyBar> {
                 high: day_high,
                 low: day_low,
                 close: day_close,
+                start_idx: day_start_idx,
+                end_idx: i - 1,
             });
             day_high = data.high(i);
             day_low = data.low(i);
             current_day = day;
+            day_start_idx = i;
         } else {
             day_high = day_high.max(data.high(i));
             day_low = day_low.min(data.low(i));
@@ -119,6 +149,8 @@ fn aggregate_daily_bars(data: &dyn CandleData) -> Vec<DailyBar> {
         high: day_high,
         low: day_low,
         close: day_close,
+        start_idx: day_start_idx,
+        end_idx: data.len() - 1,
     });
 
     bars

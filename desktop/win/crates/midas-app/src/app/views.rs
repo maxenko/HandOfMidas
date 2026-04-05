@@ -83,6 +83,9 @@ impl MidasApp {
     ) -> Element<'a, Message> {
         // If data is loaded, render via GPU Shader widget.
         if let (LoadState::Loaded, Some(ref data)) = (&chart.load_state, &chart.data) {
+            // Compute G.ATR early so bright_ranges can be included in the snapshot.
+            let gerchik_atr = gatr_render_from_cache(&self.market_cache, &chart.symbol);
+
             let snapshot = crate::chart_widget::ChartRenderSnapshot {
                 symbol: chart.symbol.clone(),
                 data: Some(Arc::clone(data)),
@@ -127,6 +130,11 @@ impl MidasApp {
                     ))
                     .cloned()
                     .collect(),
+                gatr_bright_ranges: if chart.gatr_hover && chart.timeframe == Timeframe::D1 {
+                    chart.data.as_ref().map_or(Vec::new(), |d| compute_daily_bright_ranges(d))
+                } else {
+                    Vec::new()
+                },
             };
             // Use ChartId(0) for floating windows -- they don't participate
             // in the pane_grid's chart map.
@@ -158,14 +166,10 @@ impl MidasApp {
             let floating_chart_id = ChartId::new(0);
             let drawing_panel = build_drawing_panel(floating_chart_id, self.level_placing);
 
-            // Gerchik ATR overlay — reads from the central market_cache
-            // (computed from D1 bars), not from intraday aggregation.
-            let gerchik_atr = gatr_render_from_cache(&self.market_cache, &chart.symbol);
-
             let mut chart_layers: Vec<Element<'_, Message>> =
                 vec![shader.into(), date_overlay, price_overlay];
 
-            chart_layers.push(build_gerchik_atr_overlay(gerchik_atr.as_ref()));
+            chart_layers.push(build_gerchik_atr_overlay(gerchik_atr.as_ref(), floating_chart_id, chart.timeframe == Timeframe::D1));
 
             let store_levels = self.level_store.levels_for(&chart.symbol);
             if chart.chart_state.show_levels {
@@ -772,6 +776,9 @@ impl MidasApp {
         };
 
         if let (LoadState::Loaded, Some(ref data)) = (&chart.load_state, &chart.data) {
+            // Compute G.ATR early so bright_ranges can be included in the snapshot.
+            let gerchik_atr = gatr_render_from_cache(&self.market_cache, &chart.symbol);
+
             let snapshot = crate::chart_widget::ChartRenderSnapshot {
                 symbol: chart.symbol.clone(),
                 data: Some(Arc::clone(data)),
@@ -816,6 +823,11 @@ impl MidasApp {
                     ))
                     .cloned()
                     .collect(),
+                gatr_bright_ranges: if chart.gatr_hover && chart.timeframe == Timeframe::D1 {
+                    chart.data.as_ref().map_or(Vec::new(), |d| compute_daily_bright_ranges(d))
+                } else {
+                    Vec::new()
+                },
             };
             let program = crate::chart_widget::ChartProgram { chart_id, snapshot };
             let shader = crate::chart_widget::chart_shader(program);
@@ -842,14 +854,10 @@ impl MidasApp {
             // Build level-related overlays.
             let drawing_panel = build_drawing_panel(chart_id, self.level_placing);
 
-            // Gerchik ATR overlay — reads from the central market_cache
-            // (computed from D1 bars), not from intraday aggregation.
-            let gerchik_atr = gatr_render_from_cache(&self.market_cache, &chart.symbol);
-
             let mut chart_layers: Vec<Element<'_, Message>> =
                 vec![shader.into(), date_overlay, price_overlay];
 
-            chart_layers.push(build_gerchik_atr_overlay(gerchik_atr.as_ref()));
+            chart_layers.push(build_gerchik_atr_overlay(gerchik_atr.as_ref(), chart_id, chart.timeframe == Timeframe::D1));
 
             let store_levels = self.level_store.levels_for(&chart.symbol);
             if chart.chart_state.show_levels {
@@ -2943,11 +2951,38 @@ fn gatr_render_from_cache(
         pct,
         text: format!("G.ATR {:.0}%", pct),
         color,
+        bright_ranges: Vec::new(),
     })
+}
+
+/// Compute bright candle index ranges for G.ATR hover highlighting
+/// on a daily chart. Each selected bar maps 1:1 to a candle index.
+fn compute_daily_bright_ranges(data: &midas_core::CandleBuffer) -> Vec<(usize, usize)> {
+    if data.len() < 2 {
+        return Vec::new();
+    }
+    let highs: Vec<f64> = data.highs.iter().map(|&h| h as f64).collect();
+    let lows: Vec<f64> = data.lows.iter().map(|&l| l as f64).collect();
+    let closes: Vec<f64> = data.closes.iter().map(|&c| c as f64).collect();
+    let Some(result) = midas_core::gerchik_gatr_detail(&highs, &lows, &closes) else {
+        return Vec::new();
+    };
+    let mut ranges: Vec<(usize, usize)> = result
+        .selected_bars
+        .iter()
+        .map(|&idx| (idx, idx))
+        .collect();
+    // Always include today (last bar).
+    let last = data.len() - 1;
+    ranges.push((last, last));
+    ranges.sort_unstable_by_key(|r| r.0);
+    ranges
 }
 
 fn build_gerchik_atr_overlay<'a>(
     data: Option<&midas_chart::GerchikAtrRender>,
+    chart_id: ChartId,
+    is_daily: bool,
 ) -> Element<'a, Message> {
     let data = match data {
         Some(d) => d,
@@ -2957,13 +2992,22 @@ fn build_gerchik_atr_overlay<'a>(
     let color = Color::from_rgba(data.color[0], data.color[1], data.color[2], data.color[3]);
 
     // Bold watermark-style text, offset from the right edge.
-    let label = text(data.text.clone())
-        .size(20)
-        .color(color)
-        .font(iced::Font {
-            weight: iced::font::Weight::Bold,
-            ..iced::Font::default()
-        });
+    // Wrapped in mouse_area to detect hover for candle dimming (D1 only).
+    let mut area = iced::widget::mouse_area(
+        text(data.text.clone())
+            .size(20)
+            .color(color)
+            .font(iced::Font {
+                weight: iced::font::Weight::Bold,
+                ..iced::Font::default()
+            }),
+    );
+    if is_daily {
+        area = area
+            .on_enter(Message::GatrHoverEnter(chart_id))
+            .on_exit(Message::GatrHoverLeave(chart_id));
+    }
+    let label = area;
 
     container(row![
         Space::new().width(Fill),

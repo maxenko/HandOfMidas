@@ -9,7 +9,6 @@
 //! and integrates with the new indicator architecture.
 
 use midas_core::CandleData;
-use midas_indicators::atr::{true_range, GerchikAtr};
 
 use super::IndicatorOutput;
 
@@ -66,12 +65,17 @@ struct DailyBar {
     high: f64,
     low: f64,
     close: f64,
+    /// First intraday candle index (inclusive) in the source `CandleData`.
+    start_idx: usize,
+    /// Last intraday candle index (inclusive) in the source `CandleData`.
+    end_idx: usize,
 }
 
 /// Aggregate intraday candles into daily bars by UTC calendar day.
 ///
 /// Groups consecutive candles sharing the same `timestamp / DAY_MS`
-/// into a single bar with the day's high, low, and last close.
+/// into a single bar with the day's high, low, last close, and
+/// the source candle index range.
 fn aggregate_daily_bars(data: &dyn CandleData) -> Vec<DailyBar> {
     if data.is_empty() {
         return Vec::new();
@@ -82,6 +86,7 @@ fn aggregate_daily_bars(data: &dyn CandleData) -> Vec<DailyBar> {
     let mut day_low = data.low(0) as f64;
     let mut day_close = data.close(0) as f64;
     let mut current_day = data.timestamp(0).div_euclid(DAY_MS);
+    let mut day_start_idx: usize = 0;
 
     for i in 1..data.len() {
         let day = data.timestamp(i).div_euclid(DAY_MS);
@@ -90,10 +95,13 @@ fn aggregate_daily_bars(data: &dyn CandleData) -> Vec<DailyBar> {
                 high: day_high,
                 low: day_low,
                 close: day_close,
+                start_idx: day_start_idx,
+                end_idx: i - 1,
             });
             day_high = data.high(i) as f64;
             day_low = data.low(i) as f64;
             current_day = day;
+            day_start_idx = i;
         } else {
             day_high = day_high.max(data.high(i) as f64);
             day_low = day_low.min(data.low(i) as f64);
@@ -104,6 +112,8 @@ fn aggregate_daily_bars(data: &dyn CandleData) -> Vec<DailyBar> {
         high: day_high,
         low: day_low,
         close: day_close,
+        start_idx: day_start_idx,
+        end_idx: data.len() - 1,
     });
 
     bars
@@ -116,12 +126,12 @@ fn aggregate_daily_bars(data: &dyn CandleData) -> Vec<DailyBar> {
 /// - Candle duration >= 1 day (not an intraday chart)
 /// - Not enough daily bars for ATR calculation (need at least 2)
 ///
-/// This uses `midas_indicators::GerchikAtr` for the core math,
+/// This uses `midas_core::gerchik_gatr_pct` for the core math,
 /// wrapping it with daily bar aggregation and chart display logic.
 pub fn compute(
     data: &dyn CandleData,
     candle_duration_ms: f64,
-    config: &GerchikAtrConfig,
+    _config: &GerchikAtrConfig,
 ) -> Option<IndicatorOutput> {
     // Only show on intraday charts.
     if candle_duration_ms >= DAY_MS as f64 || data.len() < 2 {
@@ -133,35 +143,14 @@ pub fn compute(
         return None;
     }
 
-    // Build true range series from daily bars.
-    let mut true_ranges = Vec::with_capacity(daily_bars.len() - 1);
-    for i in 1..daily_bars.len() {
-        let tr = true_range(
-            daily_bars[i].high,
-            daily_bars[i].low,
-            Some(daily_bars[i - 1].close),
-        );
-        true_ranges.push(tr);
-    }
+    // Build f64 slices for the canonical Gerchik algorithm.
+    let highs: Vec<f64> = daily_bars.iter().map(|b| b.high).collect();
+    let lows: Vec<f64> = daily_bars.iter().map(|b| b.low).collect();
+    let closes: Vec<f64> = daily_bars.iter().map(|b| b.close).collect();
 
-    // Compute filtered ATR using the midas-indicators crate.
-    let gerchik = GerchikAtr::with_coefficients(
-        config.period,
-        config.upper_coeff,
-        config.lower_coeff,
-    );
-    let atr = gerchik.compute(&true_ranges)?;
-    if atr <= 0.0 {
-        return None;
-    }
-
-    // Current session range = last daily bar's (high - low).
-    let last = daily_bars.last()?;
-    let session_range = last.high - last.low;
-
-    let pct = (session_range / atr * 100.0) as f32;
-    let price_up = daily_bars.len() >= 2
-        && daily_bars.last().unwrap().close >= daily_bars[daily_bars.len() - 2].close;
+    let pct = midas_core::gerchik_gatr_pct(&highs, &lows, &closes)?;
+    let n = closes.len();
+    let price_up = n >= 2 && closes[n - 1] >= closes[n - 2];
     let color = midas_core::gatr_color(price_up);
     let text = format!("G.ATR {:.0}%", pct);
 

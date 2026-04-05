@@ -69,6 +69,7 @@ fn make_default_chart_input<'a>(
         show_volume_profile: false,
         dirty,
         level_tool: &DEFAULT_LEVEL_TOOL,
+        gatr_bright_ranges: &[],
     }
 }
 

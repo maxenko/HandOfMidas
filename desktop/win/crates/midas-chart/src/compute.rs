@@ -205,6 +205,7 @@ fn compute_normal_scene(
         &input.bull_color,
         &input.bear_color,
         &x_from_ts,
+        input.gatr_bright_ranges,
     );
 
     let volumes = build_volume_instances(
@@ -218,6 +219,7 @@ fn compute_normal_scene(
         &input.volume_bear_color,
         input.volume_scale,
         &x_from_ts,
+        input.gatr_bright_ranges,
     );
     let volume_count = volumes.as_ref().map_or(0, |v| v.len());
 
@@ -331,6 +333,7 @@ fn compute_collapsed_scene(
         &input.bull_color,
         &input.bear_color,
         &x_from_idx,
+        input.gatr_bright_ranges,
     );
     let candle_count = visible_count;
 
@@ -345,6 +348,7 @@ fn compute_collapsed_scene(
         &input.volume_bear_color,
         input.volume_scale,
         &x_from_idx,
+        input.gatr_bright_ranges,
     );
     let volume_count = volumes.as_ref().map_or(0, |v| v.len());
 
@@ -509,11 +513,19 @@ fn build_candle_instances(
     bull_color: &[f32; 4],
     bear_color: &[f32; 4],
     x_for_candle: &dyn Fn(usize) -> f32,
+    bright_ranges: &[(usize, usize)],
 ) -> Option<Vec<CandleInstance>> {
     if vis_start >= vis_end {
         return None;
     }
 
+    debug_assert!(
+        bright_ranges.windows(2).all(|w| w[0].1 < w[1].0),
+        "bright_ranges must be sorted and non-overlapping"
+    );
+
+    let dimming_active = !bright_ranges.is_empty();
+    let mut range_idx = 0;
     let mut instances = Vec::with_capacity(vis_end - vis_start);
 
     for i in vis_start..vis_end {
@@ -541,6 +553,25 @@ fn build_candle_instances(
         let is_bull = close >= open;
         let color = if is_bull { *bull_color } else { *bear_color };
 
+        // Determine dim factor for G.ATR hover highlighting.
+        let dim = if dimming_active {
+            // Advance cursor past ranges that end before this candle.
+            while range_idx < bright_ranges.len() && bright_ranges[range_idx].1 < i {
+                range_idx += 1;
+            }
+            // Check if this candle falls within the current range.
+            if range_idx < bright_ranges.len()
+                && i >= bright_ranges[range_idx].0
+                && i <= bright_ranges[range_idx].1
+            {
+                0.0 // bright
+            } else {
+                1.0 // dimmed
+            }
+        } else {
+            0.0
+        };
+
         instances.push(CandleInstance {
             x,
             body_top,
@@ -549,7 +580,7 @@ fn build_candle_instances(
             wick_bottom,
             width: body_width,
             wick_width,
-            _pad0: 0.0,
+            dim,
             color,
         });
     }
@@ -573,6 +604,7 @@ fn build_volume_instances(
     volume_bear_color: &[f32; 4],
     volume_scale: f32,
     x_for_candle: &dyn Fn(usize) -> f32,
+    bright_ranges: &[(usize, usize)],
 ) -> Option<Vec<VolumeInstance>> {
     if vis_start >= vis_end {
         return None;
@@ -593,6 +625,8 @@ fn build_volume_instances(
     let volume_area_bottom = vh;
     let volume_area_height = volume_area_bottom - volume_area_top;
 
+    let dimming_active = !bright_ranges.is_empty();
+    let mut range_idx = 0;
     let mut instances = Vec::with_capacity(vis_end - vis_start);
 
     for i in vis_start..vis_end {
@@ -603,11 +637,24 @@ fn build_volume_instances(
         let y_bottom = volume_area_bottom;
 
         let is_bull = data.close(i) >= data.open(i);
-        let color = if is_bull {
+        let mut color = if is_bull {
             *volume_bull_color
         } else {
             *volume_bear_color
         };
+
+        // Dim volume bars outside bright ranges (matches candle 30% target).
+        if dimming_active {
+            while range_idx < bright_ranges.len() && bright_ranges[range_idx].1 < i {
+                range_idx += 1;
+            }
+            let in_range = range_idx < bright_ranges.len()
+                && i >= bright_ranges[range_idx].0
+                && i <= bright_ranges[range_idx].1;
+            if !in_range {
+                color[3] *= 0.3;
+            }
+        }
 
         instances.push(VolumeInstance {
             x,
@@ -1435,6 +1482,7 @@ mod tests {
             show_volume_profile: false,
             level_tool: &DEFAULT_LEVEL_TOOL,
             dirty,
+            gatr_bright_ranges: &[],
         }
     }
 
@@ -1468,6 +1516,7 @@ mod tests {
             show_volume_profile: false,
             level_tool: &DEFAULT_LEVEL_TOOL,
             dirty,
+            gatr_bright_ranges: &[],
         }
     }
 

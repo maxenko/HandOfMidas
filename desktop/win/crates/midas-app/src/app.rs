@@ -77,6 +77,8 @@ pub struct ChartPanel {
     pub symbol_link: LinkMode,
     /// Timeframe link group for cross-chart timeframe synchronization.
     pub timeframe_link: LinkMode,
+    /// Whether the G.ATR badge is currently hovered (triggers candle dimming).
+    pub gatr_hover: bool,
 }
 
 // ── Application state ─────────────────────────────────────────────────
@@ -386,6 +388,12 @@ pub enum Message {
     OrderPanelMsg(OrderPanelId, crate::order_panel::OrderPanelAction),
     /// Set the symbol link mode for a dockable order panel.
     OrderPanelSetSymbolLink(OrderPanelId, LinkMode),
+
+    // -- G.ATR hover highlight --
+    /// Mouse entered the G.ATR badge on a chart — activate candle dimming.
+    GatrHoverEnter(ChartId),
+    /// Mouse left the G.ATR badge — deactivate candle dimming.
+    GatrHoverLeave(ChartId),
 
     // -- Bracket drag --
     /// A bracket leg was dragged on a chart.
@@ -992,6 +1000,7 @@ impl MidasApp {
             level_editor_price_input: String::new(),
             symbol_link: LinkMode::Unlinked,
             timeframe_link: LinkMode::Unlinked,
+            gatr_hover: false,
         }
     }
 
@@ -1075,6 +1084,9 @@ impl MidasApp {
 
         let mut tasks: Vec<Task<Message>> = Vec::new();
         for id in pane_targets {
+            if let Some(chart) = self.charts.get_mut(&id) {
+                chart.gatr_hover = false;
+            }
             tasks.push(self.load_symbol_for_chart(id, new_symbol));
         }
 
@@ -1095,6 +1107,7 @@ impl MidasApp {
             if let Some(chart) = self.floating_charts.get_mut(&wid) {
                 chart.symbol = symbol.clone();
                 chart.symbol_input = symbol.clone();
+                chart.gatr_hover = false;
                 chart.load_state = LoadState::Loading;
                 chart.chart_state.dirty.mark_data();
             }
@@ -1157,6 +1170,7 @@ impl MidasApp {
                 .unwrap_or_default();
             if let Some(chart) = self.charts.get_mut(&id) {
                 chart.timeframe = new_tf;
+                chart.gatr_hover = false;
                 chart.chart_state.dirty.mark_camera();
             }
             if !symbol.is_empty() {
@@ -1183,6 +1197,7 @@ impl MidasApp {
                 .unwrap_or_default();
             if let Some(chart) = self.floating_charts.get_mut(&wid) {
                 chart.timeframe = new_tf;
+                chart.gatr_hover = false;
             }
             if !symbol.is_empty() {
                 if let Some(chart) = self.floating_charts.get_mut(&wid) {
@@ -1440,6 +1455,9 @@ impl MidasApp {
 
             Message::PanelSymbolSubmitted(chart_id) => {
                 self.focus_chart(chart_id);
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    chart.gatr_hover = false;
+                }
                 let symbol = if let Some(chart) = self.charts.get(&chart_id) {
                     chart.symbol_input.trim().to_uppercase()
                 } else {
@@ -1465,6 +1483,7 @@ impl MidasApp {
 
                 if let Some(chart) = self.charts.get_mut(&chart_id) {
                     chart.timeframe = tf;
+                    chart.gatr_hover = false;
                     chart.chart_state.dirty.mark_camera();
                 }
 
@@ -3070,6 +3089,33 @@ impl MidasApp {
                 // If the main window was closed, exit the application.
                 if self.main_window == Some(id) {
                     return self.flush_config().chain(iced::exit());
+                }
+                Task::none()
+            }
+
+            // -- G.ATR hover highlight --
+            Message::GatrHoverEnter(chart_id) => {
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    chart.gatr_hover = true;
+                    chart.chart_state.dirty.mark_candles();
+                } else {
+                    // Floating windows use ChartId(0) which isn't in self.charts.
+                    for fc in self.floating_charts.values_mut() {
+                        fc.gatr_hover = true;
+                        fc.chart_state.dirty.mark_candles();
+                    }
+                }
+                Task::none()
+            }
+            Message::GatrHoverLeave(chart_id) => {
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    chart.gatr_hover = false;
+                    chart.chart_state.dirty.mark_candles();
+                } else {
+                    for fc in self.floating_charts.values_mut() {
+                        fc.gatr_hover = false;
+                        fc.chart_state.dirty.mark_candles();
+                    }
                 }
                 Task::none()
             }

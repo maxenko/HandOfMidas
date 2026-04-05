@@ -56,6 +56,12 @@ impl DirtyFlags {
         self.indicators += 1;
     }
 
+    /// Candle instances need rebuild (e.g., hover highlight toggled).
+    /// Does NOT cascade to indicators — only triggers candle instance rebuild.
+    pub fn mark_candles(&mut self) {
+        self.candles += 1;
+    }
+
     /// Crosshair position changed (mouse moved).
     pub fn mark_crosshair(&mut self) {
         self.crosshair += 1;

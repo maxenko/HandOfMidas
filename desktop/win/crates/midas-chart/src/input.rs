@@ -55,4 +55,8 @@ pub struct ChartInput<'a> {
     pub dirty: &'a DirtyFlags,
     /// Level tool state for placement/snapping queries.
     pub level_tool: &'a LevelTool,
+    /// G.ATR hover highlight: intraday candle index ranges that should
+    /// remain bright. Empty slice = no dimming (hover inactive).
+    /// Each tuple is `(start_idx, end_idx)` inclusive, sorted ascending.
+    pub gatr_bright_ranges: &'a [(usize, usize)],
 }
