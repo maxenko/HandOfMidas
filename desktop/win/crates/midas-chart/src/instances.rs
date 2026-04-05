@@ -34,8 +34,9 @@ pub struct CandleInstance {
     pub width: f32,
     /// Wick width in physical pixels (always 1.0 after DPI adjustment).
     pub wick_width: f32,
-    /// Padding to align `color` to 16-byte boundary.
-    pub _pad0: f32,
+    /// Dim factor: 0.0 = full brightness, 1.0 = dimmed to 30% brightness.
+    /// Used for G.ATR hover highlighting.
+    pub dim: f32,
     /// RGBA color (linear space, NOT sRGB).
     pub color: [f32; 4],
 }
@@ -253,7 +254,7 @@ mod tests {
             wick_bottom: 65.0,
             width: 8.0,
             wick_width: 1.0,
-            _pad0: 0.0,
+            dim: 0.0,
             color: [0.0, 1.0, 0.0, 1.0],
         };
         let bytes: &[u8] = bytemuck::bytes_of(&instance);
@@ -317,7 +318,7 @@ mod tests {
                 wick_bottom: 35.0,
                 width: 6.0,
                 wick_width: 1.0,
-                _pad0: 0.0,
+                dim: 0.0,
                 color: [1.0, 0.0, 0.0, 1.0],
             },
             CandleInstance {
@@ -328,7 +329,7 @@ mod tests {
                 wick_bottom: 40.0,
                 width: 6.0,
                 wick_width: 1.0,
-                _pad0: 0.0,
+                dim: 0.0,
                 color: [0.0, 1.0, 0.0, 1.0],
             },
         ];

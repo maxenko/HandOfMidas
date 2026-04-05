@@ -65,7 +65,7 @@ mod tests {
             wick_bottom: 65.0,
             width: 8.0,
             wick_width: 1.0,
-            _pad0: 0.0,
+            dim: 0.0,
             color: [0.0, 1.0, 0.0, 1.0],
         };
         let bytes: &[u8] = bytemuck::bytes_of(&instance);

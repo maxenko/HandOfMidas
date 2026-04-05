@@ -283,7 +283,7 @@ impl CandlePipeline {
 ///   wick_bottom: f32 @ offset 16  -> location(5)
 ///   width:       f32 @ offset 20  -> location(6)
 ///   wick_width:  f32 @ offset 24  -> location(7)
-///   _pad0:       f32 @ offset 28  (not bound)
+///   dim:         f32 @ offset 28  -> location(9)
 ///   color:       [f32;4] @ offset 32 -> location(8)
 fn candle_instance_buffer_layout() -> wgpu::VertexBufferLayout<'static> {
     wgpu::VertexBufferLayout {
@@ -332,7 +332,12 @@ fn candle_instance_buffer_layout() -> wgpu::VertexBufferLayout<'static> {
                 offset: 24,
                 shader_location: 7,
             },
-            // _pad0 at offset 28 is NOT bound
+            // location(9): dim (was _pad0; 0.0 = full brightness, 1.0 = dimmed)
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32,
+                offset: 28,
+                shader_location: 9,
+            },
             // location(8): color vec4<f32>
             wgpu::VertexAttribute {
                 format: wgpu::VertexFormat::Float32x4,

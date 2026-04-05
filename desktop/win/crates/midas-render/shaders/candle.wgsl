@@ -42,7 +42,7 @@ struct VertexInput {
 // --- Instance Input (per-instance from instance buffer) ---
 // Matches CandleInstance layout from midas-chart::instances:
 //   x: f32, body_top: f32, body_bottom: f32, wick_top: f32,
-//   wick_bottom: f32, width: f32, wick_width: f32, _pad0: f32,
+//   wick_bottom: f32, width: f32, wick_width: f32, dim: f32,
 //   color: vec4<f32>
 
 struct InstanceInput {
@@ -53,7 +53,7 @@ struct InstanceInput {
     @location(5) wick_bottom: f32,
     @location(6) width:       f32,
     @location(7) wick_width:  f32,
-    // _pad0 is not bound (offset 28, skipped)
+    @location(9) dim:         f32,   // 0.0 = full brightness, 1.0 = dimmed to 30%
     @location(8) color:       vec4<f32>,
 }
 
@@ -62,6 +62,7 @@ struct InstanceInput {
 struct VertexOutput {
     @builtin(position) clip_pos: vec4<f32>,
     @location(0)       color:    vec4<f32>,
+    @location(1)       dim:      f32,
 }
 
 // --- Vertex Shader ---
@@ -101,6 +102,7 @@ fn vs_main(vert: VertexInput, inst: InstanceInput) -> VertexOutput {
     var out: VertexOutput;
     out.clip_pos = camera.projection * vec4<f32>(px, py, 0.0, 1.0);
     out.color    = inst.color;
+    out.dim      = inst.dim;
     return out;
 }
 
@@ -108,6 +110,7 @@ fn vs_main(vert: VertexInput, inst: InstanceInput) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // No branching. Flat color. Pixel-perfect hard edges.
-    return in.color;
+    // Apply dim factor: 0.0 = full brightness, 1.0 = 30% brightness.
+    let brightness = 1.0 - in.dim * 0.7;
+    return vec4(in.color.rgb * brightness, in.color.a);
 }
