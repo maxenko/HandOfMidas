@@ -23,6 +23,9 @@ fn make_bracket(entry: f64, tp: f64, sl: f64) -> OrderBracket {
         quantity: None,
         saved: false,
         filled_qty: None,
+        entry_type: EntryType::Market,
+        entry_stop_price: None,
+        wrong_side_warning: false,
     }
 }
 
@@ -428,6 +431,115 @@ fn format_entry_label_pending() {
     b.status = BracketStatus::Pending;
     let label = format_entry_label(&b);
     assert_eq!(label, "BUY @ 171.59  \u{23F3}");
+}
+
+// -----------------------------------------------------------------------
+// Entry type label prefixes
+// -----------------------------------------------------------------------
+
+#[test]
+fn format_entry_label_market_buy_draft() {
+    let mut b = make_bracket(182.00, 192.0, 175.0);
+    b.entry_type = EntryType::Market;
+    b.side = BracketSide::Long;
+    b.status = BracketStatus::Draft;
+    assert_eq!(format_entry_label(&b), "BUY @ 182.00");
+}
+
+#[test]
+fn format_entry_label_market_sell_draft() {
+    let mut b = make_bracket(182.00, 175.0, 192.0);
+    b.entry_type = EntryType::Market;
+    b.side = BracketSide::Short;
+    b.status = BracketStatus::Draft;
+    assert_eq!(format_entry_label(&b), "SELL @ 182.00");
+}
+
+#[test]
+fn format_entry_label_limit_buy_draft() {
+    let mut b = make_bracket(180.00, 192.0, 175.0);
+    b.entry_type = EntryType::Limit;
+    b.side = BracketSide::Long;
+    b.status = BracketStatus::Draft;
+    assert_eq!(format_entry_label(&b), "LMT BUY @ 180.00");
+}
+
+#[test]
+fn format_entry_label_limit_sell_draft() {
+    let mut b = make_bracket(190.00, 180.0, 195.0);
+    b.entry_type = EntryType::Limit;
+    b.side = BracketSide::Short;
+    b.status = BracketStatus::Draft;
+    assert_eq!(format_entry_label(&b), "LMT SELL @ 190.00");
+}
+
+#[test]
+fn format_entry_label_stop_buy_draft() {
+    let mut b = make_bracket(185.00, 195.0, 180.0);
+    b.entry_type = EntryType::Stop;
+    b.side = BracketSide::Long;
+    b.status = BracketStatus::Draft;
+    assert_eq!(format_entry_label(&b), "STP BUY @ 185.00");
+}
+
+#[test]
+fn format_entry_label_stop_sell_draft() {
+    let mut b = make_bracket(175.00, 165.0, 180.0);
+    b.entry_type = EntryType::Stop;
+    b.side = BracketSide::Short;
+    b.status = BracketStatus::Draft;
+    assert_eq!(format_entry_label(&b), "STP SELL @ 175.00");
+}
+
+#[test]
+fn format_entry_label_stop_limit_buy_draft() {
+    let mut b = make_bracket(184.50, 195.0, 180.0);
+    b.entry_type = EntryType::StopLimit;
+    b.entry_stop_price = Some(185.00);
+    b.side = BracketSide::Long;
+    b.status = BracketStatus::Draft;
+    assert_eq!(format_entry_label(&b), "STP LMT BUY @ 185.00/184.50");
+}
+
+#[test]
+fn format_entry_label_stop_limit_sell_draft() {
+    let mut b = make_bracket(175.50, 165.0, 180.0);
+    b.entry_type = EntryType::StopLimit;
+    b.entry_stop_price = Some(175.00);
+    b.side = BracketSide::Short;
+    b.status = BracketStatus::Draft;
+    assert_eq!(format_entry_label(&b), "STP LMT SELL @ 175.00/175.50");
+}
+
+#[test]
+fn format_entry_label_limit_pending() {
+    let mut b = make_bracket(180.00, 192.0, 175.0);
+    b.entry_type = EntryType::Limit;
+    b.side = BracketSide::Long;
+    b.status = BracketStatus::Pending;
+    assert_eq!(format_entry_label(&b), "LMT BUY @ 180.00  \u{23F3}");
+}
+
+#[test]
+fn entry_type_default_is_market() {
+    assert_eq!(EntryType::default(), EntryType::Market);
+}
+
+#[test]
+fn serde_backward_compat_missing_entry_type() {
+    // Simulate old JSON without entry_type / entry_stop_price / wrong_side_warning
+    let json = r#"{
+        "entry": {"price": 185.0, "timestamp": null, "color": null, "style": "Solid", "line_width": 1.0, "label": null},
+        "take_profit": null,
+        "stop_loss": null,
+        "side": "Long",
+        "status": "Draft",
+        "quantity": null
+    }"#;
+    let b: OrderBracket = serde_json::from_str(json).expect("should deserialize");
+    assert_eq!(b.entry_type, EntryType::Market);
+    assert!(b.entry_stop_price.is_none());
+    assert!(!b.wrong_side_warning);
 }
 
 // -----------------------------------------------------------------------

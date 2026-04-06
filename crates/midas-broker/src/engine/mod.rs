@@ -12,8 +12,8 @@ use crate::error::BrokerError;
 use crate::events::BrokerEvent;
 use crate::market_data::MarketDataSource;
 use crate::orders::bracket::{
-    check_bracket_direction, derive_bracket_status, validate_market_bracket, BracketGroup,
-    BracketLifecycleStatus, MarketBracketParams,
+    check_bracket_direction, derive_bracket_status, validate_bracket, BracketGroup,
+    BracketLifecycleStatus, BracketParams,
 };
 use crate::orders::state::OrderStatus;
 use crate::orders::types::{BracketRole, LocalOrder, OrderAction, OrderKind, TimeInForce};
@@ -209,8 +209,8 @@ impl BrokerEngine {
                 }
                 false
             }
-            BrokerCommand::CreateMarketBracket(params) => {
-                self.handle_create_market_bracket(params);
+            BrokerCommand::CreateBracket(params) => {
+                self.handle_create_bracket(params);
                 false
             }
             BrokerCommand::CancelBracket { parent_id } => {
@@ -353,18 +353,18 @@ impl BrokerEngine {
         Ok(())
     }
 
-    // ── Market Bracket Handling ─────────────────────────────────────────
+    // ── Bracket Handling ───────────────────────────────────────────────
 
-    /// Handle CreateMarketBracket: validate → build → persist → emit.
-    fn handle_create_market_bracket(&mut self, params: MarketBracketParams) {
+    /// Handle CreateBracket: validate → build → persist → emit.
+    fn handle_create_bracket(&mut self, params: BracketParams) {
         // 1. Validate params
-        if let Err(errors) = validate_market_bracket(&params) {
+        if let Err(errors) = validate_bracket(&params) {
             let msg = errors
                 .iter()
                 .map(|e| e.to_string())
                 .collect::<Vec<_>>()
                 .join("; ");
-            tracing::warn!("Market bracket validation failed: {msg}");
+            tracing::warn!("Bracket validation failed: {msg}");
             let _ = self
                 .order_event_tx
                 .send(BrokerEvent::OrderValidationFailed {
@@ -400,7 +400,7 @@ impl BrokerEngine {
         }
 
         // 4. Build bracket orders
-        let mut group = build_market_bracket(&params);
+        let mut group = build_bracket(&params);
         let parent_id = group.parent.id;
 
         // 5. Persist bracket and transition all legs to PendingSubmit
@@ -478,7 +478,7 @@ impl BrokerEngine {
         });
 
         tracing::info!(
-            "Market bracket {parent_id} submitted: {} {} {} (TP: {}, SL: {})",
+            "Bracket {parent_id} submitted: {} {} {} (TP: {}, SL: {})",
             params.action,
             params.quantity,
             params.symbol,
@@ -1644,18 +1644,18 @@ impl BrokerEngine {
 // Bracket Builder (free function, testable without engine)
 // ===========================================================================
 
-/// Build a BracketGroup from MarketBracketParams.
+/// Build a BracketGroup from BracketParams.
 ///
 /// All orders start in Inactive status. The engine transitions them to
 /// PendingSubmit in a single atomic DB transaction before IB submission.
-fn build_market_bracket(params: &MarketBracketParams) -> BracketGroup {
+fn build_bracket(params: &BracketParams) -> BracketGroup {
     let parent_id = Uuid::now_v7();
 
-    // -- Parent: Market Order --
+    // -- Parent: Entry Order --
     let mut parent = LocalOrder::new_draft(
         &params.symbol,
         params.action,
-        OrderKind::Market,
+        params.entry_kind,
         params.quantity,
     );
     parent.id = parent_id;
@@ -1668,6 +1668,22 @@ fn build_market_bracket(params: &MarketBracketParams) -> BracketGroup {
     parent.bracket_role = Some(BracketRole::Parent);
     parent.strategy = params.strategy.clone();
     parent.tags = params.tags.clone();
+
+    // -- Set entry prices based on entry_kind --
+    match params.entry_kind {
+        OrderKind::Market => { /* no prices needed */ }
+        OrderKind::Limit => {
+            parent.limit_price = params.entry_price;
+        }
+        OrderKind::Stop => {
+            parent.stop_price = params.entry_stop_price;
+        }
+        OrderKind::StopLimit => {
+            parent.limit_price = params.entry_price;
+            parent.stop_price = params.entry_stop_price;
+        }
+        OrderKind::TrailingStop => { /* handled separately if needed */ }
+    }
 
     // -- Take Profit: Limit Order (opposite side) --
     let take_profit = params.take_profit.as_ref().map(|tp| {
@@ -1757,9 +1773,9 @@ impl std::fmt::Display for OrderSizeError {
 }
 
 /// Engine-level order size guard. Hard reject — not bypassable from UI.
-/// Runs before build_market_bracket().
+/// Runs before build_bracket().
 fn validate_order_size(
-    params: &MarketBracketParams,
+    params: &BracketParams,
     limits: &TradingLimits,
 ) -> Result<(), OrderSizeError> {
     if limits.max_order_quantity > 0.0 && params.quantity > limits.max_order_quantity {

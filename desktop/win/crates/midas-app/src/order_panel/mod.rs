@@ -4,6 +4,7 @@
 //! brackets with optional Take Profit and Stop Loss legs.
 //! Follows TradingView's bracket order model (1 TP + 1 SL per bracket).
 
+use midas_chart::widget::order_bracket::EntryType;
 use midas_chart::widget::AnnotationId;
 use midas_core::link::LinkMode;
 use midas_core::ChartId;
@@ -39,6 +40,12 @@ pub struct OrderPanelState {
     pub sl_type: StopLossType,
     /// Stop limit price (only when sl_type == StopLimit).
     pub sl_limit_value: String,
+    /// Entry order type (Market, Limit, Stop, StopLimit).
+    pub entry_type: EntryType,
+    /// Limit price input (for Limit and StopLimit types).
+    pub limit_price: String,
+    /// Stop price input (for Stop and StopLimit types).
+    pub stop_price: String,
     /// Validation errors to display inline.
     pub errors: Vec<(String, String)>,
     /// Symbol (from active chart).
@@ -72,6 +79,9 @@ impl Default for OrderPanelState {
             sl_value: String::new(),
             sl_type: StopLossType::Stop,
             sl_limit_value: String::new(),
+            entry_type: EntryType::Market,
+            limit_price: String::new(),
+            stop_price: String::new(),
             errors: Vec::new(),
             symbol: String::new(),
             last_price: None,
@@ -317,15 +327,59 @@ pub fn validate_bracket(
     bracket: &midas_chart::widget::order_bracket::OrderBracket,
     quantity: f64,
 ) -> Vec<(String, String)> {
-    use midas_chart::widget::order_bracket::BracketSide;
+    use midas_chart::widget::order_bracket::{BracketSide, EntryType};
     let mut errors = Vec::new();
-
-    if bracket.entry.price <= 0.0 {
-        errors.push(("entry".into(), "No market price available".into()));
-    }
 
     if quantity <= 0.0 {
         errors.push(("quantity".into(), "Quantity must be positive".into()));
+    }
+
+    // Entry type-specific validation.
+    match bracket.entry_type {
+        EntryType::Market if bracket.entry.price <= 0.0 => {
+            errors.push(("entry".into(), "No market price available".into()));
+        }
+        EntryType::Limit if bracket.entry.price <= 0.0 => {
+            errors.push(("entry".into(), "Limit price must be positive".into()));
+        }
+        EntryType::Stop if bracket.entry.price <= 0.0 => {
+            errors.push(("entry".into(), "Stop price must be positive".into()));
+        }
+        EntryType::StopLimit => {
+            if bracket.entry.price <= 0.0 {
+                errors.push(("entry".into(), "Limit price must be positive".into()));
+            }
+            match bracket.entry_stop_price {
+                None => {
+                    errors.push((
+                        "entry".into(),
+                        "Stop-Limit requires a stop trigger price".into(),
+                    ));
+                }
+                Some(sp) if sp <= 0.0 => {
+                    errors.push(("entry".into(), "Stop trigger price must be positive".into()));
+                }
+                Some(sp) => {
+                    // BUY: limit must be ≤ stop; SELL: limit must be ≥ stop.
+                    match bracket.side {
+                        BracketSide::Long if bracket.entry.price > sp => {
+                            errors.push((
+                                "entry".into(),
+                                "Limit price must be at or below stop for BUY".into(),
+                            ));
+                        }
+                        BracketSide::Short if bracket.entry.price < sp => {
+                            errors.push((
+                                "entry".into(),
+                                "Limit price must be at or above stop for SELL".into(),
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        _ => {}
     }
 
     if let Some(ref sl) = bracket.stop_loss {
@@ -408,6 +462,9 @@ pub fn create_bracket_annotation(
         quantity: Some(quantity),
         saved: false,
         filled_qty: None,
+        entry_type: EntryType::Market,
+        entry_stop_price: None,
+        wrong_side_warning: false,
     }
 }
 
@@ -549,6 +606,12 @@ pub enum OrderPanelAction {
     /// `Some(Buy/Sell)` activates a bracket on the chart.
     /// `None` deactivates (clears unsaved bracket, caches state).
     SetBracketMode(Option<OrderSide>),
+    /// Set the entry order type (Market, Limit, Stop, StopLimit).
+    SetEntryType(EntryType),
+    /// Update the limit price input text.
+    SetLimitPrice(String),
+    /// Update the stop price input text.
+    SetStopPrice(String),
 }
 
 // ===========================================================================

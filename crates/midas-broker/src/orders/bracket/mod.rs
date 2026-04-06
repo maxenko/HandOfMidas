@@ -1,6 +1,6 @@
-//! Market bracket types: params, grouping, lifecycle status, and derivation.
+//! Bracket types: params, grouping, lifecycle status, and derivation.
 //!
-//! A market bracket consists of a parent market order with optional
+//! A bracket consists of a parent entry order with optional
 //! take-profit (limit) and stop-loss (stop/stop-limit) children.
 
 use std::fmt;
@@ -10,23 +10,23 @@ use midas_core::SecurityType;
 use serde::{Deserialize, Serialize};
 
 use super::state::OrderStatus;
-use super::types::{LocalOrder, OrderAction, TimeInForce};
+use super::types::{LocalOrder, OrderAction, OrderKind, TimeInForce};
 
 // ===========================================================================
-// MarketBracketParams
+// BracketParams
 // ===========================================================================
 
-/// Parameters for creating a Market Order bracket.
+/// Parameters for creating an order bracket.
 ///
-/// A market bracket consists of:
-/// - Parent: Market order (BUY or SELL)
+/// A bracket consists of:
+/// - Parent: Entry order (Market, Limit, Stop, or StopLimit)
 /// - Take Profit: Limit order on the opposite side (optional)
 /// - Stop Loss: Stop or StopLimit order on the opposite side (optional)
 ///
 /// At least one of `take_profit` or `stop_loss` should be present for
-/// the bracket to be meaningful, though a naked market order is valid.
+/// the bracket to be meaningful, though a naked entry order is valid.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MarketBracketParams {
+pub struct BracketParams {
     // -- Contract --
     pub symbol: String,
     pub con_id: Option<i32>,
@@ -38,6 +38,12 @@ pub struct MarketBracketParams {
     pub action: OrderAction,
     pub quantity: f64,
     pub outside_rth: bool,
+    /// Entry order type. Defaults to `OrderKind::Market`.
+    pub entry_kind: OrderKind,
+    /// Entry limit price (for Limit and StopLimit). None for Market/Stop.
+    pub entry_price: Option<f64>,
+    /// Entry stop trigger price (for Stop and StopLimit). None for Market/Limit.
+    pub entry_stop_price: Option<f64>,
 
     // -- Take Profit --
     pub take_profit: Option<TakeProfitParams>,
@@ -199,7 +205,7 @@ impl FromStr for BracketLifecycleStatus {
 // Validation
 // ===========================================================================
 
-/// Validation errors for market bracket params.
+/// Validation errors for bracket params.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ValidationError {
     MissingSymbol,
@@ -221,8 +227,8 @@ impl fmt::Display for ValidationError {
     }
 }
 
-/// Validate market bracket params. Returns errors if any fields are invalid.
-pub fn validate_market_bracket(params: &MarketBracketParams) -> Result<(), Vec<ValidationError>> {
+/// Validate bracket params. Returns errors if any fields are invalid.
+pub fn validate_bracket(params: &BracketParams) -> Result<(), Vec<ValidationError>> {
     let mut errors = Vec::new();
 
     if params.symbol.is_empty() {
@@ -256,6 +262,41 @@ pub fn validate_market_bracket(params: &MarketBracketParams) -> Result<(), Vec<V
                 errors.push(ValidationError::InvalidPrice("stop_loss_limit"));
             }
         }
+    }
+
+    // Validate entry prices are present for their order type.
+    match params.entry_kind {
+        OrderKind::Limit => {
+            if params
+                .entry_price
+                .is_none_or(|p| !(p.is_finite() && p > 0.0))
+            {
+                errors.push(ValidationError::InvalidPrice("entry_limit"));
+            }
+        }
+        OrderKind::Stop => {
+            if params
+                .entry_stop_price
+                .is_none_or(|p| !(p.is_finite() && p > 0.0))
+            {
+                errors.push(ValidationError::InvalidPrice("entry_stop"));
+            }
+        }
+        OrderKind::StopLimit => {
+            if params
+                .entry_price
+                .is_none_or(|p| !(p.is_finite() && p > 0.0))
+            {
+                errors.push(ValidationError::InvalidPrice("entry_limit"));
+            }
+            if params
+                .entry_stop_price
+                .is_none_or(|p| !(p.is_finite() && p > 0.0))
+            {
+                errors.push(ValidationError::InvalidPrice("entry_stop"));
+            }
+        }
+        OrderKind::Market | OrderKind::TrailingStop => {}
     }
 
     if errors.is_empty() {

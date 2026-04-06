@@ -1617,6 +1617,35 @@ impl MidasApp {
             .get(&state.symbol)
             .and_then(|snap| snap.last_price);
 
+        let oid = order_id;
+
+        // Entry type tabs: [Market] [Limit] [Stop] [Stop Limit].
+        let entry_type = state.entry_type;
+        use midas_chart::widget::order_bracket::EntryType;
+        let type_btn = |label: &'static str, et: EntryType| -> Element<'_, Message> {
+            let style: fn(&iced::Theme, button::Status) -> button::Style = if entry_type == et {
+                active_neutral_button_style
+            } else {
+                inactive_side_button_style
+            };
+            button(text(label).size(11))
+                .on_press(Message::OrderPanelMsg(
+                    oid,
+                    OrderPanelAction::SetEntryType(et),
+                ))
+                .padding([4, 8])
+                .style(style)
+                .into()
+        };
+        let entry_type_row = row![
+            type_btn("Market", EntryType::Market),
+            type_btn("Limit", EntryType::Limit),
+            type_btn("Stop", EntryType::Stop),
+            type_btn("Stop Limit", EntryType::StopLimit),
+        ]
+        .spacing(4)
+        .align_y(iced::Alignment::Center);
+
         // Side / bracket toggle buttons: [BUY] [X] [SELL].
         //
         // BUY/SELL activate bracket mode (chart bracket visible).
@@ -1642,7 +1671,6 @@ impl MidasApp {
             inactive_side_button_style
         };
 
-        let oid = order_id;
         let side_row = row![
             button(text("BUY").size(14))
                 .on_press(Message::OrderPanelMsg(
@@ -1665,13 +1693,76 @@ impl MidasApp {
                 ))
                 .padding([8, 20])
                 .style(sell_style),
-            Space::new().width(Fill),
-            text("Market")
-                .size(12)
-                .color(Color::from_rgb(0.6, 0.6, 0.6)),
         ]
         .spacing(4)
         .align_y(iced::Alignment::Center);
+
+        // Entry price inputs (shown for non-Market types).
+        let entry_price_section = {
+            use midas_chart::widget::order_bracket::EntryType;
+            let mut col = Column::new().spacing(4);
+            match entry_type {
+                EntryType::Market => {} // No price input needed
+                EntryType::Limit => {
+                    let lp_input = row![
+                        text("Limit:").size(11).width(50),
+                        text_input("0.00", &state.limit_price)
+                            .on_input(move |val| Message::OrderPanelMsg(
+                                oid,
+                                OrderPanelAction::SetLimitPrice(val),
+                            ))
+                            .size(12)
+                            .width(100),
+                    ]
+                    .spacing(6)
+                    .align_y(iced::Alignment::Center);
+                    col = col.push(lp_input);
+                }
+                EntryType::Stop => {
+                    let sp_input = row![
+                        text("Stop:").size(11).width(50),
+                        text_input("0.00", &state.stop_price)
+                            .on_input(move |val| Message::OrderPanelMsg(
+                                oid,
+                                OrderPanelAction::SetStopPrice(val),
+                            ))
+                            .size(12)
+                            .width(100),
+                    ]
+                    .spacing(6)
+                    .align_y(iced::Alignment::Center);
+                    col = col.push(sp_input);
+                }
+                EntryType::StopLimit => {
+                    let sp_input = row![
+                        text("Stop:").size(11).width(50),
+                        text_input("0.00", &state.stop_price)
+                            .on_input(move |val| Message::OrderPanelMsg(
+                                oid,
+                                OrderPanelAction::SetStopPrice(val),
+                            ))
+                            .size(12)
+                            .width(100),
+                    ]
+                    .spacing(6)
+                    .align_y(iced::Alignment::Center);
+                    let lp_input = row![
+                        text("Limit:").size(11).width(50),
+                        text_input("0.00", &state.limit_price)
+                            .on_input(move |val| Message::OrderPanelMsg(
+                                oid,
+                                OrderPanelAction::SetLimitPrice(val),
+                            ))
+                            .size(12)
+                            .width(100),
+                    ]
+                    .spacing(6)
+                    .align_y(iced::Alignment::Center);
+                    col = col.push(sp_input).push(lp_input);
+                }
+            }
+            col
+        };
 
         // Show "Waiting for market data..." when bracket is active
         // but no market price is available yet.
@@ -1828,10 +1919,17 @@ impl MidasApp {
                 .color(Color::from_rgb(0.6, 0.6, 0.3))
                 .into()
         } else {
-            let submit_label = match state.side {
-                crate::order_panel::OrderSide::Buy => "Place Market BUY",
-                crate::order_panel::OrderSide::Sell => "Place Market SELL",
+            let type_label = match state.entry_type {
+                midas_chart::widget::order_bracket::EntryType::Market => "Market",
+                midas_chart::widget::order_bracket::EntryType::Limit => "Limit",
+                midas_chart::widget::order_bracket::EntryType::Stop => "Stop",
+                midas_chart::widget::order_bracket::EntryType::StopLimit => "Stop Limit",
             };
+            let side_label = match state.side {
+                crate::order_panel::OrderSide::Buy => "BUY",
+                crate::order_panel::OrderSide::Sell => "SELL",
+            };
+            let submit_label = format!("Place {} {}", type_label, side_label);
             row![
                 Space::new().width(Fill),
                 button(text(submit_label).size(13))
@@ -1860,7 +1958,9 @@ impl MidasApp {
         // Assemble form column.
         let mut form = Column::new().spacing(6).padding(12).width(Fill);
 
+        form = form.push(entry_type_row);
         form = form.push(side_row);
+        form = form.push(entry_price_section);
         if let Some(waiting_el) = bracket_waiting {
             form = form.push(waiting_el);
         }
@@ -1885,9 +1985,15 @@ impl MidasApp {
                 crate::order_panel::OrderSide::Buy => "BUY",
                 crate::order_panel::OrderSide::Sell => "SELL",
             };
+            let type_name = match state.entry_type {
+                midas_chart::widget::order_bracket::EntryType::Market => "Market",
+                midas_chart::widget::order_bracket::EntryType::Limit => "Limit",
+                midas_chart::widget::order_bracket::EntryType::Stop => "Stop",
+                midas_chart::widget::order_bracket::EntryType::StopLimit => "Stop Limit",
+            };
             let order_summary = format!(
-                "{} {} {} at Market",
-                side_label, state.quantity, state.symbol,
+                "{} {} {} at {}",
+                side_label, state.quantity, state.symbol, type_name,
             );
 
             let mut details = Column::new().spacing(4);

@@ -37,7 +37,7 @@ pub use timeframe::Timeframe;
 
 // Re-export broker bridge types for convenience.
 pub use broker::{
-    BracketEvent, BracketLifecycleStatus, MarketBracketParams, OrderAction, StopLossParams,
+    BracketEvent, BracketLifecycleStatus, BracketParams, EntryKind, OrderAction, StopLossParams,
     TakeProfitParams, TimeInForce,
 };
 

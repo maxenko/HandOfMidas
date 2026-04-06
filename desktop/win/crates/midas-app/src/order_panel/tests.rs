@@ -308,6 +308,9 @@ fn validate_bracket_valid_long_with_sl() {
         quantity: None,
         saved: false,
         filled_qty: None,
+        entry_type: EntryType::Market,
+        entry_stop_price: None,
+        wrong_side_warning: false,
     };
     let errors = validate_bracket(&bracket, 100.0);
     assert!(errors.is_empty(), "expected no errors, got: {errors:?}");
@@ -336,6 +339,9 @@ fn validate_bracket_zero_entry_price() {
         quantity: None,
         saved: false,
         filled_qty: None,
+        entry_type: EntryType::Market,
+        entry_stop_price: None,
+        wrong_side_warning: false,
     };
     let errors = validate_bracket(&bracket, 100.0);
     assert!(
@@ -367,6 +373,9 @@ fn validate_bracket_zero_quantity() {
         quantity: None,
         saved: false,
         filled_qty: None,
+        entry_type: EntryType::Market,
+        entry_stop_price: None,
+        wrong_side_warning: false,
     };
     let errors = validate_bracket(&bracket, 0.0);
     assert!(
@@ -407,6 +416,9 @@ fn validate_bracket_long_sl_above_entry() {
         quantity: None,
         saved: false,
         filled_qty: None,
+        entry_type: EntryType::Market,
+        entry_stop_price: None,
+        wrong_side_warning: false,
     };
     let errors = validate_bracket(&bracket, 100.0);
     assert!(
@@ -449,6 +461,9 @@ fn validate_bracket_short_sl_below_entry() {
         quantity: None,
         saved: false,
         filled_qty: None,
+        entry_type: EntryType::Market,
+        entry_stop_price: None,
+        wrong_side_warning: false,
     };
     let errors = validate_bracket(&bracket, 100.0);
     assert!(
@@ -456,6 +471,114 @@ fn validate_bracket_short_sl_below_entry() {
             .iter()
             .any(|(f, msg)| f == "sl" && msg.contains("above entry")),
         "expected SL constraint error, got: {errors:?}"
+    );
+}
+
+// -- StopLimit validation tests --
+
+#[test]
+fn validate_bracket_stop_limit_missing_stop_price() {
+    use midas_chart::widget::level::LineStyle;
+    use midas_chart::widget::order_bracket::*;
+
+    let bracket = OrderBracket {
+        entry: BracketLeg {
+            price: 184.50,
+            timestamp: None,
+            color: None,
+            style: LineStyle::Solid,
+            line_width: 1.5,
+            label: None,
+            projected_pnl: None,
+            projected_pnl_pct: None,
+        },
+        take_profit: None,
+        stop_loss: None,
+        side: BracketSide::Long,
+        status: BracketStatus::Draft,
+        quantity: None,
+        saved: false,
+        filled_qty: None,
+        entry_type: EntryType::StopLimit,
+        entry_stop_price: None, // Missing!
+        wrong_side_warning: false,
+    };
+    let errors = validate_bracket(&bracket, 100.0);
+    assert!(
+        errors
+            .iter()
+            .any(|(f, msg)| f == "entry" && msg.contains("stop trigger")),
+        "expected missing stop price error, got: {errors:?}"
+    );
+}
+
+#[test]
+fn validate_bracket_stop_limit_buy_limit_above_stop() {
+    use midas_chart::widget::level::LineStyle;
+    use midas_chart::widget::order_bracket::*;
+
+    let bracket = OrderBracket {
+        entry: BracketLeg {
+            price: 186.00, // limit price above stop — invalid for BUY
+            timestamp: None,
+            color: None,
+            style: LineStyle::Solid,
+            line_width: 1.5,
+            label: None,
+            projected_pnl: None,
+            projected_pnl_pct: None,
+        },
+        take_profit: None,
+        stop_loss: None,
+        side: BracketSide::Long,
+        status: BracketStatus::Draft,
+        quantity: None,
+        saved: false,
+        filled_qty: None,
+        entry_type: EntryType::StopLimit,
+        entry_stop_price: Some(185.00),
+        wrong_side_warning: false,
+    };
+    let errors = validate_bracket(&bracket, 100.0);
+    assert!(
+        errors
+            .iter()
+            .any(|(f, msg)| f == "entry" && msg.contains("at or below")),
+        "expected limit>stop error for BUY, got: {errors:?}"
+    );
+}
+
+#[test]
+fn validate_bracket_stop_limit_valid_buy() {
+    use midas_chart::widget::level::LineStyle;
+    use midas_chart::widget::order_bracket::*;
+
+    let bracket = OrderBracket {
+        entry: BracketLeg {
+            price: 184.50, // limit below stop — valid for BUY
+            timestamp: None,
+            color: None,
+            style: LineStyle::Solid,
+            line_width: 1.5,
+            label: None,
+            projected_pnl: None,
+            projected_pnl_pct: None,
+        },
+        take_profit: None,
+        stop_loss: None,
+        side: BracketSide::Long,
+        status: BracketStatus::Draft,
+        quantity: None,
+        saved: false,
+        filled_qty: None,
+        entry_type: EntryType::StopLimit,
+        entry_stop_price: Some(185.00),
+        wrong_side_warning: false,
+    };
+    let errors = validate_bracket(&bracket, 100.0);
+    assert!(
+        !errors.iter().any(|(f, _)| f == "entry"),
+        "expected no entry errors, got: {errors:?}"
     );
 }
 

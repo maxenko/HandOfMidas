@@ -59,13 +59,10 @@ impl BrokerBridge {
         self.send_command(BrokerCommand::Connect)
     }
 
-    /// Send `BrokerCommand::CreateMarketBracket` with translated params.
-    pub fn create_market_bracket(
-        &self,
-        params: midas_core::broker::MarketBracketParams,
-    ) -> Result<(), String> {
+    /// Send `BrokerCommand::CreateBracket` with translated params.
+    pub fn create_bracket(&self, params: midas_core::broker::BracketParams) -> Result<(), String> {
         let broker_params = translate_bracket_params(params);
-        self.send_command(BrokerCommand::CreateMarketBracket(broker_params))
+        self.send_command(BrokerCommand::CreateBracket(broker_params))
     }
 
     /// Send `BrokerCommand::CancelBracket`.
@@ -217,12 +214,10 @@ pub fn broker_conn_stream(source: &BrokerConnSource) -> impl iced::futures::Stre
 // Type translation functions
 // ══════════════════════════════════════════════════════════════════════════════
 
-/// Translate desktop `MarketBracketParams` to broker engine
-/// `midas_broker::MarketBracketParams`.
-fn translate_bracket_params(
-    p: midas_core::broker::MarketBracketParams,
-) -> midas_broker::MarketBracketParams {
-    midas_broker::MarketBracketParams {
+/// Translate desktop `BracketParams` to broker engine
+/// `midas_broker::BracketParams`.
+fn translate_bracket_params(p: midas_core::broker::BracketParams) -> midas_broker::BracketParams {
+    midas_broker::BracketParams {
         symbol: p.symbol,
         con_id: p.con_id,
         sec_type: translate_security_type(p.sec_type),
@@ -243,6 +238,19 @@ fn translate_bracket_params(
         reference_price: p.reference_price,
         strategy: p.strategy,
         tags: p.tags,
+        entry_kind: translate_entry_kind(p.entry_kind),
+        entry_price: p.entry_price,
+        entry_stop_price: p.entry_stop_price,
+    }
+}
+
+/// Desktop `EntryKind` -> broker `OrderKind`.
+fn translate_entry_kind(ek: midas_core::broker::EntryKind) -> midas_broker::OrderKind {
+    match ek {
+        midas_core::broker::EntryKind::Market => midas_broker::OrderKind::Market,
+        midas_core::broker::EntryKind::Limit => midas_broker::OrderKind::Limit,
+        midas_core::broker::EntryKind::Stop => midas_broker::OrderKind::Stop,
+        midas_core::broker::EntryKind::StopLimit => midas_broker::OrderKind::StopLimit,
     }
 }
 

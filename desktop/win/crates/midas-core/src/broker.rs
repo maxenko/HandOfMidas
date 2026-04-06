@@ -41,12 +41,25 @@ pub enum TimeInForce {
 }
 
 // ===========================================================================
-// MIRROR OF: crates/midas-broker/src/orders/bracket.rs::MarketBracketParams
+// MIRROR OF: crates/midas-broker/src/orders/types.rs::OrderKind
 // ===========================================================================
 
-/// Parameters for creating a Market Order bracket (desktop mirror).
+/// Order type (desktop mirror of broker's `OrderKind`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum EntryKind {
+    Market,
+    Limit,
+    Stop,
+    StopLimit,
+}
+
+// ===========================================================================
+// MIRROR OF: crates/midas-broker/src/orders/bracket.rs::BracketParams
+// ===========================================================================
+
+/// Parameters for creating an order bracket (desktop mirror).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MarketBracketParams {
+pub struct BracketParams {
     pub symbol: String,
     pub con_id: Option<i32>,
     pub sec_type: crate::SecurityType,
@@ -60,6 +73,12 @@ pub struct MarketBracketParams {
     pub reference_price: Option<f64>,
     pub strategy: Option<String>,
     pub tags: Vec<String>,
+    /// Entry order type.
+    pub entry_kind: EntryKind,
+    /// Entry limit price (for Limit and StopLimit). None for Market/Stop.
+    pub entry_price: Option<f64>,
+    /// Entry stop trigger price (for Stop and StopLimit). None for Market/Limit.
+    pub entry_stop_price: Option<f64>,
 }
 
 /// Take profit configuration (desktop mirror).
@@ -151,8 +170,8 @@ pub trait OrderBroker: Send + Sync {
     fn name(&self) -> &str;
     fn is_connected(&self) -> bool;
 
-    /// Create and submit a market bracket order.
-    fn create_market_bracket(&self, params: MarketBracketParams) -> Result<(), String>;
+    /// Create and submit a bracket order.
+    fn create_bracket(&self, params: BracketParams) -> Result<(), String>;
 
     /// Cancel an entire bracket.
     fn cancel_bracket(&self, parent_id: uuid::Uuid) -> Result<(), String>;
@@ -173,7 +192,7 @@ mod tests {
 
     #[test]
     fn bracket_params_serde_round_trip() {
-        let params = MarketBracketParams {
+        let params = BracketParams {
             symbol: "AAPL".to_string(),
             con_id: Some(265598),
             sec_type: crate::SecurityType::Stock,
@@ -194,9 +213,12 @@ mod tests {
             reference_price: Some(185.50),
             strategy: None,
             tags: Vec::new(),
+            entry_kind: EntryKind::Market,
+            entry_price: None,
+            entry_stop_price: None,
         };
         let json = serde_json::to_string(&params).unwrap();
-        let decoded: MarketBracketParams = serde_json::from_str(&json).unwrap();
+        let decoded: BracketParams = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.symbol, "AAPL");
         assert_eq!(decoded.quantity, 100.0);
     }

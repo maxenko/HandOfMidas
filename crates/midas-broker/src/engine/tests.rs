@@ -174,9 +174,9 @@ async fn test_historical_data_via_test_source() {
 // Bracket builder tests
 // -----------------------------------------------------------------------
 
-fn sample_bracket_params() -> MarketBracketParams {
+fn sample_bracket_params() -> BracketParams {
     use crate::orders::bracket::{StopLossParams, TakeProfitParams};
-    MarketBracketParams {
+    BracketParams {
         symbol: "AAPL".to_string(),
         con_id: Some(265598),
         sec_type: midas_core::SecurityType::Stock,
@@ -185,6 +185,9 @@ fn sample_bracket_params() -> MarketBracketParams {
         action: crate::orders::types::OrderAction::Buy,
         quantity: 100.0,
         outside_rth: false,
+        entry_kind: OrderKind::Market,
+        entry_price: None,
+        entry_stop_price: None,
         take_profit: Some(TakeProfitParams {
             price: 192.0,
             tif: None,
@@ -201,9 +204,9 @@ fn sample_bracket_params() -> MarketBracketParams {
 }
 
 #[test]
-fn test_build_market_bracket_full() {
+fn test_build_bracket_full() {
     let params = sample_bracket_params();
-    let group = build_market_bracket(&params);
+    let group = build_bracket(&params);
 
     // Parent
     assert_eq!(group.parent.symbol, "AAPL");
@@ -237,46 +240,46 @@ fn test_build_market_bracket_full() {
 }
 
 #[test]
-fn test_build_market_bracket_tp_only() {
+fn test_build_bracket_tp_only() {
     let mut params = sample_bracket_params();
     params.stop_loss = None;
-    let group = build_market_bracket(&params);
+    let group = build_bracket(&params);
     assert_eq!(group.legs().len(), 2);
     assert!(group.take_profit.is_some());
     assert!(group.stop_loss.is_none());
 }
 
 #[test]
-fn test_build_market_bracket_sl_only() {
+fn test_build_bracket_sl_only() {
     let mut params = sample_bracket_params();
     params.take_profit = None;
-    let group = build_market_bracket(&params);
+    let group = build_bracket(&params);
     assert_eq!(group.legs().len(), 2);
     assert!(group.take_profit.is_none());
     assert!(group.stop_loss.is_some());
 }
 
 #[test]
-fn test_build_market_bracket_naked() {
+fn test_build_bracket_naked() {
     let mut params = sample_bracket_params();
     params.take_profit = None;
     params.stop_loss = None;
-    let group = build_market_bracket(&params);
+    let group = build_bracket(&params);
     assert_eq!(group.legs().len(), 1);
 }
 
 #[test]
-fn test_build_market_bracket_sell_children_are_buy() {
+fn test_build_bracket_sell_children_are_buy() {
     let mut params = sample_bracket_params();
     params.action = OrderAction::Sell;
-    let group = build_market_bracket(&params);
+    let group = build_bracket(&params);
     assert_eq!(group.parent.action, OrderAction::Sell);
     assert_eq!(group.take_profit.as_ref().unwrap().action, OrderAction::Buy);
     assert_eq!(group.stop_loss.as_ref().unwrap().action, OrderAction::Buy);
 }
 
 #[test]
-fn test_build_market_bracket_stop_limit_sl() {
+fn test_build_bracket_stop_limit_sl() {
     use crate::orders::bracket::StopLossParams;
     let mut params = sample_bracket_params();
     params.stop_loss = Some(StopLossParams {
@@ -284,11 +287,49 @@ fn test_build_market_bracket_stop_limit_sl() {
         limit_price: Some(181.50),
         tif: None,
     });
-    let group = build_market_bracket(&params);
+    let group = build_bracket(&params);
     let sl = group.stop_loss.as_ref().unwrap();
     assert_eq!(sl.order_type, OrderKind::StopLimit);
     assert_eq!(sl.stop_price, Some(182.0));
     assert_eq!(sl.limit_price, Some(181.50));
+}
+
+// -----------------------------------------------------------------------
+// Non-Market entry type tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_build_bracket_limit_entry() {
+    let mut params = sample_bracket_params();
+    params.entry_kind = OrderKind::Limit;
+    params.entry_price = Some(180.00);
+    let group = build_bracket(&params);
+    assert_eq!(group.parent.order_type, OrderKind::Limit);
+    assert_eq!(group.parent.limit_price, Some(180.00));
+    assert!(group.parent.stop_price.is_none());
+}
+
+#[test]
+fn test_build_bracket_stop_entry() {
+    let mut params = sample_bracket_params();
+    params.entry_kind = OrderKind::Stop;
+    params.entry_stop_price = Some(190.00);
+    let group = build_bracket(&params);
+    assert_eq!(group.parent.order_type, OrderKind::Stop);
+    assert_eq!(group.parent.stop_price, Some(190.00));
+    assert!(group.parent.limit_price.is_none());
+}
+
+#[test]
+fn test_build_bracket_stop_limit_entry() {
+    let mut params = sample_bracket_params();
+    params.entry_kind = OrderKind::StopLimit;
+    params.entry_price = Some(184.50);
+    params.entry_stop_price = Some(185.00);
+    let group = build_bracket(&params);
+    assert_eq!(group.parent.order_type, OrderKind::StopLimit);
+    assert_eq!(group.parent.limit_price, Some(184.50));
+    assert_eq!(group.parent.stop_price, Some(185.00));
 }
 
 // -----------------------------------------------------------------------
@@ -403,7 +444,7 @@ async fn test_cancel_bracket_via_command() {
     let params = sample_bracket_params();
     handle
         .commands
-        .send(BrokerCommand::CreateMarketBracket(params))
+        .send(BrokerCommand::CreateBracket(params))
         .await
         .unwrap();
 
@@ -521,7 +562,7 @@ async fn test_create_full_bracket_emits_event() {
     let params = sample_bracket_params();
     handle
         .commands
-        .send(BrokerCommand::CreateMarketBracket(params))
+        .send(BrokerCommand::CreateBracket(params))
         .await
         .unwrap();
 
@@ -568,7 +609,7 @@ async fn test_create_tp_only_bracket() {
     params.stop_loss = None;
     handle
         .commands
-        .send(BrokerCommand::CreateMarketBracket(params))
+        .send(BrokerCommand::CreateBracket(params))
         .await
         .unwrap();
 
@@ -599,7 +640,7 @@ async fn test_create_sl_only_bracket() {
     params.take_profit = None;
     handle
         .commands
-        .send(BrokerCommand::CreateMarketBracket(params))
+        .send(BrokerCommand::CreateBracket(params))
         .await
         .unwrap();
 
@@ -635,7 +676,7 @@ async fn test_create_naked_market_order() {
     // No TP/SL means no notional guard is needed, but we still have reference_price
     handle
         .commands
-        .send(BrokerCommand::CreateMarketBracket(params))
+        .send(BrokerCommand::CreateBracket(params))
         .await
         .unwrap();
 
@@ -666,7 +707,7 @@ async fn test_create_bracket_empty_symbol_rejected() {
     params.symbol = String::new();
     handle
         .commands
-        .send(BrokerCommand::CreateMarketBracket(params))
+        .send(BrokerCommand::CreateBracket(params))
         .await
         .unwrap();
 
@@ -706,7 +747,7 @@ async fn test_create_bracket_zero_qty_rejected() {
     params.quantity = 0.0;
     handle
         .commands
-        .send(BrokerCommand::CreateMarketBracket(params))
+        .send(BrokerCommand::CreateBracket(params))
         .await
         .unwrap();
 
@@ -738,7 +779,7 @@ async fn test_order_size_guard_quantity() {
     let params = sample_bracket_params(); // quantity=100, limit=50
     handle
         .commands
-        .send(BrokerCommand::CreateMarketBracket(params))
+        .send(BrokerCommand::CreateBracket(params))
         .await
         .unwrap();
 
@@ -772,7 +813,7 @@ async fn test_order_size_guard_notional() {
     params.reference_price = Some(185.0); // notional = 18500, limit = 1000
     handle
         .commands
-        .send(BrokerCommand::CreateMarketBracket(params))
+        .send(BrokerCommand::CreateBracket(params))
         .await
         .unwrap();
 
@@ -804,7 +845,7 @@ async fn test_cancel_bracket_lifecycle() {
     let params = sample_bracket_params();
     handle
         .commands
-        .send(BrokerCommand::CreateMarketBracket(params))
+        .send(BrokerCommand::CreateBracket(params))
         .await
         .unwrap();
 
@@ -860,7 +901,7 @@ async fn test_modify_tp_price() {
     let params = sample_bracket_params();
     handle
         .commands
-        .send(BrokerCommand::CreateMarketBracket(params))
+        .send(BrokerCommand::CreateBracket(params))
         .await
         .unwrap();
 
@@ -914,7 +955,7 @@ async fn test_sell_bracket_created() {
     params.action = OrderAction::Sell;
     handle
         .commands
-        .send(BrokerCommand::CreateMarketBracket(params))
+        .send(BrokerCommand::CreateBracket(params))
         .await
         .unwrap();
 
@@ -953,7 +994,7 @@ async fn test_stop_limit_sl_bracket() {
     });
     handle
         .commands
-        .send(BrokerCommand::CreateMarketBracket(params))
+        .send(BrokerCommand::CreateBracket(params))
         .await
         .unwrap();
 
@@ -983,7 +1024,7 @@ async fn test_multiple_brackets_sequential() {
         let params = sample_bracket_params();
         handle
             .commands
-            .send(BrokerCommand::CreateMarketBracket(params))
+            .send(BrokerCommand::CreateBracket(params))
             .await
             .unwrap();
     }
@@ -1044,7 +1085,7 @@ async fn test_cancel_nonexistent_bracket() {
         .expect("engine should still be running after cancelling nonexistent bracket");
 }
 
-// 15. Persistence round-trip via build_market_bracket
+// 15. Persistence round-trip via build_bracket
 #[test]
 fn test_bracket_persistence_round_trip() {
     use crate::db::BrokerDb;
@@ -1057,7 +1098,7 @@ fn test_bracket_persistence_round_trip() {
 
     // Build a bracket group from params
     let params = sample_bracket_params();
-    let group = build_market_bracket(&params);
+    let group = build_bracket(&params);
 
     let parent_id = group.parent.id;
 
@@ -1240,7 +1281,7 @@ async fn test_create_bracket_empty_exchange_rejected() {
     params.exchange = String::new();
     handle
         .commands
-        .send(BrokerCommand::CreateMarketBracket(params))
+        .send(BrokerCommand::CreateBracket(params))
         .await
         .unwrap();
 
@@ -1273,7 +1314,7 @@ async fn test_create_bracket_empty_currency_rejected() {
     params.currency = String::new();
     handle
         .commands
-        .send(BrokerCommand::CreateMarketBracket(params))
+        .send(BrokerCommand::CreateBracket(params))
         .await
         .unwrap();
 
@@ -1306,7 +1347,7 @@ async fn test_order_size_guard_missing_reference_price() {
     params.reference_price = None; // remove reference price
     handle
         .commands
-        .send(BrokerCommand::CreateMarketBracket(params))
+        .send(BrokerCommand::CreateBracket(params))
         .await
         .unwrap();
 
@@ -1340,7 +1381,7 @@ async fn test_bracket_persisted_to_db_via_engine() {
     let params = sample_bracket_params();
     handle
         .commands
-        .send(BrokerCommand::CreateMarketBracket(params))
+        .send(BrokerCommand::CreateBracket(params))
         .await
         .unwrap();
 
@@ -1370,7 +1411,7 @@ async fn test_bracket_persisted_to_db_via_engine() {
     // so by the time BracketCreated is emitted, the DB writes are complete.
     // We cannot directly access the DB from outside the engine, but we can
     // verify that all three IDs are distinct (which requires correct UUID
-    // generation inside build_market_bracket).
+    // generation inside build_bracket).
     let mut ids = vec![parent_id, tp_id, sl_id];
     ids.sort();
     ids.dedup();
@@ -1388,7 +1429,7 @@ async fn test_cancel_bracket_emits_order_cancelled_per_leg() {
     let params = sample_bracket_params();
     handle
         .commands
-        .send(BrokerCommand::CreateMarketBracket(params))
+        .send(BrokerCommand::CreateBracket(params))
         .await
         .unwrap();
 
@@ -1498,7 +1539,7 @@ async fn test_bracket_submission_with_test_client() {
     let params = sample_bracket_params();
     handle
         .commands
-        .send(BrokerCommand::CreateMarketBracket(params))
+        .send(BrokerCommand::CreateBracket(params))
         .await
         .unwrap();
 
@@ -1546,7 +1587,7 @@ async fn test_tp_only_bracket_submission() {
     params.stop_loss = None;
     handle
         .commands
-        .send(BrokerCommand::CreateMarketBracket(params))
+        .send(BrokerCommand::CreateBracket(params))
         .await
         .unwrap();
 
@@ -1571,7 +1612,7 @@ async fn test_naked_market_order_submission() {
     params.stop_loss = None;
     handle
         .commands
-        .send(BrokerCommand::CreateMarketBracket(params))
+        .send(BrokerCommand::CreateBracket(params))
         .await
         .unwrap();
 
@@ -1595,7 +1636,7 @@ async fn test_sl_only_bracket_submission() {
     params.take_profit = None;
     handle
         .commands
-        .send(BrokerCommand::CreateMarketBracket(params))
+        .send(BrokerCommand::CreateBracket(params))
         .await
         .unwrap();
 
@@ -1618,7 +1659,7 @@ async fn test_bracket_ib_order_ids_match_events() {
     let params = sample_bracket_params();
     handle
         .commands
-        .send(BrokerCommand::CreateMarketBracket(params))
+        .send(BrokerCommand::CreateBracket(params))
         .await
         .unwrap();
 
@@ -1686,7 +1727,7 @@ async fn test_bracket_unconnected_client_emits_error() {
     let params = sample_bracket_params();
     handle
         .commands
-        .send(BrokerCommand::CreateMarketBracket(params))
+        .send(BrokerCommand::CreateBracket(params))
         .await
         .unwrap();
 

@@ -1399,7 +1399,9 @@ fn mouse_release_clears_drag() {
 
 // ── Bracket leg drag tests ──────────────────────────────────────
 
-use crate::widget::order_bracket::{BracketLeg, BracketSide, BracketStatus, LegRole, OrderBracket};
+use crate::widget::order_bracket::{
+    BracketLeg, BracketSide, BracketStatus, EntryType, LegRole, OrderBracket,
+};
 
 fn make_bracket_leg(price: f64) -> BracketLeg {
     BracketLeg {
@@ -1426,6 +1428,9 @@ fn test_bracket_annotation(id: u64, entry: f64, tp: f64, sl: f64) -> Annotation 
             quantity: Some(100.0),
             saved: false,
             filled_qty: None,
+            entry_type: EntryType::Market,
+            entry_stop_price: None,
+            wrong_side_warning: false,
         })),
         presence: Presence::Active,
         visible_timeframes: None,
@@ -1579,6 +1584,94 @@ fn hit_test_bracket_legs_misses_entry() {
     // Entry line should NOT be hit-testable for bracket leg drags.
     let result = hit_test_bracket_legs(&[bracket], entry_y, &state.camera);
     assert!(result.is_none(), "entry should not be draggable");
+}
+
+#[test]
+fn hit_test_bracket_legs_finds_entry_for_draft_limit() {
+    let state = test_state();
+    let mut bracket = test_bracket_annotation(10, 150.0, 170.0, 130.0);
+    // Make it a Draft Limit bracket — entry should be draggable.
+    if let AnnotationKind::OrderBracket(ref mut b) = bracket.kind {
+        b.status = BracketStatus::Draft;
+        b.entry_type = EntryType::Limit;
+    }
+    let entry_y = state.camera.price_to_y(150.0);
+
+    let result = hit_test_bracket_legs(&[bracket], entry_y, &state.camera);
+    assert!(result.is_some(), "Draft Limit entry should be hit-testable");
+    let (_id, role, _, _, _) = result.unwrap();
+    assert_eq!(role, LegRole::Entry);
+}
+
+#[test]
+fn hit_test_bracket_legs_misses_entry_for_draft_market() {
+    let state = test_state();
+    let mut bracket = test_bracket_annotation(10, 150.0, 170.0, 130.0);
+    // Draft Market — entry should NOT be draggable.
+    if let AnnotationKind::OrderBracket(ref mut b) = bracket.kind {
+        b.status = BracketStatus::Draft;
+        b.entry_type = EntryType::Market;
+    }
+    let entry_y = state.camera.price_to_y(150.0);
+
+    let result = hit_test_bracket_legs(&[bracket], entry_y, &state.camera);
+    assert!(
+        result.is_none(),
+        "Draft Market entry should not be draggable"
+    );
+}
+
+#[test]
+fn hit_test_bracket_legs_misses_entry_for_pending_limit() {
+    let state = test_state();
+    let mut bracket = test_bracket_annotation(10, 150.0, 170.0, 130.0);
+    // Pending Limit — entry should NOT be draggable (live at broker).
+    if let AnnotationKind::OrderBracket(ref mut b) = bracket.kind {
+        b.status = BracketStatus::Pending;
+        b.entry_type = EntryType::Limit;
+    }
+    let entry_y = state.camera.price_to_y(150.0);
+
+    let result = hit_test_bracket_legs(&[bracket], entry_y, &state.camera);
+    assert!(
+        result.is_none(),
+        "Pending Limit entry should not be draggable"
+    );
+}
+
+#[test]
+fn hit_test_bracket_legs_finds_entry_for_draft_stop() {
+    let state = test_state();
+    let mut bracket = test_bracket_annotation(10, 150.0, 170.0, 130.0);
+    if let AnnotationKind::OrderBracket(ref mut b) = bracket.kind {
+        b.status = BracketStatus::Draft;
+        b.entry_type = EntryType::Stop;
+    }
+    let entry_y = state.camera.price_to_y(150.0);
+
+    let result = hit_test_bracket_legs(&[bracket], entry_y, &state.camera);
+    assert!(result.is_some(), "Draft Stop entry should be hit-testable");
+    let (_id, role, _, _, _) = result.unwrap();
+    assert_eq!(role, LegRole::Entry);
+}
+
+#[test]
+fn hit_test_bracket_legs_finds_entry_for_draft_stop_limit() {
+    let state = test_state();
+    let mut bracket = test_bracket_annotation(10, 150.0, 170.0, 130.0);
+    if let AnnotationKind::OrderBracket(ref mut b) = bracket.kind {
+        b.status = BracketStatus::Draft;
+        b.entry_type = EntryType::StopLimit;
+    }
+    let entry_y = state.camera.price_to_y(150.0);
+
+    let result = hit_test_bracket_legs(&[bracket], entry_y, &state.camera);
+    assert!(
+        result.is_some(),
+        "Draft StopLimit entry should be hit-testable"
+    );
+    let (_id, role, _, _, _) = result.unwrap();
+    assert_eq!(role, LegRole::Entry);
 }
 
 #[test]

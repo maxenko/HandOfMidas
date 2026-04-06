@@ -20,7 +20,7 @@ pub use self::compute::{ComputeContext, LabelAnchor, Viewport, WidgetLabel, Widg
 pub use self::hit_test::{BoundingBox, CursorIcon, HitResult, HitZone, HitZoneKind, Point};
 pub use self::level::{HorizontalLevel, LevelExtend, LineStyle};
 pub use self::marker::{MarkerAnnotation, MarkerIcon};
-pub use self::order_bracket::{BracketLeg, BracketSide, BracketStatus, OrderBracket};
+pub use self::order_bracket::{BracketLeg, BracketSide, BracketStatus, EntryType, OrderBracket};
 pub use self::text_note::TextNote;
 pub use self::theme::Theme;
 

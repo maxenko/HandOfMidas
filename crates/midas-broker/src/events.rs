@@ -68,7 +68,7 @@ pub enum BrokerEvent {
     },
 
     // ── Brackets ────────────────────────────────────────────────────────────
-    /// A market bracket was created and submitted.
+    /// A bracket was created and submitted.
     BracketCreated {
         parent_id: Uuid,
         take_profit_id: Option<Uuid>,
@@ -80,7 +80,7 @@ pub enum BrokerEvent {
         tp_price: Option<f64>,
         /// Stop loss trigger price (if SL leg exists).
         sl_price: Option<f64>,
-        /// Last traded price at submission time (from MarketBracketParams).
+        /// Last traded price at submission time (from BracketParams).
         reference_price: Option<f64>,
     },
     /// A bracket's lifecycle status changed (derived from leg statuses).

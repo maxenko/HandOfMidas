@@ -1241,6 +1241,9 @@ impl MidasApp {
                 quantity: None,
                 saved: false,
                 filled_qty: None,
+                entry_type: midas_chart::widget::order_bracket::EntryType::Market,
+                entry_stop_price: None,
+                wrong_side_warning: false,
             };
 
             let ann_id = self.annotation_store.add(
@@ -1254,6 +1257,151 @@ impl MidasApp {
         }
 
         self.mark_levels_dirty_for_ticker(&new_upper);
+    }
+
+    /// Compute and set `wrong_side_warning` on a bracket based on entry
+    /// price vs. market price. Uses bid/ask from market_cache if available,
+    /// falls back to last_price.
+    fn update_wrong_side_warning(&mut self, ticker: &str, ann_id: AnnotationId) {
+        use midas_chart::widget::order_bracket::{BracketSide, EntryType};
+
+        let last_price = self
+            .market_cache
+            .get(ticker)
+            .and_then(|s| s.last_price)
+            .unwrap_or(0.0);
+        if last_price <= 0.0 {
+            return;
+        }
+
+        self.annotation_store.update(ticker, ann_id, |ann| {
+            if let midas_chart::widget::AnnotationKind::OrderBracket(ref mut b) = ann.kind {
+                b.wrong_side_warning = match (b.entry_type, b.side) {
+                    // Limit BUY above market = marketable (warn)
+                    (EntryType::Limit, BracketSide::Long) => b.entry.price > last_price,
+                    // Limit SELL below market = marketable (warn)
+                    (EntryType::Limit, BracketSide::Short) => b.entry.price < last_price,
+                    // Stop BUY below market (warn)
+                    (EntryType::Stop, BracketSide::Long) => b.entry.price < last_price,
+                    // Stop SELL above market (warn)
+                    (EntryType::Stop, BracketSide::Short) => b.entry.price > last_price,
+                    // StopLimit: warn based on limit price (entry.price)
+                    (EntryType::StopLimit, BracketSide::Long) => b.entry.price > last_price,
+                    (EntryType::StopLimit, BracketSide::Short) => b.entry.price < last_price,
+                    // Market: never warn
+                    (EntryType::Market, _) => false,
+                };
+            }
+        });
+    }
+
+    /// Handle entry type change for an order panel.
+    ///
+    /// Updates panel state, updates the bracket annotation's `entry_type`,
+    /// and adjusts entry price: switching to Market resets to `last_price`;
+    /// switching from Market to Limit/Stop/StopLimit defaults the price
+    /// input to `last_price` as a starting point.
+    fn handle_set_entry_type(
+        &mut self,
+        panel_id: OrderPanelId,
+        new_type: midas_chart::widget::order_bracket::EntryType,
+    ) {
+        use midas_chart::widget::order_bracket::EntryType;
+
+        let panel = match self.order_panels.get(&panel_id) {
+            Some(p) => p,
+            None => return,
+        };
+        let symbol = panel.state.symbol.clone();
+        if symbol.is_empty() {
+            return;
+        }
+        let symbol_upper = symbol.to_uppercase();
+        let old_type = panel.state.entry_type;
+        let ann_id = panel.state.bracket_annotation_id;
+
+        let last_price = self
+            .market_cache
+            .get(&symbol_upper)
+            .and_then(|snap| snap.last_price)
+            .unwrap_or(0.0);
+
+        // Default price inputs when switching away from Market.
+        if old_type == EntryType::Market && new_type != EntryType::Market && last_price > 0.0 {
+            let side = self
+                .order_panels
+                .get(&panel_id)
+                .map(|p| p.state.side)
+                .unwrap_or(crate::order_panel::OrderSide::Buy);
+            let is_buy = side == crate::order_panel::OrderSide::Buy;
+
+            if let Some(p) = self.order_panels.get_mut(&panel_id) {
+                if p.state.limit_price.is_empty() {
+                    p.state.limit_price = format!("{:.2}", last_price);
+                }
+                if p.state.stop_price.is_empty() {
+                    // Stop defaults: +2% for buy, -2% for sell.
+                    let stop_default = if is_buy {
+                        last_price * 1.02
+                    } else {
+                        last_price * 0.98
+                    };
+                    p.state.stop_price = format!("{:.2}", stop_default);
+                }
+            }
+        }
+
+        // Update panel state.
+        if let Some(p) = self.order_panels.get_mut(&panel_id) {
+            p.state.entry_type = new_type;
+        }
+
+        // Update the bracket annotation.
+        if let Some(ann_id) = ann_id {
+            let limit_price_str = self
+                .order_panels
+                .get(&panel_id)
+                .map(|p| p.state.limit_price.clone())
+                .unwrap_or_default();
+            let stop_price_str = self
+                .order_panels
+                .get(&panel_id)
+                .map(|p| p.state.stop_price.clone())
+                .unwrap_or_default();
+
+            self.annotation_store.update(&symbol_upper, ann_id, |ann| {
+                if let midas_chart::widget::AnnotationKind::OrderBracket(ref mut b) = ann.kind {
+                    b.entry_type = new_type;
+                    b.wrong_side_warning = false;
+                    match new_type {
+                        EntryType::Market => {
+                            b.entry.price = last_price;
+                            b.entry_stop_price = None;
+                        }
+                        EntryType::Limit => {
+                            if let Ok(p) = limit_price_str.parse::<f64>() {
+                                b.entry.price = p;
+                            }
+                            b.entry_stop_price = None;
+                        }
+                        EntryType::Stop => {
+                            if let Ok(p) = stop_price_str.parse::<f64>() {
+                                b.entry.price = p;
+                            }
+                            b.entry_stop_price = None;
+                        }
+                        EntryType::StopLimit => {
+                            if let Ok(p) = limit_price_str.parse::<f64>() {
+                                b.entry.price = p;
+                            }
+                            b.entry_stop_price = stop_price_str.parse::<f64>().ok();
+                        }
+                    }
+                }
+            });
+            self.sync_draft_cache(panel_id, &symbol_upper);
+            self.mark_levels_dirty_for_ticker(&symbol_upper);
+        }
     }
 
     /// Update Draft brackets that have `entry.price == 0.0` for a symbol.
@@ -1329,6 +1477,9 @@ impl MidasApp {
         }
         let symbol_upper = symbol.to_uppercase();
         let old_ann_id = panel.state.bracket_annotation_id;
+        let panel_entry_type = panel.state.entry_type;
+        let panel_limit_price = panel.state.limit_price.clone();
+        let panel_stop_price = panel.state.stop_price.clone();
 
         match mode {
             Some(side) => {
@@ -1406,6 +1557,7 @@ impl MidasApp {
 
                 let bracket = if let Some(mut b) = cached {
                     b.side = bracket_side;
+                    b.entry_type = panel_entry_type;
                     b
                 } else {
                     // Create a new bracket at last_price (0.0 if no data yet).
@@ -1426,8 +1578,23 @@ impl MidasApp {
                         projected_pnl_pct: None,
                     };
 
+                    // Determine entry price based on entry type.
+                    let entry_price = match panel_entry_type {
+                        EntryType::Market => last_price,
+                        EntryType::Limit => panel_limit_price.parse::<f64>().unwrap_or(last_price),
+                        EntryType::Stop => panel_stop_price.parse::<f64>().unwrap_or(last_price),
+                        EntryType::StopLimit => {
+                            panel_limit_price.parse::<f64>().unwrap_or(last_price)
+                        }
+                    };
+                    let entry_stop = if panel_entry_type == EntryType::StopLimit {
+                        panel_stop_price.parse::<f64>().ok()
+                    } else {
+                        None
+                    };
+
                     OrderBracket {
-                        entry: make_leg(last_price),
+                        entry: make_leg(entry_price),
                         take_profit: None,
                         stop_loss: None,
                         side: bracket_side,
@@ -1435,6 +1602,9 @@ impl MidasApp {
                         quantity: None,
                         saved: false,
                         filled_qty: None,
+                        entry_type: panel_entry_type,
+                        entry_stop_price: entry_stop,
+                        wrong_side_warning: false,
                     }
                 };
 
@@ -2816,6 +2986,12 @@ impl MidasApp {
                     return Task::none();
                 }
 
+                // SetEntryType needs annotation_store + market_cache access.
+                if let OrderPanelAction::SetEntryType(new_type) = action {
+                    self.handle_set_entry_type(panel_id, new_type);
+                    return Task::none();
+                }
+
                 // ConfirmYes needs broader access to self (broker_bridge, market_cache),
                 // so handle it outside the panel borrow.
                 if matches!(action, OrderPanelAction::ConfirmYes) {
@@ -2893,7 +3069,7 @@ impl MidasApp {
 
                     // Send to broker engine.
                     if let Some(ref bridge) = self.broker_bridge {
-                        let broker_params = midas_core::broker::MarketBracketParams {
+                        let broker_params = midas_core::broker::BracketParams {
                             symbol: symbol.clone(),
                             con_id: None,
                             sec_type: midas_core::SecurityType::Stock,
@@ -2917,11 +3093,14 @@ impl MidasApp {
                             reference_price: Some(last_price),
                             strategy: None,
                             tags: Vec::new(),
+                            entry_kind: midas_core::EntryKind::Market,
+                            entry_price: None,
+                            entry_stop_price: None,
                         };
-                        match bridge.create_market_bracket(broker_params) {
+                        match bridge.create_bracket(broker_params) {
                             Ok(()) => {
                                 tracing::info!(
-                                    "CreateMarketBracket sent to broker engine for {}",
+                                    "CreateBracket sent to broker engine for {}",
                                     symbol
                                 );
                             }
@@ -2932,10 +3111,7 @@ impl MidasApp {
                             }
                         }
                     } else {
-                        tracing::warn!(
-                            "No broker bridge: CreateMarketBracket for {} not sent",
-                            symbol,
-                        );
+                        tracing::warn!("No broker bridge: CreateBracket for {} not sent", symbol,);
                     }
 
                     self.status_message = format!(
@@ -3000,7 +3176,15 @@ impl MidasApp {
                         OrderPanelAction::Dismiss => {
                             panel.state.showing_confirmation = false;
                         }
-                        OrderPanelAction::ConfirmYes | OrderPanelAction::SetBracketMode(_) => {
+                        OrderPanelAction::SetLimitPrice(val) => {
+                            panel.state.limit_price = val;
+                        }
+                        OrderPanelAction::SetStopPrice(val) => {
+                            panel.state.stop_price = val;
+                        }
+                        OrderPanelAction::ConfirmYes
+                        | OrderPanelAction::SetBracketMode(_)
+                        | OrderPanelAction::SetEntryType(_) => {
                             // Handled above (outside the panel borrow).
                             unreachable!();
                         }
@@ -3319,7 +3503,8 @@ impl MidasApp {
                     self.market_cache.insert(symbol.clone(), snapshot);
                 }
 
-                // Sync draft bracket entry prices for panels tracking this symbol.
+                // Sync draft bracket entry prices for Market-type panels tracking this symbol.
+                // Non-Market brackets preserve user-specified entry prices.
                 let symbol_upper = symbol.to_uppercase();
                 if let Some(new_price) = self
                     .market_cache
@@ -3330,6 +3515,8 @@ impl MidasApp {
                     for panel in self.order_panels.values() {
                         if panel.state.bracket_active.is_some()
                             && panel.state.symbol.to_uppercase() == symbol_upper
+                            && panel.state.entry_type
+                                == midas_chart::widget::order_bracket::EntryType::Market
                         {
                             if let Some(ann_id) = panel.state.bracket_annotation_id {
                                 let should_update = self
@@ -3659,6 +3846,9 @@ impl MidasApp {
                         quantity: None,
                         saved: false,
                         filled_qty: None,
+                        entry_type: midas_chart::widget::order_bracket::EntryType::Market,
+                        entry_stop_price: None,
+                        wrong_side_warning: false,
                     };
                     let annotation_id = self.annotation_store.add(
                         &ticker,
@@ -3680,12 +3870,6 @@ impl MidasApp {
             Message::ChartDragBracketLeg(chart_id, annotation_id, leg, new_price) => {
                 use midas_chart::widget::order_bracket::LegRole;
 
-                // Entry legs are not draggable (market orders fill instantly).
-                if leg == LegRole::Entry {
-                    tracing::warn!("Attempted to drag entry leg — entry is not draggable");
-                    return Task::none();
-                }
-
                 let ann_id = AnnotationId(annotation_id);
 
                 // Resolve the ticker for this chart so we can look up the
@@ -3704,7 +3888,6 @@ impl MidasApp {
                             };
                             match leg {
                                 LegRole::Entry => {
-                                    // Unreachable: guarded by early return above.
                                     bracket.entry.price = new_price;
                                 }
                                 LegRole::TakeProfit => {
@@ -3761,6 +3944,37 @@ impl MidasApp {
                         // Mark levels dirty on all charts showing this symbol
                         // so the GPU re-renders the bracket lines.
                         self.mark_levels_dirty_for_ticker(ticker);
+
+                        // Entry leg drag: sync panel inputs and compute warnings.
+                        if leg == LegRole::Entry {
+                            // Find the panel linked to this annotation.
+                            let panel_id = self
+                                .order_panels
+                                .iter()
+                                .find(|(_, p)| p.state.bracket_annotation_id == Some(ann_id))
+                                .map(|(id, _)| *id);
+                            if let Some(pid) = panel_id {
+                                if let Some(p) = self.order_panels.get_mut(&pid) {
+                                    let price_str = format!("{:.2}", new_price);
+                                    match p.state.entry_type {
+                                        // StopLimit: drag adjusts limit price only.
+                                        // Stop price is only editable via panel
+                                        // input (V1 — second drag line deferred).
+                                        midas_chart::widget::order_bracket::EntryType::Limit
+                                        | midas_chart::widget::order_bracket::EntryType::StopLimit => {
+                                            p.state.limit_price = price_str;
+                                        }
+                                        midas_chart::widget::order_bracket::EntryType::Stop => {
+                                            p.state.stop_price = price_str;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                // Compute directional warning.
+                                self.update_wrong_side_warning(ticker, ann_id);
+                                self.sync_draft_cache(pid, ticker);
+                            }
+                        }
 
                         // Send price modification to broker engine.
                         if let Some(ref bridge) = self.broker_bridge {
@@ -3975,17 +4189,122 @@ impl MidasApp {
                     return Task::none();
                 }
 
-                // Transition bracket to Pending (broker integration pending).
+                // Map chart EntryType → desktop EntryKind for broker params.
+                let entry_kind = match bracket.entry_type {
+                    midas_chart::widget::order_bracket::EntryType::Market => {
+                        midas_core::EntryKind::Market
+                    }
+                    midas_chart::widget::order_bracket::EntryType::Limit => {
+                        midas_core::EntryKind::Limit
+                    }
+                    midas_chart::widget::order_bracket::EntryType::Stop => {
+                        midas_core::EntryKind::Stop
+                    }
+                    midas_chart::widget::order_bracket::EntryType::StopLimit => {
+                        midas_core::EntryKind::StopLimit
+                    }
+                };
+
+                // Entry type → broker BracketParams field mapping:
+                //   Market:    entry_price = None,                entry_stop_price = None
+                //   Limit:     entry_price = Some(limit_price),   entry_stop_price = None
+                //   Stop:      entry_price = None,                entry_stop_price = Some(stop_price)
+                //   StopLimit: entry_price = Some(limit_price),   entry_stop_price = Some(stop_price)
+                let (entry_price, entry_stop_price) = match bracket.entry_type {
+                    midas_chart::widget::order_bracket::EntryType::Market => (None, None),
+                    midas_chart::widget::order_bracket::EntryType::Limit => {
+                        (Some(bracket.entry.price), None)
+                    }
+                    midas_chart::widget::order_bracket::EntryType::Stop => {
+                        (None, Some(bracket.entry.price))
+                    }
+                    midas_chart::widget::order_bracket::EntryType::StopLimit => {
+                        (Some(bracket.entry.price), bracket.entry_stop_price)
+                    }
+                };
+
+                let action = match bracket.side {
+                    midas_chart::widget::order_bracket::BracketSide::Long => {
+                        midas_core::broker::OrderAction::Buy
+                    }
+                    midas_chart::widget::order_bracket::BracketSide::Short => {
+                        midas_core::broker::OrderAction::Sell
+                    }
+                };
+
+                // Transition bracket to Pending.
                 self.annotation_store.update(&symbol, ann_id, |ann| {
                     if let midas_chart::widget::AnnotationKind::OrderBracket(ref mut b) = ann.kind {
                         b.status = midas_chart::widget::order_bracket::BracketStatus::Pending;
                     }
                 });
-                tracing::info!(
-                    "Bracket submitted (broker integration pending): \
-                     chart={chart_id:?} ann={ann_id} symbol={symbol} \
-                     qty={quantity}"
-                );
+
+                // Send to broker engine.
+                if let Some(ref bridge) = self.broker_bridge {
+                    let broker_params = midas_core::broker::BracketParams {
+                        symbol: symbol.clone(),
+                        con_id: None,
+                        sec_type: midas_core::SecurityType::Stock,
+                        exchange: "SMART".to_string(),
+                        currency: "USD".to_string(),
+                        action,
+                        quantity,
+                        outside_rth: false,
+                        take_profit: bracket.take_profit.as_ref().map(|tp| {
+                            midas_core::broker::TakeProfitParams {
+                                price: tp.price,
+                                tif: None,
+                            }
+                        }),
+                        stop_loss: bracket.stop_loss.as_ref().map(|sl| {
+                            midas_core::broker::StopLossParams {
+                                stop_price: sl.price,
+                                limit_price: None,
+                                tif: None,
+                            }
+                        }),
+                        reference_price: Some(bracket.entry.price),
+                        strategy: None,
+                        tags: Vec::new(),
+                        entry_kind,
+                        entry_price,
+                        entry_stop_price,
+                    };
+                    match bridge.create_bracket(broker_params) {
+                        Ok(()) => {
+                            tracing::info!(
+                                "CreateBracket sent: chart={chart_id:?} ann={ann_id} \
+                                 symbol={symbol} qty={quantity} type={entry_kind:?}"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to send bracket to broker: {e}");
+                            // Revert to Draft on broker rejection.
+                            self.annotation_store.update(&symbol, ann_id, |ann| {
+                                if let midas_chart::widget::AnnotationKind::OrderBracket(
+                                    ref mut b,
+                                ) = ann.kind
+                                {
+                                    b.status =
+                                        midas_chart::widget::order_bracket::BracketStatus::Draft;
+                                }
+                            });
+                            if let Some(pid) = panel_id {
+                                if let Some(p) = self.order_panels.get_mut(&pid) {
+                                    p.state.errors =
+                                        vec![("broker".into(), format!("Broker error: {e}"))];
+                                }
+                            }
+                            self.mark_levels_dirty_for_ticker(&symbol);
+                            return Task::none();
+                        }
+                    }
+                } else {
+                    tracing::info!(
+                        "Bracket submitted (no broker bridge): \
+                         chart={chart_id:?} ann={ann_id} symbol={symbol} qty={quantity}"
+                    );
+                }
 
                 // Clear panel bracket ownership.
                 if let Some(pid) = panel_id {

@@ -1,6 +1,6 @@
 use uuid::Uuid;
 
-use crate::orders::bracket::MarketBracketParams;
+use crate::orders::bracket::BracketParams;
 
 /// Commands sent from the UI to the broker engine via mpsc channel.
 ///
@@ -27,9 +27,9 @@ pub enum BrokerCommand {
     },
 
     // ── Brackets ────────────────────────────────────────────────────────────
-    /// Create and immediately submit a market order bracket.
+    /// Create and immediately submit an order bracket.
     /// Builds the bracket, persists all legs, and submits to the broker.
-    CreateMarketBracket(MarketBracketParams),
+    CreateBracket(BracketParams),
     /// Cancel an entire bracket (parent + all children) as a unit.
     CancelBracket { parent_id: Uuid },
     /// Modify a bracket leg's price without affecting other legs.
@@ -81,9 +81,10 @@ mod tests {
     }
 
     #[test]
-    fn market_bracket_command() {
-        use crate::orders::bracket::MarketBracketParams;
-        let cmd = BrokerCommand::CreateMarketBracket(MarketBracketParams {
+    fn bracket_command() {
+        use crate::orders::bracket::BracketParams;
+        use crate::orders::types::OrderKind;
+        let cmd = BrokerCommand::CreateBracket(BracketParams {
             symbol: "AAPL".to_string(),
             con_id: None,
             sec_type: midas_core::SecurityType::Stock,
@@ -92,6 +93,9 @@ mod tests {
             action: crate::orders::types::OrderAction::Buy,
             quantity: 100.0,
             outside_rth: false,
+            entry_kind: OrderKind::Market,
+            entry_price: None,
+            entry_stop_price: None,
             take_profit: None,
             stop_loss: None,
             reference_price: None,
@@ -99,6 +103,6 @@ mod tests {
             tags: Vec::new(),
         });
         let dbg = format!("{cmd:?}");
-        assert!(dbg.contains("CreateMarketBracket"));
+        assert!(dbg.contains("CreateBracket"));
     }
 }

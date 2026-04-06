@@ -1301,16 +1301,17 @@ fn clamp_bracket_leg_price(
         (BracketSide::Short, LegRole::TakeProfit) => raw_price.min(entry_price - MIN_OFFSET),
         // Short SL must be above entry.
         (BracketSide::Short, LegRole::StopLoss) => raw_price.max(entry_price + MIN_OFFSET),
-        // Entry is not draggable — return as-is (should never reach here).
+        // Entry legs have no clamping — user can place at any price.
+        // Directional warnings are computed in the app layer.
         (_, LegRole::Entry) => raw_price,
     }
 }
 
-/// Hit-test bracket TP/SL legs within `LEVEL_HIT_TOLERANCE_PX` of `cursor_y`.
+/// Hit-test bracket legs within `LEVEL_HIT_TOLERANCE_PX` of `cursor_y`.
 ///
 /// Returns `Some((annotation_id, leg_role, grab_offset, entry_price, side))`
-/// for the closest bracket leg. Entry legs are excluded because they are not
-/// draggable (market orders fill instantly, entry is terminal).
+/// for the closest bracket leg. Entry legs are included only for
+/// non-Market Draft brackets (Limit/Stop/StopLimit entry is draggable).
 fn hit_test_bracket_legs(
     annotations: &[crate::widget::Annotation],
     cursor_y: f32,
@@ -1378,6 +1379,31 @@ fn hit_test_bracket_legs(
                     closest = Some((
                         ann.id,
                         crate::widget::order_bracket::LegRole::StopLoss,
+                        dist,
+                        offset,
+                        bracket.entry.price,
+                        bracket.side,
+                    ));
+                }
+            }
+        }
+
+        // Check Entry leg — draggable only for non-Market Draft brackets.
+        if bracket.entry_type != crate::widget::order_bracket::EntryType::Market
+            && bracket.status == crate::widget::order_bracket::BracketStatus::Draft
+        {
+            let leg_y = camera.price_to_y(bracket.entry.price);
+            let dist = (cursor_y - leg_y).abs();
+            if dist <= LEVEL_HIT_TOLERANCE_PX {
+                let better = match closest {
+                    None => true,
+                    Some((_, _, prev_dist, _, _, _)) => dist < prev_dist,
+                };
+                if better {
+                    let offset = bracket.entry.price - cursor_price;
+                    closest = Some((
+                        ann.id,
+                        crate::widget::order_bracket::LegRole::Entry,
                         dist,
                         offset,
                         bracket.entry.price,

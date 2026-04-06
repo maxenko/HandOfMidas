@@ -7,10 +7,35 @@
 use super::level::LineStyle;
 use serde::{Deserialize, Serialize};
 
+/// Entry order type for a bracket. Defined in midas-chart (not broker)
+/// to maintain sans-IO boundary. The app layer maps `EntryType` →
+/// broker `OrderKind` at the bridge.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EntryType {
+    /// Market order — entry tracks last price, not draggable.
+    #[default]
+    Market,
+    /// Limit order — entry at user-specified limit price.
+    Limit,
+    /// Stop order — entry at user-specified stop trigger price.
+    Stop,
+    /// Stop-Limit order — stop trigger + limit execution price.
+    StopLimit,
+}
+
 /// An order bracket: entry line + optional take-profit and stop-loss.
 ///
 /// The chart crate uses `BracketStatus` for visual styling only.
 /// The app layer maps brackets to broker order instances.
+///
+/// # `entry.price` semantics by `entry_type`
+///
+/// - **Market / Limit**: target fill price (exact for risk calculations).
+/// - **Stop**: trigger price (fill is approximate — market at trigger).
+/// - **StopLimit**: limit execution price; the stop trigger lives in
+///   `entry_stop_price`. Risk calculations use `entry.price` as-is,
+///   which is exact for Limit and approximate for Stop (acceptable V1).
+// TODO: consider EntryPrice enum to make per-type semantics compiler-enforced
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OrderBracket {
     /// The entry price line. Always present.
@@ -33,6 +58,19 @@ pub struct OrderBracket {
     /// reports. Used by `format_entry_label()` for partial-fill display.
     #[serde(default)]
     pub filled_qty: Option<f64>,
+    /// Entry order type. Defaults to Market for backward compat.
+    #[serde(default)]
+    pub entry_type: EntryType,
+    /// Stop trigger price for StopLimit entries. `None` for all other types.
+    /// When `entry_type == StopLimit`, `entry.price` is the limit price
+    /// and this field holds the stop trigger price.
+    #[serde(default)]
+    pub entry_stop_price: Option<f64>,
+    /// True when the entry price is on the "wrong" side of market
+    /// (e.g., Limit BUY above ask). Set by the app layer; rendered
+    /// as amber warning on the entry label by the chart.
+    #[serde(default)]
+    pub wrong_side_warning: bool,
 }
 
 /// A single leg of an order bracket.
@@ -225,27 +263,53 @@ pub fn bracket_zone_rects(
 
 // ── Label formatting helpers ─────────────────────────────────────────
 
-/// Format entry label based on bracket status and side.
+/// Entry type label prefix. Market has no prefix (backward compat).
+fn entry_type_prefix(entry_type: EntryType) -> &'static str {
+    match entry_type {
+        EntryType::Market => "",
+        EntryType::Limit => "LMT ",
+        EntryType::Stop => "STP ",
+        EntryType::StopLimit => "STP LMT ",
+    }
+}
+
+/// Format the price portion of the entry label.
 ///
-/// - **Draft**: `"BUY @ 171.59"` / `"SELL @ 171.59"`
-/// - **Pending**: `"BUY @ 171.59  ⏳"` / `"SELL @ 171.59  ⏳"`
+/// For StopLimit, shows `"stop/limit"` (e.g., `"185.00/184.50"`).
+/// For all other types, shows the single entry price.
+fn format_entry_price(bracket: &OrderBracket) -> String {
+    if bracket.entry_type == EntryType::StopLimit {
+        if let Some(stop_price) = bracket.entry_stop_price {
+            return format!("{:.2}/{:.2}", stop_price, bracket.entry.price);
+        }
+    }
+    format!("{:.2}", bracket.entry.price)
+}
+
+/// Format entry label based on bracket status, side, and entry type.
+///
+/// - **Draft**: `"BUY @ 171.59"` / `"LMT BUY @ 180.00"` / `"STP LMT BUY @ 185.00/184.50"`
+/// - **Pending**: `"BUY @ 171.59  ⏳"` / `"LMT BUY @ 180.00  ⏳"`
 /// - **PartialFill**: `"BUY @ 171.59  ◑ 50/100sh"`
 /// - **Active / Closed / Cancelled**: `"▲ 171.59  100sh"` (original)
 pub fn format_entry_label(bracket: &OrderBracket) -> String {
+    let prefix = entry_type_prefix(bracket.entry_type);
+    let price_str = format_entry_price(bracket);
+
     match bracket.status {
         BracketStatus::Draft => {
             let verb = match bracket.side {
                 BracketSide::Long => "BUY",
                 BracketSide::Short => "SELL",
             };
-            format!("{} @ {:.2}", verb, bracket.entry.price)
+            format!("{}{} @ {}", prefix, verb, price_str)
         }
         BracketStatus::Pending => {
             let verb = match bracket.side {
                 BracketSide::Long => "BUY",
                 BracketSide::Short => "SELL",
             };
-            format!("{} @ {:.2}  \u{23F3}", verb, bracket.entry.price)
+            format!("{}{} @ {}  \u{23F3}", prefix, verb, price_str)
         }
         BracketStatus::PartialFill => {
             let verb = match bracket.side {
@@ -255,8 +319,8 @@ pub fn format_entry_label(bracket: &OrderBracket) -> String {
             let filled = bracket.filled_qty.unwrap_or(0.0);
             let total = bracket.quantity.unwrap_or(0.0);
             format!(
-                "{} @ {:.2}  \u{25D1} {:.0}/{:.0}sh",
-                verb, bracket.entry.price, filled, total
+                "{}{} @ {}  \u{25D1} {:.0}/{:.0}sh",
+                prefix, verb, price_str, filled, total
             )
         }
         BracketStatus::Active | BracketStatus::Closed | BracketStatus::Cancelled => {

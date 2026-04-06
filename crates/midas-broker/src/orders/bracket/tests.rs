@@ -33,8 +33,8 @@ fn make_bracket(
     }
 }
 
-fn sample_params() -> MarketBracketParams {
-    MarketBracketParams {
+fn sample_params() -> BracketParams {
+    BracketParams {
         symbol: "AAPL".to_string(),
         con_id: Some(265598),
         sec_type: SecurityType::Stock,
@@ -43,6 +43,9 @@ fn sample_params() -> MarketBracketParams {
         action: OrderAction::Buy,
         quantity: 100.0,
         outside_rth: false,
+        entry_kind: OrderKind::Market,
+        entry_price: None,
+        entry_stop_price: None,
         take_profit: Some(TakeProfitParams {
             price: 192.0,
             tif: None,
@@ -96,21 +99,21 @@ fn lifecycle_status_serde_round_trip() {
 
 #[test]
 fn valid_full_bracket() {
-    assert!(validate_market_bracket(&sample_params()).is_ok());
+    assert!(validate_bracket(&sample_params()).is_ok());
 }
 
 #[test]
 fn valid_tp_only() {
     let mut p = sample_params();
     p.stop_loss = None;
-    assert!(validate_market_bracket(&p).is_ok());
+    assert!(validate_bracket(&p).is_ok());
 }
 
 #[test]
 fn valid_sl_only() {
     let mut p = sample_params();
     p.take_profit = None;
-    assert!(validate_market_bracket(&p).is_ok());
+    assert!(validate_bracket(&p).is_ok());
 }
 
 #[test]
@@ -118,14 +121,14 @@ fn valid_naked_market() {
     let mut p = sample_params();
     p.take_profit = None;
     p.stop_loss = None;
-    assert!(validate_market_bracket(&p).is_ok());
+    assert!(validate_bracket(&p).is_ok());
 }
 
 #[test]
 fn reject_empty_symbol() {
     let mut p = sample_params();
     p.symbol = String::new();
-    let errs = validate_market_bracket(&p).unwrap_err();
+    let errs = validate_bracket(&p).unwrap_err();
     assert!(errs.contains(&ValidationError::MissingSymbol));
 }
 
@@ -133,7 +136,7 @@ fn reject_empty_symbol() {
 fn reject_empty_exchange() {
     let mut p = sample_params();
     p.exchange = String::new();
-    let errs = validate_market_bracket(&p).unwrap_err();
+    let errs = validate_bracket(&p).unwrap_err();
     assert!(errs.contains(&ValidationError::MissingExchange));
 }
 
@@ -141,7 +144,7 @@ fn reject_empty_exchange() {
 fn reject_empty_currency() {
     let mut p = sample_params();
     p.currency = String::new();
-    let errs = validate_market_bracket(&p).unwrap_err();
+    let errs = validate_bracket(&p).unwrap_err();
     assert!(errs.contains(&ValidationError::MissingCurrency));
 }
 
@@ -149,7 +152,7 @@ fn reject_empty_currency() {
 fn reject_zero_quantity() {
     let mut p = sample_params();
     p.quantity = 0.0;
-    let errs = validate_market_bracket(&p).unwrap_err();
+    let errs = validate_bracket(&p).unwrap_err();
     assert!(errs.contains(&ValidationError::InvalidQuantity));
 }
 
@@ -157,7 +160,7 @@ fn reject_zero_quantity() {
 fn reject_negative_quantity() {
     let mut p = sample_params();
     p.quantity = -100.0;
-    let errs = validate_market_bracket(&p).unwrap_err();
+    let errs = validate_bracket(&p).unwrap_err();
     assert!(errs.contains(&ValidationError::InvalidQuantity));
 }
 
@@ -168,7 +171,7 @@ fn reject_negative_tp_price() {
         price: -10.0,
         tif: None,
     });
-    let errs = validate_market_bracket(&p).unwrap_err();
+    let errs = validate_bracket(&p).unwrap_err();
     assert!(errs.contains(&ValidationError::InvalidPrice("take_profit")));
 }
 
@@ -180,7 +183,7 @@ fn reject_negative_sl_price() {
         limit_price: None,
         tif: None,
     });
-    let errs = validate_market_bracket(&p).unwrap_err();
+    let errs = validate_bracket(&p).unwrap_err();
     assert!(errs.contains(&ValidationError::InvalidPrice("stop_loss")));
 }
 
@@ -188,7 +191,7 @@ fn reject_negative_sl_price() {
 fn reject_nan_quantity() {
     let mut p = sample_params();
     p.quantity = f64::NAN;
-    let errs = validate_market_bracket(&p).unwrap_err();
+    let errs = validate_bracket(&p).unwrap_err();
     assert!(errs.contains(&ValidationError::InvalidQuantity));
 }
 
@@ -196,7 +199,7 @@ fn reject_nan_quantity() {
 fn reject_infinity_quantity() {
     let mut p = sample_params();
     p.quantity = f64::INFINITY;
-    let errs = validate_market_bracket(&p).unwrap_err();
+    let errs = validate_bracket(&p).unwrap_err();
     assert!(errs.contains(&ValidationError::InvalidQuantity));
 }
 
@@ -207,7 +210,7 @@ fn reject_nan_tp_price() {
         price: f64::NAN,
         tif: None,
     });
-    let errs = validate_market_bracket(&p).unwrap_err();
+    let errs = validate_bracket(&p).unwrap_err();
     assert!(errs.contains(&ValidationError::InvalidPrice("take_profit")));
 }
 
@@ -219,7 +222,7 @@ fn reject_infinity_sl_stop_price() {
         limit_price: None,
         tif: None,
     });
-    let errs = validate_market_bracket(&p).unwrap_err();
+    let errs = validate_bracket(&p).unwrap_err();
     assert!(errs.contains(&ValidationError::InvalidPrice("stop_loss")));
 }
 
@@ -231,7 +234,7 @@ fn reject_nan_sl_limit_price() {
         limit_price: Some(f64::NAN),
         tif: None,
     });
-    let errs = validate_market_bracket(&p).unwrap_err();
+    let errs = validate_bracket(&p).unwrap_err();
     assert!(errs.contains(&ValidationError::InvalidPrice("stop_loss_limit")));
 }
 

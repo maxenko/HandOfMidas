@@ -30,10 +30,10 @@ pub use error::BrokerError;
 pub use events::BrokerEvent;
 pub use market_data::MarketDataSource;
 pub use orders::bracket::{
-    BracketGroup, BracketLifecycleStatus, MarketBracketParams, StopLossParams, TakeProfitParams,
+    BracketGroup, BracketLifecycleStatus, BracketParams, StopLossParams, TakeProfitParams,
 };
 pub use orders::state::OrderStatus;
-pub use orders::types::{BracketRole, LocalOrder};
+pub use orders::types::{BracketRole, LocalOrder, OrderKind};
 pub use test_broker::{TestBroker, TestBrokerConfig};
 
 pub use engine::start_broker_engine;
