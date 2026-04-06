@@ -4,6 +4,7 @@
 //! brackets with optional Take Profit and Stop Loss legs.
 //! Follows TradingView's bracket order model (1 TP + 1 SL per bracket).
 
+use midas_chart::widget::AnnotationId;
 use midas_core::link::LinkMode;
 use midas_core::ChartId;
 use midas_core::OrderPanelId;
@@ -49,6 +50,12 @@ pub struct OrderPanelState {
     pub source_chart: Option<ChartId>,
     /// Whether the confirmation dialog is showing.
     pub showing_confirmation: bool,
+    /// Bracket chart toggle: `None` = [X] active (no bracket shown),
+    /// `Some(Buy/Sell)` = bracket active on chart.
+    pub bracket_active: Option<OrderSide>,
+    /// Annotation ID of the live Draft bracket in `AnnotationStore`.
+    /// Links this panel to its bracket for mutations and re-linking.
+    pub bracket_annotation_id: Option<AnnotationId>,
 }
 
 impl Default for OrderPanelState {
@@ -70,6 +77,8 @@ impl Default for OrderPanelState {
             last_price: None,
             source_chart: None,
             showing_confirmation: false,
+            bracket_active: None,
+            bracket_annotation_id: None,
         }
     }
 }
@@ -299,6 +308,41 @@ pub fn validate_panel(state: &OrderPanelState) -> Vec<(String, String)> {
     errors
 }
 
+/// Validate bracket annotation data for submission.
+///
+/// Unlike `validate_panel()` which validates form string inputs,
+/// this validates `OrderBracket` f64 data directly for the
+/// chart-driven bracket flow.
+pub fn validate_bracket(
+    bracket: &midas_chart::widget::order_bracket::OrderBracket,
+    quantity: f64,
+) -> Vec<(String, String)> {
+    use midas_chart::widget::order_bracket::BracketSide;
+    let mut errors = Vec::new();
+
+    if bracket.entry.price <= 0.0 {
+        errors.push(("entry".into(), "No market price available".into()));
+    }
+
+    if quantity <= 0.0 {
+        errors.push(("quantity".into(), "Quantity must be positive".into()));
+    }
+
+    if let Some(ref sl) = bracket.stop_loss {
+        match bracket.side {
+            BracketSide::Long if sl.price >= bracket.entry.price => {
+                errors.push(("sl".into(), "Stop loss must be below entry for BUY".into()));
+            }
+            BracketSide::Short if sl.price <= bracket.entry.price => {
+                errors.push(("sl".into(), "Stop loss must be above entry for SELL".into()));
+            }
+            _ => {}
+        }
+    }
+
+    errors
+}
+
 // ===========================================================================
 // OrderAnnotationLink
 // ===========================================================================
@@ -362,6 +406,8 @@ pub fn create_bracket_annotation(
         side,
         status: BracketStatus::Pending,
         quantity: Some(quantity),
+        saved: false,
+        filled_qty: None,
     }
 }
 
@@ -419,6 +465,10 @@ impl OrderPanel {
 
     /// Serialize this panel's state to a config struct for persistence.
     pub fn to_config(&self) -> midas_core::config::OrderPanelConfig {
+        let bracket_active = self.state.bracket_active.map(|side| match side {
+            OrderSide::Buy => "BUY".to_string(),
+            OrderSide::Sell => "SELL".to_string(),
+        });
         midas_core::config::OrderPanelConfig {
             symbol: self.state.symbol.clone(),
             side: match self.state.side {
@@ -427,11 +477,17 @@ impl OrderPanel {
             },
             quantity: self.state.quantity.clone(),
             symbol_link: self.symbol_link,
+            bracket_active,
         }
     }
 
     /// Restore a panel from a saved config.
     pub fn from_config(id: OrderPanelId, config: &midas_core::config::OrderPanelConfig) -> Self {
+        let bracket_active = config.bracket_active.as_deref().and_then(|s| match s {
+            "BUY" => Some(OrderSide::Buy),
+            "SELL" => Some(OrderSide::Sell),
+            _ => None,
+        });
         let state = OrderPanelState {
             symbol: config.symbol.clone(),
             side: if config.side == "SELL" {
@@ -441,6 +497,7 @@ impl OrderPanel {
             },
             quantity: config.quantity.clone(),
             visible: true,
+            bracket_active,
             ..Default::default()
         };
         Self {
@@ -454,7 +511,8 @@ impl OrderPanel {
 /// Actions for a specific order panel instance.
 #[derive(Debug, Clone)]
 pub enum OrderPanelAction {
-    /// Set the order side (Buy/Sell).
+    /// Set the order side (Buy/Sell) without changing bracket mode.
+    #[allow(dead_code)] // retained for non-bracket side changes
     SetSide(OrderSide),
     /// Update the quantity input text.
     SetQuantity(String),
@@ -487,6 +545,10 @@ pub enum OrderPanelAction {
     /// Dismiss the order panel (close confirmation or clear errors).
     #[allow(dead_code)] // part of planned UI
     Dismiss,
+    /// Set the bracket chart toggle mode.
+    /// `Some(Buy/Sell)` activates a bracket on the chart.
+    /// `None` deactivates (clears unsaved bracket, caches state).
+    SetBracketMode(Option<OrderSide>),
 }
 
 // ===========================================================================

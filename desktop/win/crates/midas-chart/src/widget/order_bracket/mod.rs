@@ -25,6 +25,14 @@ pub struct OrderBracket {
     pub status: BracketStatus,
     /// Display quantity (informational label, not order routing).
     pub quantity: Option<f64>,
+    /// Whether the bracket has been explicitly saved/pinned by the user.
+    /// Saved drafts survive [X] toggle and render at higher alpha.
+    #[serde(default)]
+    pub saved: bool,
+    /// Quantity filled so far. Set by the app layer from execution
+    /// reports. Used by `format_entry_label()` for partial-fill display.
+    #[serde(default)]
+    pub filled_qty: Option<f64>,
 }
 
 /// A single leg of an order bracket.
@@ -120,12 +128,14 @@ impl OrderBracket {
 
 // ── Default bracket colors (RGBA, linear space) ──────────────────────
 
-/// Blue-gray entry line.
-const BRACKET_ENTRY_COLOR: [f32; 4] = [0.55, 0.65, 0.80, 1.0];
 /// Green take-profit line.
 const BRACKET_TP_COLOR: [f32; 4] = [0.20, 0.78, 0.35, 1.0];
 /// Red stop-loss line.
 const BRACKET_SL_COLOR: [f32; 4] = [0.90, 0.25, 0.25, 1.0];
+/// Green entry line for long positions.
+const BRACKET_LONG_ENTRY_COLOR: [f32; 4] = [0.20, 0.78, 0.35, 1.0];
+/// Red entry line for short positions.
+const BRACKET_SHORT_ENTRY_COLOR: [f32; 4] = [0.90, 0.25, 0.25, 1.0];
 /// Green zone fill at 6% alpha (between entry and TP).
 const BRACKET_TP_ZONE: [f32; 4] = [0.20, 0.78, 0.35, 0.06];
 /// Red zone fill at 6% alpha (between entry and SL).
@@ -136,30 +146,38 @@ const BRACKET_SL_ZONE: [f32; 4] = [0.90, 0.25, 0.25, 0.06];
 impl OrderBracket {
     /// Compute line style for a leg based on bracket status.
     ///
-    /// Returns `(LineStyle, line_width, color)`. The base color comes from
-    /// the leg role (entry = blue-gray, TP = green, SL = red), then the
-    /// bracket status modulates style, width, and alpha.
+    /// Returns `(LineStyle, line_width, color)`. The base color comes
+    /// from the leg role: entry uses side-colored green (Long) or red
+    /// (Short), TP = green, SL = red. The bracket status modulates
+    /// line style, width, and alpha. Draft brackets additionally
+    /// distinguish saved (0.65) from unsaved (0.50).
     pub fn leg_style(&self, role: LegRole) -> (LineStyle, f32, [f32; 4]) {
         let base_color = match role {
-            LegRole::Entry => BRACKET_ENTRY_COLOR,
+            LegRole::Entry => match self.side {
+                BracketSide::Long => BRACKET_LONG_ENTRY_COLOR,
+                BracketSide::Short => BRACKET_SHORT_ENTRY_COLOR,
+            },
             LegRole::TakeProfit => BRACKET_TP_COLOR,
             LegRole::StopLoss => BRACKET_SL_COLOR,
         };
 
         let (style, width, alpha_mult) = match self.status {
-            BracketStatus::Draft => (
-                LineStyle::Dashed {
-                    dash_len: 6.0,
-                    gap_len: 4.0,
-                },
-                1.0,
-                0.8,
-            ),
-            BracketStatus::Pending => (LineStyle::Dotted { dot_spacing: 4.0 }, 1.0, 0.7),
-            BracketStatus::PartialFill => (LineStyle::Solid, 1.5, 0.9),
+            BracketStatus::Draft => {
+                let alpha = if self.saved { 0.65 } else { 0.50 };
+                (
+                    LineStyle::Dashed {
+                        dash_len: 6.0,
+                        gap_len: 4.0,
+                    },
+                    1.0,
+                    alpha,
+                )
+            }
+            BracketStatus::Pending => (LineStyle::Dotted { dot_spacing: 4.0 }, 1.0, 0.80),
+            BracketStatus::PartialFill => (LineStyle::Solid, 1.5, 0.90),
             BracketStatus::Active => (LineStyle::Solid, 1.5, 1.0),
-            BracketStatus::Closed => (LineStyle::Solid, 1.0, 0.3),
-            BracketStatus::Cancelled => (LineStyle::Solid, 1.0, 0.2),
+            BracketStatus::Closed => (LineStyle::Solid, 1.0, 0.30),
+            BracketStatus::Cancelled => (LineStyle::Solid, 1.0, 0.20),
         };
 
         let mut color = base_color;
@@ -207,17 +225,52 @@ pub fn bracket_zone_rects(
 
 // ── Label formatting helpers ─────────────────────────────────────────
 
-/// Format entry label: "▲ 185.50  100sh" for buy, "▼ 185.50  100sh" for sell.
+/// Format entry label based on bracket status and side.
+///
+/// - **Draft**: `"BUY @ 171.59"` / `"SELL @ 171.59"`
+/// - **Pending**: `"BUY @ 171.59  ⏳"` / `"SELL @ 171.59  ⏳"`
+/// - **PartialFill**: `"BUY @ 171.59  ◑ 50/100sh"`
+/// - **Active / Closed / Cancelled**: `"▲ 171.59  100sh"` (original)
 pub fn format_entry_label(bracket: &OrderBracket) -> String {
-    let arrow = match bracket.side {
-        BracketSide::Long => "\u{25B2}",
-        BracketSide::Short => "\u{25BC}",
-    };
-    let qty_str = bracket
-        .quantity
-        .map(|q| format!("  {:.0}sh", q))
-        .unwrap_or_default();
-    format!("{} {:.2}{}", arrow, bracket.entry.price, qty_str)
+    match bracket.status {
+        BracketStatus::Draft => {
+            let verb = match bracket.side {
+                BracketSide::Long => "BUY",
+                BracketSide::Short => "SELL",
+            };
+            format!("{} @ {:.2}", verb, bracket.entry.price)
+        }
+        BracketStatus::Pending => {
+            let verb = match bracket.side {
+                BracketSide::Long => "BUY",
+                BracketSide::Short => "SELL",
+            };
+            format!("{} @ {:.2}  \u{23F3}", verb, bracket.entry.price)
+        }
+        BracketStatus::PartialFill => {
+            let verb = match bracket.side {
+                BracketSide::Long => "BUY",
+                BracketSide::Short => "SELL",
+            };
+            let filled = bracket.filled_qty.unwrap_or(0.0);
+            let total = bracket.quantity.unwrap_or(0.0);
+            format!(
+                "{} @ {:.2}  \u{25D1} {:.0}/{:.0}sh",
+                verb, bracket.entry.price, filled, total
+            )
+        }
+        BracketStatus::Active | BracketStatus::Closed | BracketStatus::Cancelled => {
+            let arrow = match bracket.side {
+                BracketSide::Long => "\u{25B2}",
+                BracketSide::Short => "\u{25BC}",
+            };
+            let qty_str = bracket
+                .quantity
+                .map(|q| format!("  {:.0}sh", q))
+                .unwrap_or_default();
+            format!("{} {:.2}{}", arrow, bracket.entry.price, qty_str)
+        }
+    }
 }
 
 /// Format TP label: "TP 192.00  +$650" or "TP 192.00".
@@ -229,8 +282,12 @@ pub fn format_tp_label(leg: &BracketLeg) -> String {
     format!("TP {:.2}{}", leg.price, pnl_str)
 }
 
-/// Format SL label: "SL 182.00  -$350" or "SL 182.00".
-pub fn format_sl_label(leg: &BracketLeg) -> String {
+/// Format SL label. Draft brackets show `"SL @ {price:.2}"`.
+/// Other statuses show `"SL {price:.2}"` with optional P&L.
+pub fn format_sl_label(leg: &BracketLeg, status: BracketStatus) -> String {
+    if status == BracketStatus::Draft {
+        return format!("SL @ {:.2}", leg.price);
+    }
     let pnl_str = leg
         .projected_pnl
         .map(|pnl| format!("  -${:.0}", pnl.abs()))
@@ -331,7 +388,7 @@ pub fn compute_bracket(
             cursor: CursorIcon::ResizeNS,
         });
 
-        let sl_text = format_sl_label(sl);
+        let sl_text = format_sl_label(sl, bracket.status);
         output.labels.push(WidgetLabel {
             text: sl_text,
             screen_x: vp_width - 10.0,
@@ -341,6 +398,25 @@ pub fn compute_bracket(
             font_size: 11.0,
             anchor: LabelAnchor::Right,
         });
+    }
+
+    // ── Draft action buttons (entry line) ─────────────────────────
+    if bracket.status == BracketStatus::Draft {
+        emit_entry_buttons(
+            bracket,
+            annotation_id,
+            entry_y,
+            vp_width,
+            alpha,
+            &mut output,
+        );
+    }
+
+    // ── Draft [X] button on SL line ────────────────────────────
+    if bracket.status == BracketStatus::Draft && bracket.stop_loss.is_some() {
+        let sl = bracket.stop_loss.as_ref().unwrap();
+        let sl_y = ctx.camera.price_to_y(sl.price);
+        emit_sl_cancel_button(annotation_id, sl_y, vp_width, alpha, &mut output);
     }
 
     // ── Zone fills (Active brackets only) ───────────────────────────
@@ -367,6 +443,230 @@ pub fn compute_bracket(
     }
 
     output
+}
+
+// ── Button constants ────────────────────────────────────────────────
+
+/// Button half-height for hit zone rects (pixels above/below label y).
+const BTN_HIT_HALF_H: f32 = 8.0;
+/// Right-edge padding from viewport edge for the first button.
+const BTN_RIGHT_PAD: f32 = 8.0;
+/// Horizontal gap between adjacent buttons.
+const BTN_GAP: f32 = 4.0;
+/// Text color for all action buttons (white with slight transparency).
+const BTN_TEXT_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 0.95];
+
+/// Estimate pixel width of a button label: char_count * 7.0 + 12.0.
+fn btn_width(text: &str) -> f32 {
+    text.len() as f32 * 7.0 + 12.0
+}
+
+/// Emit right-aligned action buttons on the entry line for a Draft bracket.
+///
+/// Button order (right to left): `[X]`, `[Submit]`, `[Save]`, `[SL]`.
+/// Buttons that would overflow beyond x=0 are omitted. `[Submit]` is
+/// omitted when entry price is zero (no market data). `[SL]` is
+/// omitted when `stop_loss` is already set.
+fn emit_entry_buttons(
+    bracket: &OrderBracket,
+    annotation_id: AnnotationId,
+    entry_y: f32,
+    vp_width: f32,
+    alpha: f32,
+    output: &mut WidgetOutput,
+) {
+    let submit_bg = match bracket.side {
+        BracketSide::Long => [0.20, 0.78, 0.35, 0.85 * alpha],
+        BracketSide::Short => [0.90, 0.25, 0.25, 0.85 * alpha],
+    };
+    let cancel_bg = [0.4, 0.4, 0.4, 0.85 * alpha];
+    let save_bg = [0.35, 0.45, 0.65, 0.85 * alpha];
+    let sl_bg = [0.85, 0.55, 0.20, 0.85 * alpha];
+    let text_color = [
+        BTN_TEXT_COLOR[0],
+        BTN_TEXT_COLOR[1],
+        BTN_TEXT_COLOR[2],
+        BTN_TEXT_COLOR[3] * alpha,
+    ];
+
+    let mut cursor = vp_width - BTN_RIGHT_PAD;
+
+    // [X] cancel button
+    let x_text = "X";
+    let x_w = btn_width(x_text);
+    let x_right = cursor;
+    let x_left = x_right - x_w;
+    if x_left < 0.0 {
+        return;
+    }
+    push_button(
+        output,
+        ButtonSpec {
+            text: x_text,
+            right_x: x_right,
+            center_y: entry_y,
+            width: x_w,
+            bg_color: cancel_bg,
+            text_color,
+            annotation_id,
+            kind: HitZoneKind::BracketCancel,
+        },
+    );
+    cursor = x_left - BTN_GAP;
+
+    // [Submit] button — only if entry price is non-zero
+    if bracket.entry.price != 0.0 {
+        let submit_text = "Submit";
+        let submit_w = btn_width(submit_text);
+        let submit_right = cursor;
+        let submit_left = submit_right - submit_w;
+        if submit_left < 0.0 {
+            return;
+        }
+        push_button(
+            output,
+            ButtonSpec {
+                text: submit_text,
+                right_x: submit_right,
+                center_y: entry_y,
+                width: submit_w,
+                bg_color: submit_bg,
+                text_color,
+                annotation_id,
+                kind: HitZoneKind::BracketSubmit,
+            },
+        );
+        cursor = submit_left - BTN_GAP;
+    }
+
+    // [Save] button
+    let save_text = "Save";
+    let save_w = btn_width(save_text);
+    let save_right = cursor;
+    let save_left = save_right - save_w;
+    if save_left < 0.0 {
+        return;
+    }
+    push_button(
+        output,
+        ButtonSpec {
+            text: save_text,
+            right_x: save_right,
+            center_y: entry_y,
+            width: save_w,
+            bg_color: save_bg,
+            text_color,
+            annotation_id,
+            kind: HitZoneKind::BracketSave,
+        },
+    );
+    cursor = save_left - BTN_GAP;
+
+    // [SL] button — only when stop_loss is not yet set
+    if bracket.stop_loss.is_none() {
+        let sl_text = "SL";
+        let sl_w = btn_width(sl_text);
+        let sl_right = cursor;
+        let sl_left = sl_right - sl_w;
+        if sl_left < 0.0 {
+            return;
+        }
+        push_button(
+            output,
+            ButtonSpec {
+                text: sl_text,
+                right_x: sl_right,
+                center_y: entry_y,
+                width: sl_w,
+                bg_color: sl_bg,
+                text_color,
+                annotation_id,
+                kind: HitZoneKind::BracketToggleSL,
+            },
+        );
+    }
+}
+
+/// Emit an [X] cancel button on the SL line for a Draft bracket.
+fn emit_sl_cancel_button(
+    annotation_id: AnnotationId,
+    sl_y: f32,
+    vp_width: f32,
+    alpha: f32,
+    output: &mut WidgetOutput,
+) {
+    let cancel_bg = [0.4, 0.4, 0.4, 0.85 * alpha];
+    let text_color = [
+        BTN_TEXT_COLOR[0],
+        BTN_TEXT_COLOR[1],
+        BTN_TEXT_COLOR[2],
+        BTN_TEXT_COLOR[3] * alpha,
+    ];
+
+    let x_text = "X";
+    let x_w = btn_width(x_text);
+    let x_right = vp_width - BTN_RIGHT_PAD;
+    let x_left = x_right - x_w;
+    if x_left < 0.0 {
+        return;
+    }
+    push_button(
+        output,
+        ButtonSpec {
+            text: x_text,
+            right_x: x_right,
+            center_y: sl_y,
+            width: x_w,
+            bg_color: cancel_bg,
+            text_color,
+            annotation_id,
+            kind: HitZoneKind::BracketCancelSL,
+        },
+    );
+}
+
+/// Parameters for a single action button on a bracket line.
+struct ButtonSpec<'a> {
+    /// Button label text.
+    text: &'a str,
+    /// Right edge X coordinate.
+    right_x: f32,
+    /// Center Y coordinate of the line.
+    center_y: f32,
+    /// Estimated pixel width.
+    width: f32,
+    /// Background color.
+    bg_color: [f32; 4],
+    /// Text color.
+    text_color: [f32; 4],
+    /// Owning annotation ID.
+    annotation_id: AnnotationId,
+    /// Hit zone kind for click dispatch.
+    kind: HitZoneKind,
+}
+
+/// Push a button label + hit zone into the output.
+fn push_button(output: &mut WidgetOutput, spec: ButtonSpec<'_>) {
+    output.labels.push(WidgetLabel {
+        text: spec.text.to_string(),
+        screen_x: spec.right_x,
+        screen_y: spec.center_y,
+        bg_color: spec.bg_color,
+        text_color: spec.text_color,
+        font_size: 11.0,
+        anchor: LabelAnchor::Right,
+    });
+    output.hit_zones.push(HitZone {
+        annotation_id: spec.annotation_id,
+        rect: [
+            spec.right_x - spec.width,
+            spec.center_y - BTN_HIT_HALF_H,
+            spec.right_x,
+            spec.center_y + BTN_HIT_HALF_H,
+        ],
+        kind: spec.kind,
+        cursor: CursorIcon::Pointer,
+    });
 }
 
 #[cfg(test)]

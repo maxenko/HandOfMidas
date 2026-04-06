@@ -10,6 +10,7 @@ use crate::crosshair_tool::CrosshairTool;
 use crate::dirty::DirtyFlags;
 use crate::interaction::ChartAction;
 use crate::level_tool::LevelTool;
+use crate::widget::bracket_tool::BracketTool;
 use crate::widget::AnnotationId;
 
 /// What the active tool needs from the crosshair.
@@ -175,6 +176,8 @@ pub struct ChartState {
     pub show_levels: bool,
     /// Self-contained level tool state machine (Phase 2+).
     pub level_tool: LevelTool,
+    /// Self-contained bracket drawing tool (3-click entry/TP/SL).
+    pub bracket_tool: BracketTool,
 }
 
 impl ChartState {
@@ -200,6 +203,7 @@ impl ChartState {
             show_volume_profile: false,
             show_levels: true,
             level_tool: LevelTool::default(),
+            bracket_tool: BracketTool::default(),
         }
     }
 
@@ -209,7 +213,7 @@ impl ChartState {
     /// individually. New tools only need to be added here.
     /// Priority: Suppress > Preview > None.
     pub fn active_cursor_claim(&self) -> CursorClaim {
-        if self.level_tool.is_active() {
+        if self.level_tool.is_active() || self.bracket_tool.is_active() {
             return CursorClaim::Suppress;
         }
         CursorClaim::None
@@ -411,6 +415,22 @@ impl ChartState {
                 // and updates the appropriate leg's price.
                 self.dirty.mark_data();
             }
+
+            ChartAction::CreateBracket { .. } => {
+                // Handled by the app layer — creates an annotation in the store.
+                self.dirty.mark_data();
+            }
+
+            ChartAction::RightClickBracketLeg { .. } => {
+                // Handled by the app layer — opens bracket context menu.
+            }
+
+            // Bracket button actions — handled entirely by the app layer.
+            ChartAction::SubmitBracket { .. }
+            | ChartAction::SaveBracket { .. }
+            | ChartAction::ToggleBracketSL { .. }
+            | ChartAction::CancelBracket { .. }
+            | ChartAction::CancelBracketSL { .. } => {}
         }
     }
 

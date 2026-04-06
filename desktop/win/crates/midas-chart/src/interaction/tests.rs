@@ -1424,6 +1424,8 @@ fn test_bracket_annotation(id: u64, entry: f64, tp: f64, sl: f64) -> Annotation 
             side: BracketSide::Long,
             status: BracketStatus::Active,
             quantity: Some(100.0),
+            saved: false,
+            filled_qty: None,
         })),
         presence: Presence::Active,
         visible_timeframes: None,

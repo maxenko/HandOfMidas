@@ -59,6 +59,16 @@ pub enum HitZoneKind {
     NoteBody,
     /// A volume profile's histogram area.
     VolumeProfileBar,
+    /// [Submit] button on a Draft bracket entry line.
+    BracketSubmit,
+    /// [Save] button on a Draft bracket entry line.
+    BracketSave,
+    /// [SL] toggle button on a Draft bracket entry line.
+    BracketToggleSL,
+    /// [X] cancel button on a Draft bracket entry line.
+    BracketCancel,
+    /// [X] cancel-SL button on a Draft bracket SL line.
+    BracketCancelSL,
 }
 
 /// An interactive area registered by a widget during compute.

@@ -118,6 +118,53 @@ pub enum ChartAction {
         /// The new price for this leg (may be clamped by side constraints).
         new_price: f64,
     },
+    /// Create an order bracket from the drawing tool (3-click complete).
+    CreateBracket {
+        /// Entry price.
+        entry: f64,
+        /// Take-profit price.
+        tp: f64,
+        /// Stop-loss price.
+        sl: f64,
+        /// Trade direction.
+        side: super::widget::order_bracket::BracketSide,
+    },
+    /// Submit a Draft bracket to the broker.
+    SubmitBracket {
+        /// Which annotation (OrderBracket) to submit.
+        annotation_id: super::widget::AnnotationId,
+    },
+    /// Save/pin a Draft bracket.
+    SaveBracket {
+        /// Which annotation (OrderBracket) to save.
+        annotation_id: super::widget::AnnotationId,
+    },
+    /// Toggle SL on/off for a Draft bracket.
+    ToggleBracketSL {
+        /// Which annotation (OrderBracket) to toggle SL on.
+        annotation_id: super::widget::AnnotationId,
+    },
+    /// Cancel/remove a Draft bracket.
+    CancelBracket {
+        /// Which annotation (OrderBracket) to cancel.
+        annotation_id: super::widget::AnnotationId,
+    },
+    /// Remove the SL leg from a Draft bracket.
+    CancelBracketSL {
+        /// Which annotation (OrderBracket) to remove SL from.
+        annotation_id: super::widget::AnnotationId,
+    },
+    /// Right-click on a bracket leg — opens bracket context menu.
+    RightClickBracketLeg {
+        /// Which annotation (OrderBracket) owns the leg.
+        annotation_id: super::widget::AnnotationId,
+        /// Which leg was right-clicked.
+        leg: super::widget::order_bracket::LegRole,
+        /// Screen X for context menu placement.
+        x: f32,
+        /// Screen Y for context menu placement.
+        y: f32,
+    },
 }
 
 /// Mouse button discriminant.
@@ -144,6 +191,10 @@ pub enum Key {
     End,
     /// H key (hotkey for horizontal level).
     H,
+    /// B key (hotkey for bracket tool — Long).
+    B,
+    /// Tab key (toggle bracket side during placement).
+    Tab,
 }
 
 /// Drag threshold in pixels. A mouse move must exceed this distance from
@@ -565,6 +616,58 @@ fn handle_mouse_pressed(
     _alt_held: bool,
     annotations: &[crate::widget::Annotation],
 ) -> Vec<ChartAction> {
+    // In bracket drawing mode (via BracketTool):
+    // - Left-click: advance the 3-click state machine
+    // - Right-click: cancel bracket drawing
+    // - Escape: cancel (handled in key press)
+    if state.bracket_tool.is_active() {
+        match button {
+            MouseButton::Left => {
+                let price = state.camera.y_to_price(y);
+                if let Some(result) = state.bracket_tool.click(price) {
+                    use crate::widget::bracket_tool::BracketToolResult;
+                    match result {
+                        BracketToolResult::NeedMore => {
+                            // Still placing — stay in bracket tool mode.
+                            return Vec::new();
+                        }
+                        BracketToolResult::Complete {
+                            entry,
+                            tp,
+                            sl,
+                            side,
+                        } => {
+                            // Bracket complete — emit CreateBracket action.
+                            state.crosshair.force_hide();
+                            #[allow(deprecated)]
+                            {
+                                state.crosshair_pos = None;
+                            }
+                            return vec![
+                                ChartAction::CreateBracket {
+                                    entry,
+                                    tp,
+                                    sl,
+                                    side,
+                                },
+                                ChartAction::ClearCrosshair,
+                            ];
+                        }
+                    }
+                }
+                return Vec::new();
+            }
+            MouseButton::Right => {
+                // Cancel bracket drawing on right-click.
+                state.bracket_tool.cancel();
+                return Vec::new();
+            }
+            MouseButton::Middle => {
+                return Vec::new();
+            }
+        }
+    }
+
     // In Placing mode (via LevelTool):
     // - Left-click: place the level at (snapped) cursor price
     // - Right-click / Middle-click: temporarily suspend placement for pan/scale
@@ -687,11 +790,22 @@ fn handle_mouse_pressed(
         }
 
         MouseButton::Right => {
-            // Hit-test levels first — right-click on a level opens the editor.
-            if let Some((level_id, _offset)) = hit_test_levels(annotations, y, &state.camera) {
+            // Hit-test bracket legs first (TP/SL are more specific than levels).
+            if let Some((ann_id, leg, _grab_offset, _entry_price, _side)) =
+                hit_test_bracket_legs(annotations, y, &state.camera)
+            {
+                vec![ChartAction::RightClickBracketLeg {
+                    annotation_id: ann_id,
+                    leg,
+                    x,
+                    y,
+                }]
+            } else if let Some((level_id, _offset)) = hit_test_levels(annotations, y, &state.camera)
+            {
+                // Right-click on a level opens the editor.
                 vec![ChartAction::RightClickLevel { id: level_id, x, y }]
             } else {
-                // No level hit — right-click starts XY panning.
+                // No bracket or level hit — right-click starts XY panning.
                 state.interaction_mode = InteractionMode::RightPanning;
                 state.drag_start = Some((x, y));
                 vec![]
@@ -818,12 +932,16 @@ fn handle_mouse_released(
     let prev_mode = state.interaction_mode.clone();
 
     match prev_mode {
-        InteractionMode::PendingDrag {
-            start_x: _,
-            start_y,
-        } => {
+        InteractionMode::PendingDrag { start_x, start_y } => {
             // Released without exceeding drag threshold -- this is a click.
-            if let Some((level_id, _)) = hit_test_levels(annotations, start_y, &state.camera) {
+            // Check bracket button hit zones first (higher priority).
+            let vp_w = state.camera.viewport_width as f32;
+            if let Some(btn_action) =
+                hit_test_bracket_buttons(annotations, start_x, start_y, &state.camera, vp_w)
+            {
+                actions.push(btn_action);
+            } else if let Some((level_id, _)) = hit_test_levels(annotations, start_y, &state.camera)
+            {
                 actions.push(ChartAction::SelectLevel { id: level_id });
             } else if state.selected_level.is_some() {
                 actions.push(ChartAction::DeselectLevel);
@@ -890,6 +1008,16 @@ fn handle_key_pressed(state: &mut ChartState, key: Key) -> Vec<ChartAction> {
         Key::Escape => {
             let mut actions = Vec::new();
             // Cancel whichever tool is active (each tool has its own cleanup).
+            if state.bracket_tool.is_active() {
+                state.bracket_tool.cancel();
+                state.crosshair.force_hide();
+                #[allow(deprecated)]
+                {
+                    state.crosshair_pos = None;
+                }
+                actions.push(ChartAction::ClearCrosshair);
+                return actions;
+            }
             if state.level_tool.is_active() {
                 state.level_tool.cancel();
                 state.crosshair.force_hide();
@@ -910,9 +1038,23 @@ fn handle_key_pressed(state: &mut ChartState, key: Key) -> Vec<ChartAction> {
         Key::Home => vec![ChartAction::JumpToStart],
         Key::End => vec![ChartAction::JumpToEnd],
         Key::H => {
-            if matches!(state.interaction_mode, InteractionMode::Idle) {
+            if matches!(state.interaction_mode, InteractionMode::Idle)
+                && !state.bracket_tool.is_active()
+            {
                 state.level_tool.activate();
             }
+            Vec::new()
+        }
+        Key::B => {
+            if matches!(state.interaction_mode, InteractionMode::Idle)
+                && !state.level_tool.is_active()
+            {
+                state.bracket_tool.activate();
+            }
+            Vec::new()
+        }
+        Key::Tab => {
+            state.bracket_tool.toggle_side();
             Vec::new()
         }
     }
@@ -961,6 +1103,26 @@ fn handle_suppressed_move(
             ];
         } else {
             state.level_tool.preview_price = None;
+        }
+        state.crosshair.suppress();
+        #[allow(deprecated)]
+        {
+            state.crosshair_pos = None;
+        }
+        return vec![ChartAction::ClearCrosshair];
+    }
+
+    // Bracket tool active: update preview price for the next leg.
+    if state.bracket_tool.is_active() {
+        let in_bounds = x >= 0.0
+            && y >= 0.0
+            && x <= state.camera.viewport_width as f32
+            && y <= state.camera.viewport_height as f32;
+        if in_bounds {
+            let price = state.camera.y_to_price(y);
+            state.bracket_tool.set_preview(price);
+        } else {
+            state.bracket_tool.preview_price = None;
         }
         state.crosshair.suppress();
         #[allow(deprecated)]
@@ -1227,6 +1389,149 @@ fn hit_test_bracket_legs(
     }
 
     closest.map(|(id, role, _, offset, entry, side)| (id, role, offset, entry, side))
+}
+
+/// Button half-height for hit zone rectangles (pixels above/below label y).
+const BUTTON_HIT_HALF_H: f32 = 8.0;
+/// Right-edge padding for the first button (pixels from viewport right edge).
+const BUTTON_RIGHT_PAD: f32 = 8.0;
+/// Horizontal gap between adjacent buttons.
+const BUTTON_GAP: f32 = 4.0;
+
+/// Estimate pixel width of a button label: char_count * 7.0 + 12.0 padding.
+fn button_width(text: &str) -> f32 {
+    text.len() as f32 * 7.0 + 12.0
+}
+
+/// Hit-test bracket action buttons for a click at `(cx, cy)`.
+///
+/// For every Draft `OrderBracket` annotation, computes button positions
+/// using the same right-to-left layout as `compute_bracket()` and checks
+/// whether the click falls inside a button rect. Returns the first
+/// matching `ChartAction`, or `None`.
+fn hit_test_bracket_buttons(
+    annotations: &[crate::widget::Annotation],
+    cx: f32,
+    cy: f32,
+    camera: &crate::camera::Camera2D,
+    vp_width: f32,
+) -> Option<ChartAction> {
+    use crate::widget::order_bracket::BracketStatus;
+
+    for ann in annotations {
+        if !ann.presence.is_interactive() {
+            continue;
+        }
+        let bracket = match &ann.kind {
+            crate::widget::AnnotationKind::OrderBracket(b) => b,
+            _ => continue,
+        };
+        if bracket.status != BracketStatus::Draft {
+            continue;
+        }
+
+        let ann_id = ann.id;
+
+        // ── Entry line buttons ────────────────────────────────
+        let entry_y = camera.price_to_y(bracket.entry.price);
+        let mut cursor = vp_width - BUTTON_RIGHT_PAD;
+
+        // Button order (right to left): [X], [Submit], [Save], [SL]
+        // Priority for narrow viewports: drop [SL] first, then
+        // [Save], then [X]. [Submit] always emits if it fits.
+
+        // [X] cancel
+        // NOTE: overflow logic must mirror emit_entry_buttons() in
+        // order_bracket/mod.rs — if a button doesn't fit, ALL further
+        // buttons to the left are skipped (early return).
+        let x_text = "X";
+        let x_w = button_width(x_text);
+        let x_right = cursor;
+        let x_left = x_right - x_w;
+        if x_left < 0.0 {
+            // Button doesn't fit — skip all remaining entry buttons.
+            // Fall through to SL line button check below.
+        } else {
+            if hit_rect(cx, cy, x_left, entry_y, x_right) {
+                return Some(ChartAction::CancelBracket {
+                    annotation_id: ann_id,
+                });
+            }
+            cursor = x_left - BUTTON_GAP;
+
+            // [Submit] — only if entry price != 0.0
+            if bracket.entry.price != 0.0 {
+                let submit_text = "Submit";
+                let submit_w = button_width(submit_text);
+                let submit_right = cursor;
+                let submit_left = submit_right - submit_w;
+                if submit_left < 0.0 {
+                    // Stop — no more entry buttons fit.
+                } else {
+                    if hit_rect(cx, cy, submit_left, entry_y, submit_right) {
+                        return Some(ChartAction::SubmitBracket {
+                            annotation_id: ann_id,
+                        });
+                    }
+                    cursor = submit_left - BUTTON_GAP;
+                }
+            }
+
+            // [Save] — only if [Submit] (or all prior) fit
+            if cursor > 0.0 {
+                let save_text = "Save";
+                let save_w = button_width(save_text);
+                let save_right = cursor;
+                let save_left = save_right - save_w;
+                if save_left >= 0.0 {
+                    if hit_rect(cx, cy, save_left, entry_y, save_right) {
+                        return Some(ChartAction::SaveBracket {
+                            annotation_id: ann_id,
+                        });
+                    }
+                    cursor = save_left - BUTTON_GAP;
+
+                    // [SL] — only when SL is not set
+                    if bracket.stop_loss.is_none() {
+                        let sl_text = "SL";
+                        let sl_w = button_width(sl_text);
+                        let sl_right = cursor;
+                        let sl_left = sl_right - sl_w;
+                        if sl_left >= 0.0 && hit_rect(cx, cy, sl_left, entry_y, sl_right) {
+                            return Some(ChartAction::ToggleBracketSL {
+                                annotation_id: ann_id,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── SL line [X] button ────────────────────────────────
+        if bracket.stop_loss.is_some() {
+            let sl = bracket.stop_loss.as_ref().unwrap();
+            let sl_y = camera.price_to_y(sl.price);
+            let sl_x_text = "X";
+            let sl_x_w = button_width(sl_x_text);
+            let sl_x_right = vp_width - BUTTON_RIGHT_PAD;
+            let sl_x_left = sl_x_right - sl_x_w;
+            if sl_x_left >= 0.0 && hit_rect(cx, cy, sl_x_left, sl_y, sl_x_right) {
+                return Some(ChartAction::CancelBracketSL {
+                    annotation_id: ann_id,
+                });
+            }
+        }
+    }
+
+    None
+}
+
+/// Check if `(cx, cy)` falls within a button rectangle.
+fn hit_rect(cx: f32, cy: f32, left: f32, center_y: f32, right: f32) -> bool {
+    cx >= left
+        && cx <= right
+        && cy >= center_y - BUTTON_HIT_HALF_H
+        && cy <= center_y + BUTTON_HIT_HALF_H
 }
 
 #[cfg(test)]

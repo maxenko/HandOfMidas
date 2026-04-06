@@ -1617,33 +1617,51 @@ impl MidasApp {
             .get(&state.symbol)
             .and_then(|snap| snap.last_price);
 
-        // Side toggle buttons.
+        // Side / bracket toggle buttons: [BUY] [X] [SELL].
+        //
+        // BUY/SELL activate bracket mode (chart bracket visible).
+        // [X] deactivates bracket mode (chart bracket hidden/cached).
+        let bracket_active = state.bracket_active;
+
         let buy_style: fn(&iced::Theme, button::Status) -> button::Style =
-            if state.side == crate::order_panel::OrderSide::Buy {
+            if bracket_active == Some(crate::order_panel::OrderSide::Buy) {
                 active_buy_button_style
             } else {
                 inactive_side_button_style
             };
         let sell_style: fn(&iced::Theme, button::Status) -> button::Style =
-            if state.side == crate::order_panel::OrderSide::Sell {
+            if bracket_active == Some(crate::order_panel::OrderSide::Sell) {
                 active_sell_button_style
             } else {
                 inactive_side_button_style
             };
+        let x_style: fn(&iced::Theme, button::Status) -> button::Style = if bracket_active.is_none()
+        {
+            active_neutral_button_style
+        } else {
+            inactive_side_button_style
+        };
 
         let oid = order_id;
         let side_row = row![
             button(text("BUY").size(14))
                 .on_press(Message::OrderPanelMsg(
                     oid,
-                    OrderPanelAction::SetSide(crate::order_panel::OrderSide::Buy),
+                    OrderPanelAction::SetBracketMode(Some(crate::order_panel::OrderSide::Buy),),
                 ))
                 .padding([8, 20])
                 .style(buy_style),
+            button(text("X").size(14))
+                .on_press(Message::OrderPanelMsg(
+                    oid,
+                    OrderPanelAction::SetBracketMode(None),
+                ))
+                .padding([8, 8])
+                .style(x_style),
             button(text("SELL").size(14))
                 .on_press(Message::OrderPanelMsg(
                     oid,
-                    OrderPanelAction::SetSide(crate::order_panel::OrderSide::Sell),
+                    OrderPanelAction::SetBracketMode(Some(crate::order_panel::OrderSide::Sell),),
                 ))
                 .padding([8, 20])
                 .style(sell_style),
@@ -1654,6 +1672,20 @@ impl MidasApp {
         ]
         .spacing(4)
         .align_y(iced::Alignment::Center);
+
+        // Show "Waiting for market data..." when bracket is active
+        // but no market price is available yet.
+        let bracket_waiting: Option<Element<'_, Message>> =
+            if bracket_active.is_some() && last_price.is_none() {
+                Some(
+                    text("Waiting for market data...")
+                        .size(11)
+                        .color(Color::from_rgb(0.45, 0.45, 0.45))
+                        .into(),
+                )
+            } else {
+                None
+            };
 
         // Symbol and price display.
         let price_text = last_price
@@ -1828,8 +1860,11 @@ impl MidasApp {
         // Assemble form column.
         let mut form = Column::new().spacing(6).padding(12).width(Fill);
 
+        form = form.push(side_row);
+        if let Some(waiting_el) = bracket_waiting {
+            form = form.push(waiting_el);
+        }
         form = form
-            .push(side_row)
             .push(sep())
             .push(symbol_row)
             .push(sep())
@@ -3044,6 +3079,19 @@ fn inactive_side_button_style(_theme: &iced::Theme, _status: button::Status) -> 
     button::Style {
         background: Some(iced::Background::Color(Color::from_rgb(0.18, 0.18, 0.22))),
         text_color: Color::from_rgb(0.6, 0.6, 0.6),
+        border: iced::Border {
+            radius: 4.0.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// Button style for the active [X] (neutral) bracket toggle.
+fn active_neutral_button_style(_theme: &iced::Theme, _status: button::Status) -> button::Style {
+    button::Style {
+        background: Some(iced::Background::Color(Color::from_rgb(0.30, 0.30, 0.34))),
+        text_color: Color::WHITE,
         border: iced::Border {
             radius: 4.0.into(),
             ..Default::default()

@@ -21,6 +21,8 @@ fn make_bracket(entry: f64, tp: f64, sl: f64) -> OrderBracket {
         side: BracketSide::Long,
         status: BracketStatus::Draft,
         quantity: None,
+        saved: false,
+        filled_qty: None,
     }
 }
 
@@ -177,8 +179,8 @@ fn test_leg_style_draft_tp() {
     let (style, width, color) = b.leg_style(LegRole::TakeProfit);
     assert!(matches!(style, LineStyle::Dashed { .. }));
     assert!((width - 1.0).abs() < f32::EPSILON);
-    // Draft alpha_mult = 0.8, base TP alpha = 1.0 => 0.8
-    assert!((color[3] - 0.8).abs() < f32::EPSILON);
+    // Draft unsaved alpha_mult = 0.50, base TP alpha = 1.0 => 0.50
+    assert!((color[3] - 0.50).abs() < f32::EPSILON);
 }
 
 #[test]
@@ -197,28 +199,30 @@ fn test_leg_style_cancelled_sl() {
 // -----------------------------------------------------------------------
 
 #[test]
-fn test_format_entry_label_long() {
+fn test_format_entry_label_long_active() {
     let mut b = make_bracket(185.50, 192.0, 182.0);
     b.side = BracketSide::Long;
+    b.status = BracketStatus::Active;
     b.quantity = Some(100.0);
     let label = format_entry_label(&b);
     assert!(
         label.starts_with('\u{25B2}'),
-        "Long should start with up arrow, got: {label}"
+        "Active Long should start with up arrow, got: {label}"
     );
     assert!(label.contains("185.50"));
     assert!(label.contains("100sh"));
 }
 
 #[test]
-fn test_format_entry_label_short() {
+fn test_format_entry_label_short_active() {
     let mut b = make_bracket(185.50, 178.0, 188.0);
     b.side = BracketSide::Short;
+    b.status = BracketStatus::Active;
     b.quantity = Some(50.0);
     let label = format_entry_label(&b);
     assert!(
         label.starts_with('\u{25BC}'),
-        "Short should start with down arrow, got: {label}"
+        "Active Short should start with down arrow, got: {label}"
     );
     assert!(label.contains("185.50"));
     assert!(label.contains("50sh"));
@@ -236,7 +240,7 @@ fn test_format_tp_label_with_pnl() {
 #[test]
 fn test_format_sl_label_no_pnl() {
     let leg = make_leg(182.0);
-    let label = format_sl_label(&leg);
+    let label = format_sl_label(&leg, BracketStatus::Active);
     assert_eq!(label, "SL 182.00");
 }
 
@@ -284,4 +288,155 @@ fn test_bracket_zone_rects_draft() {
         zones.is_empty(),
         "Draft bracket should produce no zone rects"
     );
+}
+
+// -----------------------------------------------------------------------
+// Slice 2: side-colored entry line
+// -----------------------------------------------------------------------
+
+#[test]
+fn leg_style_entry_green_for_long() {
+    let mut b = make_bracket(185.0, 192.0, 182.0);
+    b.side = BracketSide::Long;
+    b.status = BracketStatus::Active;
+    let (_style, _width, color) = b.leg_style(LegRole::Entry);
+    // Long entry uses BRACKET_LONG_ENTRY_COLOR (green-ish)
+    assert!(
+        (color[0] - 0.20).abs() < 0.01
+            && (color[1] - 0.78).abs() < 0.01
+            && (color[2] - 0.35).abs() < 0.01,
+        "Long entry should be green, got: {:?}",
+        color
+    );
+}
+
+#[test]
+fn leg_style_entry_red_for_short() {
+    let mut b = make_bracket(185.0, 178.0, 188.0);
+    b.side = BracketSide::Short;
+    b.status = BracketStatus::Active;
+    let (_style, _width, color) = b.leg_style(LegRole::Entry);
+    // Short entry uses BRACKET_SHORT_ENTRY_COLOR (red-ish)
+    assert!(
+        (color[0] - 0.90).abs() < 0.01
+            && (color[1] - 0.25).abs() < 0.01
+            && (color[2] - 0.25).abs() < 0.01,
+        "Short entry should be red, got: {:?}",
+        color
+    );
+}
+
+// -----------------------------------------------------------------------
+// Slice 2: status-aware alpha progression
+// -----------------------------------------------------------------------
+
+#[test]
+fn leg_style_draft_unsaved_alpha() {
+    let b = make_bracket(185.0, 192.0, 182.0);
+    // Draft, saved = false by default
+    let (_style, _width, color) = b.leg_style(LegRole::Entry);
+    assert!(
+        (color[3] - 0.50).abs() < f32::EPSILON,
+        "Draft unsaved alpha should be 0.50, got {}",
+        color[3]
+    );
+}
+
+#[test]
+fn leg_style_draft_saved_alpha() {
+    let mut b = make_bracket(185.0, 192.0, 182.0);
+    b.saved = true;
+    let (_style, _width, color) = b.leg_style(LegRole::Entry);
+    assert!(
+        (color[3] - 0.65).abs() < f32::EPSILON,
+        "Draft saved alpha should be 0.65, got {}",
+        color[3]
+    );
+}
+
+#[test]
+fn leg_style_pending_alpha() {
+    let mut b = make_bracket(185.0, 192.0, 182.0);
+    b.status = BracketStatus::Pending;
+    let (_style, _width, color) = b.leg_style(LegRole::Entry);
+    assert!(
+        (color[3] - 0.80).abs() < f32::EPSILON,
+        "Pending alpha should be 0.80, got {}",
+        color[3]
+    );
+}
+
+#[test]
+fn leg_style_active_alpha() {
+    let mut b = make_bracket(185.0, 192.0, 182.0);
+    b.status = BracketStatus::Active;
+    let (_style, _width, color) = b.leg_style(LegRole::Entry);
+    assert!(
+        (color[3] - 1.0).abs() < f32::EPSILON,
+        "Active alpha should be 1.0, got {}",
+        color[3]
+    );
+}
+
+// -----------------------------------------------------------------------
+// Slice 2: status-aware entry label formatting
+// -----------------------------------------------------------------------
+
+#[test]
+fn format_entry_label_draft() {
+    let mut b = make_bracket(171.59, 180.0, 165.0);
+    b.side = BracketSide::Long;
+    b.status = BracketStatus::Draft;
+    let label = format_entry_label(&b);
+    assert_eq!(label, "BUY @ 171.59");
+}
+
+#[test]
+fn format_entry_label_draft_short() {
+    let mut b = make_bracket(171.59, 165.0, 180.0);
+    b.side = BracketSide::Short;
+    b.status = BracketStatus::Draft;
+    let label = format_entry_label(&b);
+    assert_eq!(label, "SELL @ 171.59");
+}
+
+#[test]
+fn format_entry_label_active() {
+    let mut b = make_bracket(171.59, 180.0, 165.0);
+    b.side = BracketSide::Long;
+    b.status = BracketStatus::Active;
+    b.quantity = Some(100.0);
+    let label = format_entry_label(&b);
+    assert_eq!(label, "\u{25B2} 171.59  100sh");
+}
+
+#[test]
+fn format_entry_label_partial_fill() {
+    let mut b = make_bracket(171.59, 180.0, 165.0);
+    b.side = BracketSide::Long;
+    b.status = BracketStatus::PartialFill;
+    b.filled_qty = Some(50.0);
+    b.quantity = Some(100.0);
+    let label = format_entry_label(&b);
+    assert_eq!(label, "BUY @ 171.59  \u{25D1} 50/100sh");
+}
+
+#[test]
+fn format_entry_label_pending() {
+    let mut b = make_bracket(171.59, 180.0, 165.0);
+    b.side = BracketSide::Long;
+    b.status = BracketStatus::Pending;
+    let label = format_entry_label(&b);
+    assert_eq!(label, "BUY @ 171.59  \u{23F3}");
+}
+
+// -----------------------------------------------------------------------
+// Slice 2: status-aware SL label formatting
+// -----------------------------------------------------------------------
+
+#[test]
+fn format_sl_label_draft() {
+    let leg = make_leg(169.95);
+    let label = format_sl_label(&leg, BracketStatus::Draft);
+    assert_eq!(label, "SL @ 169.95");
 }

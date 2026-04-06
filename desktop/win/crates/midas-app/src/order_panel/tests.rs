@@ -274,6 +274,191 @@ fn validate_non_numeric_sl_value() {
     );
 }
 
+// -- validate_bracket tests --
+
+#[test]
+fn validate_bracket_valid_long_with_sl() {
+    use midas_chart::widget::level::LineStyle;
+    use midas_chart::widget::order_bracket::*;
+
+    let bracket = OrderBracket {
+        entry: BracketLeg {
+            price: 185.0,
+            timestamp: None,
+            color: None,
+            style: LineStyle::Solid,
+            line_width: 1.5,
+            label: None,
+            projected_pnl: None,
+            projected_pnl_pct: None,
+        },
+        take_profit: None,
+        stop_loss: Some(BracketLeg {
+            price: 180.0,
+            timestamp: None,
+            color: None,
+            style: LineStyle::Solid,
+            line_width: 1.5,
+            label: None,
+            projected_pnl: None,
+            projected_pnl_pct: None,
+        }),
+        side: BracketSide::Long,
+        status: BracketStatus::Draft,
+        quantity: None,
+        saved: false,
+        filled_qty: None,
+    };
+    let errors = validate_bracket(&bracket, 100.0);
+    assert!(errors.is_empty(), "expected no errors, got: {errors:?}");
+}
+
+#[test]
+fn validate_bracket_zero_entry_price() {
+    use midas_chart::widget::level::LineStyle;
+    use midas_chart::widget::order_bracket::*;
+
+    let bracket = OrderBracket {
+        entry: BracketLeg {
+            price: 0.0,
+            timestamp: None,
+            color: None,
+            style: LineStyle::Solid,
+            line_width: 1.5,
+            label: None,
+            projected_pnl: None,
+            projected_pnl_pct: None,
+        },
+        take_profit: None,
+        stop_loss: None,
+        side: BracketSide::Long,
+        status: BracketStatus::Draft,
+        quantity: None,
+        saved: false,
+        filled_qty: None,
+    };
+    let errors = validate_bracket(&bracket, 100.0);
+    assert!(
+        errors.iter().any(|(f, _)| f == "entry"),
+        "expected entry error, got: {errors:?}"
+    );
+}
+
+#[test]
+fn validate_bracket_zero_quantity() {
+    use midas_chart::widget::level::LineStyle;
+    use midas_chart::widget::order_bracket::*;
+
+    let bracket = OrderBracket {
+        entry: BracketLeg {
+            price: 185.0,
+            timestamp: None,
+            color: None,
+            style: LineStyle::Solid,
+            line_width: 1.5,
+            label: None,
+            projected_pnl: None,
+            projected_pnl_pct: None,
+        },
+        take_profit: None,
+        stop_loss: None,
+        side: BracketSide::Long,
+        status: BracketStatus::Draft,
+        quantity: None,
+        saved: false,
+        filled_qty: None,
+    };
+    let errors = validate_bracket(&bracket, 0.0);
+    assert!(
+        errors.iter().any(|(f, _)| f == "quantity"),
+        "expected quantity error, got: {errors:?}"
+    );
+}
+
+#[test]
+fn validate_bracket_long_sl_above_entry() {
+    use midas_chart::widget::level::LineStyle;
+    use midas_chart::widget::order_bracket::*;
+
+    let bracket = OrderBracket {
+        entry: BracketLeg {
+            price: 185.0,
+            timestamp: None,
+            color: None,
+            style: LineStyle::Solid,
+            line_width: 1.5,
+            label: None,
+            projected_pnl: None,
+            projected_pnl_pct: None,
+        },
+        take_profit: None,
+        stop_loss: Some(BracketLeg {
+            price: 190.0,
+            timestamp: None,
+            color: None,
+            style: LineStyle::Solid,
+            line_width: 1.5,
+            label: None,
+            projected_pnl: None,
+            projected_pnl_pct: None,
+        }),
+        side: BracketSide::Long,
+        status: BracketStatus::Draft,
+        quantity: None,
+        saved: false,
+        filled_qty: None,
+    };
+    let errors = validate_bracket(&bracket, 100.0);
+    assert!(
+        errors
+            .iter()
+            .any(|(f, msg)| f == "sl" && msg.contains("below entry")),
+        "expected SL constraint error, got: {errors:?}"
+    );
+}
+
+#[test]
+fn validate_bracket_short_sl_below_entry() {
+    use midas_chart::widget::level::LineStyle;
+    use midas_chart::widget::order_bracket::*;
+
+    let bracket = OrderBracket {
+        entry: BracketLeg {
+            price: 185.0,
+            timestamp: None,
+            color: None,
+            style: LineStyle::Solid,
+            line_width: 1.5,
+            label: None,
+            projected_pnl: None,
+            projected_pnl_pct: None,
+        },
+        take_profit: None,
+        stop_loss: Some(BracketLeg {
+            price: 180.0,
+            timestamp: None,
+            color: None,
+            style: LineStyle::Solid,
+            line_width: 1.5,
+            label: None,
+            projected_pnl: None,
+            projected_pnl_pct: None,
+        }),
+        side: BracketSide::Short,
+        status: BracketStatus::Draft,
+        quantity: None,
+        saved: false,
+        filled_qty: None,
+    };
+    let errors = validate_bracket(&bracket, 100.0);
+    assert!(
+        errors
+            .iter()
+            .any(|(f, msg)| f == "sl" && msg.contains("above entry")),
+        "expected SL constraint error, got: {errors:?}"
+    );
+}
+
 // -- OrderPanel (dockable) tests --
 
 #[test]
@@ -317,4 +502,104 @@ fn order_panel_from_config_defaults() {
     assert_eq!(panel.state.side, OrderSide::Buy);
     assert_eq!(panel.state.quantity, "100");
     assert!(panel.state.symbol.is_empty());
+}
+
+// -- bracket_active config persistence tests --
+
+#[test]
+fn to_config_persists_bracket_active_buy() {
+    let id = OrderPanelId::new(1);
+    let mut panel = OrderPanel::new(id, "AAPL".to_string());
+    panel.state.bracket_active = Some(OrderSide::Buy);
+
+    let config = panel.to_config();
+    assert_eq!(config.bracket_active, Some("BUY".to_string()));
+}
+
+#[test]
+fn to_config_persists_bracket_active_sell() {
+    let id = OrderPanelId::new(1);
+    let mut panel = OrderPanel::new(id, "AAPL".to_string());
+    panel.state.bracket_active = Some(OrderSide::Sell);
+
+    let config = panel.to_config();
+    assert_eq!(config.bracket_active, Some("SELL".to_string()));
+}
+
+#[test]
+fn to_config_persists_bracket_active_none() {
+    let id = OrderPanelId::new(1);
+    let panel = OrderPanel::new(id, "AAPL".to_string());
+
+    let config = panel.to_config();
+    assert_eq!(config.bracket_active, None);
+}
+
+#[test]
+fn from_config_restores_bracket_active_buy() {
+    let config = midas_core::config::OrderPanelConfig {
+        bracket_active: Some("BUY".to_string()),
+        ..Default::default()
+    };
+    let panel = OrderPanel::from_config(OrderPanelId::new(1), &config);
+    assert_eq!(panel.state.bracket_active, Some(OrderSide::Buy));
+}
+
+#[test]
+fn from_config_restores_bracket_active_sell() {
+    let config = midas_core::config::OrderPanelConfig {
+        bracket_active: Some("SELL".to_string()),
+        ..Default::default()
+    };
+    let panel = OrderPanel::from_config(OrderPanelId::new(1), &config);
+    assert_eq!(panel.state.bracket_active, Some(OrderSide::Sell));
+}
+
+#[test]
+fn from_config_bracket_active_none_when_missing() {
+    let config = midas_core::config::OrderPanelConfig::default();
+    let panel = OrderPanel::from_config(OrderPanelId::new(1), &config);
+    assert_eq!(panel.state.bracket_active, None);
+}
+
+#[test]
+fn from_config_bracket_active_none_for_unknown_value() {
+    let config = midas_core::config::OrderPanelConfig {
+        bracket_active: Some("UNKNOWN".to_string()),
+        ..Default::default()
+    };
+    let panel = OrderPanel::from_config(OrderPanelId::new(1), &config);
+    assert_eq!(panel.state.bracket_active, None);
+}
+
+#[test]
+fn bracket_active_roundtrip_buy() {
+    let id = OrderPanelId::new(1);
+    let mut panel = OrderPanel::new(id, "TSLA".to_string());
+    panel.state.bracket_active = Some(OrderSide::Buy);
+
+    let config = panel.to_config();
+    let restored = OrderPanel::from_config(id, &config);
+    assert_eq!(restored.state.bracket_active, Some(OrderSide::Buy),);
+}
+
+#[test]
+fn bracket_active_roundtrip_sell() {
+    let id = OrderPanelId::new(1);
+    let mut panel = OrderPanel::new(id, "TSLA".to_string());
+    panel.state.bracket_active = Some(OrderSide::Sell);
+
+    let config = panel.to_config();
+    let restored = OrderPanel::from_config(id, &config);
+    assert_eq!(restored.state.bracket_active, Some(OrderSide::Sell),);
+}
+
+#[test]
+fn bracket_active_roundtrip_none() {
+    let id = OrderPanelId::new(1);
+    let panel = OrderPanel::new(id, "TSLA".to_string());
+
+    let config = panel.to_config();
+    let restored = OrderPanel::from_config(id, &config);
+    assert_eq!(restored.state.bracket_active, None);
 }

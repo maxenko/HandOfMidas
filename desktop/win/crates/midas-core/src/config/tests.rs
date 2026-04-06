@@ -899,3 +899,73 @@ fn non_default_link_modes_roundtrip() {
 
     cleanup(&dir);
 }
+
+#[test]
+fn order_panel_bracket_active_roundtrip() {
+    let dir = temp_dir();
+    let path = dir.join("op_bracket.toml");
+
+    let config = AppConfig {
+        order_panels: vec![
+            OrderPanelConfig {
+                symbol: "AAPL".into(),
+                bracket_active: Some("BUY".into()),
+                ..Default::default()
+            },
+            OrderPanelConfig {
+                symbol: "MSFT".into(),
+                bracket_active: Some("SELL".into()),
+                ..Default::default()
+            },
+            OrderPanelConfig {
+                symbol: "TSLA".into(),
+                bracket_active: None,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+
+    config.save(&path).expect("save");
+    let loaded = AppConfig::load(&path).expect("load");
+
+    assert_eq!(loaded.order_panels.len(), 3);
+    assert_eq!(loaded.order_panels[0].bracket_active, Some("BUY".into()),);
+    assert_eq!(loaded.order_panels[1].bracket_active, Some("SELL".into()),);
+    assert_eq!(loaded.order_panels[2].bracket_active, None);
+
+    cleanup(&dir);
+}
+
+#[test]
+fn old_config_without_bracket_active_loads_with_none() {
+    let dir = temp_dir();
+    let path = dir.join("op_no_bracket.toml");
+
+    // Simulate old config that predates bracket_active field.
+    std::fs::write(
+        &path,
+        r#"
+[window]
+width = 1280
+height = 800
+
+[theme]
+mode = "dark"
+
+[[order_panels]]
+symbol = "AAPL"
+side = "BUY"
+quantity = "100"
+symbol_link = "unlinked"
+"#,
+    )
+    .expect("write old order panel config");
+
+    let config = AppConfig::load(&path).expect("load");
+    assert_eq!(config.order_panels.len(), 1);
+    assert_eq!(config.order_panels[0].symbol, "AAPL");
+    assert_eq!(config.order_panels[0].bracket_active, None);
+
+    cleanup(&dir);
+}

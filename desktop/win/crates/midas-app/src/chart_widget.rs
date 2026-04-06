@@ -953,6 +953,12 @@ fn translate_keyboard_event(event: &iced::keyboard::Event) -> Vec<ChartEvent> {
                 iced::keyboard::Key::Character(c) if c.as_str() == "h" || c.as_str() == "H" => {
                     Some(midas_chart::Key::H)
                 }
+                iced::keyboard::Key::Character(c) if c.as_str() == "b" || c.as_str() == "B" => {
+                    Some(midas_chart::Key::B)
+                }
+                iced::keyboard::Key::Named(iced::keyboard::key::Named::Tab) => {
+                    Some(midas_chart::Key::Tab)
+                }
                 _ => None,
             };
             chart_key
@@ -1131,6 +1137,41 @@ fn action_to_message(
             *leg,
             *new_price,
         )),
+        ChartAction::RightClickBracketLeg {
+            annotation_id,
+            leg,
+            x,
+            y,
+        } => Some(Message::ChartBracketContextMenu(
+            chart_id,
+            annotation_id.0,
+            *leg,
+            *x,
+            *y,
+        )),
+        ChartAction::CreateBracket {
+            entry,
+            tp,
+            sl,
+            side,
+        } => Some(Message::ChartCreateBracket(
+            chart_id, *entry, *tp, *sl, *side,
+        )),
+        ChartAction::SubmitBracket { annotation_id } => {
+            Some(Message::ChartBracketSubmit(chart_id, *annotation_id))
+        }
+        ChartAction::SaveBracket { annotation_id } => {
+            Some(Message::ChartBracketSave(chart_id, *annotation_id))
+        }
+        ChartAction::ToggleBracketSL { annotation_id } => {
+            Some(Message::ChartBracketToggleSL(chart_id, *annotation_id))
+        }
+        ChartAction::CancelBracket { annotation_id } => {
+            Some(Message::ChartBracketCancel(chart_id, *annotation_id))
+        }
+        ChartAction::CancelBracketSL { annotation_id } => {
+            Some(Message::ChartBracketCancelSL(chart_id, *annotation_id))
+        }
         ChartAction::Redraw => None,
         _ => None,
     }

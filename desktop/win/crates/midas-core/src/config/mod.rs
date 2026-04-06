@@ -209,6 +209,11 @@ pub struct OrderPanelConfig {
     /// Symbol link mode for cross-panel symbol synchronization.
     #[serde(default)]
     pub symbol_link: LinkMode,
+    /// Bracket chart toggle state: `"BUY"`, `"SELL"`, or `"NONE"`.
+    /// Persisted so the toggle survives app restarts.
+    /// Defaults to `None` if missing from config (backward compat).
+    #[serde(default)]
+    pub bracket_active: Option<String>,
 }
 
 impl Default for OrderPanelConfig {
@@ -218,6 +223,7 @@ impl Default for OrderPanelConfig {
             side: default_order_side(),
             quantity: default_order_quantity(),
             symbol_link: LinkMode::default(),
+            bracket_active: None,
         }
     }
 }
