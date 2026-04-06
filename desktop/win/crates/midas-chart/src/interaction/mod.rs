@@ -1534,8 +1534,7 @@ fn hit_test_bracket_buttons(
         }
 
         // ── SL line [X] button ────────────────────────────────
-        if bracket.stop_loss.is_some() {
-            let sl = bracket.stop_loss.as_ref().unwrap();
+        if let Some(ref sl) = bracket.stop_loss {
             let sl_y = camera.price_to_y(sl.price);
             let sl_x_text = "X";
             let sl_x_w = button_width(sl_x_text);

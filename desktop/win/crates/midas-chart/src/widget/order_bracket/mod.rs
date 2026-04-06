@@ -477,10 +477,11 @@ pub fn compute_bracket(
     }
 
     // ── Draft [X] button on SL line ────────────────────────────
-    if bracket.status == BracketStatus::Draft && bracket.stop_loss.is_some() {
-        let sl = bracket.stop_loss.as_ref().unwrap();
-        let sl_y = ctx.camera.price_to_y(sl.price);
-        emit_sl_cancel_button(annotation_id, sl_y, vp_width, alpha, &mut output);
+    if bracket.status == BracketStatus::Draft {
+        if let Some(ref sl) = bracket.stop_loss {
+            let sl_y = ctx.camera.price_to_y(sl.price);
+            emit_sl_cancel_button(annotation_id, sl_y, vp_width, alpha, &mut output);
+        }
     }
 
     // ── Zone fills (Active brackets only) ───────────────────────────
