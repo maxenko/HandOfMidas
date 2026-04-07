@@ -171,6 +171,7 @@ fn make_input<'a>(
         level_tool: &DEFAULT_LEVEL_TOOL,
         dirty,
         gatr_bright_ranges: &[],
+        hovered_annotation: None,
     }
 }
 
@@ -205,6 +206,7 @@ fn make_input_with_collapse<'a>(
         level_tool: &DEFAULT_LEVEL_TOOL,
         dirty,
         gatr_bright_ranges: &[],
+        hovered_annotation: None,
     }
 }
 
@@ -482,7 +484,7 @@ fn x_labels_are_produced() {
 }
 
 #[test]
-fn levels_rendered_at_correct_y() {
+fn levels_rendered_via_widget_output() {
     let data = TestCandles::sample();
     let camera = make_camera_for_data(&data);
     let dirty = DirtyFlags::new();
@@ -507,13 +509,23 @@ fn levels_rendered_at_correct_y() {
 
     let scene = compute_chart_scene(&input);
 
-    assert_eq!(scene.levels.len(), 1);
-    let expected_y = camera.snap_to_pixel(camera.price_to_y(105.0));
+    // Levels now render via widget_output (not scene.levels which is deprecated).
     assert!(
-        (scene.levels[0].screen_y - expected_y).abs() < 1.0,
-        "level y={} should be near expected={}",
-        scene.levels[0].screen_y,
-        expected_y
+        !scene.widget_output.lines.is_empty(),
+        "widget_output should have level lines"
+    );
+    assert!(
+        !scene.widget_output.hit_zones.is_empty(),
+        "widget_output should have level hit zones"
+    );
+    assert!(
+        !scene.widget_output.labels.is_empty(),
+        "widget_output should have level labels"
+    );
+    // Old path should be empty.
+    assert!(
+        scene.levels.is_empty(),
+        "scene.levels should be empty (deprecated path)"
     );
 }
 

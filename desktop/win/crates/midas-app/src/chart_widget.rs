@@ -32,6 +32,8 @@ use midas_chart::level_tool::LevelTool;
 use midas_chart::levels::HorizontalLevel;
 use midas_chart::scene::ChartScene;
 use midas_chart::state::{ChartState, InteractionMode};
+use midas_chart::widget::hit_test::HitZoneKind;
+use midas_chart::widget::order_bracket::BracketStatus;
 use midas_chart::widget::{Annotation, AnnotationKind, Presence};
 use midas_chart::{
     compute_chart_scene, AnnotationId, CandleInstance, CrosshairRender, GridLineInstance,
@@ -145,6 +147,76 @@ pub struct ChartWidgetState {
     drag_price_override: Option<(u64, f64)>,
 }
 
+/// Find the interactive annotation element (if any) at the given cursor Y.
+///
+/// Checks all annotation types: levels (`LevelLine`), bracket legs
+/// (`BracketTP`, `BracketSL`, `BracketEntry`, `BracketStopTrigger`).
+/// Returns the closest within 6px tolerance.
+///
+/// Mirrors `hit_test_annotation` in `interaction/mod.rs` for consistency.
+fn annotation_at_cursor(
+    annotations: &[Annotation],
+    levels: &[midas_chart::levels::HorizontalLevel],
+    camera: &Camera2D,
+    cursor_y: f32,
+) -> Option<(AnnotationId, HitZoneKind)> {
+    use midas_chart::widget::order_bracket::EntryType;
+
+    let mut best: Option<(AnnotationId, HitZoneKind, f32)> = None;
+    let tolerance = 6.0_f32;
+
+    // Check levels (from old LevelStore — still using bridge).
+    for level in levels {
+        if level.locked {
+            continue;
+        }
+        let dist = (cursor_y - camera.price_to_y(level.price)).abs();
+        if dist <= tolerance && best.as_ref().is_none_or(|b| dist < b.2) {
+            best = Some((AnnotationId(level.id), HitZoneKind::LevelLine, dist));
+        }
+    }
+
+    // Check bracket annotations.
+    for ann in annotations {
+        if !ann.presence.is_interactive() || ann.locked {
+            continue;
+        }
+        if let AnnotationKind::OrderBracket(ref bracket) = ann.kind {
+            if let Some(ref tp) = bracket.take_profit {
+                let dist = (cursor_y - camera.price_to_y(tp.price)).abs();
+                if dist <= tolerance && best.as_ref().is_none_or(|b| dist < b.2) {
+                    best = Some((ann.id, HitZoneKind::BracketTP, dist));
+                }
+            }
+            if let Some(ref sl) = bracket.stop_loss {
+                let dist = (cursor_y - camera.price_to_y(sl.price)).abs();
+                if dist <= tolerance && best.as_ref().is_none_or(|b| dist < b.2) {
+                    best = Some((ann.id, HitZoneKind::BracketSL, dist));
+                }
+            }
+            if bracket.entry_type != EntryType::Market
+                && bracket.status == BracketStatus::Draft
+            {
+                let dist = (cursor_y - camera.price_to_y(bracket.entry.price)).abs();
+                if dist <= tolerance && best.as_ref().is_none_or(|b| dist < b.2) {
+                    best = Some((ann.id, HitZoneKind::BracketEntry, dist));
+                }
+            }
+            if bracket.entry_type == EntryType::StopLimit
+                && bracket.status == BracketStatus::Draft
+            {
+                if let Some(stop_price) = bracket.entry_stop_price {
+                    let dist = (cursor_y - camera.price_to_y(stop_price)).abs();
+                    if dist <= tolerance && best.as_ref().is_none_or(|b| dist < b.2) {
+                        best = Some((ann.id, HitZoneKind::BracketStopTrigger, dist));
+                    }
+                }
+            }
+        }
+    }
+    best.map(|(id, kind, _)| (id, kind))
+}
+
 impl shader::Program<Message> for ChartProgram {
     type State = ChartWidgetState;
     type Primitive = ChartPrimitive;
@@ -249,6 +321,23 @@ impl shader::Program<Message> for ChartProgram {
         // Track modifier keys for Alt detection during level placement.
         if let Event::Keyboard(iced::keyboard::Event::ModifiersChanged(mods)) = event {
             state.modifiers = *mods;
+        }
+
+        // Update annotation hover state on every update() call, not just
+        // mouse events. Must be before the chart_events.is_empty() early
+        // return so hover clears even when non-mouse events fire.
+        {
+            let found = if let Some(pos) = cursor.position_in(bounds) {
+                annotation_at_cursor(
+                    &self.snapshot.bracket_annotations,
+                    &self.snapshot.levels,
+                    &chart_state.camera,
+                    pos.y,
+                )
+            } else {
+                None // cursor left bounds — clear hover
+            };
+            chart_state.hovered_annotation = found;
         }
 
         // Convert iced event to ChartEvent(s).
@@ -484,6 +573,10 @@ impl shader::Program<Message> for ChartProgram {
             dirty: &dirty,
             level_tool: &effective_level_tool,
             gatr_bright_ranges: &snap.gatr_bright_ranges,
+            hovered_annotation: state
+                .chart_state
+                .as_ref()
+                .and_then(|cs| cs.hovered_annotation),
         };
 
         let scene = compute_chart_scene(&input);
@@ -561,16 +654,18 @@ impl shader::Program<Message> for ChartProgram {
                 return mouse::Interaction::ResizingVertically;
             }
 
-            // Check horizontal levels — show resize cursor on non-locked levels.
+            // Unified cursor change for all interactive annotation elements
+            // (levels + bracket legs).
             if let Some(cs) = &state.chart_state {
-                for level in &self.snapshot.levels {
-                    if level.locked {
-                        continue;
-                    }
-                    let level_y = cs.camera.price_to_y(level.price);
-                    if (pos.y - level_y).abs() <= 6.0 {
-                        return mouse::Interaction::ResizingVertically;
-                    }
+                if annotation_at_cursor(
+                    &self.snapshot.bracket_annotations,
+                    &self.snapshot.levels,
+                    &cs.camera,
+                    pos.y,
+                )
+                .is_some()
+                {
+                    return mouse::Interaction::ResizingVertically;
                 }
             }
 

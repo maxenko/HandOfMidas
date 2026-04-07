@@ -70,6 +70,7 @@ fn make_default_chart_input<'a>(
         dirty,
         level_tool: &DEFAULT_LEVEL_TOOL,
         gatr_bright_ranges: &[],
+        hovered_annotation: None,
     }
 }
 

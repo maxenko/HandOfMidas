@@ -1067,52 +1067,31 @@ fn compute_x_labels(camera: &Camera2D, candle_duration: f64) -> Vec<AxisLabel> {
 }
 
 /// Compute render data for horizontal levels from annotations.
+///
+/// **Deprecated**: Levels are now rendered via `compute_widget_annotations()`
+/// → `compute_level()` → `WidgetOutput`. This function returns an empty vec
+/// to prevent double-rendering. It is retained during the transition for
+/// backward compatibility with `ChartScene::levels` consumers. Will be
+/// removed in the cleanup slice.
 fn compute_levels(
-    annotations: &[crate::widget::Annotation],
-    camera: &Camera2D,
+    _annotations: &[crate::widget::Annotation],
+    _camera: &Camera2D,
 ) -> Vec<LevelRender> {
-    annotations
-        .iter()
-        .filter_map(|ann| {
-            if !ann.presence.is_visible() {
-                return None;
-            }
-            match &ann.kind {
-                crate::widget::AnnotationKind::Level(level) => {
-                    let y = camera.snap_to_pixel(camera.price_to_y(level.price));
-                    Some(LevelRender {
-                        id: ann.id,
-                        price: level.price,
-                        screen_y: y,
-                        color: level.color,
-                        line_width: level.line_width,
-                        is_selected: false,
-                        is_being_dragged: false,
-                        original_screen_y: None,
-                        label_text: format_price(level.price),
-                        label: level.label.clone(),
-                        icon: level.icon.clone(),
-                        locked: ann.locked,
-                    })
-                }
-                // Non-level annotations are not rendered as LevelRender.
-                _ => None,
-            }
-        })
-        .collect()
+    Vec::new()
 }
 
-/// Compute merged `WidgetOutput` for all non-level annotations.
+/// Compute merged `WidgetOutput` for all annotations (levels + brackets).
 ///
 /// Walks the annotation slice, dispatches to the appropriate widget
-/// compute function (currently `OrderBracket`), and merges all outputs
-/// into a single `WidgetOutput`.
+/// compute function, and merges all outputs into a single `WidgetOutput`.
+/// Hovered annotations render last (on top).
 fn compute_widget_annotations(
     annotations: &[crate::widget::Annotation],
     camera: &Camera2D,
     input: &ChartInput<'_>,
 ) -> crate::widget::WidgetOutput {
     use crate::widget::compute::{ComputeContext, Viewport};
+    use crate::widget::level::compute_level;
     use crate::widget::order_bracket::compute_bracket;
     use crate::widget::theme::Theme;
     use crate::widget::WidgetOutput;
@@ -1125,24 +1104,57 @@ fn compute_widget_annotations(
             height: input.viewport_height,
         },
         theme: &Theme::default(),
-        snap_fn: &|_y| None, // bracket compute does not use snap
+        snap_fn: &|_y| None,
         candle_duration_ms: estimate_candle_duration(input.data),
         collapse_gaps: input.collapse_gaps,
         separator_y: input.viewport_height as f32 * (1.0 - input.timeline_border_ratio),
         dpi_scale: input.dpi_scale,
+        hovered_annotation: input.hovered_annotation,
     };
 
     let mut merged = WidgetOutput::default();
+    let hovered_aid = input.hovered_annotation.map(|(aid, _)| aid);
 
+    // Pass 1: non-hovered annotations (render underneath).
     for ann in annotations {
         if !ann.presence.is_visible() {
             continue;
         }
+        if Some(ann.id) == hovered_aid {
+            continue;
+        }
         let alpha = ann.presence.alpha();
-        // Level is handled by compute_levels(); other kinds are future work.
-        if let crate::widget::AnnotationKind::OrderBracket(bracket) = &ann.kind {
-            let out = compute_bracket(bracket, ann.id, &ctx, alpha);
-            merged.merge(out);
+        match &ann.kind {
+            crate::widget::AnnotationKind::Level(level) => {
+                let out = compute_level(level, ann.id, &ctx, alpha, ann.locked);
+                merged.merge(out);
+            }
+            crate::widget::AnnotationKind::OrderBracket(bracket) => {
+                let out = compute_bracket(bracket, ann.id, &ctx, alpha);
+                merged.merge(out);
+            }
+            _ => {}
+        }
+    }
+    // Pass 2: hovered annotation (render on top).
+    for ann in annotations {
+        if !ann.presence.is_visible() {
+            continue;
+        }
+        if Some(ann.id) != hovered_aid {
+            continue;
+        }
+        let alpha = ann.presence.alpha();
+        match &ann.kind {
+            crate::widget::AnnotationKind::Level(level) => {
+                let out = compute_level(level, ann.id, &ctx, alpha, ann.locked);
+                merged.merge(out);
+            }
+            crate::widget::AnnotationKind::OrderBracket(bracket) => {
+                let out = compute_bracket(bracket, ann.id, &ctx, alpha);
+                merged.merge(out);
+            }
+            _ => {}
         }
     }
 
