@@ -1595,11 +1595,13 @@ impl MidasApp {
                                 ann_id,
                                 |ann| {
                                     ann.presence = midas_chart::widget::Presence::Active;
-                                    if needs_reposition {
-                                        if let midas_chart::widget::AnnotationKind::OrderBracket(
-                                            ref mut b,
-                                        ) = ann.kind
-                                        {
+                                    if let midas_chart::widget::AnnotationKind::OrderBracket(
+                                        ref mut b,
+                                    ) = ann.kind
+                                    {
+                                        // Normalize stale data from old code versions.
+                                        crate::order_panel::normalize_bracket(b);
+                                        if needs_reposition {
                                             crate::order_panel::reposition_bracket(b, last_price);
                                         }
                                     }
@@ -3542,20 +3544,21 @@ impl MidasApp {
                             }
                         });
                     }
-                    StructuralSync::ToggleTp(ann_id, ref symbol, enabled, last_price) => {
+                    StructuralSync::ToggleTp(ann_id, ref symbol, enabled, _last_price) => {
                         self.annotation_store.update(symbol, ann_id, |ann| {
                             if let midas_chart::widget::AnnotationKind::OrderBracket(ref mut b) =
                                 ann.kind
                             {
-                                if enabled && b.take_profit.is_none() && last_price > 0.0 {
-                                    // Create TP at default offset from entry.
-                                    let offset = last_price * 0.01;
+                                if enabled && b.take_profit.is_none() {
+                                    // Create TP at 1% offset from entry price.
+                                    let entry = b.entry.price;
+                                    let offset = (entry * 0.01).max(0.01);
                                     let tp_price = match b.side {
                                         midas_chart::widget::order_bracket::BracketSide::Long => {
-                                            b.entry.price + offset
+                                            entry + offset
                                         }
                                         midas_chart::widget::order_bracket::BracketSide::Short => {
-                                            b.entry.price - offset
+                                            entry - offset
                                         }
                                     };
                                     b.take_profit = Some(midas_chart::widget::order_bracket::BracketLeg {
@@ -3595,20 +3598,21 @@ impl MidasApp {
                         }
                         self.mark_levels_dirty_for_ticker(symbol);
                     }
-                    StructuralSync::ToggleSl(ann_id, ref symbol, enabled, last_price) => {
+                    StructuralSync::ToggleSl(ann_id, ref symbol, enabled, _last_price) => {
                         self.annotation_store.update(symbol, ann_id, |ann| {
                             if let midas_chart::widget::AnnotationKind::OrderBracket(ref mut b) =
                                 ann.kind
                             {
-                                if enabled && b.stop_loss.is_none() && last_price > 0.0 {
-                                    // Create SL at default offset from entry.
-                                    let offset = last_price * 0.005;
+                                if enabled && b.stop_loss.is_none() {
+                                    // Create SL at 0.5% offset from entry price.
+                                    let entry = b.entry.price;
+                                    let offset = (entry * 0.005).max(0.01);
                                     let sl_price = match b.side {
                                         midas_chart::widget::order_bracket::BracketSide::Long => {
-                                            b.entry.price - offset
+                                            entry - offset
                                         }
                                         midas_chart::widget::order_bracket::BracketSide::Short => {
-                                            b.entry.price + offset
+                                            entry + offset
                                         }
                                     };
                                     b.stop_loss = Some(midas_chart::widget::order_bracket::BracketLeg {

@@ -184,6 +184,10 @@ pub fn load_all(data_dir: &Path) -> anyhow::Result<HashMap<String, Vec<Annotatio
 }
 
 /// Build an AnnotationStore from loaded files.
+///
+/// Normalizes every bracket annotation to match current entry_type rules,
+/// ensuring stale data from old code versions doesn't produce incorrect
+/// chart lines.
 pub fn store_from_files(files: HashMap<String, Vec<Annotation>>) -> AnnotationStore {
     let mut store = AnnotationStore::new();
     let mut max_id: u64 = 0;
@@ -191,7 +195,13 @@ pub fn store_from_files(files: HashMap<String, Vec<Annotation>>) -> AnnotationSt
     for (symbol, annotations) in &files {
         for ann in annotations {
             max_id = max_id.max(ann.id.0);
-            store.add_raw(symbol, ann.clone());
+            let mut ann = ann.clone();
+            // Normalize brackets loaded from disk so stale data from
+            // old code versions doesn't produce incorrect chart lines.
+            if let midas_chart::widget::AnnotationKind::OrderBracket(ref mut b) = ann.kind {
+                crate::order_panel::normalize_bracket(b);
+            }
+            store.add_raw(symbol, ann);
         }
     }
 
