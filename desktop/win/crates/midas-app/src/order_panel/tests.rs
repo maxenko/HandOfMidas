@@ -726,3 +726,256 @@ fn bracket_active_roundtrip_none() {
     let restored = OrderPanel::from_config(id, &config);
     assert_eq!(restored.state.bracket_active, None);
 }
+
+// -- default_bracket_prices tests --
+
+#[test]
+fn default_bracket_prices_buy_both_enabled() {
+    let (entry, tp, sl) = default_bracket_prices(100.0, OrderSide::Buy, true, true, None);
+    assert!((entry - 100.0).abs() < f64::EPSILON);
+    assert!((tp.unwrap() - 101.0).abs() < 0.01);
+    assert!((sl.unwrap() - 99.5).abs() < 0.01);
+}
+
+#[test]
+fn default_bracket_prices_sell_both_enabled() {
+    let (entry, tp, sl) = default_bracket_prices(100.0, OrderSide::Sell, true, true, None);
+    assert!((entry - 100.0).abs() < f64::EPSILON);
+    assert!((tp.unwrap() - 99.0).abs() < 0.01);
+    assert!((sl.unwrap() - 100.5).abs() < 0.01);
+}
+
+#[test]
+fn default_bracket_prices_tp_disabled() {
+    let (_, tp, sl) = default_bracket_prices(100.0, OrderSide::Buy, false, true, None);
+    assert!(tp.is_none());
+    assert!(sl.is_some());
+}
+
+#[test]
+fn default_bracket_prices_sl_disabled() {
+    let (_, tp, sl) = default_bracket_prices(100.0, OrderSide::Sell, true, false, None);
+    assert!(tp.is_some());
+    assert!(sl.is_none());
+}
+
+#[test]
+fn default_bracket_prices_pixel_minimum_overrides_pct() {
+    // Simulate zoomed-out chart: $100 range over 1000px = $0.10/px
+    // 30px minimum → $3.00 minimum offset, which is > 1% ($1.00)
+    let ppp = 0.10; // price per pixel
+    let (entry, tp, sl) = default_bracket_prices(100.0, OrderSide::Buy, true, true, Some(ppp));
+    assert!((entry - 100.0).abs() < f64::EPSILON);
+    // TP offset should be $3.00 (pixel min), not $1.00 (1%)
+    assert!(
+        (tp.unwrap() - 103.0).abs() < 0.01,
+        "TP should be 103.0 (30px min), got {}",
+        tp.unwrap()
+    );
+    // SL offset should be $3.00 (pixel min), not $0.50 (0.5%)
+    assert!(
+        (sl.unwrap() - 97.0).abs() < 0.01,
+        "SL should be 97.0 (30px min), got {}",
+        sl.unwrap()
+    );
+}
+
+// -- sync_panel_from_bracket tests --
+
+#[test]
+fn sync_panel_from_bracket_populates_tp_sl() {
+    use midas_chart::widget::level::LineStyle;
+    use midas_chart::widget::order_bracket::*;
+
+    let bracket = OrderBracket {
+        entry: BracketLeg {
+            price: 100.0,
+            timestamp: None,
+            color: None,
+            style: LineStyle::Solid,
+            line_width: 1.0,
+            label: None,
+            projected_pnl: None,
+            projected_pnl_pct: None,
+        },
+        take_profit: Some(BracketLeg {
+            price: 101.0,
+            timestamp: None,
+            color: None,
+            style: LineStyle::Solid,
+            line_width: 1.0,
+            label: None,
+            projected_pnl: None,
+            projected_pnl_pct: None,
+        }),
+        stop_loss: Some(BracketLeg {
+            price: 99.5,
+            timestamp: None,
+            color: None,
+            style: LineStyle::Solid,
+            line_width: 1.0,
+            label: None,
+            projected_pnl: None,
+            projected_pnl_pct: None,
+        }),
+        side: BracketSide::Long,
+        status: BracketStatus::Draft,
+        quantity: None,
+        saved: false,
+        filled_qty: None,
+        entry_type: EntryType::Market,
+        entry_stop_price: None,
+        wrong_side_warning: false,
+    };
+
+    let mut state = OrderPanelState::default();
+    sync_panel_from_bracket(&mut state, &bracket);
+    assert_eq!(state.tp_value, "101.00");
+    assert_eq!(state.sl_value, "99.50");
+}
+
+#[test]
+fn sync_panel_from_bracket_clears_missing_legs() {
+    use midas_chart::widget::level::LineStyle;
+    use midas_chart::widget::order_bracket::*;
+
+    let bracket = OrderBracket {
+        entry: BracketLeg {
+            price: 100.0,
+            timestamp: None,
+            color: None,
+            style: LineStyle::Solid,
+            line_width: 1.0,
+            label: None,
+            projected_pnl: None,
+            projected_pnl_pct: None,
+        },
+        take_profit: None,
+        stop_loss: None,
+        side: BracketSide::Long,
+        status: BracketStatus::Draft,
+        quantity: None,
+        saved: false,
+        filled_qty: None,
+        entry_type: EntryType::Market,
+        entry_stop_price: None,
+        wrong_side_warning: false,
+    };
+
+    let mut state = OrderPanelState {
+        tp_value: "old_value".to_string(),
+        sl_value: "old_value".to_string(),
+        ..Default::default()
+    };
+    sync_panel_from_bracket(&mut state, &bracket);
+    assert!(state.tp_value.is_empty());
+    assert!(state.sl_value.is_empty());
+}
+
+#[test]
+fn sync_panel_from_bracket_limit_entry() {
+    use midas_chart::widget::level::LineStyle;
+    use midas_chart::widget::order_bracket::*;
+
+    let bracket = OrderBracket {
+        entry: BracketLeg {
+            price: 180.50,
+            timestamp: None,
+            color: None,
+            style: LineStyle::Solid,
+            line_width: 1.0,
+            label: None,
+            projected_pnl: None,
+            projected_pnl_pct: None,
+        },
+        take_profit: None,
+        stop_loss: None,
+        side: BracketSide::Long,
+        status: BracketStatus::Draft,
+        quantity: None,
+        saved: false,
+        filled_qty: None,
+        entry_type: EntryType::Limit,
+        entry_stop_price: None,
+        wrong_side_warning: false,
+    };
+
+    let mut state = OrderPanelState::default();
+    sync_panel_from_bracket(&mut state, &bracket);
+    assert_eq!(state.limit_price, "180.50");
+}
+
+// -- should_reposition tests --
+
+#[test]
+fn should_reposition_within_threshold() {
+    assert!(!should_reposition(100.0, 100.0, Some(5.0)));
+    assert!(!should_reposition(100.0, 104.0, Some(5.0)));
+}
+
+#[test]
+fn should_reposition_beyond_threshold() {
+    assert!(should_reposition(100.0, 106.0, Some(5.0)));
+}
+
+#[test]
+fn should_reposition_fallback_to_5_pct() {
+    // 6 > 5% of 100 = 5.0
+    assert!(should_reposition(100.0, 106.0, None));
+    // 4 < 5% of 100 = 5.0
+    assert!(!should_reposition(100.0, 104.0, None));
+}
+
+// -- reposition_bracket tests --
+
+#[test]
+fn reposition_bracket_shifts_all_legs() {
+    use midas_chart::widget::level::LineStyle;
+    use midas_chart::widget::order_bracket::*;
+
+    let mut bracket = OrderBracket {
+        entry: BracketLeg {
+            price: 100.0,
+            timestamp: None,
+            color: None,
+            style: LineStyle::Solid,
+            line_width: 1.0,
+            label: None,
+            projected_pnl: None,
+            projected_pnl_pct: None,
+        },
+        take_profit: Some(BracketLeg {
+            price: 102.0,
+            timestamp: None,
+            color: None,
+            style: LineStyle::Solid,
+            line_width: 1.0,
+            label: None,
+            projected_pnl: None,
+            projected_pnl_pct: None,
+        }),
+        stop_loss: Some(BracketLeg {
+            price: 99.0,
+            timestamp: None,
+            color: None,
+            style: LineStyle::Solid,
+            line_width: 1.0,
+            label: None,
+            projected_pnl: None,
+            projected_pnl_pct: None,
+        }),
+        side: BracketSide::Long,
+        status: BracketStatus::Draft,
+        quantity: None,
+        saved: true,
+        filled_qty: None,
+        entry_type: EntryType::Market,
+        entry_stop_price: None,
+        wrong_side_warning: false,
+    };
+
+    reposition_bracket(&mut bracket, 110.0);
+    assert!((bracket.entry.price - 110.0).abs() < f64::EPSILON);
+    assert!((bracket.take_profit.unwrap().price - 112.0).abs() < f64::EPSILON);
+    assert!((bracket.stop_loss.unwrap().price - 109.0).abs() < f64::EPSILON);
+}

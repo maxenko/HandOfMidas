@@ -398,6 +398,137 @@ pub fn validate_bracket(
 }
 
 // ===========================================================================
+// Instant bracket helpers
+// ===========================================================================
+
+/// Compute default bracket prices for an instant bracket.
+///
+/// Returns `(entry, tp, sl)` where TP/SL are `None` when disabled.
+///
+/// `price_per_pixel` is the camera's price-per-pixel ratio
+/// (`(price_high - price_low) / viewport_height`). When provided, the
+/// default offsets are clamped so that TP and SL are always at least
+/// `MIN_LEG_PX` pixels from the entry line — guaranteeing the legs are
+/// visually distinct and grabbable regardless of zoom level. Without
+/// camera info, falls back to percentage-only defaults.
+pub fn default_bracket_prices(
+    last_price: f64,
+    side: OrderSide,
+    tp_enabled: bool,
+    sl_enabled: bool,
+    price_per_pixel: Option<f64>,
+) -> (f64, Option<f64>, Option<f64>) {
+    /// Minimum screen-space separation between a leg and entry (pixels).
+    const MIN_LEG_PX: f64 = 30.0;
+
+    // Percentage-based defaults.
+    let pct_tp_offset = last_price * 0.01; // 1%
+    let pct_sl_offset = last_price * 0.005; // 0.5%
+
+    // Screen-space minimum offset (if camera info available).
+    let px_min = price_per_pixel
+        .map(|ppp| (ppp * MIN_LEG_PX).max(0.01))
+        .unwrap_or(0.0);
+
+    let tp_offset = pct_tp_offset.max(px_min);
+    let sl_offset = pct_sl_offset.max(px_min);
+
+    let tp = if tp_enabled {
+        Some(match side {
+            OrderSide::Buy => last_price + tp_offset,
+            OrderSide::Sell => last_price - tp_offset,
+        })
+    } else {
+        None
+    };
+    let sl = if sl_enabled {
+        Some(match side {
+            OrderSide::Buy => last_price - sl_offset,
+            OrderSide::Sell => last_price + sl_offset,
+        })
+    } else {
+        None
+    };
+    (last_price, tp, sl)
+}
+
+/// Populate panel string inputs from a bracket's f64 prices.
+///
+/// Called after bracket creation and after chart drag to keep the
+/// panel in sync with the annotation store (single source of truth).
+pub fn sync_panel_from_bracket(
+    state: &mut OrderPanelState,
+    bracket: &midas_chart::widget::order_bracket::OrderBracket,
+) {
+    // Entry price → limit_price / stop_price depending on entry_type.
+    let entry_str = format!("{:.2}", bracket.entry.price);
+    match bracket.entry_type {
+        midas_chart::widget::order_bracket::EntryType::Market => {
+            // Market entry tracks last_price; no panel input to sync.
+        }
+        midas_chart::widget::order_bracket::EntryType::Limit => {
+            state.limit_price = entry_str;
+        }
+        midas_chart::widget::order_bracket::EntryType::Stop => {
+            state.stop_price = entry_str;
+        }
+        midas_chart::widget::order_bracket::EntryType::StopLimit => {
+            state.limit_price = entry_str;
+            if let Some(sp) = bracket.entry_stop_price {
+                state.stop_price = format!("{:.2}", sp);
+            }
+        }
+    }
+
+    // TP value.
+    if let Some(ref tp) = bracket.take_profit {
+        state.tp_value = format!("{:.2}", tp.price);
+    } else {
+        state.tp_value.clear();
+    }
+
+    // SL value.
+    if let Some(ref sl) = bracket.stop_loss {
+        state.sl_value = format!("{:.2}", sl.price);
+    } else {
+        state.sl_value.clear();
+    }
+}
+
+// ===========================================================================
+// Hide / recall helpers
+// ===========================================================================
+
+/// Whether a bracket's entry price has drifted far enough from the
+/// current price to warrant repositioning on recall.
+///
+/// Returns `true` when `|entry - current| > gatr_abs`. Falls back
+/// to 5% of current price when G.ATR is unavailable.
+pub fn should_reposition(entry_price: f64, current_price: f64, gatr_abs: Option<f64>) -> bool {
+    let threshold = gatr_abs.unwrap_or_else(|| (current_price.abs() * 0.05).max(0.01));
+    (entry_price - current_price).abs() > threshold
+}
+
+/// Shift all bracket legs by a delta to center the entry near the
+/// current price. Preserves R:R shape (TP and SL offsets unchanged).
+pub fn reposition_bracket(
+    bracket: &mut midas_chart::widget::order_bracket::OrderBracket,
+    current_price: f64,
+) {
+    let delta = current_price - bracket.entry.price;
+    bracket.entry.price += delta;
+    if let Some(ref mut sp) = bracket.entry_stop_price {
+        *sp += delta;
+    }
+    if let Some(ref mut tp) = bracket.take_profit {
+        tp.price += delta;
+    }
+    if let Some(ref mut sl) = bracket.stop_loss {
+        sl.price += delta;
+    }
+}
+
+// ===========================================================================
 // OrderAnnotationLink
 // ===========================================================================
 
@@ -563,6 +694,35 @@ impl OrderPanel {
             symbol_link: config.symbol_link,
         }
     }
+
+    /// Re-link this panel to a hidden saved Draft bracket in the annotation store.
+    ///
+    /// `annotations` must be the slice for **this panel's symbol** (i.e.,
+    /// from `annotation_store.get(&self.state.symbol)`). The first hidden
+    /// saved Draft bracket found is claimed. Only the first panel for a
+    /// given symbol should call this (ownership semantics).
+    #[allow(dead_code)] // called from app init path (not yet wired)
+    pub fn relink_hidden_bracket(
+        &mut self,
+        annotations: &[midas_chart::widget::Annotation],
+    ) {
+        use midas_chart::widget::order_bracket::BracketStatus;
+        use midas_chart::widget::{AnnotationKind, Presence};
+
+        if self.state.bracket_annotation_id.is_some() {
+            return; // Already linked
+        }
+
+        let found = annotations.iter().find(|a| {
+            a.presence == Presence::Hidden
+                && matches!(&a.kind, AnnotationKind::OrderBracket(b)
+                    if b.status == BracketStatus::Draft && b.saved)
+        });
+
+        if let Some(ann) = found {
+            self.state.bracket_annotation_id = Some(ann.id);
+        }
+    }
 }
 
 /// Actions for a specific order panel instance.
@@ -612,6 +772,26 @@ pub enum OrderPanelAction {
     SetLimitPrice(String),
     /// Update the stop price input text.
     SetStopPrice(String),
+    /// Increment/decrement a price field by a delta (from mouse wheel).
+    StepPrice {
+        /// Which price field to adjust.
+        field: PriceField,
+        /// Amount to add (positive = up, negative = down).
+        delta: f64,
+    },
+}
+
+/// Which price field a `StepPrice` action targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PriceField {
+    /// Take profit price.
+    Tp,
+    /// Stop loss price.
+    Sl,
+    /// Limit entry price.
+    LimitPrice,
+    /// Stop entry price.
+    StopPrice,
 }
 
 // ===========================================================================

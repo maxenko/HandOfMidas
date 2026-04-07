@@ -1697,14 +1697,47 @@ impl MidasApp {
         .spacing(4)
         .align_y(iced::Alignment::Center);
 
+        // Price step for mouse wheel adjustment.
+        let (coarse_step, _fine_step) =
+            midas_chart::price_step_for(last_price.unwrap_or(100.0));
+
         // Entry price inputs (shown for non-Market types).
+        // Each row is wrapped in mouse_area for scroll-wheel adjustment.
         let entry_price_section = {
             use midas_chart::widget::order_bracket::EntryType;
+
+            let limit_scroll = move |delta: iced::mouse::ScrollDelta| {
+                let lines = match delta {
+                    iced::mouse::ScrollDelta::Lines { y, .. } => y,
+                    iced::mouse::ScrollDelta::Pixels { y, .. } => y / 50.0,
+                };
+                Message::OrderPanelMsg(
+                    oid,
+                    OrderPanelAction::StepPrice {
+                        field: crate::order_panel::PriceField::LimitPrice,
+                        delta: coarse_step * lines as f64,
+                    },
+                )
+            };
+            let stop_scroll = move |delta: iced::mouse::ScrollDelta| {
+                let lines = match delta {
+                    iced::mouse::ScrollDelta::Lines { y, .. } => y,
+                    iced::mouse::ScrollDelta::Pixels { y, .. } => y / 50.0,
+                };
+                Message::OrderPanelMsg(
+                    oid,
+                    OrderPanelAction::StepPrice {
+                        field: crate::order_panel::PriceField::StopPrice,
+                        delta: coarse_step * lines as f64,
+                    },
+                )
+            };
+
             let mut col = Column::new().spacing(4);
             match entry_type {
                 EntryType::Market => {} // No price input needed
                 EntryType::Limit => {
-                    let lp_input = row![
+                    let lp_row = row![
                         text("Limit:").size(11).width(50),
                         text_input("0.00", &state.limit_price)
                             .on_input(move |val| Message::OrderPanelMsg(
@@ -1716,10 +1749,11 @@ impl MidasApp {
                     ]
                     .spacing(6)
                     .align_y(iced::Alignment::Center);
-                    col = col.push(lp_input);
+                    col = col
+                        .push(iced::widget::mouse_area(lp_row).on_scroll(limit_scroll));
                 }
                 EntryType::Stop => {
-                    let sp_input = row![
+                    let sp_row = row![
                         text("Stop:").size(11).width(50),
                         text_input("0.00", &state.stop_price)
                             .on_input(move |val| Message::OrderPanelMsg(
@@ -1731,10 +1765,11 @@ impl MidasApp {
                     ]
                     .spacing(6)
                     .align_y(iced::Alignment::Center);
-                    col = col.push(sp_input);
+                    col = col
+                        .push(iced::widget::mouse_area(sp_row).on_scroll(stop_scroll));
                 }
                 EntryType::StopLimit => {
-                    let sp_input = row![
+                    let sp_row = row![
                         text("Stop:").size(11).width(50),
                         text_input("0.00", &state.stop_price)
                             .on_input(move |val| Message::OrderPanelMsg(
@@ -1746,7 +1781,7 @@ impl MidasApp {
                     ]
                     .spacing(6)
                     .align_y(iced::Alignment::Center);
-                    let lp_input = row![
+                    let lp_row = row![
                         text("Limit:").size(11).width(50),
                         text_input("0.00", &state.limit_price)
                             .on_input(move |val| Message::OrderPanelMsg(
@@ -1758,7 +1793,9 @@ impl MidasApp {
                     ]
                     .spacing(6)
                     .align_y(iced::Alignment::Center);
-                    col = col.push(sp_input).push(lp_input);
+                    col = col
+                        .push(iced::widget::mouse_area(sp_row).on_scroll(stop_scroll))
+                        .push(iced::widget::mouse_area(lp_row).on_scroll(limit_scroll));
                 }
             }
             col
@@ -1814,7 +1851,7 @@ impl MidasApp {
                 .size(14),];
             col = col.push(tp_check);
             if state.tp_enabled {
-                let tp_input = row![
+                let tp_input_row = row![
                     text("Price:").size(11).width(40),
                     text_input("0.00", &state.tp_value)
                         .on_input(move |val| Message::OrderPanelMsg(
@@ -1826,6 +1863,19 @@ impl MidasApp {
                 ]
                 .spacing(6)
                 .align_y(iced::Alignment::Center);
+                let tp_input = iced::widget::mouse_area(tp_input_row).on_scroll(move |delta| {
+                    let lines = match delta {
+                        iced::mouse::ScrollDelta::Lines { y, .. } => y,
+                        iced::mouse::ScrollDelta::Pixels { y, .. } => y / 50.0,
+                    };
+                    Message::OrderPanelMsg(
+                        oid,
+                        OrderPanelAction::StepPrice {
+                            field: crate::order_panel::PriceField::Tp,
+                            delta: coarse_step * lines as f64,
+                        },
+                    )
+                });
                 col = col.push(tp_input);
             }
             col
@@ -1840,7 +1890,7 @@ impl MidasApp {
                 .size(14),];
             col = col.push(sl_check);
             if state.sl_enabled {
-                let sl_input = row![
+                let sl_input_row = row![
                     text("Price:").size(11).width(40),
                     text_input("0.00", &state.sl_value)
                         .on_input(move |val| Message::OrderPanelMsg(
@@ -1852,6 +1902,19 @@ impl MidasApp {
                 ]
                 .spacing(6)
                 .align_y(iced::Alignment::Center);
+                let sl_input = iced::widget::mouse_area(sl_input_row).on_scroll(move |delta| {
+                    let lines = match delta {
+                        iced::mouse::ScrollDelta::Lines { y, .. } => y,
+                        iced::mouse::ScrollDelta::Pixels { y, .. } => y / 50.0,
+                    };
+                    Message::OrderPanelMsg(
+                        oid,
+                        OrderPanelAction::StepPrice {
+                            field: crate::order_panel::PriceField::Sl,
+                            delta: coarse_step * lines as f64,
+                        },
+                    )
+                });
                 col = col.push(sl_input);
             }
             col
