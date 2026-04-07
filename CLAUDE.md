@@ -2,6 +2,8 @@
 
 Trading platform for Interactive Brokers. Windows desktop app with GPU-rendered charts and a Rust broker engine.
 
+**Never commit automatically.** Only commit when explicitly asked.
+
 ## Project Status
 
 700+ tests passing across two workspaces. Market order brackets, test broker simulation, and chart rendering are implemented. Phase 1 (IB paper trading connection) is next.
