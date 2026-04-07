@@ -15,4 +15,7 @@ pub struct MarketSnapshot {
     /// Gerchik ATR percentage consumed (0.0+, can exceed 100).
     /// Computed from daily bars. See `market_cache::compute_daily_gatr`.
     pub gatr_pct: Option<f32>,
+    /// Absolute G.ATR value (average true range in dollars).
+    /// Used for bracket repositioning distance threshold.
+    pub gatr_abs: Option<f64>,
 }

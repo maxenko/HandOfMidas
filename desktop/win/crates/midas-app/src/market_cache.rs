@@ -69,32 +69,38 @@ pub fn snapshot_from_candles(buffer: &midas_core::CandleBuffer) -> MarketSnapsho
         }
     });
 
-    let gatr_pct = compute_daily_gatr(buffer);
+    let (gatr_pct, gatr_abs) = compute_daily_gatr(buffer);
 
     MarketSnapshot {
         last_price: Some(last_close),
         prev_close,
         change_pct,
         gatr_pct,
+        gatr_abs,
     }
 }
 
-/// Compute Gerchik ATR percentage from daily candle data.
+/// Compute Gerchik ATR percentage and absolute value from daily candle data.
 ///
-/// Delegates to [`midas_core::gerchik_gatr_pct`] which implements the
+/// Delegates to [`midas_core::gerchik_gatr_detail`] which implements the
 /// canonical algorithm: skip today, walk previous 7 sessions, filter
 /// paranormal candles (TR > 2× or < 0.5× of raw average), then show
 /// today's TR as a percentage of the filtered average.
-fn compute_daily_gatr(buffer: &midas_core::CandleBuffer) -> Option<f32> {
+///
+/// Returns `(Option<pct>, Option<abs>)` — the percentage and absolute ATR.
+fn compute_daily_gatr(buffer: &midas_core::CandleBuffer) -> (Option<f32>, Option<f64>) {
     let len = buffer.len();
     if len < 3 {
-        return None; // Need at least 2 history bars + today
+        return (None, None); // Need at least 2 history bars + today
     }
     let highs: Vec<f64> = buffer.highs.iter().map(|&h| h as f64).collect();
     let lows: Vec<f64> = buffer.lows.iter().map(|&l| l as f64).collect();
     let closes: Vec<f64> = buffer.closes.iter().map(|&c| c as f64).collect();
 
-    midas_core::gerchik_gatr_pct(&highs, &lows, &closes)
+    match midas_core::gerchik_gatr_detail(&highs, &lows, &closes) {
+        Some(result) => (Some(result.pct), Some(result.avg_atr)),
+        None => (None, None),
+    }
 }
 
 #[cfg(test)]
@@ -186,6 +192,7 @@ mod tests {
             prev_close: Some(148.0),
             change_pct: Some(1.35),
             gatr_pct: None,
+            gatr_abs: None,
         };
         cache.insert("AAPL".to_string(), snap);
 

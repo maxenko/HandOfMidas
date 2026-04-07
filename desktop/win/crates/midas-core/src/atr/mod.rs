@@ -62,6 +62,9 @@ pub struct GatrResult {
     /// non-paranormal history bars used in the average.
     /// Does NOT include today (the last bar) — today is always bright.
     pub selected_bars: Vec<usize>,
+    /// Absolute average true range (filtered average of non-paranormal bars).
+    /// When all bars are paranormal, falls back to the raw average.
+    pub avg_atr: f64,
 }
 
 /// Compute Gerchik G.ATR with full detail (percentage + selected bar indices).
@@ -125,17 +128,21 @@ pub fn gerchik_gatr_detail(highs: &[f64], lows: &[f64], closes: &[f64]) -> Optio
         }
     }
 
-    let pct = if selected_bars.is_empty() {
-        (today_range / raw_avg * 100.0) as f32
+    let (pct, avg_atr) = if selected_bars.is_empty() {
+        ((today_range / raw_avg * 100.0) as f32, raw_avg)
     } else {
         let avg = sum / selected_bars.len() as f64;
-        (today_range / avg * 100.0) as f32
+        ((today_range / avg * 100.0) as f32, avg)
     };
 
     // Reverse so indices are in ascending order.
     selected_bars.reverse();
 
-    Some(GatrResult { pct, selected_bars })
+    Some(GatrResult {
+        pct,
+        selected_bars,
+        avg_atr,
+    })
 }
 
 /// Compute Gerchik G.ATR percentage from daily bars.

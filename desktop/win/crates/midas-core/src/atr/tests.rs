@@ -217,6 +217,20 @@ fn gatr_detail_fewer_than_7() {
 }
 
 #[test]
+fn gatr_detail_avg_atr_uniform() {
+    // 10 bars: 9 history + 1 today. All uniform TR=20, no gaps.
+    let h = vec![110.0; 10];
+    let l = vec![90.0; 10];
+    let c = vec![100.0; 10];
+    let result = gerchik_gatr_detail(&h, &l, &c).unwrap();
+    assert!(
+        (result.avg_atr - 20.0).abs() < 1e-6,
+        "expected avg_atr ≈ 20.0, got {}",
+        result.avg_atr
+    );
+}
+
+#[test]
 fn gatr_detail_indices_ascending() {
     // Verify selected_bars is sorted ascending.
     let h = vec![110.0; 10];
