@@ -3360,11 +3360,51 @@ impl MidasApp {
                 // Fields: (annotation_id, symbol, field_name, parsed_price)
                 let mut annotation_sync: Option<(AnnotationId, String, &str, f64)> = None;
 
+                // Structural annotation changes that go beyond a single f64 price.
+                // Applied after the panel borrow drops (below annotation_sync).
+                enum StructuralSync {
+                    None,
+                    Side(AnnotationId, String, crate::order_panel::OrderSide),
+                    Quantity(AnnotationId, String, String),
+                    ToggleTp(AnnotationId, String, bool, f64),
+                    ToggleSl(AnnotationId, String, bool, f64),
+                }
+                let mut structural_sync = StructuralSync::None;
+
                 if let Some(panel) = self.order_panels.get_mut(&panel_id) {
                     match action {
-                        OrderPanelAction::SetSide(side) => panel.state.side = side,
-                        OrderPanelAction::SetQuantity(qty) => panel.state.quantity = qty,
-                        OrderPanelAction::ToggleTp(enabled) => panel.state.tp_enabled = enabled,
+                        OrderPanelAction::SetSide(side) => {
+                            panel.state.side = side;
+                            if let Some(ann_id) = panel.state.bracket_annotation_id {
+                                structural_sync = StructuralSync::Side(
+                                    ann_id,
+                                    panel.state.symbol.clone(),
+                                    side,
+                                );
+                            }
+                        }
+                        OrderPanelAction::SetQuantity(qty) => {
+                            if let Some(ann_id) = panel.state.bracket_annotation_id {
+                                structural_sync = StructuralSync::Quantity(
+                                    ann_id,
+                                    panel.state.symbol.clone(),
+                                    qty.clone(),
+                                );
+                            }
+                            panel.state.quantity = qty;
+                        }
+                        OrderPanelAction::ToggleTp(enabled) => {
+                            panel.state.tp_enabled = enabled;
+                            if let Some(ann_id) = panel.state.bracket_annotation_id {
+                                let last = panel.state.last_price.unwrap_or(0.0);
+                                structural_sync = StructuralSync::ToggleTp(
+                                    ann_id,
+                                    panel.state.symbol.clone(),
+                                    enabled,
+                                    last,
+                                );
+                            }
+                        }
                         OrderPanelAction::SetTpMode(mode) => panel.state.tp_mode = mode,
                         OrderPanelAction::SetTpValue(val) => {
                             if let (Some(ann_id), Ok(price)) =
@@ -3375,7 +3415,18 @@ impl MidasApp {
                             }
                             panel.state.tp_value = val;
                         }
-                        OrderPanelAction::ToggleSl(enabled) => panel.state.sl_enabled = enabled,
+                        OrderPanelAction::ToggleSl(enabled) => {
+                            panel.state.sl_enabled = enabled;
+                            if let Some(ann_id) = panel.state.bracket_annotation_id {
+                                let last = panel.state.last_price.unwrap_or(0.0);
+                                structural_sync = StructuralSync::ToggleSl(
+                                    ann_id,
+                                    panel.state.symbol.clone(),
+                                    enabled,
+                                    last,
+                                );
+                            }
+                        }
                         OrderPanelAction::SetSlMode(mode) => panel.state.sl_mode = mode,
                         OrderPanelAction::SetSlValue(val) => {
                             if let (Some(ann_id), Ok(price)) =
@@ -3464,7 +3515,143 @@ impl MidasApp {
                     }
                 }
 
-                // Panel → Chart annotation sync.
+                // Structural sync (side, quantity, TP/SL toggle).
+                match structural_sync {
+                    StructuralSync::Side(ann_id, ref symbol, side) => {
+                        use midas_chart::widget::order_bracket::BracketSide;
+                        let bracket_side = match side {
+                            crate::order_panel::OrderSide::Buy => BracketSide::Long,
+                            crate::order_panel::OrderSide::Sell => BracketSide::Short,
+                        };
+                        self.annotation_store.update(symbol, ann_id, |ann| {
+                            if let midas_chart::widget::AnnotationKind::OrderBracket(ref mut b) =
+                                ann.kind
+                            {
+                                b.side = bracket_side;
+                            }
+                        });
+                        self.mark_levels_dirty_for_ticker(symbol);
+                    }
+                    StructuralSync::Quantity(ann_id, ref symbol, ref qty_str) => {
+                        let qty = qty_str.parse::<f64>().ok();
+                        self.annotation_store.update(symbol, ann_id, |ann| {
+                            if let midas_chart::widget::AnnotationKind::OrderBracket(ref mut b) =
+                                ann.kind
+                            {
+                                b.quantity = qty;
+                            }
+                        });
+                    }
+                    StructuralSync::ToggleTp(ann_id, ref symbol, enabled, last_price) => {
+                        self.annotation_store.update(symbol, ann_id, |ann| {
+                            if let midas_chart::widget::AnnotationKind::OrderBracket(ref mut b) =
+                                ann.kind
+                            {
+                                if enabled && b.take_profit.is_none() && last_price > 0.0 {
+                                    // Create TP at default offset from entry.
+                                    let offset = last_price * 0.01;
+                                    let tp_price = match b.side {
+                                        midas_chart::widget::order_bracket::BracketSide::Long => {
+                                            b.entry.price + offset
+                                        }
+                                        midas_chart::widget::order_bracket::BracketSide::Short => {
+                                            b.entry.price - offset
+                                        }
+                                    };
+                                    b.take_profit = Some(midas_chart::widget::order_bracket::BracketLeg {
+                                        price: tp_price,
+                                        timestamp: None,
+                                        color: None,
+                                        style: midas_chart::widget::level::LineStyle::Solid,
+                                        line_width: 1.0,
+                                        label: None,
+                                        projected_pnl: None,
+                                        projected_pnl_pct: None,
+                                    });
+                                } else if !enabled {
+                                    b.take_profit = None;
+                                }
+                            }
+                        });
+                        // Sync panel from updated bracket.
+                        if let Some(bracket_data) = self
+                            .annotation_store
+                            .get(symbol)
+                            .iter()
+                            .find(|a| a.id == ann_id)
+                            .and_then(|a| match &a.kind {
+                                midas_chart::widget::AnnotationKind::OrderBracket(b) => {
+                                    Some(b.as_ref())
+                                }
+                                _ => None,
+                            })
+                        {
+                            if let Some(p) = self.order_panels.get_mut(&panel_id) {
+                                crate::order_panel::sync_panel_from_bracket(
+                                    &mut p.state,
+                                    bracket_data,
+                                );
+                            }
+                        }
+                        self.mark_levels_dirty_for_ticker(symbol);
+                    }
+                    StructuralSync::ToggleSl(ann_id, ref symbol, enabled, last_price) => {
+                        self.annotation_store.update(symbol, ann_id, |ann| {
+                            if let midas_chart::widget::AnnotationKind::OrderBracket(ref mut b) =
+                                ann.kind
+                            {
+                                if enabled && b.stop_loss.is_none() && last_price > 0.0 {
+                                    // Create SL at default offset from entry.
+                                    let offset = last_price * 0.005;
+                                    let sl_price = match b.side {
+                                        midas_chart::widget::order_bracket::BracketSide::Long => {
+                                            b.entry.price - offset
+                                        }
+                                        midas_chart::widget::order_bracket::BracketSide::Short => {
+                                            b.entry.price + offset
+                                        }
+                                    };
+                                    b.stop_loss = Some(midas_chart::widget::order_bracket::BracketLeg {
+                                        price: sl_price,
+                                        timestamp: None,
+                                        color: None,
+                                        style: midas_chart::widget::level::LineStyle::Solid,
+                                        line_width: 1.0,
+                                        label: None,
+                                        projected_pnl: None,
+                                        projected_pnl_pct: None,
+                                    });
+                                } else if !enabled {
+                                    b.stop_loss = None;
+                                }
+                            }
+                        });
+                        // Sync panel from updated bracket.
+                        if let Some(bracket_data) = self
+                            .annotation_store
+                            .get(symbol)
+                            .iter()
+                            .find(|a| a.id == ann_id)
+                            .and_then(|a| match &a.kind {
+                                midas_chart::widget::AnnotationKind::OrderBracket(b) => {
+                                    Some(b.as_ref())
+                                }
+                                _ => None,
+                            })
+                        {
+                            if let Some(p) = self.order_panels.get_mut(&panel_id) {
+                                crate::order_panel::sync_panel_from_bracket(
+                                    &mut p.state,
+                                    bracket_data,
+                                );
+                            }
+                        }
+                        self.mark_levels_dirty_for_ticker(symbol);
+                    }
+                    StructuralSync::None => {}
+                }
+
+                // Panel → Chart annotation sync (price fields).
                 if let Some((ann_id, symbol, field, price)) = annotation_sync {
                     self.annotation_store.update(&symbol, ann_id, |ann| {
                         if let midas_chart::widget::AnnotationKind::OrderBracket(ref mut b) =
