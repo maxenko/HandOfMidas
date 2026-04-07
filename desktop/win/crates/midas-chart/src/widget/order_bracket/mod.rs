@@ -133,6 +133,9 @@ pub enum LegRole {
     Entry,
     TakeProfit,
     StopLoss,
+    /// Stop trigger price for StopLimit entries (separate from the limit
+    /// execution price stored in `Entry`).
+    StopTrigger,
 }
 
 impl OrderBracket {
@@ -168,16 +171,24 @@ impl OrderBracket {
 
 /// Green take-profit line.
 const BRACKET_TP_COLOR: [f32; 4] = [0.20, 0.78, 0.35, 1.0];
-/// Red stop-loss line.
-const BRACKET_SL_COLOR: [f32; 4] = [0.90, 0.25, 0.25, 1.0];
-/// Green entry line for long positions.
+/// Orange stop-loss line (all brackets).
+const BRACKET_SL_COLOR: [f32; 4] = [1.0, 0.60, 0.0, 1.0];
+/// Green entry line for long positions (Market / Limit).
 const BRACKET_LONG_ENTRY_COLOR: [f32; 4] = [0.20, 0.78, 0.35, 1.0];
-/// Red entry line for short positions.
+/// Red entry line for short positions (Market / Limit).
 const BRACKET_SHORT_ENTRY_COLOR: [f32; 4] = [0.90, 0.25, 0.25, 1.0];
+/// Green entry for Long Stop orders.
+const BRACKET_LONG_STOP_COLOR: [f32; 4] = [0.20, 0.78, 0.35, 1.0];
+/// Lime green entry for Long StopLimit orders.
+const BRACKET_LONG_STOP_LIMIT_COLOR: [f32; 4] = [0.50, 0.90, 0.20, 1.0];
+/// Red entry for Short Stop orders.
+const BRACKET_SHORT_STOP_COLOR: [f32; 4] = [0.90, 0.25, 0.25, 1.0];
+/// Pink-red entry for Short StopLimit orders.
+const BRACKET_SHORT_STOP_LIMIT_COLOR: [f32; 4] = [0.90, 0.30, 0.50, 1.0];
 /// Green zone fill at 6% alpha (between entry and TP).
 const BRACKET_TP_ZONE: [f32; 4] = [0.20, 0.78, 0.35, 0.06];
-/// Red zone fill at 6% alpha (between entry and SL).
-const BRACKET_SL_ZONE: [f32; 4] = [0.90, 0.25, 0.25, 0.06];
+/// Orange zone fill at 6% alpha (between entry and SL).
+const BRACKET_SL_ZONE: [f32; 4] = [1.0, 0.60, 0.0, 0.06];
 
 // ── Phase 3: chart rendering helpers ─────────────────────────────────
 
@@ -185,18 +196,41 @@ impl OrderBracket {
     /// Compute line style for a leg based on bracket status.
     ///
     /// Returns `(LineStyle, line_width, color)`. The base color comes
-    /// from the leg role: entry uses side-colored green (Long) or red
-    /// (Short), TP = green, SL = red. The bracket status modulates
-    /// line style, width, and alpha. Draft brackets additionally
-    /// distinguish saved (0.65) from unsaved (0.50).
+    /// from the leg role and entry type: entry color depends on
+    /// `(side, entry_type)`, TP = green, SL = orange. The bracket
+    /// status modulates line style, width, and alpha. Draft brackets
+    /// additionally distinguish saved (0.65) from unsaved (0.50).
+    ///
+    /// SL lines are always dotted regardless of status (user
+    /// requirement for visual distinction). Other legs follow the
+    /// standard status → style mapping.
     pub fn leg_style(&self, role: LegRole) -> (LineStyle, f32, [f32; 4]) {
+        // SL has a dedicated code path: always dotted, always orange.
+        if role == LegRole::StopLoss {
+            let (width, alpha_mult) = match self.status {
+                BracketStatus::Draft => (1.0, if self.saved { 0.65 } else { 0.50 }),
+                BracketStatus::Pending => (1.0, 0.80),
+                BracketStatus::PartialFill => (1.5, 0.90),
+                BracketStatus::Active => (1.5, 1.0),
+                BracketStatus::Closed => (1.0, 0.30),
+                BracketStatus::Cancelled => (1.0, 0.20),
+            };
+            let mut color = BRACKET_SL_COLOR;
+            color[3] *= alpha_mult;
+            return (LineStyle::Dotted { dot_spacing: 4.0 }, width, color);
+        }
+
         let base_color = match role {
-            LegRole::Entry => match self.side {
-                BracketSide::Long => BRACKET_LONG_ENTRY_COLOR,
-                BracketSide::Short => BRACKET_SHORT_ENTRY_COLOR,
+            LegRole::Entry | LegRole::StopTrigger => match (self.side, self.entry_type) {
+                (BracketSide::Long, EntryType::Stop) => BRACKET_LONG_STOP_COLOR,
+                (BracketSide::Long, EntryType::StopLimit) => BRACKET_LONG_STOP_LIMIT_COLOR,
+                (BracketSide::Long, _) => BRACKET_LONG_ENTRY_COLOR,
+                (BracketSide::Short, EntryType::Stop) => BRACKET_SHORT_STOP_COLOR,
+                (BracketSide::Short, EntryType::StopLimit) => BRACKET_SHORT_STOP_LIMIT_COLOR,
+                (BracketSide::Short, _) => BRACKET_SHORT_ENTRY_COLOR,
             },
             LegRole::TakeProfit => BRACKET_TP_COLOR,
-            LegRole::StopLoss => BRACKET_SL_COLOR,
+            LegRole::StopLoss => unreachable!(),
         };
 
         let (style, width, alpha_mult) = match self.status {
@@ -363,6 +397,7 @@ pub fn format_sl_label(leg: &BracketLeg, status: BracketStatus) -> String {
 
 use super::compute::{ComputeContext, LabelAnchor, WidgetLabel, WidgetOutput};
 use super::hit_test::{CursorIcon, HitZone, HitZoneKind};
+use super::level::segmented_line;
 use super::AnnotationId;
 use crate::instances::GridLineInstance;
 
@@ -382,14 +417,13 @@ pub fn compute_bracket(
 
     // ── Entry line ──────────────────────────────────────────────────
     let entry_y = ctx.camera.price_to_y(bracket.entry.price);
-    let (_entry_style, entry_width, entry_color) = bracket.leg_style(LegRole::Entry);
+    let (entry_style, entry_width, entry_color) = bracket.leg_style(LegRole::Entry);
     let mut ec = entry_color;
     ec[3] *= alpha;
 
-    output.lines.push(GridLineInstance {
-        rect: [0.0, entry_y, vp_width, entry_y + entry_width],
-        color: ec,
-    });
+    output.lines.extend(segmented_line(
+        0.0, vp_width, entry_y, entry_width, ec, &entry_style,
+    ));
 
     let entry_label_text = format_entry_label(bracket);
     output.labels.push(WidgetLabel {
@@ -402,17 +436,69 @@ pub fn compute_bracket(
         anchor: LabelAnchor::Right,
     });
 
+    // ── Stop trigger line (StopLimit only) ─────────────────────────
+    if bracket.entry_type == EntryType::StopLimit {
+        if let Some(stop_price) = bracket.entry_stop_price {
+            let stop_y = ctx.camera.price_to_y(stop_price);
+            let mut stop_width = entry_width;
+            let stop_hovered = ctx
+                .hovered_annotation
+                .map(|(aid, kind)| {
+                    aid == annotation_id && kind == HitZoneKind::BracketStopTrigger
+                })
+                .unwrap_or(false);
+            if stop_hovered {
+                stop_width += 1.0;
+            }
+            // Use entry color but dashed to distinguish from the limit line.
+            let stop_style = LineStyle::Dashed {
+                dash_len: 4.0,
+                gap_len: 3.0,
+            };
+            output.lines.extend(segmented_line(
+                0.0, vp_width, stop_y, stop_width, ec, &stop_style,
+            ));
+
+            // Hit zone for dragging the stop trigger.
+            if bracket.status == BracketStatus::Draft {
+                output.hit_zones.push(HitZone {
+                    annotation_id,
+                    rect: [0.0, stop_y - 6.0, vp_width, stop_y + 6.0],
+                    kind: HitZoneKind::BracketStopTrigger,
+                    cursor: CursorIcon::ResizeNS,
+                });
+            }
+
+            let stop_label = format!("STP {:.2}", stop_price);
+            output.labels.push(WidgetLabel {
+                text: stop_label,
+                screen_x: vp_width - 10.0,
+                screen_y: stop_y,
+                bg_color: [0.12, 0.12, 0.15, 0.85 * alpha],
+                text_color: ec,
+                font_size: 11.0,
+                anchor: LabelAnchor::Right,
+            });
+        }
+    }
+
     // ── Take-profit line ────────────────────────────────────────────
     if let Some(ref tp) = bracket.take_profit {
         let tp_y = ctx.camera.price_to_y(tp.price);
-        let (_tp_style, tp_width, tp_color) = bracket.leg_style(LegRole::TakeProfit);
+        let (tp_style, mut tp_width, tp_color) = bracket.leg_style(LegRole::TakeProfit);
+        let tp_hovered = ctx
+            .hovered_annotation
+            .map(|(aid, kind)| aid == annotation_id && kind == HitZoneKind::BracketTP)
+            .unwrap_or(false);
+        if tp_hovered {
+            tp_width += 1.0;
+        }
         let mut tc = tp_color;
         tc[3] *= alpha;
 
-        output.lines.push(GridLineInstance {
-            rect: [0.0, tp_y, vp_width, tp_y + tp_width],
-            color: tc,
-        });
+        output.lines.extend(segmented_line(
+            0.0, vp_width, tp_y, tp_width, tc, &tp_style,
+        ));
 
         output.hit_zones.push(HitZone {
             annotation_id,
@@ -436,14 +522,20 @@ pub fn compute_bracket(
     // ── Stop-loss line ──────────────────────────────────────────────
     if let Some(ref sl) = bracket.stop_loss {
         let sl_y = ctx.camera.price_to_y(sl.price);
-        let (_sl_style, sl_width, sl_color) = bracket.leg_style(LegRole::StopLoss);
+        let (sl_style, mut sl_width, sl_color) = bracket.leg_style(LegRole::StopLoss);
+        let sl_hovered = ctx
+            .hovered_annotation
+            .map(|(aid, kind)| aid == annotation_id && kind == HitZoneKind::BracketSL)
+            .unwrap_or(false);
+        if sl_hovered {
+            sl_width += 1.0;
+        }
         let mut sc = sl_color;
         sc[3] *= alpha;
 
-        output.lines.push(GridLineInstance {
-            rect: [0.0, sl_y, vp_width, sl_y + sl_width],
-            color: sc,
-        });
+        output.lines.extend(segmented_line(
+            0.0, vp_width, sl_y, sl_width, sc, &sl_style,
+        ));
 
         output.hit_zones.push(HitZone {
             annotation_id,

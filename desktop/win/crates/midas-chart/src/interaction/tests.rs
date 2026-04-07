@@ -1476,17 +1476,34 @@ fn test_drag_bracket_leg_action_stop_loss() {
     }
 }
 
+/// Camera with $30 range over 1080px — 36px/dollar.
+/// MIN_LEG_SEPARATION_PX (15) → ~$0.42 minimum offset.
+/// Test prices are 5-10 dollars apart, so the pixel minimum doesn't interfere.
+fn clamp_test_camera() -> Camera2D {
+    Camera2D {
+        viewport_width: 1920,
+        viewport_height: 1080,
+        time_start: 0.0,
+        time_end: 100_000.0,
+        price_low: 170.0,
+        price_high: 200.0,
+        dpi_scale: 1.0,
+    }
+}
+
 #[test]
 fn test_clamp_bracket_leg_long_tp_above_entry() {
-    // Long TP dragged above entry stays above.
-    let clamped = clamp_bracket_leg_price(195.0, 185.0, LegRole::TakeProfit, BracketSide::Long);
+    let cam = clamp_test_camera();
+    let clamped =
+        clamp_bracket_leg_price(195.0, 185.0, LegRole::TakeProfit, BracketSide::Long, &cam);
     assert!((clamped - 195.0).abs() < f64::EPSILON);
 }
 
 #[test]
 fn test_clamp_bracket_leg_long_tp_below_entry_clamped() {
-    // Long TP dragged below entry is clamped to just above entry.
-    let clamped = clamp_bracket_leg_price(180.0, 185.0, LegRole::TakeProfit, BracketSide::Long);
+    let cam = clamp_test_camera();
+    let clamped =
+        clamp_bracket_leg_price(180.0, 185.0, LegRole::TakeProfit, BracketSide::Long, &cam);
     assert!(
         clamped > 185.0,
         "Long TP must be above entry, got {}",
@@ -1496,15 +1513,17 @@ fn test_clamp_bracket_leg_long_tp_below_entry_clamped() {
 
 #[test]
 fn test_clamp_bracket_leg_long_sl_below_entry() {
-    // Long SL dragged below entry stays below.
-    let clamped = clamp_bracket_leg_price(175.0, 185.0, LegRole::StopLoss, BracketSide::Long);
+    let cam = clamp_test_camera();
+    let clamped =
+        clamp_bracket_leg_price(175.0, 185.0, LegRole::StopLoss, BracketSide::Long, &cam);
     assert!((clamped - 175.0).abs() < f64::EPSILON);
 }
 
 #[test]
 fn test_clamp_bracket_leg_long_sl_above_entry_clamped() {
-    // Long SL dragged above entry is clamped to just below entry.
-    let clamped = clamp_bracket_leg_price(190.0, 185.0, LegRole::StopLoss, BracketSide::Long);
+    let cam = clamp_test_camera();
+    let clamped =
+        clamp_bracket_leg_price(190.0, 185.0, LegRole::StopLoss, BracketSide::Long, &cam);
     assert!(
         clamped < 185.0,
         "Long SL must be below entry, got {}",
@@ -1514,15 +1533,17 @@ fn test_clamp_bracket_leg_long_sl_above_entry_clamped() {
 
 #[test]
 fn test_clamp_bracket_leg_short_tp_below_entry() {
-    // Short TP dragged below entry stays below.
-    let clamped = clamp_bracket_leg_price(175.0, 185.0, LegRole::TakeProfit, BracketSide::Short);
+    let cam = clamp_test_camera();
+    let clamped =
+        clamp_bracket_leg_price(175.0, 185.0, LegRole::TakeProfit, BracketSide::Short, &cam);
     assert!((clamped - 175.0).abs() < f64::EPSILON);
 }
 
 #[test]
 fn test_clamp_bracket_leg_short_tp_above_entry_clamped() {
-    // Short TP dragged above entry is clamped to just below entry.
-    let clamped = clamp_bracket_leg_price(190.0, 185.0, LegRole::TakeProfit, BracketSide::Short);
+    let cam = clamp_test_camera();
+    let clamped =
+        clamp_bracket_leg_price(190.0, 185.0, LegRole::TakeProfit, BracketSide::Short, &cam);
     assert!(
         clamped < 185.0,
         "Short TP must be below entry, got {}",
@@ -1532,19 +1553,44 @@ fn test_clamp_bracket_leg_short_tp_above_entry_clamped() {
 
 #[test]
 fn test_clamp_bracket_leg_short_sl_above_entry() {
-    // Short SL dragged above entry stays above.
-    let clamped = clamp_bracket_leg_price(195.0, 185.0, LegRole::StopLoss, BracketSide::Short);
+    let cam = clamp_test_camera();
+    let clamped =
+        clamp_bracket_leg_price(195.0, 185.0, LegRole::StopLoss, BracketSide::Short, &cam);
     assert!((clamped - 195.0).abs() < f64::EPSILON);
 }
 
 #[test]
 fn test_clamp_bracket_leg_short_sl_below_entry_clamped() {
-    // Short SL dragged below entry is clamped to just above entry.
-    let clamped = clamp_bracket_leg_price(180.0, 185.0, LegRole::StopLoss, BracketSide::Short);
+    let cam = clamp_test_camera();
+    let clamped =
+        clamp_bracket_leg_price(180.0, 185.0, LegRole::StopLoss, BracketSide::Short, &cam);
     assert!(
         clamped > 185.0,
         "Short SL must be above entry, got {}",
         clamped
+    );
+}
+
+#[test]
+fn test_clamp_bracket_leg_pixel_minimum_enforced() {
+    // Zoomed-out camera: $200 range over 1080px → ~5.4 px/dollar.
+    // MIN_LEG_SEPARATION_PX (15) → ~$2.78 minimum offset.
+    let cam = Camera2D {
+        viewport_width: 1920,
+        viewport_height: 1080,
+        time_start: 0.0,
+        time_end: 100_000.0,
+        price_low: 100.0,
+        price_high: 300.0,
+        dpi_scale: 1.0,
+    };
+    // Try to place Long TP at entry + $0.50 — should be pushed out to ~entry + $2.78.
+    let clamped =
+        clamp_bracket_leg_price(185.50, 185.0, LegRole::TakeProfit, BracketSide::Long, &cam);
+    let offset = clamped - 185.0;
+    assert!(
+        offset > 2.0,
+        "Pixel minimum should push TP further from entry, offset = {offset}"
     );
 }
 

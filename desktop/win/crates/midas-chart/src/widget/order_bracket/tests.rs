@@ -191,9 +191,13 @@ fn test_leg_style_cancelled_sl() {
     let mut b = make_bracket(185.0, 192.0, 182.0);
     b.status = BracketStatus::Cancelled;
     let (style, width, color) = b.leg_style(LegRole::StopLoss);
-    assert_eq!(style, LineStyle::Solid);
+    // SL is always dotted (orange), regardless of status.
+    assert!(matches!(style, LineStyle::Dotted { .. }));
     assert!((width - 1.0).abs() < f32::EPSILON);
-    // Cancelled alpha_mult = 0.2, base SL alpha = 1.0 => 0.2
+    // Orange base [1.0, 0.60, 0.0], cancelled alpha_mult = 0.2
+    assert!((color[0] - 1.0).abs() < 0.01);
+    assert!((color[1] - 0.60).abs() < 0.01);
+    assert!((color[2] - 0.0).abs() < 0.01);
     assert!((color[3] - 0.2).abs() < f32::EPSILON);
 }
 
@@ -551,4 +555,328 @@ fn format_sl_label_draft() {
     let leg = make_leg(169.95);
     let label = format_sl_label(&leg, BracketStatus::Draft);
     assert_eq!(label, "SL @ 169.95");
+}
+
+// -----------------------------------------------------------------------
+// Slice 2: segmented_line
+// -----------------------------------------------------------------------
+
+#[test]
+fn segmented_line_solid_single_instance() {
+    let segs = super::segmented_line(
+        0.0, 100.0, 50.0, 1.0,
+        [1.0, 1.0, 1.0, 1.0],
+        &LineStyle::Solid,
+    );
+    assert_eq!(segs.len(), 1);
+    assert!((segs[0].rect[0] - 0.0).abs() < f32::EPSILON);
+    assert!((segs[0].rect[2] - 100.0).abs() < f32::EPSILON);
+}
+
+#[test]
+fn segmented_line_dashed_count() {
+    let segs = super::segmented_line(
+        0.0, 100.0, 50.0, 1.0,
+        [1.0, 1.0, 1.0, 1.0],
+        &LineStyle::Dashed { dash_len: 6.0, gap_len: 4.0 },
+    );
+    // 100px / (6+4) = 10 segments
+    assert_eq!(segs.len(), 10, "expected 10 dash segments, got {}", segs.len());
+}
+
+#[test]
+fn segmented_line_dotted_count() {
+    let segs = super::segmented_line(
+        0.0, 100.0, 50.0, 1.0,
+        [1.0, 1.0, 1.0, 1.0],
+        &LineStyle::Dotted { dot_spacing: 4.0 },
+    );
+    // 100px / 4.0 = 25 dots
+    assert_eq!(segs.len(), 25, "expected 25 dot segments, got {}", segs.len());
+}
+
+// -----------------------------------------------------------------------
+// Entry type color dispatch
+// -----------------------------------------------------------------------
+
+#[test]
+fn leg_style_entry_green_for_long_stop() {
+    let mut b = make_bracket(185.0, 192.0, 182.0);
+    b.side = BracketSide::Long;
+    b.entry_type = EntryType::Stop;
+    b.status = BracketStatus::Active;
+    let (_style, _width, color) = b.leg_style(LegRole::Entry);
+    assert!(
+        (color[0] - 0.20).abs() < 0.01
+            && (color[1] - 0.78).abs() < 0.01
+            && (color[2] - 0.35).abs() < 0.01,
+        "Long Stop entry should be green, got: {:?}",
+        color
+    );
+}
+
+#[test]
+fn leg_style_entry_lime_for_long_stop_limit() {
+    let mut b = make_bracket(184.50, 195.0, 180.0);
+    b.side = BracketSide::Long;
+    b.entry_type = EntryType::StopLimit;
+    b.entry_stop_price = Some(185.00);
+    b.status = BracketStatus::Active;
+    let (_style, _width, color) = b.leg_style(LegRole::Entry);
+    assert!(
+        (color[0] - 0.50).abs() < 0.01
+            && (color[1] - 0.90).abs() < 0.01
+            && (color[2] - 0.20).abs() < 0.01,
+        "Long StopLimit entry should be lime green, got: {:?}",
+        color
+    );
+}
+
+#[test]
+fn leg_style_entry_red_for_short_stop() {
+    let mut b = make_bracket(185.0, 178.0, 188.0);
+    b.side = BracketSide::Short;
+    b.entry_type = EntryType::Stop;
+    b.status = BracketStatus::Active;
+    let (_style, _width, color) = b.leg_style(LegRole::Entry);
+    assert!(
+        (color[0] - 0.90).abs() < 0.01
+            && (color[1] - 0.25).abs() < 0.01
+            && (color[2] - 0.25).abs() < 0.01,
+        "Short Stop entry should be red, got: {:?}",
+        color
+    );
+}
+
+#[test]
+fn leg_style_entry_pink_for_short_stop_limit() {
+    let mut b = make_bracket(175.50, 165.0, 180.0);
+    b.side = BracketSide::Short;
+    b.entry_type = EntryType::StopLimit;
+    b.entry_stop_price = Some(175.00);
+    b.status = BracketStatus::Active;
+    let (_style, _width, color) = b.leg_style(LegRole::Entry);
+    assert!(
+        (color[0] - 0.90).abs() < 0.01
+            && (color[1] - 0.30).abs() < 0.01
+            && (color[2] - 0.50).abs() < 0.01,
+        "Short StopLimit entry should be pink-red, got: {:?}",
+        color
+    );
+}
+
+// -----------------------------------------------------------------------
+// SL always dotted regardless of status
+// -----------------------------------------------------------------------
+
+#[test]
+fn leg_style_sl_always_dotted_active() {
+    let mut b = make_bracket(185.0, 192.0, 182.0);
+    b.status = BracketStatus::Active;
+    let (style, width, color) = b.leg_style(LegRole::StopLoss);
+    assert!(
+        matches!(style, LineStyle::Dotted { .. }),
+        "Active SL should still be dotted, got: {:?}",
+        style
+    );
+    assert!((width - 1.5).abs() < f32::EPSILON);
+    // Orange base, full alpha for Active
+    assert!((color[0] - 1.0).abs() < 0.01);
+    assert!((color[1] - 0.60).abs() < 0.01);
+    assert!((color[2] - 0.0).abs() < 0.01);
+    assert!((color[3] - 1.0).abs() < f32::EPSILON);
+}
+
+#[test]
+fn leg_style_sl_always_dotted_draft() {
+    let b = make_bracket(185.0, 192.0, 182.0);
+    // status is Draft by default
+    let (style, _width, color) = b.leg_style(LegRole::StopLoss);
+    assert!(
+        matches!(style, LineStyle::Dotted { .. }),
+        "Draft SL should be dotted (not dashed), got: {:?}",
+        style
+    );
+    // Orange base, draft unsaved alpha = 0.50
+    assert!((color[0] - 1.0).abs() < 0.01);
+    assert!((color[1] - 0.60).abs() < 0.01);
+    assert!((color[2] - 0.0).abs() < 0.01);
+    assert!((color[3] - 0.50).abs() < f32::EPSILON);
+}
+
+// -----------------------------------------------------------------------
+// SL zone fill is orange
+// -----------------------------------------------------------------------
+
+#[test]
+fn bracket_zone_rects_sl_orange() {
+    let mut b = make_bracket(185.0, 192.0, 182.0);
+    b.status = BracketStatus::Active;
+    let price_to_y = |p: f64| ((200.0 - p) * 10.0) as f32;
+    let entry_y = price_to_y(185.0);
+    let zones = bracket_zone_rects(&b, entry_y, 1920.0, price_to_y);
+    assert_eq!(zones.len(), 2);
+    // SL zone is second element
+    let (_sl_rect, sl_color) = &zones[1];
+    assert!(
+        (sl_color[0] - 1.0).abs() < 0.01
+            && (sl_color[1] - 0.60).abs() < 0.01
+            && (sl_color[2] - 0.0).abs() < 0.01
+            && (sl_color[3] - 0.06).abs() < 0.001,
+        "SL zone should be orange at 6% alpha, got: {:?}",
+        sl_color
+    );
+}
+
+// -----------------------------------------------------------------------
+// Hover highlight
+// -----------------------------------------------------------------------
+
+use crate::camera::Camera2D;
+use crate::widget::compute::{ComputeContext, Viewport};
+use crate::widget::hit_test::HitZoneKind;
+use crate::widget::theme::Theme;
+use crate::widget::AnnotationId;
+use midas_data::CandleBuffer;
+
+/// Build a minimal `ComputeContext` for hover highlight tests.
+fn make_compute_ctx<'a>(
+    camera: &'a Camera2D,
+    data: &'a dyn midas_core::CandleData,
+    theme: &'a Theme,
+    hovered: Option<(AnnotationId, HitZoneKind)>,
+) -> ComputeContext<'a> {
+    ComputeContext {
+        camera,
+        data,
+        viewport: Viewport {
+            width: camera.viewport_width,
+            height: camera.viewport_height,
+        },
+        theme,
+        snap_fn: &|_| None,
+        candle_duration_ms: 60_000.0,
+        collapse_gaps: false,
+        separator_y: camera.viewport_height as f32 * 0.80,
+        dpi_scale: 1.0,
+        hovered_annotation: hovered,
+    }
+}
+
+#[test]
+fn compute_bracket_tp_hovered_wider() {
+    let mut b = make_bracket(185.0, 192.0, 182.0);
+    b.status = BracketStatus::Active;
+    let camera = Camera2D {
+        viewport_width: 1920,
+        viewport_height: 1080,
+        time_start: 0.0,
+        time_end: 100_000.0,
+        price_low: 170.0,
+        price_high: 200.0,
+        dpi_scale: 1.0,
+    };
+    let data = CandleBuffer::new();
+    let theme = Theme::default();
+    let aid = AnnotationId(42);
+
+    let ctx = make_compute_ctx(&camera, &data, &theme, Some((aid, HitZoneKind::BracketTP)));
+    let out = compute_bracket(&b, aid, &ctx, 1.0);
+
+    let ctx_no = make_compute_ctx(&camera, &data, &theme, None);
+    let out_no = compute_bracket(&b, aid, &ctx_no, 1.0);
+
+    let max_h_hovered = out
+        .lines
+        .iter()
+        .map(|l| (l.rect[3] - l.rect[1]).abs())
+        .fold(0.0_f32, f32::max);
+    let max_h_normal = out_no
+        .lines
+        .iter()
+        .map(|l| (l.rect[3] - l.rect[1]).abs())
+        .fold(0.0_f32, f32::max);
+    assert!(
+        max_h_hovered > max_h_normal,
+        "Hovered TP should produce wider (taller) line rects: hovered={max_h_hovered}, normal={max_h_normal}"
+    );
+}
+
+#[test]
+fn compute_bracket_sl_hovered_wider() {
+    let mut b = make_bracket(185.0, 192.0, 182.0);
+    b.status = BracketStatus::Active;
+    let camera = Camera2D {
+        viewport_width: 1920,
+        viewport_height: 1080,
+        time_start: 0.0,
+        time_end: 100_000.0,
+        price_low: 170.0,
+        price_high: 200.0,
+        dpi_scale: 1.0,
+    };
+    let data = CandleBuffer::new();
+    let theme = Theme::default();
+    let aid = AnnotationId(42);
+
+    let ctx = make_compute_ctx(&camera, &data, &theme, Some((aid, HitZoneKind::BracketSL)));
+    let out = compute_bracket(&b, aid, &ctx, 1.0);
+
+    let ctx_no = make_compute_ctx(&camera, &data, &theme, None);
+    let out_no = compute_bracket(&b, aid, &ctx_no, 1.0);
+
+    let max_h_hovered = out
+        .lines
+        .iter()
+        .map(|l| (l.rect[3] - l.rect[1]).abs())
+        .fold(0.0_f32, f32::max);
+    let max_h_normal = out_no
+        .lines
+        .iter()
+        .map(|l| (l.rect[3] - l.rect[1]).abs())
+        .fold(0.0_f32, f32::max);
+    assert!(
+        max_h_hovered > max_h_normal,
+        "Hovered SL should produce wider line rects: hovered={max_h_hovered}, normal={max_h_normal}"
+    );
+}
+
+#[test]
+fn compute_bracket_no_hover_normal_width() {
+    let mut b = make_bracket(185.0, 192.0, 182.0);
+    b.status = BracketStatus::Active;
+    let camera = Camera2D {
+        viewport_width: 1920,
+        viewport_height: 1080,
+        time_start: 0.0,
+        time_end: 100_000.0,
+        price_low: 170.0,
+        price_high: 200.0,
+        dpi_scale: 1.0,
+    };
+    let data = CandleBuffer::new();
+    let theme = Theme::default();
+    let aid = AnnotationId(42);
+
+    // Hover on a different annotation
+    let ctx = make_compute_ctx(
+        &camera,
+        &data,
+        &theme,
+        Some((AnnotationId(999), HitZoneKind::BracketTP)),
+    );
+    let out = compute_bracket(&b, aid, &ctx, 1.0);
+
+    // No hover at all
+    let ctx_no = make_compute_ctx(&camera, &data, &theme, None);
+    let out_no = compute_bracket(&b, aid, &ctx_no, 1.0);
+
+    // Both should produce identical line geometry
+    assert_eq!(out.lines.len(), out_no.lines.len());
+    for (a, b) in out.lines.iter().zip(out_no.lines.iter()) {
+        assert!(
+            (a.rect[3] - a.rect[1] - (b.rect[3] - b.rect[1])).abs() < f32::EPSILON,
+            "Line heights should be identical when not hovered"
+        );
+    }
 }

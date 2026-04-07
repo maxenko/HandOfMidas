@@ -7,7 +7,8 @@
 use crate::camera::Camera2D;
 use crate::dirty::DirtyFlags;
 use crate::level_tool::LevelTool;
-use crate::widget::Annotation;
+use crate::widget::hit_test::HitZoneKind;
+use crate::widget::{Annotation, AnnotationId};
 use midas_core::CandleData;
 
 /// Clean input contract for chart scene computation.
@@ -59,4 +60,6 @@ pub struct ChartInput<'a> {
     /// remain bright. Empty slice = no dimming (hover inactive).
     /// Each tuple is `(start_idx, end_idx)` inclusive, sorted ascending.
     pub gatr_bright_ranges: &'a [(usize, usize)],
+    /// Currently hovered bracket leg (for hover highlight in compute pass).
+    pub hovered_annotation: Option<(AnnotationId, HitZoneKind)>,
 }

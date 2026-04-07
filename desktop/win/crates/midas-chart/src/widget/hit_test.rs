@@ -38,6 +38,7 @@ pub struct HitResult {
 /// - `LevelLine` -> vertical drag (price only)
 /// - `BracketEntry` -> vertical drag (moves entire bracket)
 /// - `BracketTP` / `BracketSL` -> vertical drag (moves single leg)
+/// - `BracketStopTrigger` -> vertical drag (moves stop trigger price)
 /// - `BracketZone` -> select only (no drag)
 /// - `MarkerIcon` -> select only
 /// - `NoteBody` -> 2D drag (price + time)
@@ -51,6 +52,8 @@ pub enum HitZoneKind {
     BracketTP,
     /// A bracket's stop-loss line.
     BracketSL,
+    /// A bracket's stop trigger line (StopLimit entry type).
+    BracketStopTrigger,
     /// A bracket's zone fill (between entry and TP or SL).
     BracketZone,
     /// A marker's icon area.

@@ -8,8 +8,9 @@ use crate::camera::Camera2D;
 use crate::instances::GridLineInstance;
 use midas_core::CandleData;
 
-use super::hit_test::HitZone;
+use super::hit_test::{HitZone, HitZoneKind};
 use super::theme::Theme;
+use super::AnnotationId;
 
 /// Context passed to every widget compute function.
 ///
@@ -37,6 +38,8 @@ pub struct ComputeContext<'a> {
     pub separator_y: f32,
     /// DPI scale factor for physical pixel calculations.
     pub dpi_scale: f32,
+    /// Hovered bracket leg for highlight styling.
+    pub hovered_annotation: Option<(AnnotationId, HitZoneKind)>,
 }
 
 /// Viewport dimensions.

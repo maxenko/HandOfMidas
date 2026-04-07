@@ -11,6 +11,7 @@ use crate::dirty::DirtyFlags;
 use crate::interaction::ChartAction;
 use crate::level_tool::LevelTool;
 use crate::widget::bracket_tool::BracketTool;
+use crate::widget::hit_test::HitZoneKind;
 use crate::widget::AnnotationId;
 
 /// What the active tool needs from the crosshair.
@@ -178,6 +179,9 @@ pub struct ChartState {
     pub level_tool: LevelTool,
     /// Self-contained bracket drawing tool (3-click entry/TP/SL).
     pub bracket_tool: BracketTool,
+    /// Currently hovered bracket leg for visual highlight.
+    /// Set by the app layer on mouse-move; read by `compute_bracket()`.
+    pub hovered_annotation: Option<(AnnotationId, HitZoneKind)>,
 }
 
 impl ChartState {
@@ -204,6 +208,7 @@ impl ChartState {
             show_levels: true,
             level_tool: LevelTool::default(),
             bracket_tool: BracketTool::default(),
+            hovered_annotation: None,
         }
     }
 
