@@ -71,10 +71,10 @@ impl Default for OrderPanelState {
             visible: false,
             side: OrderSide::Buy,
             quantity: "100".to_string(),
-            tp_enabled: true,
+            tp_enabled: false,
             tp_mode: PriceInputMode::Absolute,
             tp_value: String::new(),
-            sl_enabled: true,
+            sl_enabled: false,
             sl_mode: PriceInputMode::Absolute,
             sl_value: String::new(),
             sl_type: StopLossType::Stop,
@@ -460,6 +460,20 @@ pub fn sync_panel_from_bracket(
     state: &mut OrderPanelState,
     bracket: &midas_chart::widget::order_bracket::OrderBracket,
 ) {
+    // Sync entry type so the panel dropdown matches the bracket.
+    state.entry_type = bracket.entry_type;
+
+    // Sync side.
+    state.side = match bracket.side {
+        midas_chart::widget::order_bracket::BracketSide::Long => OrderSide::Buy,
+        midas_chart::widget::order_bracket::BracketSide::Short => OrderSide::Sell,
+    };
+
+    // Sync quantity.
+    if let Some(qty) = bracket.quantity {
+        state.quantity = format!("{}", qty);
+    }
+
     // Entry price → limit_price / stop_price depending on entry_type.
     let entry_str = format!("{:.2}", bracket.entry.price);
     match bracket.entry_type {
@@ -480,18 +494,89 @@ pub fn sync_panel_from_bracket(
         }
     }
 
-    // TP value.
+    // TP: sync enabled flag and price value.
+    state.tp_enabled = bracket.take_profit.is_some();
     if let Some(ref tp) = bracket.take_profit {
         state.tp_value = format!("{:.2}", tp.price);
     } else {
         state.tp_value.clear();
     }
 
-    // SL value.
+    // SL: sync enabled flag and price value.
+    state.sl_enabled = bracket.stop_loss.is_some();
     if let Some(ref sl) = bracket.stop_loss {
         state.sl_value = format!("{:.2}", sl.price);
     } else {
         state.sl_value.clear();
+    }
+}
+
+// ===========================================================================
+// Bracket normalization
+// ===========================================================================
+
+/// Normalize a bracket so its data matches its `entry_type` rules.
+///
+/// Called after loading from disk or recalling a saved bracket to ensure
+/// stale data from old code versions doesn't produce incorrect chart lines.
+/// This is the single source of truth for what a bracket of each type
+/// should contain.
+///
+/// **Entry lines by type:**
+/// - Market: entry at last price, NOT draggable. No stop trigger.
+/// - Limit: entry at limit price, draggable. No stop trigger.
+/// - Stop: entry at stop price, draggable. No stop trigger.
+/// - StopLimit: entry at limit price + stop trigger line, both draggable.
+///
+/// **TP/SL legs:** Preserved as-is (user-controlled via panel toggles).
+/// Only cleared if they have degenerate values (price <= 0).
+///
+/// **Side constraints:** TP/SL on wrong side of entry are removed
+/// (e.g., Long TP below entry).
+pub fn normalize_bracket(bracket: &mut midas_chart::widget::order_bracket::OrderBracket) {
+    use midas_chart::widget::order_bracket::{BracketSide, EntryType};
+
+    // ── Entry stop_price by type ───────────────────────────────────
+    match bracket.entry_type {
+        EntryType::Market | EntryType::Limit | EntryType::Stop => {
+            bracket.entry_stop_price = None;
+        }
+        EntryType::StopLimit => {
+            if bracket.entry_stop_price.is_none() {
+                bracket.entry_stop_price = Some(bracket.entry.price);
+            }
+        }
+    }
+
+    // ── Validate TP leg ────────────────────────────────────────────
+    if let Some(ref tp) = bracket.take_profit {
+        let invalid = tp.price <= 0.0
+            || match bracket.side {
+                BracketSide::Long => tp.price <= bracket.entry.price,
+                BracketSide::Short => tp.price >= bracket.entry.price,
+            };
+        if invalid {
+            bracket.take_profit = None;
+        }
+    }
+
+    // ── Validate SL leg ────────────────────────────────────────────
+    if let Some(ref sl) = bracket.stop_loss {
+        let invalid = sl.price <= 0.0
+            || match bracket.side {
+                BracketSide::Long => sl.price >= bracket.entry.price,
+                BracketSide::Short => sl.price <= bracket.entry.price,
+            };
+        if invalid {
+            bracket.stop_loss = None;
+        }
+    }
+
+    // ── Validate entry price ───────────────────────────────────────
+    if bracket.entry.price <= 0.0 {
+        // Degenerate bracket — mark as cancelled so it doesn't render
+        // interactively but is still visible as a dim line.
+        bracket.status = midas_chart::widget::order_bracket::BracketStatus::Cancelled;
     }
 }
 
