@@ -401,6 +401,27 @@ use super::level::segmented_line;
 use super::AnnotationId;
 use crate::instances::GridLineInstance;
 
+/// Check if a bracket has data that contradicts its entry_type.
+fn needs_render_sanitize(bracket: &OrderBracket) -> bool {
+    match bracket.entry_type {
+        EntryType::Market | EntryType::Limit | EntryType::Stop => {
+            bracket.entry_stop_price.is_some()
+        }
+        EntryType::StopLimit => false,
+    }
+}
+
+/// Force bracket data to match entry_type rules at render time.
+/// Last line of defense — called only when `needs_render_sanitize` is true.
+fn render_sanitize(bracket: &mut OrderBracket) {
+    match bracket.entry_type {
+        EntryType::Market | EntryType::Limit | EntryType::Stop => {
+            bracket.entry_stop_price = None;
+        }
+        EntryType::StopLimit => {}
+    }
+}
+
 /// Compute render primitives for a bracket annotation.
 ///
 /// Produces lines for entry/TP/SL, zone fills (Active brackets only),
@@ -412,12 +433,32 @@ pub fn compute_bracket(
     ctx: &ComputeContext<'_>,
     alpha: f32,
 ) -> WidgetOutput {
+    // ── Rendering-level entry_type guard ────────────────────────────
+    // Even if normalization was bypassed, force the data to match the
+    // entry_type rules. This is the last line of defense — the chart
+    // must never render lines that contradict the order type.
+    let mut bracket_cow;
+    let bracket = if needs_render_sanitize(bracket) {
+        bracket_cow = bracket.clone();
+        render_sanitize(&mut bracket_cow);
+        &bracket_cow
+    } else {
+        bracket
+    };
+
     let mut output = WidgetOutput::default();
     let vp_width = ctx.viewport.width as f32;
 
     // ── Entry line ──────────────────────────────────────────────────
     let entry_y = ctx.camera.price_to_y(bracket.entry.price);
-    let (entry_style, entry_width, entry_color) = bracket.leg_style(LegRole::Entry);
+    let (entry_style, mut entry_width, entry_color) = bracket.leg_style(LegRole::Entry);
+    let entry_hovered = ctx
+        .hovered_annotation
+        .map(|(aid, kind)| aid == annotation_id && kind == HitZoneKind::BracketEntry)
+        .unwrap_or(false);
+    if entry_hovered {
+        entry_width += 1.0;
+    }
     let mut ec = entry_color;
     ec[3] *= alpha;
 
@@ -440,7 +481,9 @@ pub fn compute_bracket(
     if bracket.entry_type == EntryType::StopLimit {
         if let Some(stop_price) = bracket.entry_stop_price {
             let stop_y = ctx.camera.price_to_y(stop_price);
-            let mut stop_width = entry_width;
+            // Use base width from leg_style, not the potentially hover-boosted entry_width.
+            let (_, base_stop_width, _) = bracket.leg_style(LegRole::StopTrigger);
+            let mut stop_width = base_stop_width;
             let stop_hovered = ctx
                 .hovered_annotation
                 .map(|(aid, kind)| {
