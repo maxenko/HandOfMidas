@@ -549,26 +549,32 @@ pub fn normalize_bracket(bracket: &mut midas_chart::widget::order_bracket::Order
     }
 
     // ── Validate TP leg ────────────────────────────────────────────
-    if let Some(ref tp) = bracket.take_profit {
-        let invalid = tp.price <= 0.0
-            || match bracket.side {
-                BracketSide::Long => tp.price <= bracket.entry.price,
-                BracketSide::Short => tp.price >= bracket.entry.price,
-            };
-        if invalid {
+    // Long TP must be above entry; Short TP must be below entry.
+    // If on wrong side (e.g., after a side flip), mirror it.
+    if let Some(ref mut tp) = bracket.take_profit {
+        if tp.price <= 0.0 {
             bracket.take_profit = None;
+        } else {
+            let offset = (tp.price - bracket.entry.price).abs();
+            tp.price = match bracket.side {
+                BracketSide::Long => bracket.entry.price + offset,
+                BracketSide::Short => bracket.entry.price - offset,
+            };
         }
     }
 
     // ── Validate SL leg ────────────────────────────────────────────
-    if let Some(ref sl) = bracket.stop_loss {
-        let invalid = sl.price <= 0.0
-            || match bracket.side {
-                BracketSide::Long => sl.price >= bracket.entry.price,
-                BracketSide::Short => sl.price <= bracket.entry.price,
-            };
-        if invalid {
+    // Long SL must be below entry; Short SL must be above entry.
+    // If on wrong side (e.g., after a side flip), mirror it.
+    if let Some(ref mut sl) = bracket.stop_loss {
+        if sl.price <= 0.0 {
             bracket.stop_loss = None;
+        } else {
+            let offset = (sl.price - bracket.entry.price).abs();
+            sl.price = match bracket.side {
+                BracketSide::Long => bracket.entry.price - offset,
+                BracketSide::Short => bracket.entry.price + offset,
+            };
         }
     }
 
