@@ -2461,7 +2461,7 @@ fn build_priceline_overlay<'a>(
                     text(label.text.clone())
                         .size(label_font_size)
                         .color(label_color),
-                    Space::new().width(Length::Fixed(4.0)),
+                    Space::new().width(Length::Fixed(8.0)),
                 ]
                 .width(Fill),
             )
@@ -3001,9 +3001,9 @@ fn build_crosshair_label_overlay<'a>(
 
     let mut elements: Vec<Element<'a, Message>> = Vec::new();
 
-    // ── Priceline label (right edge, centered on cursor Y) ────────────
+    // ── Price lens (right edge, centered on cursor Y) ─────────────────
     {
-        let pl = &labels.priceline_label;
+        let pl = &labels.priceline_lens;
         let [r, g, b, a] = pl.bg_color;
         let bg = Color::from_rgba(r, g, b, a);
         let [tr, tg, tb, ta] = pl.text_color;
@@ -3018,19 +3018,15 @@ fn build_crosshair_label_overlay<'a>(
             .padding([3, 6])
             .style(move |_theme: &iced::Theme| container::Style {
                 background: Some(iced::Background::Color(bg)),
-                border: iced::Border {
-                    radius: 3.0.into(),
-                    ..Default::default()
-                },
                 ..Default::default()
             });
 
-        // Right-aligned: flexible spacer on the left, badge, small gap to edge.
+        // Right-aligned: flexible spacer on the left, badge, gap to edge.
         let positioned = container(
             row![
                 Space::new().width(Fill),
                 badge,
-                Space::new().width(Length::Fixed(4.0))
+                Space::new().width(Length::Fixed(8.0))
             ]
             .width(Fill),
         )
@@ -3057,10 +3053,6 @@ fn build_crosshair_label_overlay<'a>(
             .padding([3, 6])
             .style(move |_theme: &iced::Theme| container::Style {
                 background: Some(iced::Background::Color(bg)),
-                border: iced::Border {
-                    radius: 3.0.into(),
-                    ..Default::default()
-                },
                 ..Default::default()
             });
 
