@@ -343,34 +343,16 @@ fn row_to_order(row: &rusqlite::Row<'_>) -> Result<OrderRow, rusqlite::Error> {
 // ── Conversion layer ────────────────────────────────────────────────
 
 /// Error converting between [`OrderRow`] and [`LocalOrder`].
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ConversionError {
     /// A critical field could not be parsed.
+    #[error("conversion error on '{field}': value '{value}' — {reason}")]
     Field {
         field: &'static str,
         value: String,
         reason: String,
     },
 }
-
-impl std::fmt::Display for ConversionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Field {
-                field,
-                value,
-                reason,
-            } => {
-                write!(
-                    f,
-                    "conversion error on '{field}': value '{value}' — {reason}"
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for ConversionError {}
 
 /// Helper: parse a required field via `FromStr`, returning a `ConversionError`
 /// on failure.

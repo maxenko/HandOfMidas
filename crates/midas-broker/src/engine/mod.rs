@@ -1746,30 +1746,14 @@ fn build_bracket(params: &BracketParams) -> BracketGroup {
 // ===========================================================================
 
 /// Order size validation errors.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum OrderSizeError {
+    #[error("quantity {quantity} exceeds limit {limit}")]
     QuantityExceedsLimit { quantity: f64, limit: f64 },
+    #[error("notional ${notional:.0} exceeds limit ${limit:.0}")]
     NotionalExceedsLimit { notional: f64, limit: f64 },
+    #[error("no reference price for {symbol} — notional guard requires price")]
     MissingReferencePrice { symbol: String },
-}
-
-impl std::fmt::Display for OrderSizeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::QuantityExceedsLimit { quantity, limit } => {
-                write!(f, "quantity {quantity} exceeds limit {limit}")
-            }
-            Self::NotionalExceedsLimit { notional, limit } => {
-                write!(f, "notional ${notional:.0} exceeds limit ${limit:.0}")
-            }
-            Self::MissingReferencePrice { symbol } => {
-                write!(
-                    f,
-                    "no reference price for {symbol} — notional guard requires price"
-                )
-            }
-        }
-    }
 }
 
 /// Engine-level order size guard. Hard reject — not bypassable from UI.
@@ -1786,21 +1770,18 @@ fn validate_order_size(
     }
 
     if limits.max_notional_value > 0.0 {
-        match params.reference_price {
-            Some(price) => {
-                let notional = params.quantity * price;
-                if notional > limits.max_notional_value {
-                    return Err(OrderSizeError::NotionalExceedsLimit {
-                        notional,
-                        limit: limits.max_notional_value,
-                    });
-                }
-            }
-            None => {
-                return Err(OrderSizeError::MissingReferencePrice {
+        let price =
+            params
+                .reference_price
+                .ok_or_else(|| OrderSizeError::MissingReferencePrice {
                     symbol: params.symbol.clone(),
-                });
-            }
+                })?;
+        let notional = params.quantity * price;
+        if notional > limits.max_notional_value {
+            return Err(OrderSizeError::NotionalExceedsLimit {
+                notional,
+                limit: limits.max_notional_value,
+            });
         }
     }
 
