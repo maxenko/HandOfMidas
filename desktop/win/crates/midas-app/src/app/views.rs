@@ -3041,16 +3041,17 @@ fn build_crosshair_label_overlay<'a>(
         elements.push(positioned.into());
     }
 
-    // ── Timeline label (below timeline, centered on snap X) ────────────
+    // ── Timeline lens (aligned with timeline labels, just above border) ──
     {
-        let tl = &labels.timeline_label;
+        let tl = &labels.timeline_lens;
         let [r, g, b, a] = tl.bg_color;
         let bg = Color::from_rgba(r, g, b, a);
         let [tr, tg, tb, ta] = tl.text_color;
         let fg = Color::from_rgba(tr, tg, tb, ta);
 
         let badge_height = label_font_size + 6.0;
-        let top_pad = (vh - badge_height - 2.0).max(0.0);
+        // Place badge bottom edge at border_y - 4px gap (same as time_row).
+        let top_pad = (border_y - 4.0 - badge_height).max(0.0);
 
         let badge = container(text(tl.text.clone()).size(label_font_size).color(fg))
             .padding([3, 6])
