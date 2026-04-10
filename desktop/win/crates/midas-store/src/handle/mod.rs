@@ -1,5 +1,5 @@
 use duckdb::Connection;
-use mailbox_processor::{BufferSize, MailboxProcessor};
+use mailbox_processor::MailboxProcessor;
 use midas_data::CandleBuffer;
 use tokio::sync::mpsc::Sender;
 
@@ -39,7 +39,7 @@ impl DbHandle {
         let threads = config.threads;
 
         let mb = MailboxProcessor::new_blocking(
-            BufferSize::Size(256),
+            Some(256),
             ConnState::Uninit,
             "duckdb-store",
             move |cmd, state, reply_channel| {

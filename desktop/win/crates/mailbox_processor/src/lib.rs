@@ -1,22 +1,8 @@
 use futures::future::Future;
-use std::fmt::Display;
 use tokio::sync::mpsc::{self, Sender};
 
-pub enum BufferSize {
-    Default,
-    Size(usize),
-}
-
-impl BufferSize {
-    fn unwrap_or(&self, default_value: usize) -> usize {
-        match self {
-            BufferSize::Default => default_value,
-            BufferSize::Size(x) => *x,
-        }
-    }
-}
-
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("{msg}")]
 pub struct MailboxProcessorError {
     msg: String,
 }
@@ -38,7 +24,7 @@ impl<Msg, ReplyMsg> Clone for MailboxProcessor<Msg, ReplyMsg> {
 
 impl<Msg: 'static + Send, ReplyMsg: 'static + Send> MailboxProcessor<Msg, ReplyMsg> {
     pub async fn new<State: 'static + Send, F>(
-        buffer_size: BufferSize,
+        buffer_size: Option<usize>,
         initial_state: State,
         message_processing_function: impl Fn(Msg, State, Option<Sender<ReplyMsg>>) -> F
             + Send
@@ -66,7 +52,7 @@ impl<Msg: 'static + Send, ReplyMsg: 'static + Send> MailboxProcessor<Msg, ReplyM
     /// for DuckDB's synchronous C++ FFI calls. Messages are received via
     /// `blocking_recv()` so the thread sleeps when idle.
     pub fn new_blocking<State: 'static + Send>(
-        buffer_size: BufferSize,
+        buffer_size: Option<usize>,
         initial_state: State,
         thread_name: &str,
         handler: impl Fn(Msg, State, Option<Sender<ReplyMsg>>) -> State + Send + 'static,
@@ -109,12 +95,6 @@ impl<Msg: 'static + Send, ReplyMsg: 'static + Send> MailboxProcessor<Msg, ReplyM
     }
 }
 
-impl Display for MailboxProcessorError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", self.msg)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,7 +109,7 @@ mod tests {
         }
 
         let mb = MailboxProcessor::<SendMessageTypes, i32>::new(
-            BufferSize::Default,
+            None,
             0,
             |msg, state, reply_channel| async move {
                 match msg {
@@ -181,7 +161,7 @@ mod tests {
         }
 
         let mb = MailboxProcessor::<Msg, i32>::new_blocking(
-            BufferSize::Size(100),
+            Some(100),
             0i32,
             "test-blocking",
             |msg, state, reply_channel| {
