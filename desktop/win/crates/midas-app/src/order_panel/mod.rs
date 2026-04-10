@@ -531,8 +531,8 @@ pub fn sync_panel_from_bracket(
 /// **TP/SL legs:** Preserved as-is (user-controlled via panel toggles).
 /// Only cleared if they have degenerate values (price <= 0).
 ///
-/// **Side constraints:** TP/SL on wrong side of entry are removed
-/// (e.g., Long TP below entry).
+/// **Side constraints:** TP/SL on wrong side of entry are mirrored
+/// to the correct side (preserves offset distance from entry).
 pub fn normalize_bracket(bracket: &mut midas_chart::widget::order_bracket::OrderBracket) {
     use midas_chart::widget::order_bracket::{BracketSide, EntryType};
 

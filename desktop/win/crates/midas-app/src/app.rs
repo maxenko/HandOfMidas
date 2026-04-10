@@ -819,7 +819,7 @@ impl MidasApp {
         // Saved brackets load Active (visible on chart immediately).
         {
             let mut dirty_symbols: Vec<String> = Vec::new();
-            for (_, panel) in &mut app.order_panels {
+            for panel in app.order_panels.values_mut() {
                 let symbol = panel.state.symbol.to_uppercase();
                 if symbol.is_empty() {
                     continue;
@@ -1142,6 +1142,26 @@ impl MidasApp {
                 chart.chart_state.dirty.mark_levels();
             }
         }
+    }
+
+    /// Sync an order panel's UI state from its linked bracket annotation,
+    /// then mark all charts showing that symbol as dirty so bracket lines
+    /// re-render.
+    ///
+    /// This is the single call site for the "find bracket → sync panel →
+    /// mark dirty" pattern that was previously copy-pasted 10+ times.
+    fn sync_panel_and_redraw(
+        &mut self,
+        panel_id: midas_core::OrderPanelId,
+        ann_id: midas_chart::widget::AnnotationId,
+        symbol: &str,
+    ) {
+        if let Some(bracket_data) = self.annotation_store.get_bracket(symbol, ann_id) {
+            if let Some(p) = self.order_panels.get_mut(&panel_id) {
+                crate::order_panel::sync_panel_from_bracket(&mut p.state, bracket_data);
+            }
+        }
+        self.mark_levels_dirty_for_ticker(symbol);
     }
 
     // ── Bracket chart toggle helpers ────────────────────────────────
@@ -3606,31 +3626,10 @@ impl MidasApp {
                                 ann.kind
                             {
                                 b.side = bracket_side;
-                                // Normalize mirrors TP/SL to the correct side.
                                 crate::order_panel::normalize_bracket(b);
                             }
                         });
-                        // Sync panel from the normalized bracket.
-                        if let Some(bracket_data) = self
-                            .annotation_store
-                            .get(symbol)
-                            .iter()
-                            .find(|a| a.id == ann_id)
-                            .and_then(|a| match &a.kind {
-                                midas_chart::widget::AnnotationKind::OrderBracket(b) => {
-                                    Some(b.as_ref())
-                                }
-                                _ => None,
-                            })
-                        {
-                            if let Some(p) = self.order_panels.get_mut(&panel_id) {
-                                crate::order_panel::sync_panel_from_bracket(
-                                    &mut p.state,
-                                    bracket_data,
-                                );
-                            }
-                        }
-                        self.mark_levels_dirty_for_ticker(symbol);
+                        self.sync_panel_and_redraw(panel_id, ann_id, symbol);
                     }
                     StructuralSync::Quantity(ann_id, ref symbol, ref qty_str) => {
                         let qty = qty_str.parse::<f64>().ok();
@@ -3674,27 +3673,7 @@ impl MidasApp {
                                 }
                             }
                         });
-                        // Sync panel from updated bracket.
-                        if let Some(bracket_data) = self
-                            .annotation_store
-                            .get(symbol)
-                            .iter()
-                            .find(|a| a.id == ann_id)
-                            .and_then(|a| match &a.kind {
-                                midas_chart::widget::AnnotationKind::OrderBracket(b) => {
-                                    Some(b.as_ref())
-                                }
-                                _ => None,
-                            })
-                        {
-                            if let Some(p) = self.order_panels.get_mut(&panel_id) {
-                                crate::order_panel::sync_panel_from_bracket(
-                                    &mut p.state,
-                                    bracket_data,
-                                );
-                            }
-                        }
-                        self.mark_levels_dirty_for_ticker(symbol);
+                        self.sync_panel_and_redraw(panel_id, ann_id, symbol);
                     }
                     StructuralSync::ToggleSl(ann_id, ref symbol, enabled, _last_price) => {
                         self.annotation_store.update(symbol, ann_id, |ann| {
@@ -3728,27 +3707,7 @@ impl MidasApp {
                                 }
                             }
                         });
-                        // Sync panel from updated bracket.
-                        if let Some(bracket_data) = self
-                            .annotation_store
-                            .get(symbol)
-                            .iter()
-                            .find(|a| a.id == ann_id)
-                            .and_then(|a| match &a.kind {
-                                midas_chart::widget::AnnotationKind::OrderBracket(b) => {
-                                    Some(b.as_ref())
-                                }
-                                _ => None,
-                            })
-                        {
-                            if let Some(p) = self.order_panels.get_mut(&panel_id) {
-                                crate::order_panel::sync_panel_from_bracket(
-                                    &mut p.state,
-                                    bracket_data,
-                                );
-                            }
-                        }
-                        self.mark_levels_dirty_for_ticker(symbol);
+                        self.sync_panel_and_redraw(panel_id, ann_id, symbol);
                     }
                     StructuralSync::None => {}
                 }

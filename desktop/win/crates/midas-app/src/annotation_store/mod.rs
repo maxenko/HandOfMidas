@@ -134,6 +134,24 @@ impl AnnotationStore {
         self.global_generation
     }
 
+    /// Returns an annotation by ID within a symbol, or `None`.
+    pub fn get_by_id(&self, symbol: &str, id: AnnotationId) -> Option<&Annotation> {
+        self.get(symbol).iter().find(|a| a.id == id)
+    }
+
+    /// Returns the `OrderBracket` data for an annotation, or `None` if the
+    /// annotation doesn't exist or isn't a bracket.
+    pub fn get_bracket(
+        &self,
+        symbol: &str,
+        id: AnnotationId,
+    ) -> Option<&midas_chart::widget::order_bracket::OrderBracket> {
+        self.get_by_id(symbol, id).and_then(|a| match &a.kind {
+            AnnotationKind::OrderBracket(b) => Some(b.as_ref()),
+            _ => None,
+        })
+    }
+
     /// Finds an annotation by ID across all symbols.
     #[allow(dead_code)] // part of planned API
     pub fn find(&self, id: AnnotationId) -> Option<(&str, &Annotation)> {

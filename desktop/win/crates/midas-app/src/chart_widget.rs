@@ -244,8 +244,11 @@ impl shader::Program<Message> for ChartProgram {
         chart_state.data_time_start = self.snapshot.data_time_start;
         chart_state.data_time_end = self.snapshot.data_time_end;
         // Sync global placement state → per-widget level tool.
-        // Don't interfere with dragging (drag is always local).
-        if !chart_state.level_tool.is_dragging() {
+        // Don't interfere with annotation dragging (drag is always local).
+        if !matches!(
+            chart_state.interaction_mode,
+            InteractionMode::DraggingAnnotation { .. }
+        ) {
             if self.snapshot.level_placing
                 && !chart_state.level_tool.is_placing()
                 && !state.tool_cancelled_this_frame
@@ -393,7 +396,10 @@ impl shader::Program<Message> for ChartProgram {
                     state.drag_price_override = Some((id.0, *new_price));
                 }
                 // Clear drag override when drag ends.
-                if !chart_state.level_tool.is_dragging() {
+                if !matches!(
+                    chart_state.interaction_mode,
+                    InteractionMode::DraggingAnnotation { .. }
+                ) {
                     state.drag_price_override = None;
                 }
                 if let Some(msg) = action_to_message(self.chart_id, action, &chart_state.camera) {
@@ -526,6 +532,13 @@ impl shader::Program<Message> for ChartProgram {
             Vec::new()
         };
 
+        let drag_ghost = state.drag_price_override.and_then(|(drag_id, _)| {
+            snap.levels
+                .iter()
+                .find(|l| l.id == drag_id)
+                .map(|l| (midas_chart::widget::AnnotationId(l.id), l.price))
+        });
+
         // Build the level tool for chart scene computation.
         // If this chart is NOT the source of the placing cursor, clear
         // preview_price to avoid stale previews (handles cross-window jumps).
@@ -577,6 +590,11 @@ impl shader::Program<Message> for ChartProgram {
                 .chart_state
                 .as_ref()
                 .and_then(|cs| cs.hovered_annotation),
+            selected_annotation: state
+                .chart_state
+                .as_ref()
+                .and_then(|cs| cs.selected_level),
+            drag_ghost,
         };
 
         let scene = compute_chart_scene(&input);
@@ -622,9 +640,8 @@ impl shader::Program<Message> for ChartProgram {
                 cs.interaction_mode,
                 InteractionMode::DraggingVolumeScale { .. }
                     | InteractionMode::DraggingTimelineBorder { .. }
-                    | InteractionMode::DraggingBracketLeg { .. }
-            ) || cs.level_tool.is_dragging()
-            {
+                    | InteractionMode::DraggingAnnotation { .. }
+            ) {
                 return mouse::Interaction::ResizingVertically;
             }
         }
@@ -820,42 +837,6 @@ impl shader::Primitive for ChartPrimitive {
         let vw = self.viewport_width as f32;
         let vh = self.viewport_height as f32;
         resources.grid_lines = scene.grid_instances.clone();
-
-        // Convert horizontal price levels into full-width grid line instances.
-        for level in &scene.levels {
-            let y = level.screen_y;
-            let thickness = level.line_width.max(1.0);
-            resources.grid_lines.push(GridLineInstance {
-                rect: [0.0, y, vw, y + thickness],
-                color: level.color,
-            });
-            // Selection highlight: thicker semi-transparent glow behind the line.
-            if level.is_selected {
-                let glow_thickness = thickness + 4.0;
-                let glow_y = y - 2.0;
-                resources.grid_lines.push(GridLineInstance {
-                    rect: [0.0, glow_y, vw, glow_y + glow_thickness],
-                    color: [
-                        level.color[0],
-                        level.color[1],
-                        level.color[2],
-                        level.color[3] * 0.3,
-                    ],
-                });
-            }
-            // Ghost line during drag (original position).
-            if let Some(orig_y) = level.original_screen_y {
-                resources.grid_lines.push(GridLineInstance {
-                    rect: [0.0, orig_y, vw, orig_y + 1.0],
-                    color: [
-                        level.color[0],
-                        level.color[1],
-                        level.color[2],
-                        level.color[3] * 0.2,
-                    ],
-                });
-            }
-        }
 
         // Preview level line during placement mode (thicker, colored).
         // Reads from scene.level_preview_y — independent of crosshair,

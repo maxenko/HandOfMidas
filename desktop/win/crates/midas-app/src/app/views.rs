@@ -12,7 +12,6 @@ use iced::widget::{
 };
 use iced::{window, Color, Element, Fill, Length};
 
-use midas_chart::AnnotationId;
 use midas_core::{ChartId, LinkColor, LinkMode, OrderPanelId, Timeframe, WatchlistId};
 
 use crate::layout::PanelContent;
@@ -142,30 +141,30 @@ impl MidasApp {
             };
             let shader = crate::chart_widget::chart_shader(program);
 
-            // Compute date labels for the time axis overlay.
+            // Compute timeline labels.
             let camera = &chart.chart_state.camera;
             let candle_duration = midas_chart::estimate_candle_duration(data.as_ref());
-            let date_labels = midas_chart::date_labels::compute(
+            let timeline_labels = midas_chart::timeline::compute(
                 camera,
                 data.as_ref(),
                 candle_duration,
                 chart.chart_state.collapse_gaps,
             );
-            let date_overlay = build_date_label_overlay(
-                &date_labels,
+            let timeline_overlay = build_timeline_overlay(
+                &timeline_labels,
                 camera,
                 chart.chart_state.timeline_border_ratio,
             );
 
-            let price_overlay =
-                build_price_label_overlay(camera, chart.chart_state.timeline_border_ratio);
+            let priceline_overlay =
+                build_priceline_overlay(camera, chart.chart_state.timeline_border_ratio);
 
             // Build level-related overlays for floating window.
             let floating_chart_id = ChartId::new(0);
             let drawing_panel = build_drawing_panel(floating_chart_id, self.level_placing);
 
             let mut chart_layers: Vec<Element<'_, Message>> =
-                vec![shader.into(), date_overlay, price_overlay];
+                vec![shader.into(), timeline_overlay, priceline_overlay];
 
             chart_layers.push(build_gerchik_atr_overlay(
                 gerchik_atr.as_ref(),
@@ -173,13 +172,12 @@ impl MidasApp {
                 chart.timeframe == Timeframe::D1,
             ));
 
-            let store_levels = self.level_store.levels_for(&chart.symbol);
             if chart.chart_state.show_levels {
-                let level_renders = compute_level_renders(store_levels, chart);
-                chart_layers.push(build_level_labels_overlay(
-                    &level_renders,
-                    chart.chart_state.camera.viewport_height,
-                ));
+                let level_labels = compute_level_labels(
+                    self.level_store.levels_for(&chart.symbol),
+                    &chart.chart_state.camera,
+                );
+                chart_layers.push(build_widget_labels_overlay(&level_labels));
             }
 
             // Crosshair axis labels for floating window.
@@ -199,6 +197,7 @@ impl MidasApp {
             chart_layers.push(drawing_panel);
 
             // Level editor popup (when a level is being edited).
+            let store_levels = self.level_store.levels_for(&chart.symbol);
             if let (Some(editing_id), Some(screen_pos)) =
                 (chart.editing_level_id, chart.editing_level_screen_pos)
             {
@@ -818,30 +817,30 @@ impl MidasApp {
             let program = crate::chart_widget::ChartProgram { chart_id, snapshot };
             let shader = crate::chart_widget::chart_shader(program);
 
-            // Compute date labels for the time axis overlay.
+            // Compute timeline labels.
             let camera = &chart.chart_state.camera;
             let candle_duration = midas_chart::estimate_candle_duration(data.as_ref());
-            let date_labels = midas_chart::date_labels::compute(
+            let timeline_labels = midas_chart::timeline::compute(
                 camera,
                 data.as_ref(),
                 candle_duration,
                 chart.chart_state.collapse_gaps,
             );
 
-            let date_overlay = build_date_label_overlay(
-                &date_labels,
+            let timeline_overlay = build_timeline_overlay(
+                &timeline_labels,
                 camera,
                 chart.chart_state.timeline_border_ratio,
             );
 
-            let price_overlay =
-                build_price_label_overlay(camera, chart.chart_state.timeline_border_ratio);
+            let priceline_overlay =
+                build_priceline_overlay(camera, chart.chart_state.timeline_border_ratio);
 
             // Build level-related overlays.
             let drawing_panel = build_drawing_panel(chart_id, self.level_placing);
 
             let mut chart_layers: Vec<Element<'_, Message>> =
-                vec![shader.into(), date_overlay, price_overlay];
+                vec![shader.into(), timeline_overlay, priceline_overlay];
 
             chart_layers.push(build_gerchik_atr_overlay(
                 gerchik_atr.as_ref(),
@@ -849,13 +848,12 @@ impl MidasApp {
                 chart.timeframe == Timeframe::D1,
             ));
 
-            let store_levels = self.level_store.levels_for(&chart.symbol);
             if chart.chart_state.show_levels {
-                let level_renders = compute_level_renders(store_levels, chart);
-                chart_layers.push(build_level_labels_overlay(
-                    &level_renders,
-                    chart.chart_state.camera.viewport_height,
-                ));
+                let level_labels = compute_level_labels(
+                    self.level_store.levels_for(&chart.symbol),
+                    &chart.chart_state.camera,
+                );
+                chart_layers.push(build_widget_labels_overlay(&level_labels));
             }
 
             // Crosshair axis labels (white badges at arm endpoints).
@@ -875,6 +873,7 @@ impl MidasApp {
             chart_layers.push(drawing_panel);
 
             // Level editor popup (when a level is being edited).
+            let store_levels = self.level_store.levels_for(&chart.symbol);
             if let (Some(editing_id), Some(screen_pos)) =
                 (chart.editing_level_id, chart.editing_level_screen_pos)
             {
@@ -2293,13 +2292,13 @@ impl MidasApp {
 
 // ── Button style helpers ────────────────────────────────────────────
 
-/// Build an iced widget overlay for date labels at the separator line.
+/// Build an iced widget overlay for timeline labels at the separator line.
 ///
 /// Uses `FillPortion`-based positioning so labels scale correctly
 /// regardless of actual widget bounds. Horizontal gaps are also expressed
 /// as fill-portions relative to the camera viewport width.
-fn build_date_label_overlay<'a>(
-    labels: &[midas_chart::DateLabel],
+fn build_timeline_overlay<'a>(
+    labels: &[midas_chart::TimelineLabel],
     camera: &midas_chart::camera::Camera2D,
     timeline_border_ratio: f32,
 ) -> Element<'a, Message> {
@@ -2312,9 +2311,9 @@ fn build_date_label_overlay<'a>(
     // so the row scales proportionally to actual widget width.
     let portion_scale = 1000.0 / vw;
 
-    // Two independent rows: time labels above the separator, date labels below.
+    // Two independent rows: time labels above the separator, timeline labels below.
     // This keeps time text at a fixed vertical position regardless of whether
-    // a date label is present.
+    // a timeline label is present.
     let mut time_row = Row::new();
     let mut time_cursor = 0.0_f32;
 
@@ -2382,7 +2381,7 @@ fn build_date_label_overlay<'a>(
     }
 
     // Fixed heights so the FillPortion math is stable regardless
-    // of whether a date label is present.
+    // of whether a timeline label is present.
     let _time_row_height = label_font_size + 2.0;
     let _date_row_height = secondary_font_size + 2.0;
 
@@ -2413,13 +2412,13 @@ fn build_date_label_overlay<'a>(
     .into()
 }
 
-/// Build an iced widget overlay for price labels along the right edge of
+/// Build an iced widget overlay for priceline labels along the right edge of
 /// the chart's price area. Labels are positioned at the same Y coordinates
 /// as the horizontal grid lines, using fixed-pixel spacers for exact alignment.
 ///
 /// Uses the same font size (10pt) and muted-gray color as the time axis labels
 /// so the two scales look consistent.
-fn build_price_label_overlay<'a>(
+fn build_priceline_overlay<'a>(
     camera: &midas_chart::camera::Camera2D,
     timeline_border_ratio: f32,
 ) -> Element<'a, Message> {
@@ -2428,7 +2427,7 @@ fn build_price_label_overlay<'a>(
     let vh = camera.viewport_height.max(1) as f32;
     let border_y = vh * (1.0 - timeline_border_ratio);
 
-    let labels = midas_chart::compute_y_labels(camera);
+    let labels = midas_chart::compute_priceline_labels(camera);
 
     // Filter to labels within the price area and sort top-to-bottom.
     let mut visible: Vec<_> = labels
@@ -2553,38 +2552,67 @@ fn build_drawing_panel<'a>(chart_id: ChartId, is_placing: bool) -> Element<'a, M
         .into()
 }
 
-// ── Level labels overlay ───────────────────────────────────────────
+// ── Widget labels overlay ──────────────────────────────────────────
 
-/// Build an overlay that renders text labels for levels that have labels
-/// or icons set. Each label is positioned at the level's Y coordinate
-/// on the chart, appearing as a small badge near the left side.
-fn build_level_labels_overlay<'a>(
-    levels: &[midas_chart::LevelRender],
-    _viewport_height: u32,
-) -> Element<'a, Message> {
-    let mut label_elements: Vec<Element<'a, Message>> = Vec::new();
+/// Compute widget labels for horizontal levels from raw level data + camera.
+///
+/// Called during the view phase (before the GPU scene is computed) to build
+/// iced text overlay elements. The GPU rendering (lines, fills, glow, ghost)
+/// goes through `compute_level()` → `WidgetOutput` in the draw pass.
+fn compute_level_labels(
+    levels: &[midas_chart::HorizontalLevel],
+    camera: &midas_chart::Camera2D,
+) -> Vec<midas_chart::widget::compute::WidgetLabel> {
+    use midas_chart::widget::compute::{LabelAnchor, WidgetLabel};
+
+    let mut labels = Vec::new();
 
     for level in levels {
-        let label_str = match (&level.label, level.icon.as_char()) {
-            (Some(lbl), Some(icon_ch)) if !lbl.is_empty() => {
-                format!("{} {}", icon_ch, lbl)
-            }
-            (Some(lbl), None) if !lbl.is_empty() => lbl.clone(),
-            (None, Some(icon_ch)) | (Some(_), Some(icon_ch)) => icon_ch.to_string(),
-            _ => continue,
+        let y = camera.price_to_y(level.price);
+        let color = level.color;
+
+        // Icon + name label (left-aligned).
+        let icon_label = match (&level.label, level.icon.as_char()) {
+            (Some(lbl), Some(icon_ch)) if !lbl.is_empty() => Some(format!("{} {}", icon_ch, lbl)),
+            (Some(lbl), None) if !lbl.is_empty() => Some(lbl.clone()),
+            (None, Some(icon_ch)) | (Some(_), Some(icon_ch)) => Some(icon_ch.to_string()),
+            _ => None,
         };
+        if let Some(text) = icon_label {
+            labels.push(WidgetLabel {
+                text,
+                screen_x: 8.0,
+                screen_y: y,
+                bg_color: [color[0] * 0.3, color[1] * 0.3, color[2] * 0.3, 0.75],
+                text_color: [color[0], color[1], color[2], color[3].max(0.9)],
+                font_size: 14.0,
+                anchor: LabelAnchor::Left,
+            });
+        }
+    }
 
-        let [r, g, b, a] = level.color;
-        let label_color = Color::from_rgba(r, g, b, a.max(0.9));
-        let bg_color = Color::from_rgba(r * 0.3, g * 0.3, b * 0.3, 0.75);
+    labels
+}
 
-        // Center the badge vertically on the level line.
-        // Badge height ≈ font_size(16) + vertical_padding(3*2) + border ≈ 24px.
-        let badge_half_height = 15.0;
-        let top_pad = (level.screen_y - badge_half_height).max(0.0);
+fn build_widget_labels_overlay<'a>(
+    labels: &[midas_chart::widget::compute::WidgetLabel],
+) -> Element<'a, Message> {
+    use midas_chart::widget::compute::LabelAnchor;
 
-        let label_widget = container(text(label_str).size(16).color(label_color))
-            .padding([3, 8])
+    let mut label_elements: Vec<Element<'a, Message>> = Vec::new();
+
+    for label in labels {
+        let [r, g, b, a] = label.text_color;
+        let text_color = Color::from_rgba(r, g, b, a);
+        let [br, bg_val, bb, ba] = label.bg_color;
+        let bg_color = Color::from_rgba(br, bg_val, bb, ba);
+
+        let badge_half_height = (label.font_size + 6.0) / 2.0;
+        let top_pad = (label.screen_y - badge_half_height).max(0.0);
+        let font_size = label.font_size;
+
+        let badge = container(text(label.text.clone()).size(font_size).color(text_color))
+            .padding([3, 6])
             .style(move |_theme: &iced::Theme| container::Style {
                 background: Some(iced::Background::Color(bg_color)),
                 border: iced::Border {
@@ -2594,20 +2622,33 @@ fn build_level_labels_overlay<'a>(
                 ..Default::default()
             });
 
-        let positioned = container(label_widget)
-            .padding(iced::Padding::ZERO.top(top_pad).left(8.0))
-            .width(Fill)
-            .height(Fill);
+        let positioned: Element<'a, Message> = match label.anchor {
+            LabelAnchor::Left => container(badge)
+                .padding(iced::Padding::ZERO.top(top_pad).left(label.screen_x))
+                .width(Fill)
+                .height(Fill)
+                .into(),
+            LabelAnchor::Right => container(
+                    container(badge).width(Fill).align_x(iced::Alignment::End),
+                )
+                .padding(iced::Padding::ZERO.top(top_pad).right(10.0))
+                .width(Fill)
+                .height(Fill)
+                .into(),
+            _ => container(badge)
+                .padding(iced::Padding::ZERO.top(top_pad))
+                .width(Fill)
+                .height(Fill)
+                .into(),
+        };
 
-        label_elements.push(positioned.into());
+        label_elements.push(positioned);
     }
 
     if label_elements.is_empty() {
         return Space::new().width(0).height(0).into();
     }
 
-    // Stack all labels on top of each other (each positions itself via
-    // top padding).
     stack(label_elements).width(Fill).height(Fill).into()
 }
 
@@ -2943,30 +2984,6 @@ fn compute_ghost_crosshair(
     Some((gx, gy))
 }
 
-/// Compute `LevelRender` data from levels and chart state for use in overlays.
-fn compute_level_renders(
-    levels: &[midas_chart::HorizontalLevel],
-    chart: &ChartPanel,
-) -> Vec<midas_chart::LevelRender> {
-    let cam = &chart.chart_state.camera;
-    levels
-        .iter()
-        .map(|lev| midas_chart::LevelRender {
-            id: AnnotationId(lev.id),
-            price: lev.price,
-            screen_y: cam.price_to_y(lev.price),
-            color: lev.color,
-            line_width: lev.line_width,
-            is_selected: chart.chart_state.selected_level == Some(AnnotationId(lev.id)),
-            is_being_dragged: false,
-            original_screen_y: None,
-            label_text: midas_chart::format_price(lev.price),
-            label: lev.label.clone(),
-            icon: lev.icon.clone(),
-            locked: lev.locked,
-        })
-        .collect()
-}
 
 // ── Crosshair label overlay ─────────────────────────────────────────
 
@@ -2988,9 +3005,9 @@ fn build_crosshair_label_overlay<'a>(
 
     let mut elements: Vec<Element<'a, Message>> = Vec::new();
 
-    // ── Price label (right edge, centered on cursor Y) ────────────
+    // ── Priceline label (right edge, centered on cursor Y) ────────────
     {
-        let pl = &labels.price_label;
+        let pl = &labels.priceline_label;
         let [r, g, b, a] = pl.bg_color;
         let bg = Color::from_rgba(r, g, b, a);
         let [tr, tg, tb, ta] = pl.text_color;
@@ -3028,9 +3045,9 @@ fn build_crosshair_label_overlay<'a>(
         elements.push(positioned.into());
     }
 
-    // ── Time label (below timeline, centered on snap X) ────────────
+    // ── Timeline label (below timeline, centered on snap X) ────────────
     {
-        let tl = &labels.time_label;
+        let tl = &labels.timeline_label;
         let [r, g, b, a] = tl.bg_color;
         let bg = Color::from_rgba(r, g, b, a);
         let [tr, tg, tb, ta] = tl.text_color;
