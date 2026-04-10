@@ -145,8 +145,8 @@ pub struct CrosshairRender {
     pub horizontal_y: f32,
     /// Priceline label.
     pub priceline_label: AxisLabel,
-    /// Timeline label.
-    pub timeline_label: AxisLabel,
+    /// Timeline lens.
+    pub timeline_lens: AxisLabel,
     /// Line color (typically semi-transparent white or gray).
     pub line_color: [f32; 4],
     /// OHLCV data for the candle under the crosshair (TC2000-style data overlay).

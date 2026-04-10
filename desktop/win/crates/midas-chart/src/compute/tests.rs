@@ -1068,7 +1068,7 @@ fn crosshair_labels_time_snaps_to_nearest_candle_timestamp() {
     // Time label text should use the nearest candle's timestamp.
     let expected_text = format_datetime_long(1_060_000);
     assert_eq!(
-        labels.timeline_label.text, expected_text,
+        labels.timeline_lens.text, expected_text,
         "timeline label should snap to nearest candle timestamp"
     );
 }
@@ -1090,7 +1090,7 @@ fn crosshair_labels_white_background_colors() {
         "priceline label bg_color should be white [1.0, 1.0, 1.0, 0.95]"
     );
     assert_eq!(
-        labels.timeline_label.bg_color, expected_bg,
+        labels.timeline_lens.bg_color, expected_bg,
         "timeline label bg_color should be white [1.0, 1.0, 1.0, 0.95]"
     );
 }
@@ -1118,14 +1118,14 @@ fn crosshair_labels_collapsed_gaps_produces_valid_labels() {
     // Time label text should be non-empty (formatted datetime of
     // the nearest candle).
     assert!(
-        !labels.timeline_label.text.is_empty(),
+        !labels.timeline_lens.text.is_empty(),
         "timeline label text should be non-empty in collapsed mode"
     );
 
     // Time label should snap to candle index 3's timestamp.
     let expected_time_text = format_datetime_long(data.timestamp(3));
     assert_eq!(
-        labels.timeline_label.text, expected_time_text,
+        labels.timeline_lens.text, expected_time_text,
         "collapsed timeline label should snap to nearest candle's timestamp"
     );
 }

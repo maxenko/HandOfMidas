@@ -834,8 +834,8 @@ fn build_crosshair_data(
         text_color: [1.0, 1.0, 1.0, 1.0],
     };
 
-    // Build timeline label at snap X.
-    let timeline_label = AxisLabel {
+    // Build timeline lens at snap X.
+    let timeline_lens = AxisLabel {
         text: format_time_ms(snap_ts),
         screen_x: snap_x,
         screen_y: camera.viewport_height as f32,
@@ -881,7 +881,7 @@ fn build_crosshair_data(
         vertical_x: snap_x,
         horizontal_y: snap_y,
         priceline_label,
-        timeline_label,
+        timeline_lens,
         line_color: [0.7, 0.7, 0.7, 0.5],
         ohlcv_overlay,
     }
@@ -965,7 +965,7 @@ pub struct CrosshairLabels {
     pub priceline_label: AxisLabel,
     /// Timeline label: formatted date/time text, positioned at the bottom of
     /// the price area, horizontally centered on the snapped cursor X.
-    pub timeline_label: AxisLabel,
+    pub timeline_lens: AxisLabel,
 }
 
 /// Compute crosshair axis label data for the iced widget overlay.
@@ -999,7 +999,7 @@ pub fn compute_crosshair_labels(
         text_color: [0.1, 0.1, 0.1, 1.0],
     };
 
-    // Timeline label — snap to nearest candle, show detailed datetime.
+    // Timeline lens — snap to nearest candle, show detailed datetime.
     let (snap_x, snap_ts) = if collapse_gaps {
         // In collapsed mode, camera X axis is index-space.
         let global_idx_f = camera.x_to_time(cx);
@@ -1016,7 +1016,7 @@ pub fn compute_crosshair_labels(
         (sx, ts)
     };
 
-    let timeline_label = AxisLabel {
+    let timeline_lens = AxisLabel {
         text: format_datetime_long(snap_ts),
         screen_x: snap_x,
         screen_y: camera.viewport_height as f32,
@@ -1026,7 +1026,7 @@ pub fn compute_crosshair_labels(
 
     Some(CrosshairLabels {
         priceline_label,
-        timeline_label,
+        timeline_lens,
     })
 }
 
