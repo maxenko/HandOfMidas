@@ -823,10 +823,10 @@ fn build_crosshair_data(
     snap_ts: i64,
     symbol: &str,
 ) -> CrosshairRender {
-    // Priceline label uses the raw cursor Y so the displayed price matches
+    // Price lens uses the raw cursor Y so the displayed price matches
     // the user's exact cursor position, not the pixel-snapped line.
     let cursor_price = camera.y_to_price(cursor_y);
-    let priceline_label = AxisLabel {
+    let priceline_lens = AxisLabel {
         text: format_price(cursor_price),
         screen_x: camera.viewport_width as f32,
         screen_y: snap_y,
@@ -880,7 +880,7 @@ fn build_crosshair_data(
     CrosshairRender {
         vertical_x: snap_x,
         horizontal_y: snap_y,
-        priceline_label,
+        priceline_lens,
         timeline_lens,
         line_color: [0.7, 0.7, 0.7, 0.5],
         ohlcv_overlay,
@@ -960,9 +960,9 @@ pub fn compute_priceline_labels(camera: &Camera2D) -> Vec<AxisLabel> {
 /// overlay builder in midas-app.
 #[derive(Clone, Debug)]
 pub struct CrosshairLabels {
-    /// Priceline label: formatted price text, positioned at the right edge of
+    /// Price lens: formatted price text, positioned at the right edge of
     /// the chart, vertically centered on the cursor Y.
-    pub priceline_label: AxisLabel,
+    pub priceline_lens: AxisLabel,
     /// Timeline label: formatted date/time text, positioned at the bottom of
     /// the price area, horizontally centered on the snapped cursor X.
     pub timeline_lens: AxisLabel,
@@ -987,11 +987,11 @@ pub fn compute_crosshair_labels(
         return None;
     }
 
-    // Price label uses the raw cursor Y so the displayed price matches
+    // Price lens uses the raw cursor Y so the displayed price matches
     // the user's exact cursor position, not a snapped value.
     let cursor_price = camera.y_to_price(cy);
     let snap_y = camera.snap_to_pixel(cy);
-    let priceline_label = AxisLabel {
+    let priceline_lens = AxisLabel {
         text: format_price(cursor_price),
         screen_x: camera.viewport_width as f32,
         screen_y: snap_y,
@@ -1025,7 +1025,7 @@ pub fn compute_crosshair_labels(
     };
 
     Some(CrosshairLabels {
-        priceline_label,
+        priceline_lens,
         timeline_lens,
     })
 }

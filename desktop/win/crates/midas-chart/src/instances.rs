@@ -143,8 +143,8 @@ pub struct CrosshairRender {
     pub vertical_x: f32,
     /// Horizontal line Y position (at cursor), in logical pixels.
     pub horizontal_y: f32,
-    /// Priceline label.
-    pub priceline_label: AxisLabel,
+    /// Price lens.
+    pub priceline_lens: AxisLabel,
     /// Timeline lens.
     pub timeline_lens: AxisLabel,
     /// Line color (typically semi-transparent white or gray).

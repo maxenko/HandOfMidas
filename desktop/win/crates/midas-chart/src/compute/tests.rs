@@ -1048,8 +1048,8 @@ fn crosshair_labels_price_text_matches_format_price() {
     let expected_price = camera.y_to_price(cursor_y);
     let expected_text = format_price(expected_price);
     assert_eq!(
-        labels.priceline_label.text, expected_text,
-        "priceline label text should match format_price(camera.y_to_price(cursor_y))"
+        labels.priceline_lens.text, expected_text,
+        "price lens text should match format_price(camera.y_to_price(cursor_y))"
     );
 }
 
@@ -1086,8 +1086,8 @@ fn crosshair_labels_white_background_colors() {
 
     let expected_bg = [1.0_f32, 1.0, 1.0, 0.95];
     assert_eq!(
-        labels.priceline_label.bg_color, expected_bg,
-        "priceline label bg_color should be white [1.0, 1.0, 1.0, 0.95]"
+        labels.priceline_lens.bg_color, expected_bg,
+        "price lens bg_color should be white [1.0, 1.0, 1.0, 0.95]"
     );
     assert_eq!(
         labels.timeline_lens.bg_color, expected_bg,
@@ -1111,8 +1111,8 @@ fn crosshair_labels_collapsed_gaps_produces_valid_labels() {
     let expected_price = camera.y_to_price(cursor_y);
     let expected_text = format_price(expected_price);
     assert_eq!(
-        labels.priceline_label.text, expected_text,
-        "collapsed mode priceline label should match format_price"
+        labels.priceline_lens.text, expected_text,
+        "collapsed mode price lens should match format_price"
     );
 
     // Time label text should be non-empty (formatted datetime of
@@ -1143,9 +1143,9 @@ fn crosshair_labels_price_screen_x_equals_viewport_width() {
 
     let expected_x = camera.viewport_width as f32;
     assert!(
-        (labels.priceline_label.screen_x - expected_x).abs() < f32::EPSILON,
-        "priceline label screen_x={} should equal viewport_width={}",
-        labels.priceline_label.screen_x,
+        (labels.priceline_lens.screen_x - expected_x).abs() < f32::EPSILON,
+        "price lens screen_x={} should equal viewport_width={}",
+        labels.priceline_lens.screen_x,
         expected_x
     );
 }
