@@ -38,8 +38,13 @@ pub struct ComputeContext<'a> {
     pub separator_y: f32,
     /// DPI scale factor for physical pixel calculations.
     pub dpi_scale: f32,
-    /// Hovered bracket leg for highlight styling.
+    /// Hovered annotation element for highlight styling.
     pub hovered_annotation: Option<(AnnotationId, HitZoneKind)>,
+    /// Currently selected annotation for selection glow.
+    pub selected_annotation: Option<AnnotationId>,
+    /// Drag ghost: annotation being dragged and its original price.
+    /// The compute function emits a faint ghost line at this price.
+    pub drag_ghost: Option<(AnnotationId, f64)>,
 }
 
 /// Viewport dimensions.

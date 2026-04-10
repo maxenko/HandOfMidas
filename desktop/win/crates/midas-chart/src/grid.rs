@@ -3,7 +3,7 @@
 //! This module is the **single source of truth** for all grid line
 //! computation. It produces horizontal price grid lines with hierarchical
 //! styling (dollar, half-dollar, quarter, dime levels). Vertical time
-//! grid lines are handled by the `date_labels` module.
+//! grid lines are handled by the `timeline` module.
 //!
 //! # Price grid hierarchy
 //!

@@ -1,11 +1,13 @@
 //! Self-contained horizontal level tool.
 //!
-//! Owns all state for level placement, dragging, and OHLC snapping.
+//! Owns all state for level placement and OHLC snapping.
 //! Lives as a field on [`ChartState`]. The interaction layer delegates
 //! level-related event handling to this struct.
+//!
+//! Note: Level dragging is handled by `InteractionMode::DraggingAnnotation`,
+//! unified with bracket leg drags.
 
 use crate::camera::Camera2D;
-use crate::widget::AnnotationId;
 use midas_core::CandleData;
 
 // ── Constants ─────────────────────────────────────────────────────
@@ -18,6 +20,9 @@ const SNAP_THRESHOLD_MAX_PX: f32 = 40.0;
 // ── Types ─────────────────────────────────────────────────────────
 
 /// The level tool's internal state machine.
+///
+/// Note: Level dragging is handled by `InteractionMode::DraggingAnnotation`
+/// (unified with bracket drags). This enum only covers placement.
 #[derive(Clone, Debug, PartialEq)]
 pub enum LevelToolMode {
     /// Tool is not active. No preview, no drag.
@@ -25,19 +30,11 @@ pub enum LevelToolMode {
     /// User activated the tool. Preview line follows cursor Y
     /// (snapped to OHLC unless Alt held). Single click places.
     Placing,
-    /// User is dragging an existing level to a new price.
-    Dragging {
-        /// ID of the annotation being dragged.
-        level_id: AnnotationId,
-        /// Price offset between level and cursor at grab time
-        /// (so the level doesn't jump to the cursor).
-        grab_offset: f64,
-    },
 }
 
 /// Self-contained horizontal level tool.
 ///
-/// Owns all state for level placement, dragging, and OHLC snapping.
+/// Owns all state for level placement and OHLC snapping.
 /// Lives as a field on `ChartState`. The interaction layer delegates
 /// level-related event handling to this struct.
 #[derive(Clone, Debug)]
@@ -166,12 +163,7 @@ impl LevelTool {
     }
 
     /// Activate level placement mode.
-    ///
-    /// No-op if currently dragging (prevents H-key during active drag).
     pub fn activate(&mut self) {
-        if self.is_dragging() {
-            return;
-        }
         self.mode = LevelToolMode::Placing;
         self.alt_held = false;
         self.snapped_price = None;
@@ -179,19 +171,14 @@ impl LevelTool {
         self.was_placing = false;
     }
 
-    /// Returns true if the tool is in Placing or Dragging mode.
+    /// Returns true if the tool is in Placing mode.
     pub fn is_active(&self) -> bool {
-        !matches!(self.mode, LevelToolMode::Idle)
+        matches!(self.mode, LevelToolMode::Placing)
     }
 
     /// Returns true if in Placing mode.
     pub fn is_placing(&self) -> bool {
         matches!(self.mode, LevelToolMode::Placing)
-    }
-
-    /// Returns true if in Dragging mode.
-    pub fn is_dragging(&self) -> bool {
-        matches!(self.mode, LevelToolMode::Dragging { .. })
     }
 
     /// Temporarily suspend Placing for a pan/scale operation.

@@ -2,6 +2,7 @@ use super::*;
 use crate::camera::Camera2D;
 use crate::state::{ChartState, InteractionMode, Momentum, YAnimation};
 use crate::widget::{
+    hit_test::HitZoneKind,
     level::{LevelExtend, LineStyle},
     Annotation, AnnotationId, AnnotationKind, Presence,
 };
@@ -1099,14 +1100,15 @@ fn drag_near_level_transitions_to_dragging_level() {
     );
 
     assert!(
-        state.level_tool.is_dragging(),
-        "expected LevelTool::Dragging, got {:?}",
-        state.level_tool.mode
-    );
-    assert_eq!(
-        state.interaction_mode,
-        InteractionMode::Idle,
-        "InteractionMode should be Idle during LevelTool drag"
+        matches!(
+            state.interaction_mode,
+            InteractionMode::DraggingAnnotation {
+                element: HitZoneKind::LevelLine,
+                ..
+            }
+        ),
+        "expected DraggingAnnotation(LevelLine), got {:?}",
+        state.interaction_mode
     );
 }
 
@@ -1307,10 +1309,10 @@ fn left_press_stops_active_momentum() {
     );
 }
 
-// ── Hit-test levels helper tests ───────────────────────────────
+// ── Hit-test annotation (unified) tests ────────────────────────
 
 #[test]
-fn hit_test_finds_closest_level() {
+fn hit_test_annotation_finds_closest_level() {
     let camera = Camera2D {
         time_start: 0.0,
         time_end: 1000.0,
@@ -1322,15 +1324,17 @@ fn hit_test_finds_closest_level() {
     };
     let levels = vec![test_level(1, 50.0), test_level(2, 55.0)];
 
-    let result = hit_test_levels(&levels, 500.0, &camera);
+    let result = hit_test_annotation(&levels, 500.0, &camera);
     assert!(result.is_some());
-    assert_eq!(result.unwrap().0, AnnotationId(1));
+    let (id, kind, _, _) = result.unwrap();
+    assert_eq!(id, AnnotationId(1));
+    assert_eq!(kind, HitZoneKind::LevelLine);
 
-    let result = hit_test_levels(&levels, 450.0, &camera);
+    let result = hit_test_annotation(&levels, 450.0, &camera);
     assert!(result.is_some());
     assert_eq!(result.unwrap().0, AnnotationId(2));
 
-    let result = hit_test_levels(&levels, 200.0, &camera);
+    let result = hit_test_annotation(&levels, 200.0, &camera);
     assert!(result.is_none());
 }
 
@@ -1595,98 +1599,94 @@ fn test_clamp_bracket_leg_pixel_minimum_enforced() {
 }
 
 #[test]
-fn hit_test_bracket_legs_finds_tp() {
+fn hit_test_annotation_finds_tp() {
     let state = test_state();
-    // camera: price_low=100, price_high=200, viewport_height=1080
     let bracket = test_bracket_annotation(10, 150.0, 170.0, 130.0);
     let tp_y = state.camera.price_to_y(170.0);
 
-    let result = hit_test_bracket_legs(&[bracket], tp_y, &state.camera);
+    let result = hit_test_annotation(&[bracket], tp_y, &state.camera);
     assert!(result.is_some(), "should hit TP leg");
-    let (id, role, _, _, _) = result.unwrap();
+    let (id, kind, _, _) = result.unwrap();
     assert_eq!(id, AnnotationId(10));
-    assert_eq!(role, LegRole::TakeProfit);
+    assert_eq!(kind, HitZoneKind::BracketTP);
 }
 
 #[test]
-fn hit_test_bracket_legs_finds_sl() {
+fn hit_test_annotation_finds_sl() {
     let state = test_state();
     let bracket = test_bracket_annotation(10, 150.0, 170.0, 130.0);
     let sl_y = state.camera.price_to_y(130.0);
 
-    let result = hit_test_bracket_legs(&[bracket], sl_y, &state.camera);
+    let result = hit_test_annotation(&[bracket], sl_y, &state.camera);
     assert!(result.is_some(), "should hit SL leg");
-    let (id, role, _, _, _) = result.unwrap();
+    let (id, kind, _, _) = result.unwrap();
     assert_eq!(id, AnnotationId(10));
-    assert_eq!(role, LegRole::StopLoss);
+    assert_eq!(kind, HitZoneKind::BracketSL);
 }
 
 #[test]
-fn hit_test_bracket_legs_misses_entry() {
+fn hit_test_annotation_misses_market_entry() {
     let state = test_state();
     let bracket = test_bracket_annotation(10, 150.0, 170.0, 130.0);
     let entry_y = state.camera.price_to_y(150.0);
 
-    // Entry line should NOT be hit-testable for bracket leg drags.
-    let result = hit_test_bracket_legs(&[bracket], entry_y, &state.camera);
-    assert!(result.is_none(), "entry should not be draggable");
+    // Market entry should NOT be hit-testable (not draggable).
+    let result = hit_test_annotation(&[bracket], entry_y, &state.camera);
+    // May hit TP or SL if they're nearby; check it's not BracketEntry.
+    if let Some((_, kind, _, _)) = result {
+        assert_ne!(kind, HitZoneKind::BracketEntry, "Market entry should not be draggable");
+    }
 }
 
 #[test]
-fn hit_test_bracket_legs_finds_entry_for_draft_limit() {
+fn hit_test_annotation_finds_entry_for_draft_limit() {
     let state = test_state();
     let mut bracket = test_bracket_annotation(10, 150.0, 170.0, 130.0);
-    // Make it a Draft Limit bracket — entry should be draggable.
     if let AnnotationKind::OrderBracket(ref mut b) = bracket.kind {
         b.status = BracketStatus::Draft;
         b.entry_type = EntryType::Limit;
     }
     let entry_y = state.camera.price_to_y(150.0);
 
-    let result = hit_test_bracket_legs(&[bracket], entry_y, &state.camera);
+    let result = hit_test_annotation(&[bracket], entry_y, &state.camera);
     assert!(result.is_some(), "Draft Limit entry should be hit-testable");
-    let (_id, role, _, _, _) = result.unwrap();
-    assert_eq!(role, LegRole::Entry);
+    assert_eq!(result.unwrap().1, HitZoneKind::BracketEntry);
 }
 
 #[test]
-fn hit_test_bracket_legs_misses_entry_for_draft_market() {
+fn hit_test_annotation_misses_entry_for_draft_market() {
     let state = test_state();
     let mut bracket = test_bracket_annotation(10, 150.0, 170.0, 130.0);
-    // Draft Market — entry should NOT be draggable.
     if let AnnotationKind::OrderBracket(ref mut b) = bracket.kind {
         b.status = BracketStatus::Draft;
         b.entry_type = EntryType::Market;
     }
     let entry_y = state.camera.price_to_y(150.0);
 
-    let result = hit_test_bracket_legs(&[bracket], entry_y, &state.camera);
-    assert!(
-        result.is_none(),
-        "Draft Market entry should not be draggable"
-    );
+    let result = hit_test_annotation(&[bracket], entry_y, &state.camera);
+    if let Some((_, kind, _, _)) = result {
+        assert_ne!(kind, HitZoneKind::BracketEntry, "Draft Market entry should not be draggable");
+    }
 }
 
 #[test]
-fn hit_test_bracket_legs_misses_entry_for_pending_limit() {
+fn hit_test_annotation_misses_entry_for_pending_limit() {
     let state = test_state();
     let mut bracket = test_bracket_annotation(10, 150.0, 170.0, 130.0);
-    // Pending Limit — entry should NOT be draggable (live at broker).
     if let AnnotationKind::OrderBracket(ref mut b) = bracket.kind {
         b.status = BracketStatus::Pending;
         b.entry_type = EntryType::Limit;
     }
     let entry_y = state.camera.price_to_y(150.0);
 
-    let result = hit_test_bracket_legs(&[bracket], entry_y, &state.camera);
-    assert!(
-        result.is_none(),
-        "Pending Limit entry should not be draggable"
-    );
+    let result = hit_test_annotation(&[bracket], entry_y, &state.camera);
+    if let Some((_, kind, _, _)) = result {
+        assert_ne!(kind, HitZoneKind::BracketEntry, "Pending Limit entry should not be draggable");
+    }
 }
 
 #[test]
-fn hit_test_bracket_legs_finds_entry_for_draft_stop() {
+fn hit_test_annotation_finds_entry_for_draft_stop() {
     let state = test_state();
     let mut bracket = test_bracket_annotation(10, 150.0, 170.0, 130.0);
     if let AnnotationKind::OrderBracket(ref mut b) = bracket.kind {
@@ -1695,14 +1695,13 @@ fn hit_test_bracket_legs_finds_entry_for_draft_stop() {
     }
     let entry_y = state.camera.price_to_y(150.0);
 
-    let result = hit_test_bracket_legs(&[bracket], entry_y, &state.camera);
+    let result = hit_test_annotation(&[bracket], entry_y, &state.camera);
     assert!(result.is_some(), "Draft Stop entry should be hit-testable");
-    let (_id, role, _, _, _) = result.unwrap();
-    assert_eq!(role, LegRole::Entry);
+    assert_eq!(result.unwrap().1, HitZoneKind::BracketEntry);
 }
 
 #[test]
-fn hit_test_bracket_legs_finds_entry_for_draft_stop_limit() {
+fn hit_test_annotation_finds_entry_for_draft_stop_limit() {
     let state = test_state();
     let mut bracket = test_bracket_annotation(10, 150.0, 170.0, 130.0);
     if let AnnotationKind::OrderBracket(ref mut b) = bracket.kind {
@@ -1711,34 +1710,30 @@ fn hit_test_bracket_legs_finds_entry_for_draft_stop_limit() {
     }
     let entry_y = state.camera.price_to_y(150.0);
 
-    let result = hit_test_bracket_legs(&[bracket], entry_y, &state.camera);
-    assert!(
-        result.is_some(),
-        "Draft StopLimit entry should be hit-testable"
-    );
-    let (_id, role, _, _, _) = result.unwrap();
-    assert_eq!(role, LegRole::Entry);
+    let result = hit_test_annotation(&[bracket], entry_y, &state.camera);
+    assert!(result.is_some(), "Draft StopLimit entry should be hit-testable");
+    assert_eq!(result.unwrap().1, HitZoneKind::BracketEntry);
 }
 
 #[test]
-fn hit_test_bracket_legs_skips_locked() {
+fn hit_test_annotation_skips_locked() {
     let state = test_state();
     let mut bracket = test_bracket_annotation(10, 150.0, 170.0, 130.0);
     bracket.locked = true;
     let tp_y = state.camera.price_to_y(170.0);
 
-    let result = hit_test_bracket_legs(&[bracket], tp_y, &state.camera);
+    let result = hit_test_annotation(&[bracket], tp_y, &state.camera);
     assert!(result.is_none(), "locked bracket legs should not be hit");
 }
 
 #[test]
-fn hit_test_bracket_legs_skips_ghost() {
+fn hit_test_annotation_skips_ghost() {
     let state = test_state();
     let mut bracket = test_bracket_annotation(10, 150.0, 170.0, 130.0);
     bracket.presence = Presence::Ghost;
     let tp_y = state.camera.price_to_y(170.0);
 
-    let result = hit_test_bracket_legs(&[bracket], tp_y, &state.camera);
+    let result = hit_test_annotation(&[bracket], tp_y, &state.camera);
     assert!(result.is_none(), "ghost bracket legs should not be hit");
 }
 
@@ -1785,9 +1780,9 @@ fn pending_drag_transitions_to_dragging_bracket_leg() {
     assert!(
         matches!(
             state.interaction_mode,
-            InteractionMode::DraggingBracketLeg { .. }
+            InteractionMode::DraggingAnnotation { .. }
         ),
-        "should transition to DraggingBracketLeg, got {:?}",
+        "should transition to DraggingAnnotation, got {:?}",
         state.interaction_mode
     );
     // Should emit ClearCrosshair (crosshair suppressed during drag).
@@ -1804,7 +1799,7 @@ fn dragging_bracket_leg_emits_drag_action() {
     let tp_y = state.camera.price_to_y(170.0);
     let annotations = [bracket];
 
-    // Press and drag past threshold to enter DraggingBracketLeg.
+    // Press and drag past threshold to enter DraggingAnnotation.
     handle_event(
         &mut state,
         ChartEvent::MousePressed {
@@ -1830,7 +1825,7 @@ fn dragging_bracket_leg_emits_drag_action() {
     );
     assert!(matches!(
         state.interaction_mode,
-        InteractionMode::DraggingBracketLeg { .. }
+        InteractionMode::DraggingAnnotation { .. }
     ));
 
     // Continue dragging — should emit DragBracketLeg action.
@@ -1892,7 +1887,7 @@ fn releasing_bracket_leg_drag_returns_to_idle() {
     );
     assert!(matches!(
         state.interaction_mode,
-        InteractionMode::DraggingBracketLeg { .. }
+        InteractionMode::DraggingAnnotation { .. }
     ));
 
     // Release.

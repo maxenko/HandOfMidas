@@ -8,7 +8,7 @@
 use crate::camera::Camera2D;
 use crate::crosshair_tool::CrosshairTool;
 use crate::dirty::DirtyFlags;
-use crate::interaction::ChartAction;
+use crate::interaction::{BracketClampCtx, ChartAction};
 use crate::level_tool::LevelTool;
 use crate::widget::bracket_tool::BracketTool;
 use crate::widget::hit_test::HitZoneKind;
@@ -35,7 +35,7 @@ pub enum CursorClaim {
 /// Transitions:
 /// - `Idle` -> `PendingDrag` on left mouse press
 /// - `PendingDrag` -> `Panning` when mouse moves >= 4px from start
-/// - `PendingDrag` -> `Idle` + `LevelTool::Dragging` when near a level
+/// - `PendingDrag` -> `DraggingAnnotation` when near a level or bracket leg
 /// - `Panning` -> `Idle` on mouse release
 /// - `Idle` -> `PendingScale` on middle mouse press
 /// - `PendingScale` -> `HorizontalScaling` or `VerticalScaling` after 6px movement
@@ -71,19 +71,17 @@ pub enum InteractionMode {
         /// Volume scale value at drag start.
         start_scale: f32,
     },
-    /// Dragging a bracket leg (TP or SL) to a new price.
-    DraggingBracketLeg {
-        /// The annotation ID of the bracket being dragged.
-        annotation_id: crate::widget::AnnotationId,
-        /// Which leg is being dragged (TakeProfit or StopLoss).
-        leg: crate::widget::order_bracket::LegRole,
-        /// Price offset between cursor and leg price at grab time
-        /// (so the leg does not jump to the cursor).
+    /// Dragging any annotation element (level line, bracket leg, etc.).
+    DraggingAnnotation {
+        /// The annotation ID being dragged.
+        annotation_id: AnnotationId,
+        /// Which element of the annotation is being dragged.
+        element: HitZoneKind,
+        /// Price offset between cursor and element price at grab time
+        /// (so the element does not jump to the cursor).
         grab_offset: f64,
-        /// Entry price of the bracket (used for side-constraint clamping).
-        entry_price: f64,
-        /// Trade direction (used for side-constraint clamping).
-        side: crate::widget::order_bracket::BracketSide,
+        /// Bracket-specific clamping context. `None` for levels.
+        clamp_ctx: Option<BracketClampCtx>,
     },
 }
 

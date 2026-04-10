@@ -133,38 +133,6 @@ pub struct AxisLabel {
     pub text_color: [f32; 4],
 }
 
-/// Render data for a single horizontal price level.
-///
-/// Produced by the chart state and consumed by the level rendering
-/// pipeline. Contains both the geometric data and display state.
-#[derive(Clone, Debug)]
-pub struct LevelRender {
-    /// Annotation ID of this level (for interaction targeting).
-    pub id: crate::widget::AnnotationId,
-    /// Price value of this level.
-    pub price: f64,
-    /// Screen Y position in logical pixels.
-    pub screen_y: f32,
-    /// Line color (RGBA).
-    pub color: [f32; 4],
-    /// Line width in logical pixels.
-    pub line_width: f32,
-    /// Whether this level is currently selected.
-    pub is_selected: bool,
-    /// Whether this level is being dragged.
-    pub is_being_dragged: bool,
-    /// Ghost line position during drag (original Y before drag started).
-    pub original_screen_y: Option<f32>,
-    /// Price formatted to tick size.
-    pub label_text: String,
-    /// User-defined label text (displayed on chart).
-    pub label: Option<String>,
-    /// Icon displayed next to the label.
-    pub icon: crate::levels::LevelIcon,
-    /// Whether this level is locked (prevents drag/delete).
-    pub locked: bool,
-}
-
 /// Render data for the crosshair overlay.
 ///
 /// Produced by the chart state when the mouse is over the chart
@@ -175,10 +143,10 @@ pub struct CrosshairRender {
     pub vertical_x: f32,
     /// Horizontal line Y position (at cursor), in logical pixels.
     pub horizontal_y: f32,
-    /// Price label on the Y axis.
-    pub price_label: AxisLabel,
-    /// Time label on the X axis.
-    pub time_label: AxisLabel,
+    /// Priceline label.
+    pub priceline_label: AxisLabel,
+    /// Timeline label.
+    pub timeline_label: AxisLabel,
     /// Line color (typically semi-transparent white or gray).
     pub line_color: [f32; 4],
     /// OHLCV data for the candle under the crosshair (TC2000-style data overlay).

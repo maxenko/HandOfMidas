@@ -1,6 +1,6 @@
-//! TC2000-style adaptive date labels for the chart time axis.
+//! TC2000-style adaptive timeline labels for the chart time axis.
 //!
-//! This module is the **single authoritative source** for all date label
+//! This module is the **single authoritative source** for all timeline label
 //! logic: tier selection, formatting, boundary detection, and label
 //! placement for both normal (timestamp) and collapsed (index) modes.
 //!
@@ -42,9 +42,9 @@ pub enum Tier {
     Month,
 }
 
-/// A single positioned date label for the time axis.
+/// A single positioned timeline label for the time axis.
 #[derive(Clone, Debug)]
-pub struct DateLabel {
+pub struct TimelineLabel {
     /// Primary label text (e.g. "10 a", "5", "Jan").
     pub text: String,
     /// Boundary (secondary) text shown at tier transitions
@@ -60,7 +60,7 @@ pub struct DateLabel {
 
 // ── Public API ──────────────────────────────────────────────────────
 
-/// Unified entry point: compute date labels for the current mode.
+/// Unified entry point: compute timeline labels for the current mode.
 ///
 /// Callers pass `collapse_gaps` and the candle data; this function
 /// dispatches to the correct algorithm (timestamp-aligned for normal
@@ -70,7 +70,7 @@ pub fn compute(
     data: &dyn CandleData,
     candle_duration: f64,
     collapse_gaps: bool,
-) -> Vec<DateLabel> {
+) -> Vec<TimelineLabel> {
     if data.is_empty() {
         return Vec::new();
     }
@@ -101,11 +101,11 @@ pub fn compute(
     }
 }
 
-/// Compute date labels for **normal mode** (timestamp-space camera).
+/// Compute timeline labels for **normal mode** (timestamp-space camera).
 ///
 /// The camera's `time_start`/`time_end` are epoch milliseconds.
 /// Labels are placed at regular time-aligned intervals.
-pub fn for_normal_mode(camera: &Camera2D, _candle_duration: f64) -> Vec<DateLabel> {
+pub fn for_normal_mode(camera: &Camera2D, _candle_duration: f64) -> Vec<TimelineLabel> {
     let time_range = camera.time_end - camera.time_start;
     if time_range <= 0.0 {
         return Vec::new();
@@ -126,7 +126,7 @@ pub fn for_normal_mode(camera: &Camera2D, _candle_duration: f64) -> Vec<DateLabe
         let x = camera.snap_to_pixel(camera.time_to_x(t));
         let ts = t as i64;
         let (text, is_boundary, secondary) = format_for_tier(ts, prev_ts, tier);
-        labels.push(DateLabel {
+        labels.push(TimelineLabel {
             text,
             secondary,
             screen_x: x,
@@ -139,7 +139,7 @@ pub fn for_normal_mode(camera: &Camera2D, _candle_duration: f64) -> Vec<DateLabe
     labels
 }
 
-/// Compute date labels for **collapsed mode** (index-space camera).
+/// Compute timeline labels for **collapsed mode** (index-space camera).
 ///
 /// Walks through actual candle timestamps and detects meaningful
 /// time-boundary crossings (hour/day/month changes). This produces
@@ -151,7 +151,7 @@ pub fn for_collapsed_mode(
     vis_end: usize,
     candle_duration: f64,
     index_to_x: &dyn Fn(usize) -> f32,
-) -> Vec<DateLabel> {
+) -> Vec<TimelineLabel> {
     let visible_count = vis_end.saturating_sub(vis_start);
     if visible_count == 0 {
         return Vec::new();
@@ -298,7 +298,7 @@ fn thin_by_spacing(
     _camera: &Camera2D,
     index_to_x: &dyn Fn(usize) -> f32,
     tier: Tier,
-) -> Vec<DateLabel> {
+) -> Vec<TimelineLabel> {
     if candidates.is_empty() {
         return Vec::new();
     }
@@ -325,7 +325,7 @@ fn thin_by_spacing(
             None
         };
 
-        labels.push(DateLabel {
+        labels.push(TimelineLabel {
             text,
             secondary,
             screen_x: x,

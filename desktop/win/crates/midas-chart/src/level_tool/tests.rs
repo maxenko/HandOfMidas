@@ -226,20 +226,6 @@ fn activate_sets_placing_mode() {
     tool.activate();
     assert!(tool.is_placing());
     assert!(tool.is_active());
-    assert!(!tool.is_dragging());
-}
-
-#[test]
-fn activate_noop_during_drag() {
-    let mut tool = LevelTool {
-        mode: LevelToolMode::Dragging {
-            level_id: AnnotationId(1),
-            grab_offset: 0.0,
-        },
-        ..Default::default()
-    };
-    tool.activate();
-    assert!(tool.is_dragging()); // still dragging
 }
 
 #[test]
@@ -298,20 +284,9 @@ fn is_active_predicates() {
     // Idle
     assert!(!tool.is_active());
     assert!(!tool.is_placing());
-    assert!(!tool.is_dragging());
 
     // Placing
     tool.mode = LevelToolMode::Placing;
     assert!(tool.is_active());
     assert!(tool.is_placing());
-    assert!(!tool.is_dragging());
-
-    // Dragging
-    tool.mode = LevelToolMode::Dragging {
-        level_id: AnnotationId(42),
-        grab_offset: 1.5,
-    };
-    assert!(tool.is_active());
-    assert!(!tool.is_placing());
-    assert!(tool.is_dragging());
 }

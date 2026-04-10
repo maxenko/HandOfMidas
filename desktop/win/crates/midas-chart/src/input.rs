@@ -60,6 +60,10 @@ pub struct ChartInput<'a> {
     /// remain bright. Empty slice = no dimming (hover inactive).
     /// Each tuple is `(start_idx, end_idx)` inclusive, sorted ascending.
     pub gatr_bright_ranges: &'a [(usize, usize)],
-    /// Currently hovered bracket leg (for hover highlight in compute pass).
+    /// Currently hovered annotation element (for hover highlight in compute pass).
     pub hovered_annotation: Option<(AnnotationId, HitZoneKind)>,
+    /// Currently selected annotation (for selection glow in compute pass).
+    pub selected_annotation: Option<AnnotationId>,
+    /// Drag ghost: annotation being dragged and its original (pre-drag) price.
+    pub drag_ghost: Option<(AnnotationId, f64)>,
 }

@@ -167,6 +167,19 @@ pub fn compute_level(
     let mut color = level.color;
     color[3] *= alpha;
 
+    // Selection glow: wider semi-transparent fill behind the line.
+    let is_selected = ctx.selected_annotation == Some(annotation_id);
+    if is_selected {
+        let glow_thickness = level.line_width + ctx.theme.selection_thickness * 2.0;
+        let glow_y = y - ctx.theme.selection_thickness;
+        let mut glow_color = color;
+        glow_color[3] = ctx.theme.selection_color[3] * alpha;
+        output.fills.push(GridLineInstance {
+            rect: [0.0, glow_y, vp_width, glow_y + glow_thickness],
+            color: glow_color,
+        });
+    }
+
     // Hover highlight.
     let mut width = level.line_width;
     let is_hovered = ctx
@@ -181,6 +194,19 @@ pub fn compute_level(
         .lines
         .extend(segmented_line(0.0, vp_width, y, width, color, &level.style));
 
+    // Drag ghost: faint line at the original price during drag.
+    if let Some((ghost_id, ghost_price)) = ctx.drag_ghost {
+        if ghost_id == annotation_id {
+            let ghost_y = ctx.camera.price_to_y(ghost_price);
+            let mut ghost_color = color;
+            ghost_color[3] = color[3] * 0.2;
+            output.fills.push(GridLineInstance {
+                rect: [0.0, ghost_y, vp_width, ghost_y + 1.0],
+                color: ghost_color,
+            });
+        }
+    }
+
     // Hit zone (full width, ±6px).
     let cursor = if locked {
         CursorIcon::Crosshair
@@ -194,14 +220,10 @@ pub fn compute_level(
         cursor,
     });
 
-    // Price label.
-    let label_text = if let Some(ref label) = level.label {
-        format!("{} {:.2}", label, level.price)
-    } else {
-        format!("{:.2}", level.price)
-    };
+    // Price label (right-aligned).
+    let price_text = format!("{:.2}", level.price);
     output.labels.push(WidgetLabel {
-        text: label_text,
+        text: price_text,
         screen_x: vp_width - 10.0,
         screen_y: y,
         bg_color: [0.12, 0.12, 0.15, 0.85 * alpha],
@@ -209,6 +231,25 @@ pub fn compute_level(
         font_size: 11.0,
         anchor: LabelAnchor::Right,
     });
+
+    // Icon + name label (left-aligned).
+    let icon_label = match (&level.label, level.icon.as_char()) {
+        (Some(lbl), Some(icon_ch)) if !lbl.is_empty() => Some(format!("{} {}", icon_ch, lbl)),
+        (Some(lbl), None) if !lbl.is_empty() => Some(lbl.clone()),
+        (None, Some(icon_ch)) | (Some(_), Some(icon_ch)) => Some(icon_ch.to_string()),
+        _ => None,
+    };
+    if let Some(text) = icon_label {
+        output.labels.push(WidgetLabel {
+            text,
+            screen_x: 8.0,
+            screen_y: y,
+            bg_color: [color[0] * 0.3, color[1] * 0.3, color[2] * 0.3, 0.75 * alpha],
+            text_color: [color[0], color[1], color[2], color[3].max(0.9)],
+            font_size: 14.0,
+            anchor: LabelAnchor::Left,
+        });
+    }
 
     output
 }

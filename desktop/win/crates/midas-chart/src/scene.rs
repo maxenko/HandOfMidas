@@ -8,9 +8,9 @@
 //! Produced by [`compute_chart_scene()`](crate::compute::compute_chart_scene)
 //! and consumed by `midas-render`.
 
-use crate::date_labels::DateLabel;
+use crate::timeline::TimelineLabel;
 use crate::instances::{
-    AxisLabel, CandleInstance, CrosshairRender, GridLineInstance, LevelRender, VolumeInstance,
+    AxisLabel, CandleInstance, CrosshairRender, GridLineInstance, VolumeInstance,
 };
 use crate::widget::WidgetOutput;
 
@@ -40,13 +40,11 @@ pub struct ChartScene {
     /// GPU-ready grid line instances: horizontal price lines, separator,
     /// vertical time lines, and session boundaries — all in one buffer.
     pub grid_instances: Vec<GridLineInstance>,
-    /// X-axis (time) labels.
-    pub x_labels: Vec<AxisLabel>,
-    /// Y-axis (price) labels.
-    pub y_labels: Vec<AxisLabel>,
+    /// Timeline tick labels.
+    pub timeline_ticks: Vec<AxisLabel>,
+    /// Priceline labels.
+    pub priceline_labels: Vec<AxisLabel>,
 
-    /// Horizontal price levels.
-    pub levels: Vec<LevelRender>,
     /// Crosshair overlay (if active).
     pub crosshair: Option<CrosshairRender>,
     /// Y position of the level placement preview line (if placing).
@@ -57,18 +55,17 @@ pub struct ChartScene {
     /// Y position of the separator line between price and volume areas.
     pub separator_y: f32,
 
-    /// Date labels for the time axis (TC2000-style adaptive formatting).
-    pub date_labels: Vec<DateLabel>,
+    /// Timeline labels (TC2000-style adaptive formatting).
+    pub timeline_labels: Vec<TimelineLabel>,
 
     /// Volume Profile horizontal histogram instances (empty if VP disabled).
     pub volume_profile_instances: Vec<GridLineInstance>,
 
-    /// Merged widget output for annotation rendering (brackets, etc.).
+    /// Merged widget output for annotation rendering.
     ///
     /// Contains all GPU-ready geometry (fills, lines, markers) and text
-    /// labels for annotations that use the widget compute pipeline.
-    /// Levels are still in `levels` for backward compatibility; this
-    /// field covers `OrderBracket` and future widget kinds.
+    /// labels for annotations computed through the widget pipeline
+    /// (levels, brackets, etc.).
     pub widget_output: WidgetOutput,
 
     /// Dirty generation counters -- renderer compares to decide what to upload.

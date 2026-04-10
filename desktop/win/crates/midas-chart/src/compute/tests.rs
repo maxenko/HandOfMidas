@@ -172,6 +172,8 @@ fn make_input<'a>(
         dirty,
         gatr_bright_ranges: &[],
         hovered_annotation: None,
+        selected_annotation: None,
+        drag_ghost: None,
     }
 }
 
@@ -207,6 +209,8 @@ fn make_input_with_collapse<'a>(
         dirty,
         gatr_bright_ranges: &[],
         hovered_annotation: None,
+        selected_annotation: None,
+        drag_ghost: None,
     }
 }
 
@@ -454,7 +458,7 @@ fn grid_lines_bounded_by_max() {
 }
 
 #[test]
-fn y_labels_are_produced() {
+fn priceline_labels_are_produced() {
     let data = TestCandles::sample();
     let camera = make_camera_for_data(&data);
     let dirty = DirtyFlags::new();
@@ -463,13 +467,13 @@ fn y_labels_are_produced() {
     let scene = compute_chart_scene(&input);
 
     assert!(
-        !scene.y_labels.is_empty(),
-        "should have at least one Y label"
+        !scene.priceline_labels.is_empty(),
+        "should have at least one priceline label"
     );
 }
 
 #[test]
-fn x_labels_are_produced() {
+fn timeline_ticks_are_produced() {
     let data = TestCandles::sample();
     let camera = make_camera_for_data(&data);
     let dirty = DirtyFlags::new();
@@ -478,8 +482,8 @@ fn x_labels_are_produced() {
     let scene = compute_chart_scene(&input);
 
     assert!(
-        !scene.x_labels.is_empty(),
-        "should have at least one X label"
+        !scene.timeline_ticks.is_empty(),
+        "should have at least one timeline tick"
     );
 }
 
@@ -521,11 +525,6 @@ fn levels_rendered_via_widget_output() {
     assert!(
         !scene.widget_output.labels.is_empty(),
         "widget_output should have level labels"
-    );
-    // Old path should be empty.
-    assert!(
-        scene.levels.is_empty(),
-        "scene.levels should be empty (deprecated path)"
     );
 }
 
@@ -1049,8 +1048,8 @@ fn crosshair_labels_price_text_matches_format_price() {
     let expected_price = camera.y_to_price(cursor_y);
     let expected_text = format_price(expected_price);
     assert_eq!(
-        labels.price_label.text, expected_text,
-        "price label text should match format_price(camera.y_to_price(cursor_y))"
+        labels.priceline_label.text, expected_text,
+        "priceline label text should match format_price(camera.y_to_price(cursor_y))"
     );
 }
 
@@ -1069,8 +1068,8 @@ fn crosshair_labels_time_snaps_to_nearest_candle_timestamp() {
     // Time label text should use the nearest candle's timestamp.
     let expected_text = format_datetime_long(1_060_000);
     assert_eq!(
-        labels.time_label.text, expected_text,
-        "time label should snap to nearest candle timestamp"
+        labels.timeline_label.text, expected_text,
+        "timeline label should snap to nearest candle timestamp"
     );
 }
 
@@ -1087,12 +1086,12 @@ fn crosshair_labels_white_background_colors() {
 
     let expected_bg = [1.0_f32, 1.0, 1.0, 0.95];
     assert_eq!(
-        labels.price_label.bg_color, expected_bg,
-        "price label bg_color should be white [1.0, 1.0, 1.0, 0.95]"
+        labels.priceline_label.bg_color, expected_bg,
+        "priceline label bg_color should be white [1.0, 1.0, 1.0, 0.95]"
     );
     assert_eq!(
-        labels.time_label.bg_color, expected_bg,
-        "time label bg_color should be white [1.0, 1.0, 1.0, 0.95]"
+        labels.timeline_label.bg_color, expected_bg,
+        "timeline label bg_color should be white [1.0, 1.0, 1.0, 0.95]"
     );
 }
 
@@ -1112,22 +1111,22 @@ fn crosshair_labels_collapsed_gaps_produces_valid_labels() {
     let expected_price = camera.y_to_price(cursor_y);
     let expected_text = format_price(expected_price);
     assert_eq!(
-        labels.price_label.text, expected_text,
-        "collapsed mode price label should match format_price"
+        labels.priceline_label.text, expected_text,
+        "collapsed mode priceline label should match format_price"
     );
 
     // Time label text should be non-empty (formatted datetime of
     // the nearest candle).
     assert!(
-        !labels.time_label.text.is_empty(),
-        "time label text should be non-empty in collapsed mode"
+        !labels.timeline_label.text.is_empty(),
+        "timeline label text should be non-empty in collapsed mode"
     );
 
     // Time label should snap to candle index 3's timestamp.
     let expected_time_text = format_datetime_long(data.timestamp(3));
     assert_eq!(
-        labels.time_label.text, expected_time_text,
-        "collapsed time label should snap to nearest candle's timestamp"
+        labels.timeline_label.text, expected_time_text,
+        "collapsed timeline label should snap to nearest candle's timestamp"
     );
 }
 
@@ -1144,9 +1143,9 @@ fn crosshair_labels_price_screen_x_equals_viewport_width() {
 
     let expected_x = camera.viewport_width as f32;
     assert!(
-        (labels.price_label.screen_x - expected_x).abs() < f32::EPSILON,
-        "price label screen_x={} should equal viewport_width={}",
-        labels.price_label.screen_x,
+        (labels.priceline_label.screen_x - expected_x).abs() < f32::EPSILON,
+        "priceline label screen_x={} should equal viewport_width={}",
+        labels.priceline_label.screen_x,
         expected_x
     );
 }

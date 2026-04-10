@@ -760,6 +760,8 @@ fn make_compute_ctx<'a>(
         separator_y: camera.viewport_height as f32 * 0.80,
         dpi_scale: 1.0,
         hovered_annotation: hovered,
+        selected_annotation: None,
+        drag_ghost: None,
     }
 }
 

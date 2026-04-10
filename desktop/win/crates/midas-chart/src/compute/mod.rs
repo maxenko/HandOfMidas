@@ -6,11 +6,11 @@
 //! chart frame. No GPU, no framework -- just math.
 
 use crate::camera::Camera2D;
-use crate::date_labels::{DateLabel, Tier};
+use crate::timeline::{TimelineLabel, Tier};
 use crate::input::ChartInput;
 use crate::instances::{
-    AxisLabel, CandleInstance, CrosshairRender, GridLine, GridLineInstance, LevelRender,
-    OhlcvOverlay, SessionBoundary, VolumeInstance,
+    AxisLabel, CandleInstance, CrosshairRender, GridLine, GridLineInstance, OhlcvOverlay,
+    SessionBoundary, VolumeInstance,
 };
 use crate::scene::{ChartScene, SceneGenerations};
 use midas_core::CandleData;
@@ -98,7 +98,7 @@ fn build_volume_profile(
 /// 4. Session boundary lines (collapsed mode, deduplicated against date labels)
 fn build_grid_instances(
     price_grid_lines: &[GridLine],
-    date_labels: &[DateLabel],
+    timeline_labels: &[TimelineLabel],
     session_boundaries: &[SessionBoundary],
     separator_y: f32,
     viewport_width: f32,
@@ -131,7 +131,7 @@ fn build_grid_instances(
     // 3. Vertical time lines at every date label position.
     //    Opacity and thickness scale with tier so hourly lines stay faint
     //    while daily/monthly boundaries stand out.
-    for dl in date_labels {
+    for dl in timeline_labels {
         let (color, thickness) = if dl.is_boundary {
             ([0.45, 0.45, 0.50, 0.30], 1.0_f32)
         } else {
@@ -157,7 +157,7 @@ fn build_grid_instances(
         40.0
     };
     for sb in session_boundaries {
-        let dominated = date_labels
+        let dominated = timeline_labels
             .iter()
             .any(|dl| dl.is_boundary && (dl.screen_x - sb.x).abs() < slot_tol);
         if dominated {
@@ -222,9 +222,8 @@ fn compute_normal_scene(
     let volume_count = volumes.as_ref().map_or(0, |v| v.len());
 
     let price_grid_lines = compute_grid_lines(camera, &input.grid_color);
-    let y_labels = compute_y_labels(camera);
-    let x_labels = compute_x_labels(camera, candle_duration);
-    let levels = compute_levels(input.annotations, camera);
+    let priceline_labels = compute_priceline_labels(camera);
+    let timeline_ticks = compute_timeline_ticks(camera, candle_duration);
     let widget_output = compute_widget_annotations(input.annotations, camera, input);
     let crosshair = compute_crosshair_impl(input.crosshair, data, camera, input.symbol, &|cx| {
         let cursor_time = camera.x_to_time(cx);
@@ -242,14 +241,14 @@ fn compute_normal_scene(
     } else {
         None
     };
-    let date_labels = crate::date_labels::for_normal_mode(camera, candle_duration);
+    let timeline_labels = crate::timeline::for_normal_mode(camera, candle_duration);
     let separator_y = input.viewport_height as f32 * (1.0 - input.timeline_border_ratio);
     let vw = input.viewport_width as f32;
     let projection = camera.projection_matrix();
 
     let grid_instances = build_grid_instances(
         &price_grid_lines,
-        &date_labels,
+        &timeline_labels,
         &[],
         separator_y,
         vw,
@@ -267,13 +266,12 @@ fn compute_normal_scene(
         volumes,
         volume_count,
         grid_instances,
-        x_labels,
-        y_labels,
-        levels,
+        timeline_ticks,
+        priceline_labels,
         crosshair,
         level_preview_y,
         separator_y,
-        date_labels,
+        timeline_labels,
         volume_profile_instances,
         widget_output,
         generations: SceneGenerations {
@@ -365,8 +363,8 @@ fn compute_collapsed_scene(
         &index_to_x,
     );
 
-    let y_labels = compute_y_labels(camera);
-    let x_labels = compute_collapsed_x_labels(
+    let priceline_labels = compute_priceline_labels(camera);
+    let timeline_ticks = compute_collapsed_timeline_ticks(
         camera,
         data,
         vis_start,
@@ -375,7 +373,6 @@ fn compute_collapsed_scene(
         &index_to_x,
     );
 
-    let levels = compute_levels(input.annotations, camera);
     let widget_output = compute_widget_annotations(input.annotations, camera, input);
 
     // Crosshair in collapsed mode: convert cursor X to the nearest candle index.
@@ -399,7 +396,7 @@ fn compute_collapsed_scene(
         None
     };
 
-    let date_labels = crate::date_labels::for_collapsed_mode(
+    let timeline_labels = crate::timeline::for_collapsed_mode(
         camera,
         data,
         vis_start,
@@ -413,7 +410,7 @@ fn compute_collapsed_scene(
 
     let grid_instances = build_grid_instances(
         &grid_lines,
-        &date_labels,
+        &timeline_labels,
         &session_boundaries,
         separator_y,
         vw,
@@ -431,13 +428,12 @@ fn compute_collapsed_scene(
         volumes,
         volume_count,
         grid_instances,
-        x_labels,
-        y_labels,
-        levels,
+        timeline_ticks,
+        priceline_labels,
         crosshair,
         level_preview_y,
         separator_y,
-        date_labels,
+        timeline_labels,
         volume_profile_instances,
         widget_output,
         generations: SceneGenerations {
@@ -710,7 +706,7 @@ fn detect_session_boundaries(
 /// Compute horizontal price grid lines for collapsed mode.
 ///
 /// Produces ONLY horizontal (price) grid lines. Vertical time lines
-/// are handled by the `date_labels` module.
+/// are handled by the `timeline` module.
 fn compute_collapsed_grid_lines(
     camera: &Camera2D,
     _data: &dyn CandleData,
@@ -745,8 +741,8 @@ fn compute_collapsed_grid_lines(
     lines
 }
 
-/// Compute X-axis (time) labels in gap-collapsed mode.
-fn compute_collapsed_x_labels(
+/// Compute timeline tick labels in gap-collapsed mode.
+fn compute_collapsed_timeline_ticks(
     camera: &Camera2D,
     data: &dyn CandleData,
     vis_start: usize,
@@ -827,10 +823,10 @@ fn build_crosshair_data(
     snap_ts: i64,
     symbol: &str,
 ) -> CrosshairRender {
-    // Price label uses the raw cursor Y so the displayed price matches
+    // Priceline label uses the raw cursor Y so the displayed price matches
     // the user's exact cursor position, not the pixel-snapped line.
     let cursor_price = camera.y_to_price(cursor_y);
-    let price_label = AxisLabel {
+    let priceline_label = AxisLabel {
         text: format_price(cursor_price),
         screen_x: camera.viewport_width as f32,
         screen_y: snap_y,
@@ -838,8 +834,8 @@ fn build_crosshair_data(
         text_color: [1.0, 1.0, 1.0, 1.0],
     };
 
-    // Build time label at snap X.
-    let time_label = AxisLabel {
+    // Build timeline label at snap X.
+    let timeline_label = AxisLabel {
         text: format_time_ms(snap_ts),
         screen_x: snap_x,
         screen_y: camera.viewport_height as f32,
@@ -884,8 +880,8 @@ fn build_crosshair_data(
     CrosshairRender {
         vertical_x: snap_x,
         horizontal_y: snap_y,
-        price_label,
-        time_label,
+        priceline_label,
+        timeline_label,
         line_color: [0.7, 0.7, 0.7, 0.5],
         ohlcv_overlay,
     }
@@ -894,7 +890,7 @@ fn build_crosshair_data(
 /// Compute horizontal price grid lines with adaptive density.
 ///
 /// Produces ONLY horizontal (price) grid lines. Vertical time lines
-/// are handled by the `date_labels` module.
+/// are handled by the `timeline` module.
 fn compute_grid_lines(camera: &Camera2D, grid_color: &[f32; 4]) -> Vec<GridLine> {
     let mut lines = Vec::new();
 
@@ -923,13 +919,13 @@ fn compute_grid_lines(camera: &Camera2D, grid_color: &[f32; 4]) -> Vec<GridLine>
     lines
 }
 
-/// Compute Y-axis (price) labels.
+/// Compute priceline labels.
 ///
 /// Labels are placed at "nice" price intervals (1-2-5 multiples of powers
 /// of 10) targeting roughly one label per 80 logical pixels of viewport
 /// height. The labels include the formatted price string and their
 /// screen-Y position.
-pub fn compute_y_labels(camera: &Camera2D) -> Vec<AxisLabel> {
+pub fn compute_priceline_labels(camera: &Camera2D) -> Vec<AxisLabel> {
     let price_range = camera.price_high - camera.price_low;
     if price_range <= 0.0 {
         return Vec::new();
@@ -964,12 +960,12 @@ pub fn compute_y_labels(camera: &Camera2D) -> Vec<AxisLabel> {
 /// overlay builder in midas-app.
 #[derive(Clone, Debug)]
 pub struct CrosshairLabels {
-    /// Price label: formatted price text, positioned at the right edge of
+    /// Priceline label: formatted price text, positioned at the right edge of
     /// the chart, vertically centered on the cursor Y.
-    pub price_label: AxisLabel,
-    /// Time label: formatted date/time text, positioned at the bottom of
+    pub priceline_label: AxisLabel,
+    /// Timeline label: formatted date/time text, positioned at the bottom of
     /// the price area, horizontally centered on the snapped cursor X.
-    pub time_label: AxisLabel,
+    pub timeline_label: AxisLabel,
 }
 
 /// Compute crosshair axis label data for the iced widget overlay.
@@ -995,7 +991,7 @@ pub fn compute_crosshair_labels(
     // the user's exact cursor position, not a snapped value.
     let cursor_price = camera.y_to_price(cy);
     let snap_y = camera.snap_to_pixel(cy);
-    let price_label = AxisLabel {
+    let priceline_label = AxisLabel {
         text: format_price(cursor_price),
         screen_x: camera.viewport_width as f32,
         screen_y: snap_y,
@@ -1003,7 +999,7 @@ pub fn compute_crosshair_labels(
         text_color: [0.1, 0.1, 0.1, 1.0],
     };
 
-    // Time label — snap to nearest candle, show detailed datetime.
+    // Timeline label — snap to nearest candle, show detailed datetime.
     let (snap_x, snap_ts) = if collapse_gaps {
         // In collapsed mode, camera X axis is index-space.
         let global_idx_f = camera.x_to_time(cx);
@@ -1020,7 +1016,7 @@ pub fn compute_crosshair_labels(
         (sx, ts)
     };
 
-    let time_label = AxisLabel {
+    let timeline_label = AxisLabel {
         text: format_datetime_long(snap_ts),
         screen_x: snap_x,
         screen_y: camera.viewport_height as f32,
@@ -1029,13 +1025,13 @@ pub fn compute_crosshair_labels(
     };
 
     Some(CrosshairLabels {
-        price_label,
-        time_label,
+        priceline_label,
+        timeline_label,
     })
 }
 
-/// Compute X-axis (time) labels.
-fn compute_x_labels(camera: &Camera2D, candle_duration: f64) -> Vec<AxisLabel> {
+/// Compute timeline tick labels.
+fn compute_timeline_ticks(camera: &Camera2D, candle_duration: f64) -> Vec<AxisLabel> {
     let time_range = camera.time_end - camera.time_start;
     if time_range <= 0.0 {
         return Vec::new();
@@ -1064,20 +1060,6 @@ fn compute_x_labels(camera: &Camera2D, candle_duration: f64) -> Vec<AxisLabel> {
         count += 1;
     }
     labels
-}
-
-/// Compute render data for horizontal levels from annotations.
-///
-/// **Deprecated**: Levels are now rendered via `compute_widget_annotations()`
-/// → `compute_level()` → `WidgetOutput`. This function returns an empty vec
-/// to prevent double-rendering. It is retained during the transition for
-/// backward compatibility with `ChartScene::levels` consumers. Will be
-/// removed in the cleanup slice.
-fn compute_levels(
-    _annotations: &[crate::widget::Annotation],
-    _camera: &Camera2D,
-) -> Vec<LevelRender> {
-    Vec::new()
 }
 
 /// Compute merged `WidgetOutput` for all annotations (levels + brackets).
@@ -1110,6 +1092,8 @@ fn compute_widget_annotations(
         separator_y: input.viewport_height as f32 * (1.0 - input.timeline_border_ratio),
         dpi_scale: input.dpi_scale,
         hovered_annotation: input.hovered_annotation,
+        selected_annotation: input.selected_annotation,
+        drag_ghost: input.drag_ghost,
     };
 
     let mut merged = WidgetOutput::default();

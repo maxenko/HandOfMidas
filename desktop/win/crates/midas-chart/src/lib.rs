@@ -19,7 +19,7 @@
 pub mod camera;
 pub mod compute;
 pub mod crosshair_tool;
-pub mod date_labels;
+pub mod timeline;
 pub mod dirty;
 pub mod gerchik_atr;
 pub mod grid;
@@ -38,17 +38,17 @@ pub mod widget;
 pub use camera::Camera2D;
 pub use compute::VOLUME_AREA_FRACTION;
 pub use compute::{
-    compute_chart_scene, compute_crosshair_labels, compute_y_labels, estimate_candle_duration,
+    compute_chart_scene, compute_crosshair_labels, compute_priceline_labels, estimate_candle_duration,
     format_datetime_long, format_price, CrosshairLabels,
 };
 pub use crosshair_tool::{CrosshairMode, CrosshairTool};
-pub use date_labels::{DateLabel, Tier as DateLabelTier};
+pub use timeline::{TimelineLabel, Tier as TimelineTier};
 pub use dirty::{DirtyFlags, DirtyTracker};
 pub use gerchik_atr::GerchikAtrRender;
 pub use input::ChartInput;
 pub use instances::{
-    AxisLabel, CandleInstance, CrosshairRender, GridLine, GridLineInstance, LevelRender,
-    OhlcvOverlay, SessionBoundary, VolumeInstance,
+    AxisLabel, CandleInstance, CrosshairRender, GridLine, GridLineInstance, OhlcvOverlay,
+    SessionBoundary, VolumeInstance,
 };
 pub use interaction::{
     handle_event, timeline_border_y, volume_handle_y, ChartAction, ChartEvent, Key, MouseButton,

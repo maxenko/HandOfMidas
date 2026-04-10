@@ -219,7 +219,7 @@ const SCALE_SENSITIVITY: f64 = 0.005;
 ///
 /// Carries the entry price and side needed for drag clamping.
 /// `None` for non-bracket annotations (levels).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BracketClampCtx {
     /// Entry price of the bracket (for side-constraint clamping).
     pub entry_price: f64,
@@ -376,11 +376,6 @@ pub fn handle_event(
     is_collapsed: bool,
     annotations: &[crate::widget::Annotation],
 ) -> Vec<ChartAction> {
-    debug_assert!(
-        !(state.level_tool.is_dragging() && state.interaction_mode != InteractionMode::Idle),
-        "invariant violated: LevelTool::Dragging requires InteractionMode::Idle"
-    );
-
     match event {
         ChartEvent::MouseMoved { x, y, alt_held } => {
             handle_mouse_moved(state, x, y, alt_held, data, is_collapsed, annotations)
@@ -476,7 +471,7 @@ fn handle_mouse_moved(
         state.interaction_mode,
         InteractionMode::DraggingVolumeScale { .. }
             | InteractionMode::DraggingTimelineBorder { .. }
-            | InteractionMode::DraggingBracketLeg { .. }
+            | InteractionMode::DraggingAnnotation { .. }
     );
     let in_bounds = x >= 0.0
         && y >= 0.0
@@ -515,55 +510,29 @@ fn handle_mouse_moved(
             let dist = (ddx * ddx + ddy * ddy).sqrt();
 
             if dist >= DRAG_THRESHOLD_PX {
-                // Exceeded threshold. Left-drag only initiates level or bracket
-                // leg drag, never panning (panning is right-mouse only).
+                // Exceeded threshold. Left-drag only initiates annotation
+                // drag, never panning (panning is right-mouse only).
                 if let Some((ann_id, kind, grab_offset, clamp_ctx)) =
                     hit_test_annotation(annotations, start_y, &state.camera)
                 {
                     use crate::widget::hit_test::HitZoneKind;
 
                     match kind {
-                        HitZoneKind::LevelLine => {
-                            // Level drag via LevelTool (Slice 3 will unify).
-                            state.level_tool.mode =
-                                crate::level_tool::LevelToolMode::Dragging {
-                                    level_id: ann_id,
-                                    grab_offset,
-                                };
-                            state.interaction_mode = InteractionMode::Idle;
-                            actions.push(ChartAction::SelectLevel { id: ann_id });
-                        }
-                        HitZoneKind::BracketTP
+                        HitZoneKind::LevelLine
+                        | HitZoneKind::BracketTP
                         | HitZoneKind::BracketSL
                         | HitZoneKind::BracketEntry
                         | HitZoneKind::BracketStopTrigger => {
-                            let leg = match kind {
-                                HitZoneKind::BracketTP => {
-                                    crate::widget::order_bracket::LegRole::TakeProfit
-                                }
-                                HitZoneKind::BracketSL => {
-                                    crate::widget::order_bracket::LegRole::StopLoss
-                                }
-                                HitZoneKind::BracketEntry => {
-                                    crate::widget::order_bracket::LegRole::Entry
-                                }
-                                HitZoneKind::BracketStopTrigger => {
-                                    crate::widget::order_bracket::LegRole::StopTrigger
-                                }
-                                _ => unreachable!(),
-                            };
-                            let ctx = clamp_ctx.unwrap_or(BracketClampCtx {
-                                entry_price: 0.0,
-                                side: crate::widget::order_bracket::BracketSide::Long,
-                            });
                             state.interaction_mode =
-                                InteractionMode::DraggingBracketLeg {
+                                InteractionMode::DraggingAnnotation {
                                     annotation_id: ann_id,
-                                    leg,
+                                    element: kind,
                                     grab_offset,
-                                    entry_price: ctx.entry_price,
-                                    side: ctx.side,
+                                    clamp_ctx,
                                 };
+                            if kind == HitZoneKind::LevelLine {
+                                actions.push(ChartAction::SelectLevel { id: ann_id });
+                            }
                         }
                         _ => {
                             state.interaction_mode = InteractionMode::Idle;
@@ -733,26 +702,79 @@ fn handle_mouse_moved(
             });
         }
 
-        InteractionMode::DraggingBracketLeg {
+        InteractionMode::DraggingAnnotation {
             annotation_id,
-            leg,
+            element,
             grab_offset,
-            entry_price,
-            side,
+            clamp_ctx,
         } => {
+            use crate::widget::hit_test::HitZoneKind;
+
             let raw_price = state.camera.y_to_price(y) + grab_offset;
 
-            // Clamp to correct side of entry based on trade direction.
-            let clamped =
-                clamp_bracket_leg_price(raw_price, entry_price, leg, side, &state.camera);
-            // Snap to valid tick increment.
-            let snapped = snap_to_tick(clamped, DEFAULT_TICK_SIZE);
+            match element {
+                HitZoneKind::LevelLine => {
+                    // Level drag: OHLC snap, emit DragLevel.
+                    let snapped = if let Some(d) = data {
+                        state
+                            .level_tool
+                            .snap_to_ohlc(raw_price, x, &state.camera, d, is_collapsed)
+                    } else {
+                        raw_price
+                    };
+                    state.crosshair.suppress();
+                    #[allow(deprecated)]
+                    {
+                        state.crosshair_pos = None;
+                    }
+                    actions.push(ChartAction::DragLevel {
+                        id: annotation_id,
+                        new_price: snapped,
+                    });
+                    actions.push(ChartAction::ClearCrosshair);
+                }
+                HitZoneKind::BracketTP
+                | HitZoneKind::BracketSL
+                | HitZoneKind::BracketEntry
+                | HitZoneKind::BracketStopTrigger => {
+                    let leg = match element {
+                        HitZoneKind::BracketTP => {
+                            crate::widget::order_bracket::LegRole::TakeProfit
+                        }
+                        HitZoneKind::BracketSL => {
+                            crate::widget::order_bracket::LegRole::StopLoss
+                        }
+                        HitZoneKind::BracketEntry => {
+                            crate::widget::order_bracket::LegRole::Entry
+                        }
+                        HitZoneKind::BracketStopTrigger => {
+                            crate::widget::order_bracket::LegRole::StopTrigger
+                        }
+                        _ => unreachable!(),
+                    };
+                    let ctx = clamp_ctx.unwrap_or(BracketClampCtx {
+                        entry_price: 0.0,
+                        side: crate::widget::order_bracket::BracketSide::Long,
+                    });
+                    // Clamp to correct side of entry based on trade direction.
+                    let clamped = clamp_bracket_leg_price(
+                        raw_price,
+                        ctx.entry_price,
+                        leg,
+                        ctx.side,
+                        &state.camera,
+                    );
+                    // Snap to valid tick increment.
+                    let snapped = snap_to_tick(clamped, DEFAULT_TICK_SIZE);
 
-            actions.push(ChartAction::DragBracketLeg {
-                annotation_id,
-                leg,
-                new_price: snapped,
-            });
+                    actions.push(ChartAction::DragBracketLeg {
+                        annotation_id,
+                        leg,
+                        new_price: snapped,
+                    });
+                }
+                _ => {}
+            }
         }
     }
 
@@ -938,22 +960,48 @@ fn handle_mouse_pressed(
         }
 
         MouseButton::Right => {
-            // Hit-test bracket legs first (TP/SL are more specific than levels).
-            if let Some((ann_id, leg, _grab_offset, _entry_price, _side)) =
-                hit_test_bracket_legs(annotations, y, &state.camera)
+            use crate::widget::hit_test::HitZoneKind;
+
+            if let Some((ann_id, kind, _offset, _ctx)) =
+                hit_test_annotation(annotations, y, &state.camera)
             {
-                vec![ChartAction::RightClickBracketLeg {
-                    annotation_id: ann_id,
-                    leg,
-                    x,
-                    y,
-                }]
-            } else if let Some((level_id, _offset)) = hit_test_levels(annotations, y, &state.camera)
-            {
-                // Right-click on a level opens the editor.
-                vec![ChartAction::RightClickLevel { id: level_id, x, y }]
+                match kind {
+                    HitZoneKind::LevelLine => {
+                        vec![ChartAction::RightClickLevel { id: ann_id, x, y }]
+                    }
+                    HitZoneKind::BracketTP
+                    | HitZoneKind::BracketSL
+                    | HitZoneKind::BracketEntry
+                    | HitZoneKind::BracketStopTrigger => {
+                        let leg = match kind {
+                            HitZoneKind::BracketTP => {
+                                crate::widget::order_bracket::LegRole::TakeProfit
+                            }
+                            HitZoneKind::BracketSL => {
+                                crate::widget::order_bracket::LegRole::StopLoss
+                            }
+                            HitZoneKind::BracketEntry => {
+                                crate::widget::order_bracket::LegRole::Entry
+                            }
+                            HitZoneKind::BracketStopTrigger => {
+                                crate::widget::order_bracket::LegRole::StopTrigger
+                            }
+                            _ => unreachable!(),
+                        };
+                        vec![ChartAction::RightClickBracketLeg {
+                            annotation_id: ann_id,
+                            leg,
+                            x,
+                            y,
+                        }]
+                    }
+                    _ => {
+                        state.interaction_mode = InteractionMode::RightPanning;
+                        state.drag_start = Some((x, y));
+                        vec![]
+                    }
+                }
             } else {
-                // No bracket or level hit — right-click starts XY panning.
                 state.interaction_mode = InteractionMode::RightPanning;
                 state.drag_start = Some((x, y));
                 vec![]
@@ -1038,24 +1086,13 @@ fn handle_mouse_released(
         return vec![];
     }
 
-    // End bracket leg dragging on left mouse-up.
+    // End annotation dragging on left mouse-up.
     if matches!(
         state.interaction_mode,
-        InteractionMode::DraggingBracketLeg { .. }
+        InteractionMode::DraggingAnnotation { .. }
     ) {
         state.interaction_mode = InteractionMode::Idle;
         state.drag_start = None;
-        state.crosshair.on_left_release();
-        #[allow(deprecated)]
-        {
-            state.left_mouse_down = false;
-        }
-        return vec![ChartAction::ClearCrosshair];
-    }
-
-    // End LevelTool dragging on left mouse-up.
-    if state.level_tool.is_dragging() {
-        state.level_tool.mode = crate::level_tool::LevelToolMode::Idle;
         state.crosshair.on_left_release();
         #[allow(deprecated)]
         {
@@ -1088,9 +1125,12 @@ fn handle_mouse_released(
                 hit_test_bracket_buttons(annotations, start_x, start_y, &state.camera, vp_w)
             {
                 actions.push(btn_action);
-            } else if let Some((level_id, _)) = hit_test_levels(annotations, start_y, &state.camera)
+            } else if let Some((ann_id, kind, _, _)) =
+                hit_test_annotation(annotations, start_y, &state.camera)
             {
-                actions.push(ChartAction::SelectLevel { id: level_id });
+                if kind == crate::widget::hit_test::HitZoneKind::LevelLine {
+                    actions.push(ChartAction::SelectLevel { id: ann_id });
+                }
             } else if state.selected_level.is_some() {
                 actions.push(ChartAction::DeselectLevel);
             }
@@ -1116,7 +1156,7 @@ fn handle_mouse_released(
         // Handled by the early return above; unreachable.
         InteractionMode::DraggingVolumeScale { .. } => {}
         InteractionMode::DraggingTimelineBorder { .. } => {}
-        InteractionMode::DraggingBracketLeg { .. } => {}
+        InteractionMode::DraggingAnnotation { .. } => {}
     }
 
     // Always return to Idle on mouse release.
@@ -1280,33 +1320,6 @@ fn handle_suppressed_move(
         return vec![ChartAction::ClearCrosshair];
     }
 
-    // Dragging mode: compute snapped drag price and emit DragLevel.
-    if let crate::level_tool::LevelToolMode::Dragging {
-        level_id,
-        grab_offset,
-    } = state.level_tool.mode
-    {
-        let raw_price = state.camera.y_to_price(y) + grab_offset;
-        let snapped = if let Some(d) = data {
-            state
-                .level_tool
-                .snap_to_ohlc(raw_price, x, &state.camera, d, is_collapsed)
-        } else {
-            raw_price
-        };
-        state.crosshair.suppress();
-        #[allow(deprecated)]
-        {
-            state.crosshair_pos = None;
-        }
-        return vec![
-            ChartAction::DragLevel {
-                id: level_id,
-                new_price: snapped,
-            },
-            ChartAction::ClearCrosshair,
-        ];
-    }
     Vec::new()
 }
 
@@ -1368,45 +1381,6 @@ fn is_over_timeline_border(y: f32, viewport_height: u32, timeline_border_ratio: 
     (y - border_y).abs() <= TIMELINE_BORDER_HIT_TOLERANCE
 }
 
-/// Returns `Some((annotation_id, grab_offset))` if an annotation level is
-/// within `LEVEL_HIT_TOLERANCE_PX` of `cursor_y`. The `grab_offset` is
-/// the price difference between the level and the cursor, so the level
-/// does not jump to the cursor when dragging starts.
-fn hit_test_levels(
-    annotations: &[crate::widget::Annotation],
-    cursor_y: f32,
-    camera: &crate::camera::Camera2D,
-) -> Option<(AnnotationId, f64)> {
-    let cursor_price = camera.y_to_price(cursor_y);
-    let mut closest: Option<(AnnotationId, f32, f64)> = None;
-
-    for ann in annotations {
-        if !ann.presence.is_interactive() {
-            continue;
-        }
-        let price = match &ann.kind {
-            crate::widget::AnnotationKind::Level(level) => level.price,
-            // Only levels participate in level hit-testing.
-            _ => continue,
-        };
-        let level_y = camera.price_to_y(price);
-        let dist = (cursor_y - level_y).abs();
-
-        if dist <= LEVEL_HIT_TOLERANCE_PX {
-            let better = match closest {
-                None => true,
-                Some((_, prev_dist, _)) => dist < prev_dist,
-            };
-            if better {
-                let price_offset = price - cursor_price;
-                closest = Some((ann.id, dist, price_offset));
-            }
-        }
-    }
-
-    closest.map(|(id, _, offset)| (id, offset))
-}
-
 /// Default tick size for price snapping during bracket leg drags.
 /// Used to round dragged TP/SL prices to valid tick increments.
 /// Can be made configurable per-instrument in a future iteration.
@@ -1459,143 +1433,6 @@ fn clamp_bracket_leg_price(
         (BracketSide::Short, LegRole::StopLoss) => raw_price.max(entry_price + min_offset),
         (_, LegRole::Entry | LegRole::StopTrigger) => raw_price,
     }
-}
-
-/// Hit-test bracket legs within `LEVEL_HIT_TOLERANCE_PX` of `cursor_y`.
-///
-/// Returns `Some((annotation_id, leg_role, grab_offset, entry_price, side))`
-/// for the closest bracket leg. Entry legs are included only for
-/// non-Market Draft brackets (Limit/Stop/StopLimit entry is draggable).
-fn hit_test_bracket_legs(
-    annotations: &[crate::widget::Annotation],
-    cursor_y: f32,
-    camera: &crate::camera::Camera2D,
-) -> Option<(
-    AnnotationId,
-    crate::widget::order_bracket::LegRole,
-    f64,
-    f64,
-    crate::widget::order_bracket::BracketSide,
-)> {
-    let cursor_price = camera.y_to_price(cursor_y);
-    let mut closest: Option<(
-        AnnotationId,
-        crate::widget::order_bracket::LegRole,
-        f32,
-        f64,
-        f64,
-        crate::widget::order_bracket::BracketSide,
-    )> = None;
-
-    for ann in annotations {
-        if !ann.presence.is_interactive() || ann.locked {
-            continue;
-        }
-        let bracket = match &ann.kind {
-            crate::widget::AnnotationKind::OrderBracket(b) => b,
-            _ => continue,
-        };
-
-        // Check TP leg.
-        if let Some(ref tp) = bracket.take_profit {
-            let leg_y = camera.price_to_y(tp.price);
-            let dist = (cursor_y - leg_y).abs();
-            if dist <= LEVEL_HIT_TOLERANCE_PX {
-                let better = match closest {
-                    None => true,
-                    Some((_, _, prev_dist, _, _, _)) => dist < prev_dist,
-                };
-                if better {
-                    let offset = tp.price - cursor_price;
-                    closest = Some((
-                        ann.id,
-                        crate::widget::order_bracket::LegRole::TakeProfit,
-                        dist,
-                        offset,
-                        bracket.entry.price,
-                        bracket.side,
-                    ));
-                }
-            }
-        }
-
-        // Check SL leg.
-        if let Some(ref sl) = bracket.stop_loss {
-            let leg_y = camera.price_to_y(sl.price);
-            let dist = (cursor_y - leg_y).abs();
-            if dist <= LEVEL_HIT_TOLERANCE_PX {
-                let better = match closest {
-                    None => true,
-                    Some((_, _, prev_dist, _, _, _)) => dist < prev_dist,
-                };
-                if better {
-                    let offset = sl.price - cursor_price;
-                    closest = Some((
-                        ann.id,
-                        crate::widget::order_bracket::LegRole::StopLoss,
-                        dist,
-                        offset,
-                        bracket.entry.price,
-                        bracket.side,
-                    ));
-                }
-            }
-        }
-
-        // Check Entry leg — draggable only for non-Market Draft brackets.
-        if bracket.entry_type != crate::widget::order_bracket::EntryType::Market
-            && bracket.status == crate::widget::order_bracket::BracketStatus::Draft
-        {
-            let leg_y = camera.price_to_y(bracket.entry.price);
-            let dist = (cursor_y - leg_y).abs();
-            if dist <= LEVEL_HIT_TOLERANCE_PX {
-                let better = match closest {
-                    None => true,
-                    Some((_, _, prev_dist, _, _, _)) => dist < prev_dist,
-                };
-                if better {
-                    let offset = bracket.entry.price - cursor_price;
-                    closest = Some((
-                        ann.id,
-                        crate::widget::order_bracket::LegRole::Entry,
-                        dist,
-                        offset,
-                        bracket.entry.price,
-                        bracket.side,
-                    ));
-                }
-            }
-        }
-
-        // Check StopTrigger leg — only for StopLimit Draft brackets.
-        if bracket.entry_type == crate::widget::order_bracket::EntryType::StopLimit
-            && bracket.status == crate::widget::order_bracket::BracketStatus::Draft
-        {
-            if let Some(stop_price) = bracket.entry_stop_price {
-                let leg_y = camera.price_to_y(stop_price);
-                let dist = (cursor_y - leg_y).abs();
-                if dist <= LEVEL_HIT_TOLERANCE_PX {
-                    let better = match closest {
-                        None => true,
-                        Some((_, _, prev_dist, _, _, _)) => dist < prev_dist,
-                    };
-                    if better {
-                        let offset = stop_price - cursor_price;
-                        closest = Some((
-                            ann.id,
-                            crate::widget::order_bracket::LegRole::StopTrigger,
-                            dist,
-                            offset,
-                            bracket.entry.price,
-                            bracket.side,
-                        ));
-                    }
-                }
-            }
-        }
-    }
-
-    closest.map(|(id, role, _, offset, entry, side)| (id, role, offset, entry, side))
 }
 
 /// Button half-height for hit zone rectangles (pixels above/below label y).

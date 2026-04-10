@@ -71,6 +71,8 @@ fn make_default_chart_input<'a>(
         level_tool: &DEFAULT_LEVEL_TOOL,
         gatr_bright_ranges: &[],
         hovered_annotation: None,
+        selected_annotation: None,
+        drag_ghost: None,
     }
 }
 
@@ -390,8 +392,8 @@ fn full_pipeline_end_to_end() {
     assert_eq!(volumes.len(), 20, "all volume bars present");
 
     assert!(!scene.grid_instances.is_empty(), "grid lines present");
-    assert!(!scene.y_labels.is_empty(), "y labels present");
-    assert!(!scene.x_labels.is_empty(), "x labels present");
+    assert!(!scene.priceline_labels.is_empty(), "priceline labels present");
+    assert!(!scene.timeline_ticks.is_empty(), "timeline ticks present");
 
     assert_ne!(scene.projection, glam::Mat4::IDENTITY);
 
