@@ -1594,10 +1594,10 @@ pub struct CrosshairRenderData {
     pub content_rect: ContentRect,
 
     /// Price label text and position (on Y-axis).
-    pub price_label: AxisLabel,
+    pub priceline_label: AxisLabel,
 
     /// Time label text and position (on X-axis).
-    pub time_label: AxisLabel,
+    pub timeline_label: AxisLabel,
 
     /// Line color (typically semi-transparent white or gray).
     pub line_color: [f32; 4],

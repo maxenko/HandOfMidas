@@ -39,7 +39,7 @@ The candle/volume builders already solved this with closures
 (`x_for_candle(idx)`). Apply the same pattern to unify:
 
 - `compute_crosshair()` / `compute_collapsed_crosshair()`
-- `compute_x_labels()` / `compute_collapsed_x_labels()`
+- `compute_timeline_ticks()` / `compute_collapsed_timeline_ticks()`
 - `visible_candle_range()` / `visible_candle_range_collapsed()`
 
 **Approach**: Extract an `XMapping` closure or small struct that

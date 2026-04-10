@@ -1605,8 +1605,8 @@ impl shader::Primitive for ChartPrimitive {
             chart_gpu.grid_instances.write(device, queue, &scene.grid_lines);
             chart_gpu.grid_count = scene.grid_lines.len() as u32;
             // Axis labels (x + y)
-            let all_labels: Vec<_> = scene.x_labels.iter()
-                .chain(scene.y_labels.iter())
+            let all_labels: Vec<_> = scene.timeline_ticks.iter()
+                .chain(scene.priceline_labels.iter())
                 .collect();
             chart_gpu.text_instances.write_labels(device, queue, &all_labels);
             chart_gpu.text_glyph_count = all_labels.len() as u32;

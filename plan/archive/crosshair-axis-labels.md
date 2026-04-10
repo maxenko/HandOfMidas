@@ -12,7 +12,7 @@ Both update dynamically as the crosshair moves. Visible only when crosshair is a
 
 Follow the existing overlay pattern: **compute in midas-chart, render as iced widgets in views.rs**.
 
-The `CrosshairRender` already computes `price_label` and `time_label` inside the GPU pipeline, but these never reach the view layer. Rather than restructuring the data flow, add a parallel public computation function that the view calls directly — identical to how `compute_y_labels()` and `date_labels::compute()` work.
+The `CrosshairRender` already computes `priceline_label` and `timeline_label` inside the GPU pipeline, but these never reach the view layer. Rather than restructuring the data flow, add a parallel public computation function that the view calls directly — identical to how `compute_priceline_labels()` and `timeline::compute()` work.
 
 ## Changes
 

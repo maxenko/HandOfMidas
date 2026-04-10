@@ -1024,7 +1024,7 @@ window where no component performs OHLC snap during placement.
    - The crosshair Y is already snapped by the interaction layer
      (which now has data access via step 1-2).
    - If `level_tool.is_placing()`, read `level_tool.snapped_price` to
-     adjust the crosshair's `price_label.text` and `price_label.screen_y`.
+     adjust the crosshair's `priceline_label.text` and `priceline_label.screen_y`.
    - Remove `level_preview_snapped_price` from `ChartScene` construction.
 5. Delete `snap_crosshair_to_ohlc` function from compute.rs.
 6. Remove `level_preview_snapped_price` from `ChartScene` struct.

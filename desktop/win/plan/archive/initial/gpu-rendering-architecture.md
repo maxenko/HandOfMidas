@@ -358,8 +358,8 @@ pub struct ChartScene {
     pub grid_lines: Vec<GridLine>,
 
     /// Axis labels (rebuilt on camera change)
-    pub x_labels: Vec<AxisLabel>,
-    pub y_labels: Vec<AxisLabel>,
+    pub timeline_ticks: Vec<AxisLabel>,
+    pub priceline_labels: Vec<AxisLabel>,
 
     /// Horizontal levels
     pub levels: Vec<LevelRender>,

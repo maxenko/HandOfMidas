@@ -1964,13 +1964,13 @@ pub struct ChartScene {
     pub volumes: Option<Vec<VolumeInstance>>,
     pub volume_count: usize,
     pub grid_instances: Vec<GridLineInstance>,
-    pub x_labels: Vec<AxisLabel>,     // existing type, unchanged
-    pub y_labels: Vec<AxisLabel>,     // existing type, unchanged
+    pub timeline_ticks: Vec<AxisLabel>,     // existing type, unchanged
+    pub priceline_labels: Vec<AxisLabel>,     // existing type, unchanged
     pub levels: Vec<LevelRender>,
     pub crosshair: Option<CrosshairRender>,
     pub level_preview_y: Option<f32>,
     pub separator_y: f32,
-    pub date_labels: Vec<DateLabel>,
+    pub timeline_labels: Vec<TimelineLabel>,
     pub volume_profile_instances: Vec<GridLineInstance>,
     pub generations: SceneGenerations,
 
