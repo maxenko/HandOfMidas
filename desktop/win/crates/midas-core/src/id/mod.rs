@@ -5,101 +5,56 @@
 
 use std::fmt;
 
-/// Unique identifier for a chart panel within the workspace layout.
-#[derive(
-    Copy, Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd, serde::Serialize, serde::Deserialize,
-)]
-pub struct ChartId(pub u32);
-
-/// Unique identifier for a pane (a slot in the binary split tree layout).
+/// Defines one or more newtype ID wrappers with a `const fn new()` constructor
+/// and a human-readable `Display` impl.
 ///
-/// Uses `u64` to accommodate composite IDs or high-throughput allocation.
-#[derive(
-    Copy, Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd, serde::Serialize, serde::Deserialize,
-)]
-pub struct PaneId(pub u64);
+/// # Example
+///
+/// ```ignore
+/// define_id! {
+///     ChartId(u32) => "Chart",
+/// }
+/// assert_eq!(ChartId::new(7).to_string(), "Chart(7)");
+/// ```
+macro_rules! define_id {
+    ($( $(#[$meta:meta])* $Name:ident($inner:ty) => $label:literal ),+ $(,)?) => {
+        $(
+            $(#[$meta])*
+            #[derive(
+                Copy, Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd,
+                serde::Serialize, serde::Deserialize,
+            )]
+            pub struct $Name(pub $inner);
 
-/// Unique identifier for a traded symbol (e.g., AAPL, MSFT).
-#[derive(
-    Copy, Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd, serde::Serialize, serde::Deserialize,
-)]
-pub struct SymbolId(pub u32);
+            impl $Name {
+                /// Create a new ID from a raw integer value.
+                pub const fn new(id: $inner) -> Self {
+                    Self(id)
+                }
+            }
 
-/// Unique identifier for a watchlist panel within the workspace layout.
-#[derive(
-    Copy, Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd, serde::Serialize, serde::Deserialize,
-)]
-pub struct WatchlistId(pub u32);
-
-/// Unique identifier for an order panel within the workspace layout.
-#[derive(
-    Copy, Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd, serde::Serialize, serde::Deserialize,
-)]
-pub struct OrderPanelId(pub u32);
-
-impl ChartId {
-    /// Create a new `ChartId` from a raw `u32` value.
-    pub const fn new(id: u32) -> Self {
-        Self(id)
-    }
+            impl fmt::Display for $Name {
+                fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    write!(f, concat!($label, "({})"), self.0)
+                }
+            }
+        )+
+    };
 }
 
-impl PaneId {
-    /// Create a new `PaneId` from a raw `u64` value.
-    pub const fn new(id: u64) -> Self {
-        Self(id)
-    }
-}
-
-impl SymbolId {
-    /// Create a new `SymbolId` from a raw `u32` value.
-    pub const fn new(id: u32) -> Self {
-        Self(id)
-    }
-}
-
-impl WatchlistId {
-    /// Create a new `WatchlistId` from a raw `u32` value.
-    pub const fn new(id: u32) -> Self {
-        Self(id)
-    }
-}
-
-impl OrderPanelId {
-    /// Create a new `OrderPanelId` from a raw `u32` value.
-    pub const fn new(id: u32) -> Self {
-        Self(id)
-    }
-}
-
-impl fmt::Display for ChartId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Chart({})", self.0)
-    }
-}
-
-impl fmt::Display for PaneId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Pane({})", self.0)
-    }
-}
-
-impl fmt::Display for SymbolId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Symbol({})", self.0)
-    }
-}
-
-impl fmt::Display for WatchlistId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Watchlist({})", self.0)
-    }
-}
-
-impl fmt::Display for OrderPanelId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Order({})", self.0)
-    }
+define_id! {
+    /// Unique identifier for a chart panel within the workspace layout.
+    ChartId(u32)      => "Chart",
+    /// Unique identifier for a pane (a slot in the binary split tree layout).
+    ///
+    /// Uses `u64` to accommodate composite IDs or high-throughput allocation.
+    PaneId(u64)       => "Pane",
+    /// Unique identifier for a traded symbol (e.g., AAPL, MSFT).
+    SymbolId(u32)     => "Symbol",
+    /// Unique identifier for a watchlist panel within the workspace layout.
+    WatchlistId(u32)  => "Watchlist",
+    /// Unique identifier for an order panel within the workspace layout.
+    OrderPanelId(u32) => "Order",
 }
 
 #[cfg(test)]
