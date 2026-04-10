@@ -18,7 +18,7 @@ pub mod theme;
 pub use self::bracket_tool::{BracketTool, BracketToolMode, BracketToolResult};
 pub use self::compute::{ComputeContext, LabelAnchor, Viewport, WidgetLabel, WidgetOutput};
 pub use self::hit_test::{BoundingBox, CursorIcon, HitResult, HitZone, HitZoneKind, Point};
-pub use self::level::{HorizontalLevel, LevelExtend, LineStyle, compute_level, segmented_line};
+pub use self::level::{compute_level, segmented_line, HorizontalLevel, LevelExtend, LineStyle};
 pub use self::marker::{MarkerAnnotation, MarkerIcon};
 pub use self::order_bracket::{BracketLeg, BracketSide, BracketStatus, EntryType, OrderBracket};
 pub use self::text_note::TextNote;

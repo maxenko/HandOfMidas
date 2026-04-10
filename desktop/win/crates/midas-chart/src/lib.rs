@@ -19,7 +19,6 @@
 pub mod camera;
 pub mod compute;
 pub mod crosshair_tool;
-pub mod timeline;
 pub mod dirty;
 pub mod gerchik_atr;
 pub mod grid;
@@ -31,6 +30,7 @@ pub mod level_tool;
 pub mod levels;
 pub mod scene;
 pub mod state;
+pub mod timeline;
 pub mod volume_profile;
 pub mod widget;
 
@@ -38,11 +38,10 @@ pub mod widget;
 pub use camera::Camera2D;
 pub use compute::VOLUME_AREA_FRACTION;
 pub use compute::{
-    compute_chart_scene, compute_crosshair_labels, compute_priceline_labels, estimate_candle_duration,
-    format_datetime_long, format_price, CrosshairLabels,
+    compute_chart_scene, compute_crosshair_labels, compute_priceline_labels,
+    estimate_candle_duration, format_datetime_long, format_price, CrosshairLabels,
 };
 pub use crosshair_tool::{CrosshairMode, CrosshairTool};
-pub use timeline::{TimelineLabel, Tier as TimelineTier};
 pub use dirty::{DirtyFlags, DirtyTracker};
 pub use gerchik_atr::GerchikAtrRender;
 pub use input::ChartInput;
@@ -57,6 +56,7 @@ pub use level_tool::{LevelTool, LevelToolMode};
 pub use levels::{price_step_for, HorizontalLevel, LevelIcon};
 pub use scene::{ChartScene, SceneGenerations};
 pub use state::{ChartState, CursorClaim, InteractionMode, Momentum, YAnimation};
+pub use timeline::{Tier as TimelineTier, TimelineLabel};
 pub use volume_profile::{VolumeProfile, VolumeProfileBin};
 pub use widget::{Annotation, AnnotationId, AnnotationKind};
 

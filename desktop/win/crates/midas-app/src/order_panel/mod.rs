@@ -793,10 +793,7 @@ impl OrderPanel {
     /// saved Draft bracket found is claimed. Only the first panel for a
     /// given symbol should call this (ownership semantics).
     #[allow(dead_code)] // called from app init path (not yet wired)
-    pub fn relink_hidden_bracket(
-        &mut self,
-        annotations: &[midas_chart::widget::Annotation],
-    ) {
+    pub fn relink_hidden_bracket(&mut self, annotations: &[midas_chart::widget::Annotation]) {
         use midas_chart::widget::order_bracket::BracketStatus;
         use midas_chart::widget::{AnnotationKind, Presence};
 

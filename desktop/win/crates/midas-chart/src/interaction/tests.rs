@@ -1518,16 +1518,14 @@ fn test_clamp_bracket_leg_long_tp_below_entry_clamped() {
 #[test]
 fn test_clamp_bracket_leg_long_sl_below_entry() {
     let cam = clamp_test_camera();
-    let clamped =
-        clamp_bracket_leg_price(175.0, 185.0, LegRole::StopLoss, BracketSide::Long, &cam);
+    let clamped = clamp_bracket_leg_price(175.0, 185.0, LegRole::StopLoss, BracketSide::Long, &cam);
     assert!((clamped - 175.0).abs() < f64::EPSILON);
 }
 
 #[test]
 fn test_clamp_bracket_leg_long_sl_above_entry_clamped() {
     let cam = clamp_test_camera();
-    let clamped =
-        clamp_bracket_leg_price(190.0, 185.0, LegRole::StopLoss, BracketSide::Long, &cam);
+    let clamped = clamp_bracket_leg_price(190.0, 185.0, LegRole::StopLoss, BracketSide::Long, &cam);
     assert!(
         clamped < 185.0,
         "Long SL must be below entry, got {}",
@@ -1634,7 +1632,11 @@ fn hit_test_annotation_misses_market_entry() {
     let result = hit_test_annotation(&[bracket], entry_y, &state.camera);
     // May hit TP or SL if they're nearby; check it's not BracketEntry.
     if let Some((_, kind, _, _)) = result {
-        assert_ne!(kind, HitZoneKind::BracketEntry, "Market entry should not be draggable");
+        assert_ne!(
+            kind,
+            HitZoneKind::BracketEntry,
+            "Market entry should not be draggable"
+        );
     }
 }
 
@@ -1665,7 +1667,11 @@ fn hit_test_annotation_misses_entry_for_draft_market() {
 
     let result = hit_test_annotation(&[bracket], entry_y, &state.camera);
     if let Some((_, kind, _, _)) = result {
-        assert_ne!(kind, HitZoneKind::BracketEntry, "Draft Market entry should not be draggable");
+        assert_ne!(
+            kind,
+            HitZoneKind::BracketEntry,
+            "Draft Market entry should not be draggable"
+        );
     }
 }
 
@@ -1681,7 +1687,11 @@ fn hit_test_annotation_misses_entry_for_pending_limit() {
 
     let result = hit_test_annotation(&[bracket], entry_y, &state.camera);
     if let Some((_, kind, _, _)) = result {
-        assert_ne!(kind, HitZoneKind::BracketEntry, "Pending Limit entry should not be draggable");
+        assert_ne!(
+            kind,
+            HitZoneKind::BracketEntry,
+            "Pending Limit entry should not be draggable"
+        );
     }
 }
 
@@ -1711,7 +1721,10 @@ fn hit_test_annotation_finds_entry_for_draft_stop_limit() {
     let entry_y = state.camera.price_to_y(150.0);
 
     let result = hit_test_annotation(&[bracket], entry_y, &state.camera);
-    assert!(result.is_some(), "Draft StopLimit entry should be hit-testable");
+    assert!(
+        result.is_some(),
+        "Draft StopLimit entry should be hit-testable"
+    );
     assert_eq!(result.unwrap().1, HitZoneKind::BracketEntry);
 }
 

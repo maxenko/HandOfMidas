@@ -194,16 +194,13 @@ fn annotation_at_cursor(
                     best = Some((ann.id, HitZoneKind::BracketSL, dist));
                 }
             }
-            if bracket.entry_type != EntryType::Market
-                && bracket.status == BracketStatus::Draft
-            {
+            if bracket.entry_type != EntryType::Market && bracket.status == BracketStatus::Draft {
                 let dist = (cursor_y - camera.price_to_y(bracket.entry.price)).abs();
                 if dist <= tolerance && best.as_ref().is_none_or(|b| dist < b.2) {
                     best = Some((ann.id, HitZoneKind::BracketEntry, dist));
                 }
             }
-            if bracket.entry_type == EntryType::StopLimit
-                && bracket.status == BracketStatus::Draft
+            if bracket.entry_type == EntryType::StopLimit && bracket.status == BracketStatus::Draft
             {
                 if let Some(stop_price) = bracket.entry_stop_price {
                     let dist = (cursor_y - camera.price_to_y(stop_price)).abs();
@@ -590,10 +587,7 @@ impl shader::Program<Message> for ChartProgram {
                 .chart_state
                 .as_ref()
                 .and_then(|cs| cs.hovered_annotation),
-            selected_annotation: state
-                .chart_state
-                .as_ref()
-                .and_then(|cs| cs.selected_level),
+            selected_annotation: state.chart_state.as_ref().and_then(|cs| cs.selected_level),
             drag_ghost,
         };
 

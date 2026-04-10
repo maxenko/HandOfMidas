@@ -392,7 +392,10 @@ fn full_pipeline_end_to_end() {
     assert_eq!(volumes.len(), 20, "all volume bars present");
 
     assert!(!scene.grid_instances.is_empty(), "grid lines present");
-    assert!(!scene.priceline_labels.is_empty(), "priceline labels present");
+    assert!(
+        !scene.priceline_labels.is_empty(),
+        "priceline labels present"
+    );
     assert!(!scene.timeline_ticks.is_empty(), "timeline ticks present");
 
     assert_ne!(scene.projection, glam::Mat4::IDENTITY);

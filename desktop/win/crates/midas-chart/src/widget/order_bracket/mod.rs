@@ -463,7 +463,12 @@ pub fn compute_bracket(
     ec[3] *= alpha;
 
     output.lines.extend(segmented_line(
-        0.0, vp_width, entry_y, entry_width, ec, &entry_style,
+        0.0,
+        vp_width,
+        entry_y,
+        entry_width,
+        ec,
+        &entry_style,
     ));
 
     let entry_label_text = format_entry_label(bracket);
@@ -486,9 +491,7 @@ pub fn compute_bracket(
             let mut stop_width = base_stop_width;
             let stop_hovered = ctx
                 .hovered_annotation
-                .map(|(aid, kind)| {
-                    aid == annotation_id && kind == HitZoneKind::BracketStopTrigger
-                })
+                .map(|(aid, kind)| aid == annotation_id && kind == HitZoneKind::BracketStopTrigger)
                 .unwrap_or(false);
             if stop_hovered {
                 stop_width += 1.0;
@@ -499,7 +502,12 @@ pub fn compute_bracket(
                 gap_len: 3.0,
             };
             output.lines.extend(segmented_line(
-                0.0, vp_width, stop_y, stop_width, ec, &stop_style,
+                0.0,
+                vp_width,
+                stop_y,
+                stop_width,
+                ec,
+                &stop_style,
             ));
 
             // Hit zone for dragging the stop trigger.
@@ -539,9 +547,9 @@ pub fn compute_bracket(
         let mut tc = tp_color;
         tc[3] *= alpha;
 
-        output.lines.extend(segmented_line(
-            0.0, vp_width, tp_y, tp_width, tc, &tp_style,
-        ));
+        output
+            .lines
+            .extend(segmented_line(0.0, vp_width, tp_y, tp_width, tc, &tp_style));
 
         output.hit_zones.push(HitZone {
             annotation_id,
@@ -576,9 +584,9 @@ pub fn compute_bracket(
         let mut sc = sl_color;
         sc[3] *= alpha;
 
-        output.lines.extend(segmented_line(
-            0.0, vp_width, sl_y, sl_width, sc, &sl_style,
-        ));
+        output
+            .lines
+            .extend(segmented_line(0.0, vp_width, sl_y, sl_width, sc, &sl_style));
 
         output.hit_zones.push(HitZone {
             annotation_id,

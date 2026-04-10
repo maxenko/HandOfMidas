@@ -239,7 +239,12 @@ fn hit_test_annotation(
     annotations: &[crate::widget::Annotation],
     cursor_y: f32,
     camera: &crate::camera::Camera2D,
-) -> Option<(AnnotationId, crate::widget::hit_test::HitZoneKind, f64, Option<BracketClampCtx>)> {
+) -> Option<(
+    AnnotationId,
+    crate::widget::hit_test::HitZoneKind,
+    f64,
+    Option<BracketClampCtx>,
+)> {
     use crate::widget::hit_test::HitZoneKind;
     use crate::widget::order_bracket::{BracketStatus, EntryType};
 
@@ -255,9 +260,7 @@ fn hit_test_annotation(
             crate::widget::AnnotationKind::Level(level) => {
                 let leg_y = camera.price_to_y(level.price);
                 let dist = (cursor_y - leg_y).abs();
-                if dist <= LEVEL_HIT_TOLERANCE_PX
-                    && best.as_ref().is_none_or(|b| dist < b.2)
-                {
+                if dist <= LEVEL_HIT_TOLERANCE_PX && best.as_ref().is_none_or(|b| dist < b.2) {
                     let offset = level.price - cursor_price;
                     best = Some((ann.id, HitZoneKind::LevelLine, dist, offset, None));
                 }
@@ -272,53 +275,28 @@ fn hit_test_annotation(
                 if let Some(ref tp) = bracket.take_profit {
                     let leg_y = camera.price_to_y(tp.price);
                     let dist = (cursor_y - leg_y).abs();
-                    if dist <= LEVEL_HIT_TOLERANCE_PX
-                        && best.as_ref().is_none_or(|b| dist < b.2)
-                    {
+                    if dist <= LEVEL_HIT_TOLERANCE_PX && best.as_ref().is_none_or(|b| dist < b.2) {
                         let offset = tp.price - cursor_price;
-                        best = Some((
-                            ann.id,
-                            HitZoneKind::BracketTP,
-                            dist,
-                            offset,
-                            clamp_ctx,
-                        ));
+                        best = Some((ann.id, HitZoneKind::BracketTP, dist, offset, clamp_ctx));
                     }
                 }
                 // SL leg.
                 if let Some(ref sl) = bracket.stop_loss {
                     let leg_y = camera.price_to_y(sl.price);
                     let dist = (cursor_y - leg_y).abs();
-                    if dist <= LEVEL_HIT_TOLERANCE_PX
-                        && best.as_ref().is_none_or(|b| dist < b.2)
-                    {
+                    if dist <= LEVEL_HIT_TOLERANCE_PX && best.as_ref().is_none_or(|b| dist < b.2) {
                         let offset = sl.price - cursor_price;
-                        best = Some((
-                            ann.id,
-                            HitZoneKind::BracketSL,
-                            dist,
-                            offset,
-                            clamp_ctx,
-                        ));
+                        best = Some((ann.id, HitZoneKind::BracketSL, dist, offset, clamp_ctx));
                     }
                 }
                 // Entry leg (non-Market Draft only).
-                if bracket.entry_type != EntryType::Market
-                    && bracket.status == BracketStatus::Draft
+                if bracket.entry_type != EntryType::Market && bracket.status == BracketStatus::Draft
                 {
                     let leg_y = camera.price_to_y(bracket.entry.price);
                     let dist = (cursor_y - leg_y).abs();
-                    if dist <= LEVEL_HIT_TOLERANCE_PX
-                        && best.as_ref().is_none_or(|b| dist < b.2)
-                    {
+                    if dist <= LEVEL_HIT_TOLERANCE_PX && best.as_ref().is_none_or(|b| dist < b.2) {
                         let offset = bracket.entry.price - cursor_price;
-                        best = Some((
-                            ann.id,
-                            HitZoneKind::BracketEntry,
-                            dist,
-                            offset,
-                            clamp_ctx,
-                        ));
+                        best = Some((ann.id, HitZoneKind::BracketEntry, dist, offset, clamp_ctx));
                     }
                 }
                 // StopTrigger leg (StopLimit Draft only).
@@ -523,13 +501,12 @@ fn handle_mouse_moved(
                         | HitZoneKind::BracketSL
                         | HitZoneKind::BracketEntry
                         | HitZoneKind::BracketStopTrigger => {
-                            state.interaction_mode =
-                                InteractionMode::DraggingAnnotation {
-                                    annotation_id: ann_id,
-                                    element: kind,
-                                    grab_offset,
-                                    clamp_ctx,
-                                };
+                            state.interaction_mode = InteractionMode::DraggingAnnotation {
+                                annotation_id: ann_id,
+                                element: kind,
+                                grab_offset,
+                                clamp_ctx,
+                            };
                             if kind == HitZoneKind::LevelLine {
                                 actions.push(ChartAction::SelectLevel { id: ann_id });
                             }
@@ -738,15 +715,9 @@ fn handle_mouse_moved(
                 | HitZoneKind::BracketEntry
                 | HitZoneKind::BracketStopTrigger => {
                     let leg = match element {
-                        HitZoneKind::BracketTP => {
-                            crate::widget::order_bracket::LegRole::TakeProfit
-                        }
-                        HitZoneKind::BracketSL => {
-                            crate::widget::order_bracket::LegRole::StopLoss
-                        }
-                        HitZoneKind::BracketEntry => {
-                            crate::widget::order_bracket::LegRole::Entry
-                        }
+                        HitZoneKind::BracketTP => crate::widget::order_bracket::LegRole::TakeProfit,
+                        HitZoneKind::BracketSL => crate::widget::order_bracket::LegRole::StopLoss,
+                        HitZoneKind::BracketEntry => crate::widget::order_bracket::LegRole::Entry,
                         HitZoneKind::BracketStopTrigger => {
                             crate::widget::order_bracket::LegRole::StopTrigger
                         }

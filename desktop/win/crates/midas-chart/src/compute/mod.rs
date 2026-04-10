@@ -6,13 +6,13 @@
 //! chart frame. No GPU, no framework -- just math.
 
 use crate::camera::Camera2D;
-use crate::timeline::{TimelineLabel, Tier};
 use crate::input::ChartInput;
 use crate::instances::{
     AxisLabel, CandleInstance, CrosshairRender, GridLine, GridLineInstance, OhlcvOverlay,
     SessionBoundary, VolumeInstance,
 };
 use crate::scene::{ChartScene, SceneGenerations};
+use crate::timeline::{Tier, TimelineLabel};
 use midas_core::CandleData;
 
 /// Fraction of the viewport height reserved for volume bars at the bottom.

@@ -8,10 +8,10 @@
 //! Produced by [`compute_chart_scene()`](crate::compute::compute_chart_scene)
 //! and consumed by `midas-render`.
 
-use crate::timeline::TimelineLabel;
 use crate::instances::{
     AxisLabel, CandleInstance, CrosshairRender, GridLineInstance, VolumeInstance,
 };
+use crate::timeline::TimelineLabel;
 use crate::widget::WidgetOutput;
 
 /// The output of chart logic -- a complete description of what to render.

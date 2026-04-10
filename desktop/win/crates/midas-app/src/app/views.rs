@@ -1697,8 +1697,7 @@ impl MidasApp {
         .align_y(iced::Alignment::Center);
 
         // Price step for mouse wheel adjustment.
-        let (coarse_step, _fine_step) =
-            midas_chart::price_step_for(last_price.unwrap_or(100.0));
+        let (coarse_step, _fine_step) = midas_chart::price_step_for(last_price.unwrap_or(100.0));
 
         // Entry price inputs (shown for non-Market types).
         // Each row is wrapped in mouse_area for scroll-wheel adjustment.
@@ -1748,8 +1747,7 @@ impl MidasApp {
                     ]
                     .spacing(6)
                     .align_y(iced::Alignment::Center);
-                    col = col
-                        .push(iced::widget::mouse_area(lp_row).on_scroll(limit_scroll));
+                    col = col.push(iced::widget::mouse_area(lp_row).on_scroll(limit_scroll));
                 }
                 EntryType::Stop => {
                     let sp_row = row![
@@ -1764,8 +1762,7 @@ impl MidasApp {
                     ]
                     .spacing(6)
                     .align_y(iced::Alignment::Center);
-                    col = col
-                        .push(iced::widget::mouse_area(sp_row).on_scroll(stop_scroll));
+                    col = col.push(iced::widget::mouse_area(sp_row).on_scroll(stop_scroll));
                 }
                 EntryType::StopLimit => {
                     let sp_row = row![
@@ -2628,13 +2625,13 @@ fn build_widget_labels_overlay<'a>(
                 .width(Fill)
                 .height(Fill)
                 .into(),
-            LabelAnchor::Right => container(
-                    container(badge).width(Fill).align_x(iced::Alignment::End),
-                )
-                .padding(iced::Padding::ZERO.top(top_pad).right(10.0))
-                .width(Fill)
-                .height(Fill)
-                .into(),
+            LabelAnchor::Right => {
+                container(container(badge).width(Fill).align_x(iced::Alignment::End))
+                    .padding(iced::Padding::ZERO.top(top_pad).right(10.0))
+                    .width(Fill)
+                    .height(Fill)
+                    .into()
+            }
             _ => container(badge)
                 .padding(iced::Padding::ZERO.top(top_pad))
                 .width(Fill)
@@ -2983,7 +2980,6 @@ fn compute_ghost_crosshair(
     };
     Some((gx, gy))
 }
-
 
 // ── Crosshair label overlay ─────────────────────────────────────────
 

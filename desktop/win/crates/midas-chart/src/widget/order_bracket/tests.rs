@@ -564,7 +564,10 @@ fn format_sl_label_draft() {
 #[test]
 fn segmented_line_solid_single_instance() {
     let segs = super::segmented_line(
-        0.0, 100.0, 50.0, 1.0,
+        0.0,
+        100.0,
+        50.0,
+        1.0,
         [1.0, 1.0, 1.0, 1.0],
         &LineStyle::Solid,
     );
@@ -576,23 +579,42 @@ fn segmented_line_solid_single_instance() {
 #[test]
 fn segmented_line_dashed_count() {
     let segs = super::segmented_line(
-        0.0, 100.0, 50.0, 1.0,
+        0.0,
+        100.0,
+        50.0,
+        1.0,
         [1.0, 1.0, 1.0, 1.0],
-        &LineStyle::Dashed { dash_len: 6.0, gap_len: 4.0 },
+        &LineStyle::Dashed {
+            dash_len: 6.0,
+            gap_len: 4.0,
+        },
     );
     // 100px / (6+4) = 10 segments
-    assert_eq!(segs.len(), 10, "expected 10 dash segments, got {}", segs.len());
+    assert_eq!(
+        segs.len(),
+        10,
+        "expected 10 dash segments, got {}",
+        segs.len()
+    );
 }
 
 #[test]
 fn segmented_line_dotted_count() {
     let segs = super::segmented_line(
-        0.0, 100.0, 50.0, 1.0,
+        0.0,
+        100.0,
+        50.0,
+        1.0,
         [1.0, 1.0, 1.0, 1.0],
         &LineStyle::Dotted { dot_spacing: 4.0 },
     );
     // 100px / 4.0 = 25 dots
-    assert_eq!(segs.len(), 25, "expected 25 dot segments, got {}", segs.len());
+    assert_eq!(
+        segs.len(),
+        25,
+        "expected 25 dot segments, got {}",
+        segs.len()
+    );
 }
 
 // -----------------------------------------------------------------------

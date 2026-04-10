@@ -202,8 +202,7 @@ pub fn store_from_files(files: HashMap<String, Vec<Annotation>>) -> AnnotationSt
                 crate::order_panel::normalize_bracket(b);
 
                 // Unsaved Draft brackets don't survive restart.
-                if b.status == midas_chart::widget::order_bracket::BracketStatus::Draft
-                    && !b.saved
+                if b.status == midas_chart::widget::order_bracket::BracketStatus::Draft && !b.saved
                 {
                     max_id = max_id.max(ann.id.0);
                     continue;
