@@ -7,6 +7,7 @@
 //! group layout. Per-pipeline differences are in instance layouts, shaders,
 //! blend states, and draw parameters.
 
+pub mod badge;
 pub mod candle;
 pub mod grid;
 pub mod volume;

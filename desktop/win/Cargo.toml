@@ -54,6 +54,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 # Concurrency
 crossbeam = "0.8"
 
+# Small stack-allocated vectors
+smallvec = { version = "1", features = ["serde", "const_generics", "union"] }
+
 # Data / IO
 memmap2 = "0.9"
 

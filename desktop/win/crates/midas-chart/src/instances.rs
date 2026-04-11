@@ -179,6 +179,52 @@ pub struct OhlcvOverlay {
     pub change_pct: Option<f32>,
 }
 
+// ── Decorator badge instances ──────────────────────────────────────
+
+/// GPU instance data for a single decorator badge.
+///
+/// Consumed by the SDF `BadgePipeline` in `midas-render`; rendered with
+/// analytical anti-aliasing via `fwidth()`. The fragment shader dispatches
+/// on `shape_id` to pick an SDF primitive, so adding a shape means (a)
+/// appending a discriminant to `BadgeShape` in `widget::decorator::badge`
+/// and (b) adding a `case` to `badge.wgsl`. Reordering variants is
+/// forbidden — `badge_instance_shape_id_matches_enum` in this file's tests
+/// enforces the mapping.
+///
+/// Size: 64 bytes, 16-byte aligned — matches the WGSL vertex-attribute
+/// layout declared by `BadgePipeline`.
+///
+/// `shape_id` mapping:
+///
+/// | id | `BadgeShape`             | `shape_param`                   |
+/// |---:|--------------------------|---------------------------------|
+/// | 0  | `Rect`                   | unused                          |
+/// | 1  | `Rounded { radius }`     | `radius`                        |
+/// | 2  | `Pill`                   | unused (derived: `min(w,h)/2`)  |
+/// | 3  | `PointLeft { w }`        | `point_width`                   |
+/// | 4  | `PointRight { w }`       | `point_width`                   |
+/// | 5  | `DoublePoint { w }`      | `point_width`                   |
+/// | 6  | `Chevron { w }`          | `point_width`                   |
+/// | 7  | `Circle`                 | unused (derived: `min(w,h)/2`)  |
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+pub struct BadgeInstance {
+    /// Screen-space bounding box `[x0, y0, x1, y1]` in logical pixels.
+    pub rect: [f32; 4],
+    /// Fill color in linear RGBA.
+    pub fill: [f32; 4],
+    /// Border color in linear RGBA; `alpha = 0` means no border.
+    pub border: [f32; 4],
+    /// Stable discriminant from `BadgeShape::shape_id()`.
+    pub shape_id: u32,
+    /// Shape parameter (radius / point_width) — see mapping table.
+    pub shape_param: f32,
+    /// Border thickness in logical pixels; `0.0` means no border.
+    pub border_thickness: f32,
+    /// Explicit padding to a 64-byte / 16-byte-aligned stride.
+    pub _pad: f32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,5 +349,38 @@ mod tests {
         ];
         let bytes: &[u8] = bytemuck::cast_slice(&instances);
         assert_eq!(bytes.len(), 96); // 2 * 48
+    }
+
+    #[test]
+    fn badge_instance_size_is_64_bytes() {
+        // 4*16 = 64 bytes. Stable contract with the WGSL vertex attribute
+        // layout — must match the stride declared by BadgePipeline.
+        assert_eq!(mem::size_of::<BadgeInstance>(), 64);
+    }
+
+    #[test]
+    fn badge_instance_pod_roundtrip() {
+        let instances = vec![
+            BadgeInstance {
+                rect: [10.0, 20.0, 40.0, 36.0],
+                fill: [0.2, 0.78, 0.35, 1.0],
+                border: [0.0, 0.0, 0.0, 0.4],
+                shape_id: 3,
+                shape_param: 6.0,
+                border_thickness: 1.0,
+                _pad: 0.0,
+            },
+            BadgeInstance {
+                rect: [50.0, 20.0, 80.0, 36.0],
+                fill: [0.9, 0.25, 0.25, 1.0],
+                border: [0.0; 4],
+                shape_id: 0,
+                shape_param: 0.0,
+                border_thickness: 0.0,
+                _pad: 0.0,
+            },
+        ];
+        let bytes: &[u8] = bytemuck::cast_slice(&instances);
+        assert_eq!(bytes.len(), 128); // 2 * 64
     }
 }

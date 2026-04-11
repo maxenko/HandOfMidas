@@ -19,6 +19,8 @@ tracing   = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+winit     = "0.30"
+pollster  = "0.3"
 
 [[bench]]
 name = "render_bench"

@@ -2753,6 +2753,7 @@ dependencies = [
  "midas-store",
  "serde",
  "serde_json",
+ "smallvec",
  "tempfile",
  "tokio",
  "toml",
@@ -2796,6 +2797,7 @@ dependencies = [
  "midas-indicators",
  "serde",
  "serde_json",
+ "smallvec",
  "thiserror 2.0.18",
  "tracing",
 ]
@@ -2884,9 +2886,11 @@ dependencies = [
  "midas-chart",
  "midas-core 0.1.0",
  "midas-data",
+ "pollster",
  "thiserror 2.0.18",
  "tracing",
  "wgpu",
+ "winit",
 ]
 
 [[package]]
@@ -3720,6 +3724,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "pollster"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22686f4785f02a4fcc856d3b3bb19bf6c8160d103f7a99cc258bddd0251dc7f2"
+
+[[package]]
 name = "portable-atomic"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4548,6 +4558,9 @@ name = "smallvec"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "smithay-client-toolkit"

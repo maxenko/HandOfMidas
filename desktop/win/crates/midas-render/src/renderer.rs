@@ -4,9 +4,13 @@
 //! draw order for a single chart. It consumes a [`ChartScene`] and
 //! a [`DirtyTracker`] to minimize GPU uploads.
 
-use midas_chart::{CandleInstance, DirtyFlags, DirtyTracker, GridLineInstance, VolumeInstance};
+use midas_chart::{
+    BadgeInstance, CandleInstance, DirtyFlags, DirtyTracker, GridLineInstance, VolumeInstance,
+};
 
-use crate::pipelines::{candle::CandlePipeline, grid::GridPipeline, volume::VolumePipeline};
+use crate::pipelines::{
+    badge::BadgePipeline, candle::CandlePipeline, grid::GridPipeline, volume::VolumePipeline,
+};
 
 /// Scene data for a single chart frame.
 ///
@@ -30,6 +34,9 @@ pub struct ChartScene<'a> {
     pub crosshair_lines: &'a [GridLineInstance],
     /// Volume Profile histogram bars (empty if VP disabled).
     pub volume_profile: &'a [GridLineInstance],
+    /// SDF decorator badge instances (drawn between candle bodies and
+    /// the crosshair overlay). Empty when no decorators are active.
+    pub badges: &'a [BadgeInstance],
     /// Current dirty flags snapshot.
     pub dirty: &'a DirtyFlags,
 }
@@ -44,6 +51,8 @@ pub struct ChartRenderer {
     grid_pipeline: GridPipeline,
     /// Volume Profile histogram pipeline (reuses grid shader for horizontal bars).
     volume_profile_pipeline: GridPipeline,
+    /// SDF decorator badge pipeline (rendered above candles, below crosshair).
+    badge_pipeline: BadgePipeline,
     /// Crosshair overlay pipeline (reuses the grid shader for thin lines).
     crosshair_pipeline: GridPipeline,
 }
@@ -56,6 +65,7 @@ impl ChartRenderer {
             volume_pipeline: VolumePipeline::new(device, format),
             grid_pipeline: GridPipeline::new(device, format),
             volume_profile_pipeline: GridPipeline::new(device, format),
+            badge_pipeline: BadgePipeline::new(device, format),
             crosshair_pipeline: GridPipeline::new(device, format),
         }
     }
@@ -92,6 +102,8 @@ impl ChartRenderer {
                 .update_projection(queue, &scene.projection);
             self.volume_profile_pipeline
                 .update_projection(queue, &scene.projection);
+            self.badge_pipeline
+                .update_projection(queue, &scene.projection);
             self.crosshair_pipeline
                 .update_projection(queue, &scene.projection);
         }
@@ -112,6 +124,12 @@ impl ChartRenderer {
         // Volume Profile always re-uploaded (small buffer, tracks data changes).
         self.volume_profile_pipeline
             .update_instances(device, queue, scene.volume_profile);
+
+        // Decorator badges re-uploaded every frame they're present.
+        // Empty slices are cheap: the pipeline zeroes its instance count
+        // and the draw call is skipped below.
+        self.badge_pipeline
+            .update_instances(device, queue, scene.badges);
 
         // Crosshair lines update on every frame they are present (mouse moves).
         if tracker.needs_crosshair_update(scene.dirty) {
@@ -139,6 +157,9 @@ impl ChartRenderer {
         // Layer 4: Candle bodies (opaque, on top of wicks)
         self.candle_pipeline.draw_bodies(render_pass);
 
+        // Layer 4.5: Decorator badges (SDF, above candle bodies, below crosshair)
+        self.badge_pipeline.draw(render_pass);
+
         // Layer 5: Crosshair overlay (semi-transparent, on top of everything)
         self.crosshair_pipeline.draw(render_pass);
     }
@@ -165,6 +186,8 @@ impl ChartRenderer {
                 .update_projection(queue, &scene.projection);
             self.volume_profile_pipeline
                 .update_projection(queue, &scene.projection);
+            self.badge_pipeline
+                .update_projection(queue, &scene.projection);
             self.crosshair_pipeline
                 .update_projection(queue, &scene.projection);
         }
@@ -185,6 +208,10 @@ impl ChartRenderer {
         // Volume Profile always re-uploaded (small buffer, tracks data changes).
         self.volume_profile_pipeline
             .update_instances(device, queue, scene.volume_profile);
+
+        // Decorator badges re-uploaded every frame they're present.
+        self.badge_pipeline
+            .update_instances(device, queue, scene.badges);
 
         // Crosshair overlay always re-uploaded: the buffer is tiny
         // (~16 instances for the volume handle + 2 for crosshair lines)
@@ -214,6 +241,8 @@ impl ChartRenderer {
         self.volume_profile_pipeline.draw(render_pass);
         self.candle_pipeline.draw_wicks(render_pass);
         self.candle_pipeline.draw_bodies(render_pass);
+        // Layer 4.5: decorator badges, between candle bodies and crosshair.
+        self.badge_pipeline.draw(render_pass);
         self.crosshair_pipeline.draw(render_pass);
     }
 
