@@ -71,6 +71,7 @@ fn make_default_chart_input<'a>(
         level_tool: &DEFAULT_LEVEL_TOOL,
         gatr_bright_ranges: &[],
         hovered_annotation: None,
+        hovered_decorator_groups: &[],
         selected_annotation: None,
         drag_ghost: None,
     }

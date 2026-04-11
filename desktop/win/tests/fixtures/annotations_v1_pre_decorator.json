@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "symbol": "AAPL",
+  "annotations": [
+    {
+      "id": 1,
+      "kind": {
+        "Level": {
+          "id": 1,
+          "price": 189.42,
+          "color": [0.2, 0.6, 1.0, 0.9],
+          "line_width": 2.0,
+          "style": "Solid",
+          "label": "Support",
+          "extend": "FullWidth",
+          "icon": "Star",
+          "locked": false
+        }
+      },
+      "presence": "Active",
+      "visible_timeframes": null,
+      "locked": false,
+      "created_at": 1700000000000,
+      "modified_at": 1700000000000
+    },
+    {
+      "id": 2,
+      "kind": {
+        "Level": {
+          "id": 2,
+          "price": 192.00,
+          "color": [0.85, 0.85, 0.85, 0.8],
+          "line_width": 1.0,
+          "style": "Solid",
+          "label": null,
+          "extend": "FullWidth",
+          "icon": "None"
+        }
+      },
+      "presence": "Active",
+      "visible_timeframes": null,
+      "locked": false,
+      "created_at": 1700000000001,
+      "modified_at": 1700000000001
+    }
+  ]
+}

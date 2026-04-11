@@ -1,14 +1,24 @@
 use super::*;
+use midas_chart::widget::price_line::{LineExtent, LineStroke, PriceLine};
+use midas_chart::widget::LineStyle;
 use midas_chart::LevelIcon;
 
-fn make_level(id: u64, price: f64) -> HorizontalLevel {
-    HorizontalLevel {
-        id,
-        price,
-        color: [0.85, 0.85, 0.85, 0.8],
-        line_width: 1.0,
-        label: None,
-        icon: LevelIcon::None,
+fn make_level(id: u64, price: f64) -> StoredLevel {
+    StoredLevel {
+        level: HorizontalLevel {
+            id,
+            line: PriceLine {
+                price,
+                extent: LineExtent::default(),
+                stroke: LineStroke {
+                    color: [0.85, 0.85, 0.85, 0.8],
+                    width: 1.0,
+                    style: LineStyle::Solid,
+                },
+            },
+            label: None,
+            icon: LevelIcon::None,
+        },
         locked: false,
     }
 }
@@ -39,7 +49,7 @@ fn add_and_query_levels() {
 
     let levels = store.levels_for("AAPL");
     assert_eq!(levels.len(), 1);
-    assert_eq!(levels[0].price, 185.50);
+    assert_eq!(levels[0].line.price, 185.50);
     assert!(store.levels_for("MSFT").is_empty());
 }
 
@@ -67,7 +77,7 @@ fn remove_level_returns_removed() {
 
     let removed = store.remove_level("AAPL", 1);
     assert!(removed.is_some());
-    assert_eq!(removed.unwrap().price, 100.0);
+    assert_eq!(removed.unwrap().line.price, 100.0);
     assert_eq!(store.levels_for("AAPL").len(), 1);
     assert!(store.generation("AAPL") > gen_before);
 }
@@ -111,7 +121,7 @@ fn find_level_across_tickers() {
 
     let (ticker, level) = store.find_level(2).unwrap();
     assert_eq!(ticker, "MSFT");
-    assert_eq!(level.price, 400.0);
+    assert_eq!(level.line.price, 400.0);
 
     assert!(store.find_level(999).is_none());
 }
@@ -122,9 +132,9 @@ fn find_level_mut_within_ticker() {
     store.add_level("AAPL", make_level(1, 100.0));
 
     let level = store.find_level_mut("AAPL", 1).unwrap();
-    level.price = 150.0;
+    level.line.price = 150.0;
 
-    assert_eq!(store.levels_for("AAPL")[0].price, 150.0);
+    assert_eq!(store.levels_for("AAPL")[0].line.price, 150.0);
 }
 
 #[test]
@@ -138,11 +148,11 @@ fn find_level_mut_wrong_ticker_returns_none() {
 fn config_round_trip() {
     let mut store = LevelStore::new();
     let id1 = store.alloc_id();
-    let mut level1 = make_level(id1, 185.50);
-    level1.label = Some("Support".into());
-    level1.icon = LevelIcon::ArrowUp;
-    level1.locked = true;
-    store.add_level("AAPL", level1);
+    let mut entry1 = make_level(id1, 185.50);
+    entry1.level.label = Some("Support".into());
+    entry1.level.icon = LevelIcon::ArrowUp;
+    entry1.locked = true;
+    store.add_level("AAPL", entry1);
 
     let id2 = store.alloc_id();
     store.add_level("MSFT", make_level(id2, 420.0));
@@ -158,7 +168,7 @@ fn config_round_trip() {
 
     let restored = LevelStore::from_config(&config);
     assert_eq!(restored.levels_for("AAPL").len(), 1);
-    assert_eq!(restored.levels_for("AAPL")[0].price, 185.50);
+    assert_eq!(restored.levels_for("AAPL")[0].line.price, 185.50);
     assert_eq!(
         restored.levels_for("AAPL")[0].label.as_deref(),
         Some("Support")
@@ -166,7 +176,7 @@ fn config_round_trip() {
     assert_eq!(restored.levels_for("AAPL")[0].icon, LevelIcon::ArrowUp);
     assert!(restored.levels_for("AAPL")[0].locked);
     assert_eq!(restored.levels_for("MSFT").len(), 1);
-    assert_eq!(restored.levels_for("MSFT")[0].price, 420.0);
+    assert_eq!(restored.levels_for("MSFT")[0].line.price, 420.0);
 }
 
 #[test]
@@ -224,4 +234,32 @@ fn ids_unique_across_tickers_after_from_config() {
     let aapl_id = store.levels_for("AAPL")[0].id;
     let msft_id = store.levels_for("MSFT")[0].id;
     assert_ne!(aapl_id, msft_id);
+}
+
+#[test]
+fn level_store_loads_v1_config_toml_fixture() {
+    // Pre-Slice-7 TOML fixture. The `LevelConfig` on-disk shape is
+    // unchanged from v1 — the migration only touches the decorator-
+    // composed `HorizontalLevel` shape inside annotation JSON. This
+    // test locks in that `LevelStore::from_config` still reconstructs
+    // correctly from the flat TOML shape.
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/config_v1_pre_decorator.toml");
+    let text = std::fs::read_to_string(&path).expect("read v1 toml fixture");
+    #[derive(serde::Deserialize)]
+    struct LevelsDoc {
+        levels: HashMap<String, Vec<LevelConfig>>,
+    }
+    let doc: LevelsDoc = toml::from_str(&text).expect("parse v1 toml fixture");
+    let store = LevelStore::from_config(&doc.levels);
+    let aapl = store.levels_for("AAPL");
+    assert!(!aapl.is_empty(), "fixture should contain AAPL levels");
+    assert!(
+        (aapl[0].line.price - 189.42).abs() < f64::EPSILON,
+        "fixture price should be 189.42, got {}",
+        aapl[0].line.price
+    );
+    assert_eq!(aapl[0].label.as_deref(), Some("Support"));
+    assert_eq!(aapl[0].icon, LevelIcon::Star);
+    assert!(aapl[0].locked);
 }

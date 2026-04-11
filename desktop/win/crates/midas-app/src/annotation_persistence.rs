@@ -222,22 +222,25 @@ pub fn store_from_files(files: HashMap<String, Vec<Annotation>>) -> AnnotationSt
 mod tests {
     use super::*;
     use midas_chart::levels::LevelIcon;
-    use midas_chart::widget::{
-        level::{LevelExtend, LineStyle},
-        AnnotationId, AnnotationKind, HorizontalLevel, Presence,
-    };
+    use midas_chart::widget::price_line::{LineExtent, LineStroke, PriceLine};
+    use midas_chart::widget::{AnnotationId, AnnotationKind, HorizontalLevel, LineStyle, Presence};
     use tempfile::TempDir;
 
     fn make_test_annotation(id: u64, price: f64) -> Annotation {
         Annotation {
             id: AnnotationId(id),
             kind: AnnotationKind::Level(HorizontalLevel {
-                price,
-                color: [1.0, 0.0, 0.0, 1.0],
-                line_width: 1.0,
-                style: LineStyle::default(),
+                id,
+                line: PriceLine {
+                    price,
+                    extent: LineExtent::default(),
+                    stroke: LineStroke {
+                        color: [1.0, 0.0, 0.0, 1.0],
+                        width: 1.0,
+                        style: LineStyle::default(),
+                    },
+                },
                 label: Some("Test".into()),
-                extend: LevelExtend::default(),
                 icon: LevelIcon::None,
             }),
             presence: Presence::Active,
@@ -292,14 +295,15 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let dir = annotations_dir(tmp.path());
 
-        // Write a file with a known annotation and an unknown one.
+        // Write a file with a known annotation (v1 flat shape, exercising
+        // the Slice 7 migration `Deserialize` path) and an unknown one.
         let json = r#"{
             "version": 1,
             "symbol": "AAPL",
             "annotations": [
                 {
                     "id": 1,
-                    "kind": {"Level": {"price": 185.0, "color": [1,0,0,1], "line_width": 1.0, "style": "Solid", "label": null, "extend": "FullWidth", "icon": "None"}},
+                    "kind": {"Level": {"id": 1, "price": 185.0, "color": [1,0,0,1], "line_width": 1.0, "style": "Solid", "label": null, "extend": "FullWidth", "icon": "None"}},
                     "presence": "Active",
                     "visible_timeframes": null,
                     "locked": false,
@@ -323,6 +327,41 @@ mod tests {
         let loaded = load_symbol(&dir, "AAPL").unwrap();
         assert_eq!(loaded.len(), 1, "unknown variant should be skipped");
         assert_eq!(loaded[0].id, AnnotationId(1));
+    }
+
+    #[test]
+    fn annotation_persistence_loads_v1_json_fixture() {
+        // Slice 7 migration test: load a pre-refactor JSON fixture via
+        // the manual `HorizontalLevel::deserialize` v1 fallback and
+        // verify both levels round-trip to the new composed shape.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/annotations_v1_pre_decorator.json");
+        let text = std::fs::read_to_string(&path).expect("read v1 json fixture");
+        let file: AnnotationFile = serde_json::from_str(&text).expect("parse v1 json fixture");
+        assert_eq!(file.annotations.len(), 2);
+
+        let first = &file.annotations[0];
+        assert_eq!(first.id, AnnotationId(1));
+        match &first.kind {
+            AnnotationKind::Level(level) => {
+                assert!((level.line.price - 189.42).abs() < f64::EPSILON);
+                assert_eq!(level.line.stroke.color, [0.2, 0.6, 1.0, 0.9]);
+                assert_eq!(level.line.stroke.width, 2.0);
+                assert_eq!(level.label.as_deref(), Some("Support"));
+                assert_eq!(level.icon, LevelIcon::Star);
+            }
+            _ => panic!("expected Level variant for annotation 1"),
+        }
+
+        let second = &file.annotations[1];
+        match &second.kind {
+            AnnotationKind::Level(level) => {
+                assert!((level.line.price - 192.0).abs() < f64::EPSILON);
+                assert_eq!(level.label, None);
+                assert_eq!(level.icon, LevelIcon::None);
+            }
+            _ => panic!("expected Level variant for annotation 2"),
+        }
     }
 
     #[test]

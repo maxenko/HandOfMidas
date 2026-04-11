@@ -1,15 +1,21 @@
 use super::*;
 use midas_chart::levels::LevelIcon;
-use midas_chart::widget::{level::LevelExtend, level::LineStyle, HorizontalLevel};
+use midas_chart::widget::price_line::{LineExtent, LineStroke, PriceLine};
+use midas_chart::widget::{HorizontalLevel, LineStyle};
 
 fn make_level(price: f64) -> AnnotationKind {
     AnnotationKind::Level(HorizontalLevel {
-        price,
-        color: [0.85, 0.85, 0.85, 0.8],
-        line_width: 1.0,
-        style: LineStyle::default(),
+        id: 0,
+        line: PriceLine {
+            price,
+            extent: LineExtent::default(),
+            stroke: LineStroke {
+                color: [0.85, 0.85, 0.85, 0.8],
+                width: 1.0,
+                style: LineStyle::default(),
+            },
+        },
         label: None,
-        extend: LevelExtend::default(),
         icon: LevelIcon::None,
     })
 }
@@ -91,7 +97,7 @@ fn update_via_closure() {
 
     let found = store.update("AAPL", id, |ann| {
         if let AnnotationKind::Level(ref mut level) = ann.kind {
-            level.price = 190.0;
+            level.line.price = 190.0;
         }
     });
     assert!(found);
@@ -99,7 +105,7 @@ fn update_via_closure() {
     let ann = &store.get("AAPL")[0];
     match &ann.kind {
         AnnotationKind::Level(level) => {
-            assert!((level.price - 190.0).abs() < f64::EPSILON);
+            assert!((level.line.price - 190.0).abs() < f64::EPSILON);
         }
         _ => panic!("expected Level variant"),
     }
@@ -191,7 +197,7 @@ fn retain_removes_matching() {
     store.add("AAPL", make_level(195.0));
 
     let removed = store.retain("AAPL", |ann| match &ann.kind {
-        AnnotationKind::Level(level) => level.price > 188.0,
+        AnnotationKind::Level(level) => level.line.price > 188.0,
         _ => true,
     });
     assert_eq!(removed, 1);

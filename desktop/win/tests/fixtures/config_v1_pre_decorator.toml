@@ -1,0 +1,35 @@
+# Pre-Slice-7 TOML fixture used by
+# `level_store_loads_v1_config_toml_fixture`.
+#
+# This mirrors the flat `LevelConfig` shape that the app wrote to
+# `data/config.toml` prior to the decorator-system rewrite. The on-disk
+# `LevelConfig` shape in `midas-core::config` was NOT changed by Slice
+# 7 — the migration surface is only the `HorizontalLevel` struct —
+# but the fixture is kept around as a regression guard so that
+# `LevelStore::from_config` keeps reconstructing the decorator-composed
+# `HorizontalLevel` from this legacy flat shape without drift.
+
+[levels]
+
+[[levels.AAPL]]
+price = 189.42
+color = [0.2, 0.6, 1.0, 0.9]
+line_width = 2.0
+label = "Support"
+icon = "star"
+locked = true
+
+[[levels.AAPL]]
+price = 195.50
+color = [0.85, 0.85, 0.85, 0.8]
+line_width = 1.0
+icon = "none"
+locked = false
+
+[[levels.MSFT]]
+price = 420.00
+color = [1.0, 0.0, 0.0, 1.0]
+line_width = 1.5
+label = "Resistance"
+icon = "arrow_down"
+locked = false

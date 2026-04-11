@@ -1,92 +1,93 @@
-//! Horizontal level annotation type and shared line rendering.
+//! Line rendering primitives shared by levels and bracket legs.
 //!
-//! A `HorizontalLevel` represents a user-drawn horizontal line at a specific
-//! price. `segmented_line()` is the shared line renderer used by both levels
-//! and order brackets.
+//! Slice 7 of the decorator-system plan collapsed the renderer-side
+//! `HorizontalLevel` and `LevelExtend` types that used to live here.
+//! `LineStyle` and `segmented_line()` stayed — both are still used by
+//! `compute_price_line_geometry` (below) and by
+//! `widget::order_bracket::compute_bracket()`.
+//!
+//! The level compute entry point (`compute_level`) is a thin wrapper:
+//! 1. `compute_price_line_geometry()` emits the line geometry, selection
+//!    glow, drag ghost and the line-level `HitZoneKind::LevelLine` hit
+//!    zone.
+//! 2. For each `DecoratorGroup` returned by
+//!    `HorizontalLevel::to_decorators(locked)`, a
+//!    `compute_decorator_group()` call merges the decorator's primitives
+//!    into the same `WidgetOutput`.
 
 use crate::instances::GridLineInstance;
-use crate::levels::LevelIcon;
+use crate::levels::HorizontalLevel;
+use crate::widget::decorator::compute_decorator_group;
+use crate::widget::price_line::PriceLine;
 use serde::{Deserialize, Serialize};
+use smallvec::{smallvec, SmallVec};
 
-use super::compute::{ComputeContext, LabelAnchor, WidgetLabel, WidgetOutput};
+use super::compute::{ComputeContext, WidgetOutput};
 use super::hit_test::{CursorIcon, HitZone, HitZoneKind};
 use super::AnnotationId;
 
-/// A horizontal line at a specific price.
-///
-/// The most common annotation type. Represents support/resistance levels,
-/// moving average values, or any price of interest.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct HorizontalLevel {
-    /// Price at which the horizontal line is drawn.
-    pub price: f64,
-    /// RGBA color of the line (linear space, NOT sRGB).
-    pub color: [f32; 4],
-    /// Line width in logical pixels. Typical: 1.0-3.0.
-    pub line_width: f32,
-    /// Line rendering style (solid, dashed, dotted).
-    pub style: LineStyle,
-    /// Optional text label displayed next to the price on the Y axis.
-    pub label: Option<String>,
-    /// How far the line extends horizontally.
-    pub extend: LevelExtend,
-    /// Icon displayed next to the label.
-    pub icon: LevelIcon,
-}
-
 /// Line rendering style.
 ///
-/// Dashed and dotted lines are rendered as multiple short `GridLineInstance`
-/// segments. The GPU pipeline is unchanged -- it still draws axis-aligned
-/// rectangles. The segmentation happens in the compute phase.
+/// `Pattern` holds an SVG-style `stroke-dasharray`: alternating on/off run
+/// lengths in logical pixels, walked cyclically starting with an "on" run.
+/// An empty pattern is equivalent to `Solid`. Dashed and dotted lines are
+/// rendered as multiple short `GridLineInstance` segments; the GPU pipeline
+/// still draws axis-aligned rectangles.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub enum LineStyle {
     /// Continuous line.
     #[default]
     Solid,
-    /// Alternating dash/gap segments.
-    Dashed {
-        /// Length of each dash segment in logical pixels.
-        dash_len: f32,
-        /// Length of each gap between dashes in logical pixels.
-        gap_len: f32,
-    },
-    /// Regularly spaced dots.
-    Dotted {
-        /// Spacing between dot centers in logical pixels.
-        dot_spacing: f32,
-    },
+    /// SVG-style dash pattern. Alternating on/off run lengths in logical
+    /// pixels, walked cyclically. An empty pattern is equivalent to `Solid`.
+    Pattern(SmallVec<[f32; 6]>),
 }
 
-/// How far a level line extends horizontally across the chart.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub enum LevelExtend {
-    /// Spans the entire visible chart width. Most common.
-    #[default]
-    FullWidth,
-    /// Starts at a specific time, extends infinitely to the right.
-    RightFrom {
-        /// Epoch milliseconds at which the line starts.
-        timestamp: i64,
-    },
-    /// Bounded segment between two timestamps.
-    Between {
-        /// Start timestamp (epoch ms).
-        start: i64,
-        /// End timestamp (epoch ms).
-        end: i64,
-    },
+impl LineStyle {
+    /// 1-on / 3-off dotted rhythm.
+    pub fn dotted() -> Self {
+        Self::Pattern(smallvec![1.0, 3.0])
+    }
+    /// 1-on / 6-off sparse dotted rhythm.
+    pub fn sparse_dotted() -> Self {
+        Self::Pattern(smallvec![1.0, 6.0])
+    }
+    /// 6-on / 3-off dashed rhythm.
+    pub fn dashed() -> Self {
+        Self::Pattern(smallvec![6.0, 3.0])
+    }
+    /// 10-on / 4-off long-dash rhythm.
+    pub fn dashed_long() -> Self {
+        Self::Pattern(smallvec![10.0, 4.0])
+    }
+    /// 6-on / 3-off / 1-on / 3-off dash-dot rhythm.
+    pub fn dash_dot() -> Self {
+        Self::Pattern(smallvec![6.0, 3.0, 1.0, 3.0])
+    }
+    /// 6-on / 3-off / 1-on / 3-off / 1-on / 3-off dash-dot-dot rhythm.
+    pub fn dash_dot_dot() -> Self {
+        Self::Pattern(smallvec![6.0, 3.0, 1.0, 3.0, 1.0, 3.0])
+    }
+
+    /// True when this style draws as a single continuous segment.
+    pub fn is_solid(&self) -> bool {
+        match self {
+            Self::Solid => true,
+            Self::Pattern(p) => p.is_empty(),
+        }
+    }
 }
 
 // ── Shared line renderer ────────────────────────────────────────────
 
-/// Split a full-width horizontal line into segments based on `LineStyle`.
+/// Split a horizontal line into segments based on `LineStyle`.
 ///
-/// For `Solid`, returns a single `GridLineInstance`. For `Dashed`, returns
-/// `ceil(width / (dash + gap))` short rects. For `Dotted`, returns small
-/// squares at regular intervals.
+/// For `Solid` (or `Pattern` with an empty list), returns a single
+/// `GridLineInstance`. For `Pattern`, walks the alternating on/off run
+/// lengths cyclically starting with an "on" run, emitting one instance per
+/// on-run clipped to `[x0, x1]`.
 ///
-/// Used by both `compute_level()` and `compute_bracket()`.
+/// Used by both `compute_price_line_geometry()` and `compute_bracket()`.
 pub fn segmented_line(
     x0: f32,
     x1: f32,
@@ -95,66 +96,69 @@ pub fn segmented_line(
     color: [f32; 4],
     style: &LineStyle,
 ) -> Vec<GridLineInstance> {
-    match style {
-        LineStyle::Solid => vec![GridLineInstance {
+    let solid_fallback = || {
+        vec![GridLineInstance {
             rect: [x0, y, x1, y + height],
             color,
-        }],
-        LineStyle::Dashed { dash_len, gap_len } => {
-            let total = x1 - x0;
-            let step = dash_len + gap_len;
-            if step <= 0.0 || total <= 0.0 {
-                return vec![GridLineInstance {
-                    rect: [x0, y, x1, y + height],
-                    color,
-                }];
-            }
-            let count = (total / step).ceil() as usize;
-            let mut segments = Vec::with_capacity(count);
-            let mut cx = x0;
-            while cx < x1 {
-                let end = (cx + dash_len).min(x1);
-                segments.push(GridLineInstance {
-                    rect: [cx, y, end, y + height],
-                    color,
-                });
-                cx += step;
-            }
-            segments
-        }
-        LineStyle::Dotted { dot_spacing } => {
-            let total = x1 - x0;
-            if *dot_spacing <= 0.0 || total <= 0.0 {
-                return vec![GridLineInstance {
-                    rect: [x0, y, x1, y + height],
-                    color,
-                }];
-            }
-            let count = (total / dot_spacing).ceil() as usize;
-            let mut dots = Vec::with_capacity(count);
-            let dot_size = height; // square dots
-            let mut cx = x0;
-            while cx < x1 {
-                dots.push(GridLineInstance {
-                    rect: [cx, y, cx + dot_size, y + height],
-                    color,
-                });
-                cx += dot_spacing;
-            }
-            dots
-        }
+        }]
+    };
+
+    if x1 <= x0 {
+        return Vec::new();
     }
+
+    let pattern: &[f32] = match style {
+        LineStyle::Solid => return solid_fallback(),
+        LineStyle::Pattern(p) if p.is_empty() => return solid_fallback(),
+        LineStyle::Pattern(p) => p,
+    };
+
+    // Sum of pattern runs. If the pattern is degenerate (all zero or
+    // negative), fall back to a solid segment to avoid an infinite loop.
+    let cycle: f32 = pattern.iter().copied().filter(|r| *r > 0.0).sum();
+    if cycle <= 0.0 {
+        return solid_fallback();
+    }
+
+    let total = x1 - x0;
+    let expected = (total / cycle).ceil() as usize * (pattern.len() / 2 + 1);
+    let mut segments = Vec::with_capacity(expected.max(1));
+
+    let mut cursor = x0;
+    let mut idx = 0usize;
+    let mut is_on = true;
+    while cursor < x1 {
+        let run = pattern[idx % pattern.len()];
+        if run > 0.0 {
+            let end = (cursor + run).min(x1);
+            if is_on && end > cursor {
+                segments.push(GridLineInstance {
+                    rect: [cursor, y, end, y + height],
+                    color,
+                });
+            }
+            cursor = end;
+        }
+        idx += 1;
+        is_on = !is_on;
+    }
+
+    segments
 }
 
-// ── Level compute ───────────────────────────────────────────────────
+// ── PriceLine geometry ──────────────────────────────────────────────
 
-/// Compute render primitives for a horizontal level annotation.
+/// Emit the line primitives for a `PriceLine`: the segmented stroke,
+/// selection glow, drag ghost, and the `HitZoneKind::LevelLine` hit
+/// zone that drives drag-to-edit interactions.
 ///
-/// Produces a segmented line, a hit zone for interaction, and a price
-/// label. Locked levels render normally but their hit zones use
-/// `CursorIcon::Crosshair` (no drag affordance).
-pub fn compute_level(
-    level: &HorizontalLevel,
+/// This is the line-only half of `compute_level()`; decorator groups are
+/// dispatched separately. Extracting it lets future annotation types
+/// that share a `PriceLine` (e.g. the bracket legs in Slice 8a) reuse
+/// the exact same line emission without duplicating the glow/ghost/hit
+/// bookkeeping.
+pub fn compute_price_line_geometry(
+    line: &PriceLine,
     annotation_id: AnnotationId,
     ctx: &ComputeContext<'_>,
     alpha: f32,
@@ -162,15 +166,15 @@ pub fn compute_level(
 ) -> WidgetOutput {
     let mut output = WidgetOutput::default();
     let vp_width = ctx.viewport.width as f32;
-    let y = ctx.camera.price_to_y(level.price);
+    let y = ctx.camera.price_to_y(line.price);
 
-    let mut color = level.color;
+    let mut color = line.stroke.color;
     color[3] *= alpha;
 
     // Selection glow: wider semi-transparent fill behind the line.
     let is_selected = ctx.selected_annotation == Some(annotation_id);
     if is_selected {
-        let glow_thickness = level.line_width + ctx.theme.selection_thickness * 2.0;
+        let glow_thickness = line.stroke.width + ctx.theme.selection_thickness * 2.0;
         let glow_y = y - ctx.theme.selection_thickness;
         let mut glow_color = color;
         glow_color[3] = ctx.theme.selection_color[3] * alpha;
@@ -180,8 +184,8 @@ pub fn compute_level(
         });
     }
 
-    // Hover highlight.
-    let mut width = level.line_width;
+    // Hover highlight: thicker stroke when the cursor is over this line.
+    let mut width = line.stroke.width;
     let is_hovered = ctx
         .hovered_annotation
         .map(|(aid, kind)| aid == annotation_id && kind == HitZoneKind::LevelLine)
@@ -190,9 +194,14 @@ pub fn compute_level(
         width += 1.0;
     }
 
-    output
-        .lines
-        .extend(segmented_line(0.0, vp_width, y, width, color, &level.style));
+    output.lines.extend(segmented_line(
+        0.0,
+        vp_width,
+        y,
+        width,
+        color,
+        &line.stroke.style,
+    ));
 
     // Drag ghost: faint line at the original price during drag.
     if let Some((ghost_id, ghost_price)) = ctx.drag_ghost {
@@ -207,7 +216,8 @@ pub fn compute_level(
         }
     }
 
-    // Hit zone (full width, ±6px).
+    // Hit zone (full width, ±6px). Locked lines use Crosshair cursor
+    // (no drag affordance); unlocked use ResizeNS.
     let cursor = if locked {
         CursorIcon::Crosshair
     } else {
@@ -220,36 +230,38 @@ pub fn compute_level(
         cursor,
     });
 
-    // Price label (right-aligned).
-    let price_text = format!("{:.2}", level.price);
-    output.labels.push(WidgetLabel {
-        text: price_text,
-        screen_x: vp_width - 10.0,
-        screen_y: y,
-        bg_color: [0.12, 0.12, 0.15, 0.85 * alpha],
-        text_color: color,
-        font_size: 11.0,
-        anchor: LabelAnchor::Right,
-    });
+    output
+}
 
-    // Icon + name label (left-aligned).
-    let icon_label = match (&level.label, level.icon.as_char()) {
-        (Some(lbl), Some(icon_ch)) if !lbl.is_empty() => Some(format!("{} {}", icon_ch, lbl)),
-        (Some(lbl), None) if !lbl.is_empty() => Some(lbl.clone()),
-        (None, Some(icon_ch)) | (Some(_), Some(icon_ch)) => Some(icon_ch.to_string()),
-        _ => None,
-    };
-    if let Some(text) = icon_label {
-        output.labels.push(WidgetLabel {
-            text,
-            screen_x: 8.0,
-            screen_y: y,
-            bg_color: [color[0] * 0.3, color[1] * 0.3, color[2] * 0.3, 0.75 * alpha],
-            text_color: [color[0], color[1], color[2], color[3].max(0.9)],
-            font_size: 14.0,
-            anchor: LabelAnchor::Left,
-        });
+// ── Level compute ───────────────────────────────────────────────────
+
+/// Compute render primitives for a horizontal level annotation.
+///
+/// Slice 7 end state: a thin wrapper that composes
+/// `compute_price_line_geometry()` (line geometry + line-level hit zone)
+/// with a `compute_decorator_group()` call per group returned by
+/// `HorizontalLevel::to_decorators(locked)`.
+///
+/// `locked` is sourced from the wrapper (`Annotation.locked` for the
+/// widget path, or `StoredLevel.locked` for the legacy LevelStore path)
+/// and forwarded to both the hit-zone cursor selector and
+/// `to_decorators()` so the lock badge is emitted consistently.
+pub fn compute_level(
+    level: &HorizontalLevel,
+    annotation_id: AnnotationId,
+    ctx: &ComputeContext<'_>,
+    alpha: f32,
+    locked: bool,
+) -> WidgetOutput {
+    let mut output = compute_price_line_geometry(&level.line, annotation_id, ctx, alpha, locked);
+    for group in level.to_decorators(locked) {
+        output.merge(compute_decorator_group(
+            &group,
+            &level.line,
+            annotation_id,
+            ctx,
+            alpha,
+        ));
     }
-
     output
 }
