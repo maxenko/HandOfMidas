@@ -1,13 +1,23 @@
 use super::*;
+use crate::widget::price_line::{LineExtent, LineStroke, PriceLine};
+use smallvec::smallvec;
 
 fn make_leg(price: f64) -> BracketLeg {
+    make_leg_role(price, LegRole::Entry)
+}
+
+fn make_leg_role(price: f64, role: LegRole) -> BracketLeg {
     BracketLeg {
-        price,
-        timestamp: None,
-        color: None,
-        style: LineStyle::default(),
-        line_width: 1.0,
-        label: None,
+        line: PriceLine {
+            price,
+            extent: LineExtent::FullWidth,
+            stroke: LineStroke {
+                color: [0.0, 0.0, 0.0, 1.0],
+                width: 1.0,
+                style: LineStyle::default(),
+            },
+        },
+        role,
         projected_pnl: None,
         projected_pnl_pct: None,
     }
@@ -15,9 +25,9 @@ fn make_leg(price: f64) -> BracketLeg {
 
 fn make_bracket(entry: f64, tp: f64, sl: f64) -> OrderBracket {
     OrderBracket {
-        entry: make_leg(entry),
-        take_profit: Some(make_leg(tp)),
-        stop_loss: Some(make_leg(sl)),
+        entry: make_leg_role(entry, LegRole::Entry),
+        take_profit: Some(make_leg_role(tp, LegRole::TakeProfit)),
+        stop_loss: Some(make_leg_role(sl, LegRole::StopLoss)),
         side: BracketSide::Long,
         status: BracketStatus::Draft,
         quantity: None,
@@ -69,7 +79,7 @@ fn serde_round_trip() {
     let b = make_bracket(185.50, 192.0, 182.0);
     let json = serde_json::to_string(&b).expect("serialize");
     let decoded: OrderBracket = serde_json::from_str(&json).expect("deserialize");
-    assert!((decoded.entry.price - 185.50).abs() < f64::EPSILON);
+    assert!((decoded.entry.line.price - 185.50).abs() < f64::EPSILON);
     assert_eq!(decoded.side, BracketSide::Long);
     assert_eq!(decoded.status, BracketStatus::Draft);
 }
@@ -146,18 +156,27 @@ fn dollar_risk_zero_qty() {
 
 #[test]
 fn serde_backward_compat_missing_pnl_fields() {
-    // Simulate old JSON without projected_pnl fields
+    // Slice 8a-i: BracketLeg moved to nested `line: PriceLine`. Brackets
+    // are not persisted to disk (per M9 finding) so a v1 fallback is not
+    // load-bearing — instead verify the new shape with `projected_pnl`
+    // fields omitted still defaults to None via `#[serde(default)]`.
     let json = r#"{
-        "price": 192.0,
-        "timestamp": null,
-        "color": null,
-        "style": "Solid",
-        "line_width": 1.0,
-        "label": null
+        "line": {
+            "price": 192.0,
+            "extent": "FullWidth",
+            "stroke": {
+                "color": [0.2, 0.78, 0.35, 1.0],
+                "width": 1.0,
+                "style": "Solid"
+            }
+        },
+        "role": "TakeProfit"
     }"#;
     let leg: BracketLeg = serde_json::from_str(json).expect("should deserialize");
     assert!(leg.projected_pnl.is_none());
     assert!(leg.projected_pnl_pct.is_none());
+    assert!((leg.line.price - 192.0).abs() < f64::EPSILON);
+    assert_eq!(leg.role, LegRole::TakeProfit);
 }
 
 // -----------------------------------------------------------------------
@@ -168,7 +187,10 @@ fn serde_backward_compat_missing_pnl_fields() {
 fn test_leg_style_active_entry() {
     let mut b = make_bracket(185.0, 192.0, 182.0);
     b.status = BracketStatus::Active;
-    let (style, width, color) = b.leg_style(LegRole::Entry);
+    let __stroke = b.leg_style(LegRole::Entry);
+    let style = __stroke.style;
+    let width = __stroke.width;
+    let color = __stroke.color;
     assert_eq!(style, LineStyle::Solid);
     assert!((width - 1.5).abs() < f32::EPSILON);
     // Active = alpha_mult 1.0, base alpha 1.0 => full alpha
@@ -176,23 +198,29 @@ fn test_leg_style_active_entry() {
 }
 
 #[test]
-fn test_leg_style_draft_tp() {
+fn leg_style_draft_tp_uses_pattern() {
     let mut b = make_bracket(185.0, 192.0, 182.0);
     b.status = BracketStatus::Draft;
-    let (style, width, color) = b.leg_style(LegRole::TakeProfit);
-    assert!(matches!(style, LineStyle::Dashed { .. }));
+    let __stroke = b.leg_style(LegRole::TakeProfit);
+    let style = __stroke.style;
+    let width = __stroke.width;
+    let color = __stroke.color;
+    assert_eq!(style, LineStyle::Pattern(smallvec![6.0, 4.0]));
     assert!((width - 1.0).abs() < f32::EPSILON);
     // Draft unsaved alpha_mult = 0.50, base TP alpha = 1.0 => 0.50
     assert!((color[3] - 0.50).abs() < f32::EPSILON);
 }
 
 #[test]
-fn test_leg_style_cancelled_sl() {
+fn leg_style_sl_uses_pattern() {
     let mut b = make_bracket(185.0, 192.0, 182.0);
     b.status = BracketStatus::Cancelled;
-    let (style, width, color) = b.leg_style(LegRole::StopLoss);
+    let __stroke = b.leg_style(LegRole::StopLoss);
+    let style = __stroke.style;
+    let width = __stroke.width;
+    let color = __stroke.color;
     // SL is always dotted (orange), regardless of status.
-    assert!(matches!(style, LineStyle::Dotted { .. }));
+    assert_eq!(style, LineStyle::dotted());
     assert!((width - 1.0).abs() < f32::EPSILON);
     // Orange base [1.0, 0.60, 0.0], cancelled alpha_mult = 0.2
     assert!((color[0] - 1.0).abs() < 0.01);
@@ -306,7 +334,10 @@ fn leg_style_entry_green_for_long() {
     let mut b = make_bracket(185.0, 192.0, 182.0);
     b.side = BracketSide::Long;
     b.status = BracketStatus::Active;
-    let (_style, _width, color) = b.leg_style(LegRole::Entry);
+    let __stroke = b.leg_style(LegRole::Entry);
+    let _style = __stroke.style;
+    let _width = __stroke.width;
+    let color = __stroke.color;
     // Long entry uses BRACKET_LONG_ENTRY_COLOR (green-ish)
     assert!(
         (color[0] - 0.20).abs() < 0.01
@@ -322,7 +353,10 @@ fn leg_style_entry_red_for_short() {
     let mut b = make_bracket(185.0, 178.0, 188.0);
     b.side = BracketSide::Short;
     b.status = BracketStatus::Active;
-    let (_style, _width, color) = b.leg_style(LegRole::Entry);
+    let __stroke = b.leg_style(LegRole::Entry);
+    let _style = __stroke.style;
+    let _width = __stroke.width;
+    let color = __stroke.color;
     // Short entry uses BRACKET_SHORT_ENTRY_COLOR (red-ish)
     assert!(
         (color[0] - 0.90).abs() < 0.01
@@ -341,7 +375,10 @@ fn leg_style_entry_red_for_short() {
 fn leg_style_draft_unsaved_alpha() {
     let b = make_bracket(185.0, 192.0, 182.0);
     // Draft, saved = false by default
-    let (_style, _width, color) = b.leg_style(LegRole::Entry);
+    let __stroke = b.leg_style(LegRole::Entry);
+    let _style = __stroke.style;
+    let _width = __stroke.width;
+    let color = __stroke.color;
     assert!(
         (color[3] - 0.50).abs() < f32::EPSILON,
         "Draft unsaved alpha should be 0.50, got {}",
@@ -353,7 +390,10 @@ fn leg_style_draft_unsaved_alpha() {
 fn leg_style_draft_saved_alpha() {
     let mut b = make_bracket(185.0, 192.0, 182.0);
     b.saved = true;
-    let (_style, _width, color) = b.leg_style(LegRole::Entry);
+    let __stroke = b.leg_style(LegRole::Entry);
+    let _style = __stroke.style;
+    let _width = __stroke.width;
+    let color = __stroke.color;
     assert!(
         (color[3] - 0.65).abs() < f32::EPSILON,
         "Draft saved alpha should be 0.65, got {}",
@@ -365,7 +405,10 @@ fn leg_style_draft_saved_alpha() {
 fn leg_style_pending_alpha() {
     let mut b = make_bracket(185.0, 192.0, 182.0);
     b.status = BracketStatus::Pending;
-    let (_style, _width, color) = b.leg_style(LegRole::Entry);
+    let __stroke = b.leg_style(LegRole::Entry);
+    let _style = __stroke.style;
+    let _width = __stroke.width;
+    let color = __stroke.color;
     assert!(
         (color[3] - 0.80).abs() < f32::EPSILON,
         "Pending alpha should be 0.80, got {}",
@@ -377,7 +420,10 @@ fn leg_style_pending_alpha() {
 fn leg_style_active_alpha() {
     let mut b = make_bracket(185.0, 192.0, 182.0);
     b.status = BracketStatus::Active;
-    let (_style, _width, color) = b.leg_style(LegRole::Entry);
+    let __stroke = b.leg_style(LegRole::Entry);
+    let _style = __stroke.style;
+    let _width = __stroke.width;
+    let color = __stroke.color;
     assert!(
         (color[3] - 1.0).abs() < f32::EPSILON,
         "Active alpha should be 1.0, got {}",
@@ -531,9 +577,24 @@ fn entry_type_default_is_market() {
 
 #[test]
 fn serde_backward_compat_missing_entry_type() {
-    // Simulate old JSON without entry_type / entry_stop_price / wrong_side_warning
+    // Slice 8a-i: BracketLeg moved to nested `line: PriceLine`. Brackets
+    // are not persisted to disk (per M9 finding), so this test now uses
+    // the new shape and only verifies that the optional bracket-level
+    // fields (`entry_type`, `entry_stop_price`, `wrong_side_warning`)
+    // still default correctly when omitted from JSON.
     let json = r#"{
-        "entry": {"price": 185.0, "timestamp": null, "color": null, "style": "Solid", "line_width": 1.0, "label": null},
+        "entry": {
+            "line": {
+                "price": 185.0,
+                "extent": "FullWidth",
+                "stroke": {
+                    "color": [0.2, 0.78, 0.35, 1.0],
+                    "width": 1.0,
+                    "style": "Solid"
+                }
+            },
+            "role": "Entry"
+        },
         "take_profit": null,
         "stop_loss": null,
         "side": "Long",
@@ -584,12 +645,9 @@ fn segmented_line_dashed_count() {
         50.0,
         1.0,
         [1.0, 1.0, 1.0, 1.0],
-        &LineStyle::Dashed {
-            dash_len: 6.0,
-            gap_len: 4.0,
-        },
+        &LineStyle::Pattern(smallvec![6.0, 4.0]),
     );
-    // 100px / (6+4) = 10 segments
+    // 100px / (6+4) = 10 on-segments
     assert_eq!(
         segs.len(),
         10,
@@ -606,13 +664,92 @@ fn segmented_line_dotted_count() {
         50.0,
         1.0,
         [1.0, 1.0, 1.0, 1.0],
-        &LineStyle::Dotted { dot_spacing: 4.0 },
+        &LineStyle::dotted(),
     );
-    // 100px / 4.0 = 25 dots
+    // 100px / (1+3) = 25 on-segments
     assert_eq!(
         segs.len(),
         25,
         "expected 25 dot segments, got {}",
+        segs.len()
+    );
+}
+
+#[test]
+fn segmented_line_empty_pattern_is_solid() {
+    let segs = super::segmented_line(
+        0.0,
+        100.0,
+        50.0,
+        1.0,
+        [1.0; 4],
+        &LineStyle::Pattern(smallvec![]),
+    );
+    assert_eq!(segs.len(), 1, "empty pattern must degenerate to solid");
+    assert!((segs[0].rect[0] - 0.0).abs() < f32::EPSILON);
+    assert!((segs[0].rect[2] - 100.0).abs() < f32::EPSILON);
+}
+
+#[test]
+fn segmented_line_dash_dot_alternates_run_lengths() {
+    // dash-dot: 6-on 3-off 1-on 3-off → cycle 13. Over 26px expect 4 on-runs.
+    let segs = super::segmented_line(0.0, 26.0, 50.0, 1.0, [1.0; 4], &LineStyle::dash_dot());
+    assert_eq!(segs.len(), 4, "expected 4 on-runs, got {}", segs.len());
+    // Widths alternate 6, 1, 6, 1.
+    let w0 = segs[0].rect[2] - segs[0].rect[0];
+    let w1 = segs[1].rect[2] - segs[1].rect[0];
+    let w2 = segs[2].rect[2] - segs[2].rect[0];
+    let w3 = segs[3].rect[2] - segs[3].rect[0];
+    assert!((w0 - 6.0).abs() < 1e-4);
+    assert!((w1 - 1.0).abs() < 1e-4);
+    assert!((w2 - 6.0).abs() < 1e-4);
+    assert!((w3 - 1.0).abs() < 1e-4);
+}
+
+#[test]
+fn segmented_line_pattern_wraps_cyclically() {
+    // 3-entry odd-count pattern: [a, b, c] walked cyclically flips the
+    // on/off phase every wrap. First cycle: on a / off b / on c. Second
+    // cycle: off a / on b / off c. Etc.
+    // Use [4, 2, 3] (cycle sum = 9). Over 18px (two full cycles) we expect:
+    //   cycle 1: on(0..4)  off(4..6)  on(6..9)
+    //   cycle 2: off(9..13) on(13..15) off(15..18)
+    // Total on-runs: 3. Widths: 4, 3, 2.
+    let segs = super::segmented_line(
+        0.0,
+        18.0,
+        50.0,
+        1.0,
+        [1.0; 4],
+        &LineStyle::Pattern(smallvec![4.0, 2.0, 3.0]),
+    );
+    assert_eq!(
+        segs.len(),
+        3,
+        "expected 3 cyclic on-runs, got {}",
+        segs.len()
+    );
+    let widths: Vec<f32> = segs.iter().map(|s| s.rect[2] - s.rect[0]).collect();
+    assert!((widths[0] - 4.0).abs() < 1e-4, "{:?}", widths);
+    assert!((widths[1] - 3.0).abs() < 1e-4, "{:?}", widths);
+    assert!((widths[2] - 2.0).abs() < 1e-4, "{:?}", widths);
+}
+
+#[test]
+fn segmented_line_zero_width_run_skipped() {
+    // A [0, 3] pattern would emit zero-width on-runs if run skipping is
+    // broken. Must produce zero instances over any length.
+    let segs = super::segmented_line(
+        0.0,
+        100.0,
+        50.0,
+        1.0,
+        [1.0; 4],
+        &LineStyle::Pattern(smallvec![0.0, 3.0]),
+    );
+    assert!(
+        segs.is_empty(),
+        "zero-width on runs must not emit instances, got {}",
         segs.len()
     );
 }
@@ -627,7 +764,10 @@ fn leg_style_entry_green_for_long_stop() {
     b.side = BracketSide::Long;
     b.entry_type = EntryType::Stop;
     b.status = BracketStatus::Active;
-    let (_style, _width, color) = b.leg_style(LegRole::Entry);
+    let __stroke = b.leg_style(LegRole::Entry);
+    let _style = __stroke.style;
+    let _width = __stroke.width;
+    let color = __stroke.color;
     assert!(
         (color[0] - 0.20).abs() < 0.01
             && (color[1] - 0.78).abs() < 0.01
@@ -644,7 +784,10 @@ fn leg_style_entry_lime_for_long_stop_limit() {
     b.entry_type = EntryType::StopLimit;
     b.entry_stop_price = Some(185.00);
     b.status = BracketStatus::Active;
-    let (_style, _width, color) = b.leg_style(LegRole::Entry);
+    let __stroke = b.leg_style(LegRole::Entry);
+    let _style = __stroke.style;
+    let _width = __stroke.width;
+    let color = __stroke.color;
     assert!(
         (color[0] - 0.50).abs() < 0.01
             && (color[1] - 0.90).abs() < 0.01
@@ -660,7 +803,10 @@ fn leg_style_entry_red_for_short_stop() {
     b.side = BracketSide::Short;
     b.entry_type = EntryType::Stop;
     b.status = BracketStatus::Active;
-    let (_style, _width, color) = b.leg_style(LegRole::Entry);
+    let __stroke = b.leg_style(LegRole::Entry);
+    let _style = __stroke.style;
+    let _width = __stroke.width;
+    let color = __stroke.color;
     assert!(
         (color[0] - 0.90).abs() < 0.01
             && (color[1] - 0.25).abs() < 0.01
@@ -677,7 +823,10 @@ fn leg_style_entry_pink_for_short_stop_limit() {
     b.entry_type = EntryType::StopLimit;
     b.entry_stop_price = Some(175.00);
     b.status = BracketStatus::Active;
-    let (_style, _width, color) = b.leg_style(LegRole::Entry);
+    let __stroke = b.leg_style(LegRole::Entry);
+    let _style = __stroke.style;
+    let _width = __stroke.width;
+    let color = __stroke.color;
     assert!(
         (color[0] - 0.90).abs() < 0.01
             && (color[1] - 0.30).abs() < 0.01
@@ -695,9 +844,13 @@ fn leg_style_entry_pink_for_short_stop_limit() {
 fn leg_style_sl_always_dotted_active() {
     let mut b = make_bracket(185.0, 192.0, 182.0);
     b.status = BracketStatus::Active;
-    let (style, width, color) = b.leg_style(LegRole::StopLoss);
-    assert!(
-        matches!(style, LineStyle::Dotted { .. }),
+    let __stroke = b.leg_style(LegRole::StopLoss);
+    let style = __stroke.style;
+    let width = __stroke.width;
+    let color = __stroke.color;
+    assert_eq!(
+        style,
+        LineStyle::dotted(),
         "Active SL should still be dotted, got: {:?}",
         style
     );
@@ -713,9 +866,13 @@ fn leg_style_sl_always_dotted_active() {
 fn leg_style_sl_always_dotted_draft() {
     let b = make_bracket(185.0, 192.0, 182.0);
     // status is Draft by default
-    let (style, _width, color) = b.leg_style(LegRole::StopLoss);
-    assert!(
-        matches!(style, LineStyle::Dotted { .. }),
+    let __stroke = b.leg_style(LegRole::StopLoss);
+    let style = __stroke.style;
+    let _width = __stroke.width;
+    let color = __stroke.color;
+    assert_eq!(
+        style,
+        LineStyle::dotted(),
         "Draft SL should be dotted (not dashed), got: {:?}",
         style
     );
@@ -782,6 +939,7 @@ fn make_compute_ctx<'a>(
         separator_y: camera.viewport_height as f32 * 0.80,
         dpi_scale: 1.0,
         hovered_annotation: hovered,
+        hovered_decorator_groups: &[],
         selected_annotation: None,
         drag_ghost: None,
     }
@@ -903,4 +1061,358 @@ fn compute_bracket_no_hover_normal_width() {
             "Line heights should be identical when not hovered"
         );
     }
+}
+
+// -----------------------------------------------------------------------
+// Slice 8a-ii: decorator emission parity + legacy-hit-zone regression
+// -----------------------------------------------------------------------
+
+/// Decorator-parity snapshot for a canonical Draft Long Market bracket.
+///
+/// Slice 8a-ii replaced the three per-leg emission shims with
+/// `entry/tp/sl_decorator_group()` calls routed through
+/// `compute_decorator_group()`. The primitive shape is now:
+///
+/// - **badges**: Non-Rect shapes (PointLeft, Circle) route through the
+///   SDF badge pipeline. We expect at least one `BadgeInstance` per leg
+///   (entry, TP, SL) plus the extra Circle overlay on the TP position
+///   counter segment — so `>= 4`.
+/// - **fills**: Badge dividers + entry button bg fills from the draft
+///   action buttons still emit into the grid pipeline. No zone rects
+///   (zones only emit for Active/PartialFill).
+/// - **lines**: Segmented stroke for entry + TP + SL lines. Non-empty.
+/// - **hit_zones**: Bracket drag hit zones (TP, SL) + legacy draft
+///   buttons (Submit/Save/Cancel/CancelSL) + decorator segment hit zones.
+///
+/// The individual primitive counts depend on viewport width (segmented
+/// line count) and layout measurements, so this test focuses on
+/// structural invariants rather than exact tallies.
+#[test]
+fn compute_bracket_decorator_parity_snapshot() {
+    let b = make_bracket(185.0, 192.0, 182.0);
+    let camera = Camera2D {
+        viewport_width: 1920,
+        viewport_height: 1080,
+        time_start: 0.0,
+        time_end: 100_000.0,
+        price_low: 170.0,
+        price_high: 200.0,
+        dpi_scale: 1.0,
+    };
+    let data = CandleBuffer::new();
+    let theme = Theme::default();
+    let aid = AnnotationId(7);
+    let ctx = make_compute_ctx(&camera, &data, &theme, None);
+
+    let out = compute_bracket(&b, aid, &ctx, 1.0);
+
+    assert!(
+        out.badges.len() >= 4,
+        "expected >=4 BadgeInstance (entry + TP + TP-circle + SL), got {}",
+        out.badges.len()
+    );
+    assert!(
+        !out.lines.is_empty(),
+        "Draft bracket emits patterned lines for entry/TP/SL"
+    );
+    // No zone fills (Active/PartialFill only).
+    let zone_fills: Vec<_> = out
+        .fills
+        .iter()
+        .filter(|f| f.rect[2] - f.rect[0] > 1000.0 && f.color[3] < 0.1)
+        .collect();
+    assert!(
+        zone_fills.is_empty(),
+        "Draft bracket should not emit wide translucent zone fills"
+    );
+    // R:R label still emits when both TP and SL are present.
+    assert!(
+        out.labels.iter().any(|l| l.text.starts_with("R:R")),
+        "R:R label must still emit when TP+SL both set"
+    );
+    // The entry-badge segments include the quantity placeholder and the
+    // formatted price for the entry leg.
+    assert!(
+        out.labels.iter().any(|l| l.text == "185.00"),
+        "entry price segment must render as `185.00`"
+    );
+    assert!(
+        out.labels.iter().any(|l| l.text == "192.00"),
+        "TP price segment must render as `192.00`"
+    );
+    assert!(
+        out.labels.iter().any(|l| l.text == "182.00"),
+        "SL price segment must render as `182.00`"
+    );
+}
+
+/// Slice 8b contract: Draft brackets emit decorator hit zones for the
+/// entry/TP/SL groups (carrying `DecoratorAction::{Submit, Save,
+/// CloseAnnotation, RemoveStopLoss, CreateStopLoss}` etc.) and no
+/// longer produce any of the legacy bracket-button hit zones — those
+/// enum variants were deleted along with the `emit_*_button` helpers.
+#[test]
+fn compute_bracket_emits_decorator_hit_zones_for_draft_bracket() {
+    let b = make_bracket(185.0, 192.0, 182.0);
+    let camera = Camera2D {
+        viewport_width: 1920,
+        viewport_height: 1080,
+        time_start: 0.0,
+        time_end: 100_000.0,
+        price_low: 170.0,
+        price_high: 200.0,
+        dpi_scale: 1.0,
+    };
+    let data = CandleBuffer::new();
+    let theme = Theme::default();
+    let aid = AnnotationId(7);
+    // Seed hover + group expansion so `OnGroupHover` items (Submit /
+    // Save / Close / RemoveSL) actually emit from the compute pass.
+    let hovered_groups: [(AnnotationId, u16); 3] = [(aid, 0), (aid, 1), (aid, 2)];
+    let ctx = ComputeContext {
+        camera: &camera,
+        data: &data,
+        viewport: Viewport {
+            width: camera.viewport_width,
+            height: camera.viewport_height,
+        },
+        theme: &theme,
+        snap_fn: &|_| None,
+        candle_duration_ms: 60_000.0,
+        collapse_gaps: false,
+        separator_y: camera.viewport_height as f32 * 0.80,
+        dpi_scale: 1.0,
+        hovered_annotation: Some((aid, HitZoneKind::LevelLine)),
+        hovered_decorator_groups: &hovered_groups,
+        selected_annotation: None,
+        drag_ghost: None,
+    };
+
+    let out = compute_bracket(&b, aid, &ctx, 1.0);
+
+    let has_action = |expected: DecoratorAction| {
+        out.hit_zones.iter().any(|z| {
+            matches!(
+                z.kind,
+                HitZoneKind::Decorator { action, .. } if action == expected
+            )
+        })
+    };
+    assert!(
+        has_action(DecoratorAction::Submit),
+        "entry decorator group must emit a Submit hit zone for draft brackets"
+    );
+    assert!(
+        has_action(DecoratorAction::Save),
+        "entry decorator group must emit a Save hit zone for draft brackets"
+    );
+    assert!(
+        has_action(DecoratorAction::CloseAnnotation),
+        "entry decorator group must emit a CloseAnnotation hit zone (bracket cancel)"
+    );
+    assert!(
+        has_action(DecoratorAction::RemoveStopLoss),
+        "SL decorator group must emit a RemoveStopLoss hit zone when SL is attached"
+    );
+}
+
+#[test]
+fn bracket_leg_new_shape_round_trip() {
+    let leg = BracketLeg {
+        line: PriceLine {
+            price: 192.50,
+            extent: LineExtent::FullWidth,
+            stroke: LineStroke {
+                color: [0.20, 0.78, 0.35, 1.0],
+                width: 1.5,
+                style: LineStyle::Solid,
+            },
+        },
+        role: LegRole::TakeProfit,
+        projected_pnl: Some(650.0),
+        projected_pnl_pct: Some(2.34),
+    };
+    let json = serde_json::to_string(&leg).expect("serialize");
+    let decoded: BracketLeg = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(decoded, leg);
+    assert!((decoded.line.price - 192.50).abs() < f64::EPSILON);
+    assert_eq!(decoded.role, LegRole::TakeProfit);
+    assert_eq!(decoded.line.stroke.style, LineStyle::Solid);
+    assert!((decoded.line.stroke.width - 1.5).abs() < f32::EPSILON);
+}
+
+// -----------------------------------------------------------------------
+// Slice 8a-ii: decorator group constructors
+// -----------------------------------------------------------------------
+
+use super::decorators::{entry_decorator_group, sl_decorator_group, tp_decorator_group};
+use crate::widget::decorator::{
+    BadgeShape, DecoratorAction, DecoratorAnchor, FlexDirection, ItemContent, Visibility,
+};
+
+#[test]
+fn entry_decorator_group_limit_long_has_three_segments() {
+    let mut b = make_bracket(185.0, 192.0, 182.0);
+    b.entry_type = EntryType::Limit;
+    b.side = BracketSide::Long;
+    b.quantity = Some(5000.0);
+    let group = entry_decorator_group(&b);
+
+    assert_eq!(group.group_id, 0);
+    assert!(matches!(group.anchor, DecoratorAnchor::RightEdge));
+    assert!(matches!(group.direction, FlexDirection::Row));
+
+    // Items: [close, submit, save, main badge, quick-create stack]
+    // `make_bracket` is a Draft bracket with a non-zero entry price,
+    // so both `Submit` and `Save` buttons are emitted before the badge.
+    assert_eq!(group.items.len(), 5);
+
+    let badge = match &group.items[3].content {
+        ItemContent::Badge(b) => b.as_ref(),
+        _ => panic!("expected badge at slot 3"),
+    };
+    assert!(matches!(badge.shape, BadgeShape::PointLeft { .. }));
+    assert_eq!(badge.segments.len(), 3);
+    // Segment 0: type glyph, Segment 1: quantity "5000", Segment 2: price "185.00"
+    assert_eq!(badge.segments[1].text, "5000");
+    assert_eq!(badge.segments[2].text, "185.00");
+    // Segment actions match the plan's wiring.
+    assert_eq!(
+        badge.segments[0].action,
+        Some(DecoratorAction::CycleEntryType)
+    );
+    assert_eq!(badge.segments[1].action, Some(DecoratorAction::EditQuantity));
+    assert_eq!(badge.segments[2].action, Some(DecoratorAction::EditPrice));
+}
+
+#[test]
+fn entry_decorator_group_hover_close_button_is_on_group_hover_only() {
+    let b = make_bracket(185.0, 192.0, 182.0);
+    let group = entry_decorator_group(&b);
+    let close = &group.items[0];
+    assert!(matches!(close.visibility, Visibility::OnGroupHover));
+    assert_eq!(close.action, Some(DecoratorAction::CloseAnnotation));
+}
+
+#[test]
+fn entry_decorator_group_tp_sl_stack_is_on_group_hover_only() {
+    let b = make_bracket(185.0, 192.0, 182.0);
+    let group = entry_decorator_group(&b);
+    // Draft bracket: [close, submit, save, badge, stack] — stack is last.
+    let stack_item = group.items.last().expect("non-empty items");
+    assert!(matches!(stack_item.visibility, Visibility::OnGroupHover));
+    let inner = match &stack_item.content {
+        ItemContent::Stack(g) => g.as_ref(),
+        _ => panic!("expected Stack as the final item"),
+    };
+    assert!(matches!(inner.direction, FlexDirection::Column));
+    assert_eq!(inner.items.len(), 2);
+    assert_eq!(
+        inner.items[0].action,
+        Some(DecoratorAction::CreateTakeProfit)
+    );
+    assert_eq!(inner.items[1].action, Some(DecoratorAction::CreateStopLoss));
+}
+
+#[test]
+fn tp_decorator_group_position_count_is_circle_segment() {
+    let b = make_bracket(185.0, 192.0, 182.0);
+    let group = tp_decorator_group(&b).expect("TP present");
+    assert_eq!(group.group_id, 1);
+    let badge = match &group.items[0].content {
+        ItemContent::Badge(bb) => bb.as_ref(),
+        _ => panic!("expected badge"),
+    };
+    // Segments: [T, position_count, pct, price]
+    assert_eq!(badge.segments.len(), 4);
+    let circle_seg = &badge.segments[1];
+    assert!(matches!(
+        circle_seg.shape_override,
+        Some(BadgeShape::Circle)
+    ));
+    assert_eq!(circle_seg.fill_override, Some([0.0, 0.0, 0.0, 1.0]));
+}
+
+#[test]
+fn tp_decorator_group_none_when_tp_missing() {
+    let mut b = make_bracket(185.0, 192.0, 182.0);
+    b.take_profit = None;
+    assert!(tp_decorator_group(&b).is_none());
+}
+
+#[test]
+fn entry_decorator_nested_stack_has_distinct_group_id_from_tp_sl() {
+    // Regression for BUG 2: the entry group's nested hover stack used
+    // to share `group_id: 1` with `tp_decorator_group`, so any hover
+    // on the TP line also flagged the entry's nested stack as hovered.
+    // The nested stack id is now namespaced above 0x80 and must not
+    // collide with either sibling top-level id (TP=1, SL=2).
+    let b = make_bracket(185.0, 192.0, 182.0);
+    let entry = entry_decorator_group(&b);
+    let stack_item = entry.items.last().expect("non-empty items");
+    let inner = match &stack_item.content {
+        ItemContent::Stack(g) => g.as_ref(),
+        _ => panic!("expected Stack as the final entry item"),
+    };
+    assert_ne!(inner.group_id, 1, "must not collide with tp group_id");
+    assert_ne!(inner.group_id, 2, "must not collide with sl group_id");
+    assert!(
+        inner.group_id >= 0x80,
+        "nested stack ids live in the 0x80+ namespace, got {}",
+        inner.group_id
+    );
+
+    // Sanity: TP and SL still sit on their canonical top-level ids.
+    assert_eq!(tp_decorator_group(&b).expect("tp").group_id, 1);
+    assert_eq!(sl_decorator_group(&b).expect("sl").group_id, 2);
+}
+
+#[test]
+fn sl_decorator_group_uses_orange_fill() {
+    let b = make_bracket(185.0, 192.0, 182.0);
+    let group = sl_decorator_group(&b).expect("SL present");
+    assert_eq!(group.group_id, 2);
+    // SL group is `[hover close button, main badge]`.
+    let close = &group.items[0];
+    assert!(matches!(close.visibility, Visibility::OnGroupHover));
+    assert_eq!(close.action, Some(DecoratorAction::RemoveStopLoss));
+    let badge = match &group.items[1].content {
+        ItemContent::Badge(bb) => bb.as_ref(),
+        _ => panic!("expected badge at slot 1"),
+    };
+    // Orange SL base color.
+    assert!(
+        (badge.fill[0] - 1.0).abs() < 0.01
+            && (badge.fill[1] - 0.60).abs() < 0.01
+            && (badge.fill[2] - 0.0).abs() < 0.01,
+        "SL badge fill should be orange, got {:?}",
+        badge.fill
+    );
+    // Segments: [S, risk, price]
+    assert_eq!(badge.segments.len(), 3);
+    assert_eq!(badge.segments[0].text, "S");
+    assert_eq!(badge.segments[2].text, "182.00");
+}
+
+#[test]
+fn sl_decorator_group_none_when_sl_missing() {
+    let mut b = make_bracket(185.0, 192.0, 182.0);
+    b.stop_loss = None;
+    assert!(sl_decorator_group(&b).is_none());
+}
+
+#[test]
+fn bracket_status_active_resolves_to_solid_stroke_on_price_line() {
+    let mut b = make_bracket(185.0, 192.0, 182.0);
+    b.status = BracketStatus::Active;
+    let stroke = b.leg_style(LegRole::TakeProfit);
+    assert_eq!(stroke.style, LineStyle::Solid);
+}
+
+#[test]
+fn bracket_status_draft_resolves_to_pattern_stroke_on_price_line() {
+    let mut b = make_bracket(185.0, 192.0, 182.0);
+    b.status = BracketStatus::Draft;
+    let stroke = b.leg_style(LegRole::TakeProfit);
+    assert_eq!(stroke.style, LineStyle::Pattern(smallvec![6.0, 4.0]));
 }

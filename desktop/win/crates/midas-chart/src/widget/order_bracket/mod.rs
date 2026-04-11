@@ -5,7 +5,11 @@
 //! broker orders.
 
 use super::level::LineStyle;
+use super::price_line::{LineStroke, PriceLine};
 use serde::{Deserialize, Serialize};
+use smallvec::smallvec;
+
+pub mod decorators;
 
 /// Entry order type for a bracket. Defined in midas-chart (not broker)
 /// to maintain sans-IO boundary. The app layer maps `EntryType` →
@@ -74,20 +78,25 @@ pub struct OrderBracket {
 }
 
 /// A single leg of an order bracket.
+///
+/// **Slice 8a-i shape**: line geometry (price, extent, stroke) lives inside
+/// `line: PriceLine`, mirroring `HorizontalLevel`. The old top-level
+/// `color`/`line_width`/`style`/`label`/`timestamp` fields are gone:
+///
+/// - `color` / `line_width` / `style` → `line.stroke.{color,width,style}`
+/// - `timestamp` → `line.extent` (`FullWidth` vs `RightFrom { timestamp }`)
+/// - `label` → rebuilt at decorator-build time (Slice 8a-ii)
+///
+/// `role` is now stored on the leg itself so a `BracketLeg` is fully
+/// self-describing for the rendering pipeline. Projected P&L stays here as
+/// wire data set by the app layer.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BracketLeg {
-    /// Price level for this leg.
-    pub price: f64,
-    /// Optional time anchor. None = full-width ray from left edge.
-    pub timestamp: Option<i64>,
-    /// Override color. If None, derived from BracketSide + leg role.
-    pub color: Option<[f32; 4]>,
-    /// Line style for this leg.
-    pub style: LineStyle,
-    /// Line thickness in logical pixels.
-    pub line_width: f32,
-    /// Text shown next to the price label.
-    pub label: Option<String>,
+    /// Line geometry: price, extent (full width or right-from-timestamp),
+    /// and stroke (color/width/style).
+    pub line: PriceLine,
+    /// Which leg of the bracket this is (entry, TP, SL, stop trigger).
+    pub role: LegRole,
     /// Projected dollar P&L at this leg's price level.
     /// Computed by the app layer using entry fill price and quantity.
     #[serde(default)]
@@ -128,7 +137,7 @@ pub enum BracketStatus {
 /// midas-broker. The chart crate must not depend on broker types.
 /// The app layer maps BracketRole (broker) to LegRole (chart) when
 /// creating annotations.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LegRole {
     Entry,
     TakeProfit,
@@ -144,8 +153,8 @@ impl OrderBracket {
     pub fn risk_reward(&self) -> Option<f64> {
         let tp = self.take_profit.as_ref()?;
         let sl = self.stop_loss.as_ref()?;
-        let risk = (self.entry.price - sl.price).abs();
-        let reward = (tp.price - self.entry.price).abs();
+        let risk = (self.entry.line.price - sl.line.price).abs();
+        let reward = (tp.line.price - self.entry.line.price).abs();
         if risk < f64::EPSILON {
             return None;
         }
@@ -156,14 +165,14 @@ impl OrderBracket {
     pub fn dollar_risk(&self) -> Option<f64> {
         let sl = self.stop_loss.as_ref()?;
         let qty = self.quantity?;
-        Some((self.entry.price - sl.price).abs() * qty)
+        Some((self.entry.line.price - sl.line.price).abs() * qty)
     }
 
     /// Absolute dollar reward. Returns None if TP is missing or qty is zero.
     pub fn dollar_reward(&self) -> Option<f64> {
         let tp = self.take_profit.as_ref()?;
         let qty = self.quantity?;
-        Some((tp.price - self.entry.price).abs() * qty)
+        Some((tp.line.price - self.entry.line.price).abs() * qty)
     }
 }
 
@@ -193,18 +202,21 @@ const BRACKET_SL_ZONE: [f32; 4] = [1.0, 0.60, 0.0, 0.06];
 // ── Phase 3: chart rendering helpers ─────────────────────────────────
 
 impl OrderBracket {
-    /// Compute line style for a leg based on bracket status.
+    /// Compute the canonical `LineStroke` for a leg based on bracket status.
     ///
-    /// Returns `(LineStyle, line_width, color)`. The base color comes
-    /// from the leg role and entry type: entry color depends on
-    /// `(side, entry_type)`, TP = green, SL = orange. The bracket
-    /// status modulates line style, width, and alpha. Draft brackets
-    /// additionally distinguish saved (0.65) from unsaved (0.50).
+    /// Returns a `LineStroke` carrying color, width, and dash style. The
+    /// base color comes from the leg role and entry type: entry color
+    /// depends on `(side, entry_type)`, TP = green, SL = orange. The
+    /// bracket status modulates line style, width, and alpha. Draft
+    /// brackets additionally distinguish saved (0.65) from unsaved (0.50).
     ///
-    /// SL lines are always dotted regardless of status (user
-    /// requirement for visual distinction). Other legs follow the
-    /// standard status → style mapping.
-    pub fn leg_style(&self, role: LegRole) -> (LineStyle, f32, [f32; 4]) {
+    /// SL lines are always dotted regardless of status (user requirement
+    /// for visual distinction). Other legs follow the standard
+    /// status → style mapping. `compute_bracket()` recomputes this every
+    /// frame and stamps the result onto each leg's `line.stroke` before
+    /// emission, so per-leg stored strokes do not need to be kept fresh
+    /// outside the render path.
+    pub fn leg_style(&self, role: LegRole) -> LineStroke {
         // SL has a dedicated code path: always dotted, always orange.
         if role == LegRole::StopLoss {
             let (width, alpha_mult) = match self.status {
@@ -217,7 +229,11 @@ impl OrderBracket {
             };
             let mut color = BRACKET_SL_COLOR;
             color[3] *= alpha_mult;
-            return (LineStyle::Dotted { dot_spacing: 4.0 }, width, color);
+            return LineStroke {
+                color,
+                width,
+                style: LineStyle::dotted(),
+            };
         }
 
         let base_color = match role {
@@ -236,16 +252,9 @@ impl OrderBracket {
         let (style, width, alpha_mult) = match self.status {
             BracketStatus::Draft => {
                 let alpha = if self.saved { 0.65 } else { 0.50 };
-                (
-                    LineStyle::Dashed {
-                        dash_len: 6.0,
-                        gap_len: 4.0,
-                    },
-                    1.0,
-                    alpha,
-                )
+                (LineStyle::Pattern(smallvec![6.0, 4.0]), 1.0, alpha)
             }
-            BracketStatus::Pending => (LineStyle::Dotted { dot_spacing: 4.0 }, 1.0, 0.80),
+            BracketStatus::Pending => (LineStyle::dotted(), 1.0, 0.80),
             BracketStatus::PartialFill => (LineStyle::Solid, 1.5, 0.90),
             BracketStatus::Active => (LineStyle::Solid, 1.5, 1.0),
             BracketStatus::Closed => (LineStyle::Solid, 1.0, 0.30),
@@ -254,7 +263,11 @@ impl OrderBracket {
 
         let mut color = base_color;
         color[3] *= alpha_mult;
-        (style, width, color)
+        LineStroke {
+            color,
+            width,
+            style,
+        }
     }
 }
 
@@ -279,14 +292,14 @@ pub fn bracket_zone_rects(
     let mut zones = Vec::new();
 
     if let Some(ref tp) = bracket.take_profit {
-        let tp_y = price_to_y(tp.price);
+        let tp_y = price_to_y(tp.line.price);
         let top = entry_y.min(tp_y);
         let bottom = entry_y.max(tp_y);
         zones.push(([0.0, top, chart_width, bottom], BRACKET_TP_ZONE));
     }
 
     if let Some(ref sl) = bracket.stop_loss {
-        let sl_y = price_to_y(sl.price);
+        let sl_y = price_to_y(sl.line.price);
         let top = entry_y.min(sl_y);
         let bottom = entry_y.max(sl_y);
         zones.push(([0.0, top, chart_width, bottom], BRACKET_SL_ZONE));
@@ -314,10 +327,10 @@ fn entry_type_prefix(entry_type: EntryType) -> &'static str {
 fn format_entry_price(bracket: &OrderBracket) -> String {
     if bracket.entry_type == EntryType::StopLimit {
         if let Some(stop_price) = bracket.entry_stop_price {
-            return format!("{:.2}/{:.2}", stop_price, bracket.entry.price);
+            return format!("{:.2}/{:.2}", stop_price, bracket.entry.line.price);
         }
     }
-    format!("{:.2}", bracket.entry.price)
+    format!("{:.2}", bracket.entry.line.price)
 }
 
 /// Format entry label based on bracket status, side, and entry type.
@@ -366,7 +379,7 @@ pub fn format_entry_label(bracket: &OrderBracket) -> String {
                 .quantity
                 .map(|q| format!("  {:.0}sh", q))
                 .unwrap_or_default();
-            format!("{} {:.2}{}", arrow, bracket.entry.price, qty_str)
+            format!("{} {:.2}{}", arrow, bracket.entry.line.price, qty_str)
         }
     }
 }
@@ -377,29 +390,79 @@ pub fn format_tp_label(leg: &BracketLeg) -> String {
         .projected_pnl
         .map(|pnl| format!("  +${:.0}", pnl.abs()))
         .unwrap_or_default();
-    format!("TP {:.2}{}", leg.price, pnl_str)
+    format!("TP {:.2}{}", leg.line.price, pnl_str)
 }
 
 /// Format SL label. Draft brackets show `"SL @ {price:.2}"`.
 /// Other statuses show `"SL {price:.2}"` with optional P&L.
 pub fn format_sl_label(leg: &BracketLeg, status: BracketStatus) -> String {
     if status == BracketStatus::Draft {
-        return format!("SL @ {:.2}", leg.price);
+        return format!("SL @ {:.2}", leg.line.price);
     }
     let pnl_str = leg
         .projected_pnl
         .map(|pnl| format!("  -${:.0}", pnl.abs()))
         .unwrap_or_default();
-    format!("SL {:.2}{}", leg.price, pnl_str)
+    format!("SL {:.2}{}", leg.line.price, pnl_str)
 }
 
 // ── Phase 3: compute_bracket ────────────────────────────────────────
 
+use self::decorators::{entry_decorator_group, sl_decorator_group, tp_decorator_group};
 use super::compute::{ComputeContext, LabelAnchor, WidgetLabel, WidgetOutput};
+use super::decorator::compute_decorator_group;
 use super::hit_test::{CursorIcon, HitZone, HitZoneKind};
 use super::level::segmented_line;
 use super::AnnotationId;
 use crate::instances::GridLineInstance;
+
+/// Emit the line geometry and optional drag hit-zone for a single
+/// bracket leg.
+///
+/// Slice 8a-ii: a local analogue of
+/// `widget::level::compute_price_line_geometry` that (a) uses the
+/// bracket-specific `HitZoneKind` variant for the hover-width detection
+/// and drag hit zone, and (b) skips the level-specific selection glow
+/// path since brackets do not carry a selection affordance in the same
+/// place. The decorator group anchored to this leg's `PriceLine` is
+/// emitted separately via `compute_decorator_group()`.
+fn emit_bracket_leg_line(
+    output: &mut WidgetOutput,
+    line: &PriceLine,
+    annotation_id: AnnotationId,
+    ctx: &ComputeContext<'_>,
+    alpha: f32,
+    hit_kind: HitZoneKind,
+    draw_hit_zone: bool,
+) {
+    let vp_width = ctx.viewport.width as f32;
+    let y = ctx.camera.price_to_y(line.price);
+
+    let hovered = ctx
+        .hovered_annotation
+        .map(|(aid, kind)| aid == annotation_id && kind == hit_kind)
+        .unwrap_or(false);
+    let mut width = line.stroke.width;
+    if hovered {
+        width += 1.0;
+    }
+
+    let mut color = line.stroke.color;
+    color[3] *= alpha;
+
+    output
+        .lines
+        .extend(segmented_line(0.0, vp_width, y, width, color, &line.stroke.style));
+
+    if draw_hit_zone {
+        output.hit_zones.push(HitZone {
+            annotation_id,
+            rect: [0.0, y - 6.0, vp_width, y + 6.0],
+            kind: hit_kind,
+            cursor: CursorIcon::ResizeNS,
+        });
+    }
+}
 
 /// Check if a bracket has data that contradicts its entry_type.
 fn needs_render_sanitize(bracket: &OrderBracket) -> bool {
@@ -450,45 +513,40 @@ pub fn compute_bracket(
     let vp_width = ctx.viewport.width as f32;
 
     // ── Entry line ──────────────────────────────────────────────────
-    let entry_y = ctx.camera.price_to_y(bracket.entry.price);
-    let (entry_style, mut entry_width, entry_color) = bracket.leg_style(LegRole::Entry);
-    let entry_hovered = ctx
-        .hovered_annotation
-        .map(|(aid, kind)| aid == annotation_id && kind == HitZoneKind::BracketEntry)
-        .unwrap_or(false);
-    if entry_hovered {
-        entry_width += 1.0;
-    }
-    let mut ec = entry_color;
-    ec[3] *= alpha;
-
-    output.lines.extend(segmented_line(
-        0.0,
-        vp_width,
-        entry_y,
-        entry_width,
-        ec,
-        &entry_style,
+    // Recompute the leg's stroke from the live (status, role) pair so that
+    // any stale value stamped at construction time is overwritten before we
+    // emit line + decorator primitives for the leg.
+    let entry_stroke = bracket.leg_style(LegRole::Entry);
+    let entry_line = PriceLine {
+        price: bracket.entry.line.price,
+        extent: bracket.entry.line.extent,
+        stroke: entry_stroke.clone(),
+    };
+    let entry_y = ctx.camera.price_to_y(entry_line.price);
+    emit_bracket_leg_line(
+        &mut output,
+        &entry_line,
+        annotation_id,
+        ctx,
+        alpha,
+        HitZoneKind::BracketEntry,
+        /* draw_hit_zone */ false,
+    );
+    output.merge(compute_decorator_group(
+        &entry_decorator_group(bracket),
+        &entry_line,
+        annotation_id,
+        ctx,
+        alpha,
     ));
-
-    let entry_label_text = format_entry_label(bracket);
-    output.labels.push(WidgetLabel {
-        text: entry_label_text,
-        screen_x: vp_width - 10.0,
-        screen_y: entry_y,
-        bg_color: [0.12, 0.12, 0.15, 0.85 * alpha],
-        text_color: ec,
-        font_size: 11.0,
-        anchor: LabelAnchor::Right,
-    });
 
     // ── Stop trigger line (StopLimit only) ─────────────────────────
     if bracket.entry_type == EntryType::StopLimit {
         if let Some(stop_price) = bracket.entry_stop_price {
             let stop_y = ctx.camera.price_to_y(stop_price);
             // Use base width from leg_style, not the potentially hover-boosted entry_width.
-            let (_, base_stop_width, _) = bracket.leg_style(LegRole::StopTrigger);
-            let mut stop_width = base_stop_width;
+            let base_stroke = bracket.leg_style(LegRole::StopTrigger);
+            let mut stop_width = base_stroke.width;
             let stop_hovered = ctx
                 .hovered_annotation
                 .map(|(aid, kind)| aid == annotation_id && kind == HitZoneKind::BracketStopTrigger)
@@ -497,10 +555,9 @@ pub fn compute_bracket(
                 stop_width += 1.0;
             }
             // Use entry color but dashed to distinguish from the limit line.
-            let stop_style = LineStyle::Dashed {
-                dash_len: 4.0,
-                gap_len: 3.0,
-            };
+            let stop_style = LineStyle::Pattern(smallvec![4.0, 3.0]);
+            let mut ec = entry_stroke.color;
+            ec[3] *= alpha;
             output.lines.extend(segmented_line(
                 0.0,
                 vp_width,
@@ -535,95 +592,57 @@ pub fn compute_bracket(
 
     // ── Take-profit line ────────────────────────────────────────────
     if let Some(ref tp) = bracket.take_profit {
-        let tp_y = ctx.camera.price_to_y(tp.price);
-        let (tp_style, mut tp_width, tp_color) = bracket.leg_style(LegRole::TakeProfit);
-        let tp_hovered = ctx
-            .hovered_annotation
-            .map(|(aid, kind)| aid == annotation_id && kind == HitZoneKind::BracketTP)
-            .unwrap_or(false);
-        if tp_hovered {
-            tp_width += 1.0;
-        }
-        let mut tc = tp_color;
-        tc[3] *= alpha;
-
-        output
-            .lines
-            .extend(segmented_line(0.0, vp_width, tp_y, tp_width, tc, &tp_style));
-
-        output.hit_zones.push(HitZone {
+        let tp_stroke = bracket.leg_style(LegRole::TakeProfit);
+        let tp_line = PriceLine {
+            price: tp.line.price,
+            extent: tp.line.extent,
+            stroke: tp_stroke,
+        };
+        emit_bracket_leg_line(
+            &mut output,
+            &tp_line,
             annotation_id,
-            rect: [0.0, tp_y - 6.0, vp_width, tp_y + 6.0],
-            kind: HitZoneKind::BracketTP,
-            cursor: CursorIcon::ResizeNS,
-        });
-
-        let tp_text = format_tp_label(tp);
-        output.labels.push(WidgetLabel {
-            text: tp_text,
-            screen_x: vp_width - 10.0,
-            screen_y: tp_y,
-            bg_color: [0.12, 0.12, 0.15, 0.85 * alpha],
-            text_color: tc,
-            font_size: 11.0,
-            anchor: LabelAnchor::Right,
-        });
+            ctx,
+            alpha,
+            HitZoneKind::BracketTP,
+            /* draw_hit_zone */ true,
+        );
+        if let Some(group) = tp_decorator_group(bracket) {
+            output.merge(compute_decorator_group(
+                &group,
+                &tp_line,
+                annotation_id,
+                ctx,
+                alpha,
+            ));
+        }
     }
 
     // ── Stop-loss line ──────────────────────────────────────────────
     if let Some(ref sl) = bracket.stop_loss {
-        let sl_y = ctx.camera.price_to_y(sl.price);
-        let (sl_style, mut sl_width, sl_color) = bracket.leg_style(LegRole::StopLoss);
-        let sl_hovered = ctx
-            .hovered_annotation
-            .map(|(aid, kind)| aid == annotation_id && kind == HitZoneKind::BracketSL)
-            .unwrap_or(false);
-        if sl_hovered {
-            sl_width += 1.0;
-        }
-        let mut sc = sl_color;
-        sc[3] *= alpha;
-
-        output
-            .lines
-            .extend(segmented_line(0.0, vp_width, sl_y, sl_width, sc, &sl_style));
-
-        output.hit_zones.push(HitZone {
-            annotation_id,
-            rect: [0.0, sl_y - 6.0, vp_width, sl_y + 6.0],
-            kind: HitZoneKind::BracketSL,
-            cursor: CursorIcon::ResizeNS,
-        });
-
-        let sl_text = format_sl_label(sl, bracket.status);
-        output.labels.push(WidgetLabel {
-            text: sl_text,
-            screen_x: vp_width - 10.0,
-            screen_y: sl_y,
-            bg_color: [0.12, 0.12, 0.15, 0.85 * alpha],
-            text_color: sc,
-            font_size: 11.0,
-            anchor: LabelAnchor::Right,
-        });
-    }
-
-    // ── Draft action buttons (entry line) ─────────────────────────
-    if bracket.status == BracketStatus::Draft {
-        emit_entry_buttons(
-            bracket,
-            annotation_id,
-            entry_y,
-            vp_width,
-            alpha,
+        let sl_stroke = bracket.leg_style(LegRole::StopLoss);
+        let sl_line = PriceLine {
+            price: sl.line.price,
+            extent: sl.line.extent,
+            stroke: sl_stroke,
+        };
+        emit_bracket_leg_line(
             &mut output,
+            &sl_line,
+            annotation_id,
+            ctx,
+            alpha,
+            HitZoneKind::BracketSL,
+            /* draw_hit_zone */ true,
         );
-    }
-
-    // ── Draft [X] button on SL line ────────────────────────────
-    if bracket.status == BracketStatus::Draft {
-        if let Some(ref sl) = bracket.stop_loss {
-            let sl_y = ctx.camera.price_to_y(sl.price);
-            emit_sl_cancel_button(annotation_id, sl_y, vp_width, alpha, &mut output);
+        if let Some(group) = sl_decorator_group(bracket) {
+            output.merge(compute_decorator_group(
+                &group,
+                &sl_line,
+                annotation_id,
+                ctx,
+                alpha,
+            ));
         }
     }
 
@@ -651,230 +670,6 @@ pub fn compute_bracket(
     }
 
     output
-}
-
-// ── Button constants ────────────────────────────────────────────────
-
-/// Button half-height for hit zone rects (pixels above/below label y).
-const BTN_HIT_HALF_H: f32 = 8.0;
-/// Right-edge padding from viewport edge for the first button.
-const BTN_RIGHT_PAD: f32 = 8.0;
-/// Horizontal gap between adjacent buttons.
-const BTN_GAP: f32 = 4.0;
-/// Text color for all action buttons (white with slight transparency).
-const BTN_TEXT_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 0.95];
-
-/// Estimate pixel width of a button label: char_count * 7.0 + 12.0.
-fn btn_width(text: &str) -> f32 {
-    text.len() as f32 * 7.0 + 12.0
-}
-
-/// Emit right-aligned action buttons on the entry line for a Draft bracket.
-///
-/// Button order (right to left): `[X]`, `[Submit]`, `[Save]`, `[SL]`.
-/// Buttons that would overflow beyond x=0 are omitted. `[Submit]` is
-/// omitted when entry price is zero (no market data). `[SL]` is
-/// omitted when `stop_loss` is already set.
-fn emit_entry_buttons(
-    bracket: &OrderBracket,
-    annotation_id: AnnotationId,
-    entry_y: f32,
-    vp_width: f32,
-    alpha: f32,
-    output: &mut WidgetOutput,
-) {
-    let submit_bg = match bracket.side {
-        BracketSide::Long => [0.20, 0.78, 0.35, 0.85 * alpha],
-        BracketSide::Short => [0.90, 0.25, 0.25, 0.85 * alpha],
-    };
-    let cancel_bg = [0.4, 0.4, 0.4, 0.85 * alpha];
-    let save_bg = [0.35, 0.45, 0.65, 0.85 * alpha];
-    let sl_bg = [0.85, 0.55, 0.20, 0.85 * alpha];
-    let text_color = [
-        BTN_TEXT_COLOR[0],
-        BTN_TEXT_COLOR[1],
-        BTN_TEXT_COLOR[2],
-        BTN_TEXT_COLOR[3] * alpha,
-    ];
-
-    let mut cursor = vp_width - BTN_RIGHT_PAD;
-
-    // [X] cancel button
-    let x_text = "X";
-    let x_w = btn_width(x_text);
-    let x_right = cursor;
-    let x_left = x_right - x_w;
-    if x_left < 0.0 {
-        return;
-    }
-    push_button(
-        output,
-        ButtonSpec {
-            text: x_text,
-            right_x: x_right,
-            center_y: entry_y,
-            width: x_w,
-            bg_color: cancel_bg,
-            text_color,
-            annotation_id,
-            kind: HitZoneKind::BracketCancel,
-        },
-    );
-    cursor = x_left - BTN_GAP;
-
-    // [Submit] button — only if entry price is non-zero
-    if bracket.entry.price != 0.0 {
-        let submit_text = "Submit";
-        let submit_w = btn_width(submit_text);
-        let submit_right = cursor;
-        let submit_left = submit_right - submit_w;
-        if submit_left < 0.0 {
-            return;
-        }
-        push_button(
-            output,
-            ButtonSpec {
-                text: submit_text,
-                right_x: submit_right,
-                center_y: entry_y,
-                width: submit_w,
-                bg_color: submit_bg,
-                text_color,
-                annotation_id,
-                kind: HitZoneKind::BracketSubmit,
-            },
-        );
-        cursor = submit_left - BTN_GAP;
-    }
-
-    // [Save] button
-    let save_text = "Save";
-    let save_w = btn_width(save_text);
-    let save_right = cursor;
-    let save_left = save_right - save_w;
-    if save_left < 0.0 {
-        return;
-    }
-    push_button(
-        output,
-        ButtonSpec {
-            text: save_text,
-            right_x: save_right,
-            center_y: entry_y,
-            width: save_w,
-            bg_color: save_bg,
-            text_color,
-            annotation_id,
-            kind: HitZoneKind::BracketSave,
-        },
-    );
-    cursor = save_left - BTN_GAP;
-
-    // [SL] button — only when stop_loss is not yet set
-    if bracket.stop_loss.is_none() {
-        let sl_text = "SL";
-        let sl_w = btn_width(sl_text);
-        let sl_right = cursor;
-        let sl_left = sl_right - sl_w;
-        if sl_left < 0.0 {
-            return;
-        }
-        push_button(
-            output,
-            ButtonSpec {
-                text: sl_text,
-                right_x: sl_right,
-                center_y: entry_y,
-                width: sl_w,
-                bg_color: sl_bg,
-                text_color,
-                annotation_id,
-                kind: HitZoneKind::BracketToggleSL,
-            },
-        );
-    }
-}
-
-/// Emit an [X] cancel button on the SL line for a Draft bracket.
-fn emit_sl_cancel_button(
-    annotation_id: AnnotationId,
-    sl_y: f32,
-    vp_width: f32,
-    alpha: f32,
-    output: &mut WidgetOutput,
-) {
-    let cancel_bg = [0.4, 0.4, 0.4, 0.85 * alpha];
-    let text_color = [
-        BTN_TEXT_COLOR[0],
-        BTN_TEXT_COLOR[1],
-        BTN_TEXT_COLOR[2],
-        BTN_TEXT_COLOR[3] * alpha,
-    ];
-
-    let x_text = "X";
-    let x_w = btn_width(x_text);
-    let x_right = vp_width - BTN_RIGHT_PAD;
-    let x_left = x_right - x_w;
-    if x_left < 0.0 {
-        return;
-    }
-    push_button(
-        output,
-        ButtonSpec {
-            text: x_text,
-            right_x: x_right,
-            center_y: sl_y,
-            width: x_w,
-            bg_color: cancel_bg,
-            text_color,
-            annotation_id,
-            kind: HitZoneKind::BracketCancelSL,
-        },
-    );
-}
-
-/// Parameters for a single action button on a bracket line.
-struct ButtonSpec<'a> {
-    /// Button label text.
-    text: &'a str,
-    /// Right edge X coordinate.
-    right_x: f32,
-    /// Center Y coordinate of the line.
-    center_y: f32,
-    /// Estimated pixel width.
-    width: f32,
-    /// Background color.
-    bg_color: [f32; 4],
-    /// Text color.
-    text_color: [f32; 4],
-    /// Owning annotation ID.
-    annotation_id: AnnotationId,
-    /// Hit zone kind for click dispatch.
-    kind: HitZoneKind,
-}
-
-/// Push a button label + hit zone into the output.
-fn push_button(output: &mut WidgetOutput, spec: ButtonSpec<'_>) {
-    output.labels.push(WidgetLabel {
-        text: spec.text.to_string(),
-        screen_x: spec.right_x,
-        screen_y: spec.center_y,
-        bg_color: spec.bg_color,
-        text_color: spec.text_color,
-        font_size: 11.0,
-        anchor: LabelAnchor::Right,
-    });
-    output.hit_zones.push(HitZone {
-        annotation_id: spec.annotation_id,
-        rect: [
-            spec.right_x - spec.width,
-            spec.center_y - BTN_HIT_HALF_H,
-            spec.right_x,
-            spec.center_y + BTN_HIT_HALF_H,
-        ],
-        kind: spec.kind,
-        cursor: CursorIcon::Pointer,
-    });
 }
 
 #[cfg(test)]
