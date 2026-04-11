@@ -16,6 +16,7 @@ mod market_cache;
 mod order_panel;
 mod registry;
 mod theme;
+mod ticker_order_intent;
 mod watchlist;
 mod watchlist_columns;
 

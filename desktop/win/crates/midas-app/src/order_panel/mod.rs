@@ -9,6 +9,7 @@ use midas_chart::widget::AnnotationId;
 use midas_core::link::LinkMode;
 use midas_core::ChartId;
 use midas_core::OrderPanelId;
+use serde::{Deserialize, Serialize};
 
 // ===========================================================================
 // State
@@ -98,14 +99,14 @@ impl Default for OrderPanelState {
 // ===========================================================================
 
 /// Buy or sell direction for the order panel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum OrderSide {
     Buy,
     Sell,
 }
 
 /// How the user specifies TP/SL price.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PriceInputMode {
     /// Absolute price level (e.g., 192.00).
     Absolute,
@@ -118,7 +119,7 @@ pub enum PriceInputMode {
 }
 
 /// Stop loss order type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum StopLossType {
     /// Becomes market order when stop price is hit.
     Stop,

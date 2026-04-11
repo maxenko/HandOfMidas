@@ -2743,6 +2743,7 @@ dependencies = [
  "crossbeam",
  "dirs 6.0.0",
  "iced",
+ "mailbox_processor",
  "midas-broker",
  "midas-chart",
  "midas-core 0.1.0",
@@ -2751,10 +2752,13 @@ dependencies = [
  "midas-grid",
  "midas-render",
  "midas-store",
+ "parking_lot",
+ "redb",
  "serde",
  "serde_json",
  "smallvec",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "toml",
  "tracing",
@@ -4027,6 +4031,15 @@ dependencies = [
  "bytemuck",
  "core_maths",
  "font-types",
+]
+
+[[package]]
+name = "redb"
+version = "2.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8eca1e9d98d5a7e9002d0013e18d5a9b000aee942eb134883a82f06ebffb6c01"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

@@ -490,6 +490,12 @@ pub enum Message {
     // -- Window --
     /// Periodic tick for animations and status bar clock.
     Tick,
+
+    // -- Ticker order intent (Slice 1a stub; wired in Slices 3/4) --
+    /// Route a ticker-intent message through the reducer. The stub
+    /// in `ticker_order_intent::reducer::apply_order_intent_msg`
+    /// returns `Task::none()` for every variant in Slice 1a.
+    OrderIntent(crate::ticker_order_intent::OrderIntentAppMsg),
 }
 
 // ── Constructor + helpers ─────────────────────────────────────────────
@@ -5323,6 +5329,10 @@ impl MidasApp {
                     }
                 }
                 self.maybe_save_config()
+            }
+
+            Message::OrderIntent(msg) => {
+                crate::ticker_order_intent::apply_order_intent_msg(self, msg)
             }
         }
     }

@@ -14,7 +14,7 @@ pub mod decorators;
 /// Entry order type for a bracket. Defined in midas-chart (not broker)
 /// to maintain sans-IO boundary. The app layer maps `EntryType` →
 /// broker `OrderKind` at the bridge.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EntryType {
     /// Market order — entry tracks last price, not draggable.
     #[default]

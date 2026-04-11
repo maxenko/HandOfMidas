@@ -96,6 +96,9 @@ midas-broker = { path = "../../crates/midas-broker" }
 # Concurrency primitives
 parking_lot = "0.12"
 
+# Embedded key-value database (per-ticker order intent persistence)
+redb = "2"
+
 # Caching
 lru = "0.12"
 
