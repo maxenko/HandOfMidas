@@ -2557,7 +2557,7 @@ fn build_drawing_panel<'a>(chart_id: ChartId, is_placing: bool) -> Element<'a, M
 /// iced text overlay elements. The GPU rendering (lines, fills, glow, ghost)
 /// goes through `compute_level()` → `WidgetOutput` in the draw pass.
 fn compute_level_labels(
-    levels: &[midas_chart::HorizontalLevel],
+    levels: &[crate::level_store::StoredLevel],
     camera: &midas_chart::Camera2D,
 ) -> Vec<midas_chart::widget::compute::WidgetLabel> {
     use midas_chart::widget::compute::{LabelAnchor, WidgetLabel};
@@ -2565,8 +2565,8 @@ fn compute_level_labels(
     let mut labels = Vec::new();
 
     for level in levels {
-        let y = camera.price_to_y(level.price);
-        let color = level.color;
+        let y = camera.price_to_y(level.line.price);
+        let color = level.line.stroke.color;
 
         // Icon + name label (left-aligned).
         let icon_label = match (&level.label, level.icon.as_char()) {
@@ -2657,14 +2657,14 @@ fn build_widget_labels_overlay<'a>(
 /// thickness buttons, icon selector, lock toggle, and delete button.
 fn build_level_editor<'a>(
     chart_id: ChartId,
-    level: &midas_chart::HorizontalLevel,
+    level: &crate::level_store::StoredLevel,
     screen_pos: (f32, f32),
     price_input: &str,
     viewport_width: u32,
     viewport_height: u32,
 ) -> Element<'a, Message> {
     let level_id = level.id;
-    let (coarse_step, _fine_step) = midas_chart::price_step_for(level.price);
+    let (coarse_step, _fine_step) = midas_chart::price_step_for(level.line.price);
 
     // -- Header --
     let header = row![
@@ -2752,9 +2752,10 @@ fn build_level_editor<'a>(
     let mut color_buttons = Row::new().spacing(3);
     for preset in &color_presets {
         let c = *preset;
-        let is_selected = (level.color[0] - c[0]).abs() < 0.05
-            && (level.color[1] - c[1]).abs() < 0.05
-            && (level.color[2] - c[2]).abs() < 0.05;
+        let lc = level.line.stroke.color;
+        let is_selected = (lc[0] - c[0]).abs() < 0.05
+            && (lc[1] - c[1]).abs() < 0.05
+            && (lc[2] - c[2]).abs() < 0.05;
         let border_color = if is_selected {
             Color::WHITE
         } else {
@@ -2791,7 +2792,7 @@ fn build_level_editor<'a>(
     let thicknesses: [f32; 4] = [1.0, 2.0, 3.0, 4.0];
     let mut thickness_buttons = Row::new().spacing(3);
     for &t in &thicknesses {
-        let is_sel = (level.line_width - t).abs() < 0.1;
+        let is_sel = (level.line.stroke.width - t).abs() < 0.1;
         let label = format!("{}px", t as u32);
         thickness_buttons = thickness_buttons.push(
             button(text(label).size(9))
@@ -2827,11 +2828,11 @@ fn build_level_editor<'a>(
             Some(ch) => ch.to_string(),
             None => "\u{2014}".to_string(), // em dash for "None"
         };
-        let icon_clone = icon_variant.clone();
+        let icon_copy = *icon_variant;
         icon_buttons = icon_buttons.push(
             button(text(label).size(20))
                 .on_press(Message::LevelEditorIconChanged(
-                    chart_id, level_id, icon_clone,
+                    chart_id, level_id, icon_copy,
                 ))
                 .padding([2, 5])
                 .style(move |theme: &iced::Theme, status| {
@@ -3022,17 +3023,10 @@ fn build_crosshair_label_overlay<'a>(
             });
 
         // Right-aligned: flexible spacer on the left, badge, gap to edge.
-        let positioned = container(
-            row![
-                Space::new().width(Fill),
-                badge,
-                Space::new().width(Length::Fixed(8.0))
-            ]
-            .width(Fill),
-        )
-        .padding(iced::Padding::ZERO.top(top_pad))
-        .width(Fill)
-        .height(Fill);
+        let positioned = container(row![Space::new().width(Fill), badge,].width(Fill))
+            .padding(iced::Padding::ZERO.top(top_pad))
+            .width(Fill)
+            .height(Fill);
 
         elements.push(positioned.into());
     }

@@ -1306,12 +1306,16 @@ impl MidasApp {
             .unwrap_or(0.0);
 
         let make_leg = |price: f64| BracketLeg {
-            price,
-            timestamp: None,
-            color: None,
-            style: midas_chart::widget::level::LineStyle::Solid,
-            line_width: 1.0,
-            label: None,
+            line: midas_chart::widget::PriceLine {
+                price,
+                extent: midas_chart::widget::LineExtent::FullWidth,
+                stroke: midas_chart::widget::LineStroke {
+                    color: [0.0, 0.0, 0.0, 1.0],
+                    width: 1.0,
+                    style: midas_chart::widget::level::LineStyle::Solid,
+                },
+            },
+            role: LegRole::Entry,
             projected_pnl: None,
             projected_pnl_pct: None,
         };
@@ -1361,16 +1365,16 @@ impl MidasApp {
             if let midas_chart::widget::AnnotationKind::OrderBracket(ref mut b) = ann.kind {
                 b.wrong_side_warning = match (b.entry_type, b.side) {
                     // Limit BUY above market = marketable (warn)
-                    (EntryType::Limit, BracketSide::Long) => b.entry.price > last_price,
+                    (EntryType::Limit, BracketSide::Long) => b.entry.line.price > last_price,
                     // Limit SELL below market = marketable (warn)
-                    (EntryType::Limit, BracketSide::Short) => b.entry.price < last_price,
+                    (EntryType::Limit, BracketSide::Short) => b.entry.line.price < last_price,
                     // Stop BUY below market (warn)
-                    (EntryType::Stop, BracketSide::Long) => b.entry.price < last_price,
+                    (EntryType::Stop, BracketSide::Long) => b.entry.line.price < last_price,
                     // Stop SELL above market (warn)
-                    (EntryType::Stop, BracketSide::Short) => b.entry.price > last_price,
+                    (EntryType::Stop, BracketSide::Short) => b.entry.line.price > last_price,
                     // StopLimit: warn based on limit price (entry.price)
-                    (EntryType::StopLimit, BracketSide::Long) => b.entry.price > last_price,
-                    (EntryType::StopLimit, BracketSide::Short) => b.entry.price < last_price,
+                    (EntryType::StopLimit, BracketSide::Long) => b.entry.line.price > last_price,
+                    (EntryType::StopLimit, BracketSide::Short) => b.entry.line.price < last_price,
                     // Market: never warn
                     (EntryType::Market, _) => false,
                 };
@@ -1458,24 +1462,24 @@ impl MidasApp {
                     b.wrong_side_warning = false;
                     match new_type {
                         EntryType::Market => {
-                            b.entry.price = last_price;
+                            b.entry.line.price = last_price;
                             b.entry_stop_price = None;
                         }
                         EntryType::Limit => {
                             if let Ok(p) = limit_price_str.parse::<f64>() {
-                                b.entry.price = p;
+                                b.entry.line.price = p;
                             }
                             b.entry_stop_price = None;
                         }
                         EntryType::Stop => {
                             if let Ok(p) = stop_price_str.parse::<f64>() {
-                                b.entry.price = p;
+                                b.entry.line.price = p;
                             }
                             b.entry_stop_price = None;
                         }
                         EntryType::StopLimit => {
                             if let Ok(p) = limit_price_str.parse::<f64>() {
-                                b.entry.price = p;
+                                b.entry.line.price = p;
                             }
                             b.entry_stop_price = stop_price_str.parse::<f64>().ok();
                         }
@@ -1523,7 +1527,7 @@ impl MidasApp {
                 .and_then(|a| match &a.kind {
                     midas_chart::widget::AnnotationKind::OrderBracket(b) => Some(
                         b.status == midas_chart::widget::order_bracket::BracketStatus::Draft
-                            && b.entry.price.abs() < f64::EPSILON,
+                            && b.entry.line.price.abs() < f64::EPSILON,
                     ),
                     _ => None,
                 })
@@ -1532,7 +1536,7 @@ impl MidasApp {
             if needs_update {
                 self.annotation_store.update(&sym_upper, ann_id, |ann| {
                     if let midas_chart::widget::AnnotationKind::OrderBracket(ref mut b) = ann.kind {
-                        b.entry.price = price;
+                        b.entry.line.price = price;
                     }
                 });
                 self.mark_levels_dirty_for_ticker(&sym_upper);
@@ -1669,7 +1673,7 @@ impl MidasApp {
                                 .find(|a| a.id == ann_id)
                                 .and_then(|a| match &a.kind {
                                     midas_chart::widget::AnnotationKind::OrderBracket(b) => {
-                                        Some(b.entry.price)
+                                        Some(b.entry.line.price)
                                     }
                                     _ => None,
                                 })
@@ -1823,12 +1827,16 @@ impl MidasApp {
                 );
 
                 let make_leg = |price: f64| BracketLeg {
-                    price,
-                    timestamp: None,
-                    color: None,
-                    style: midas_chart::widget::level::LineStyle::Solid,
-                    line_width: 1.0,
-                    label: None,
+                    line: midas_chart::widget::PriceLine {
+                        price,
+                        extent: midas_chart::widget::LineExtent::FullWidth,
+                        stroke: midas_chart::widget::LineStroke {
+                            color: [0.0, 0.0, 0.0, 1.0],
+                            width: 1.0,
+                            style: midas_chart::widget::level::LineStyle::Solid,
+                        },
+                    },
+                    role: LegRole::Entry,
                     projected_pnl: None,
                     projected_pnl_pct: None,
                 };
@@ -2781,13 +2789,21 @@ impl MidasApp {
                     let level_id = self.level_store.alloc_id();
                     self.level_store.add_level(
                         &ticker,
-                        midas_chart::levels::HorizontalLevel {
-                            id: level_id,
-                            price,
-                            color: [0.85, 0.85, 0.85, 0.8],
-                            line_width: 1.0,
-                            label: None,
-                            icon: midas_chart::LevelIcon::None,
+                        crate::level_store::StoredLevel {
+                            level: midas_chart::levels::HorizontalLevel {
+                                id: level_id,
+                                line: midas_chart::widget::price_line::PriceLine {
+                                    price,
+                                    extent: midas_chart::widget::price_line::LineExtent::default(),
+                                    stroke: midas_chart::widget::price_line::LineStroke {
+                                        color: [0.85, 0.85, 0.85, 0.8],
+                                        width: 1.0,
+                                        style: midas_chart::widget::LineStyle::default(),
+                                    },
+                                },
+                                label: None,
+                                icon: midas_chart::LevelIcon::None,
+                            },
                             locked: false,
                         },
                     );
@@ -2807,7 +2823,7 @@ impl MidasApp {
                 let ticker = self.chart_ticker(chart_id).map(str::to_owned);
                 if let Some(ticker) = ticker {
                     if let Some(level) = self.level_store.find_level_mut(&ticker, level_id) {
-                        level.price = new_price;
+                        level.line.price = new_price;
                     }
                     self.mark_levels_dirty_for_ticker(&ticker);
                     self.mark_config_dirty();
@@ -2906,7 +2922,7 @@ impl MidasApp {
                 let price_str = self
                     .level_store
                     .find_level(level_id)
-                    .map(|(_, l)| midas_chart::format_price(l.price));
+                    .map(|(_, l)| midas_chart::format_price(l.line.price));
                 if let Some(chart) = self.charts.get_mut(&chart_id) {
                     chart.editing_level_id = Some(level_id);
                     chart.editing_level_screen_pos = Some((x, y));
@@ -2956,7 +2972,7 @@ impl MidasApp {
                 if let Some(ticker) = ticker {
                     if let Ok(price) = text.parse::<f64>() {
                         if let Some(level) = self.level_store.find_level_mut(&ticker, level_id) {
-                            level.price = price;
+                            level.line.price = price;
                         }
                         self.mark_levels_dirty_for_ticker(&ticker);
                         self.mark_config_dirty();
@@ -2969,8 +2985,8 @@ impl MidasApp {
                 let ticker = self.chart_ticker(chart_id).map(str::to_owned);
                 if let Some(ticker) = ticker {
                     if let Some(level) = self.level_store.find_level_mut(&ticker, level_id) {
-                        level.price += delta;
-                        let price_str = midas_chart::format_price(level.price);
+                        level.line.price += delta;
+                        let price_str = midas_chart::format_price(level.line.price);
                         if let Some(chart) = self.charts.get_mut(&chart_id) {
                             chart.level_editor_price_input = price_str;
                         }
@@ -3001,7 +3017,7 @@ impl MidasApp {
                 let ticker = self.chart_ticker(chart_id).map(str::to_owned);
                 if let Some(ticker) = ticker {
                     if let Some(level) = self.level_store.find_level_mut(&ticker, level_id) {
-                        level.color = color;
+                        level.line.stroke.color = color;
                     }
                     self.mark_levels_dirty_for_ticker(&ticker);
                     self.mark_config_dirty();
@@ -3013,7 +3029,7 @@ impl MidasApp {
                 let ticker = self.chart_ticker(chart_id).map(str::to_owned);
                 if let Some(ticker) = ticker {
                     if let Some(level) = self.level_store.find_level_mut(&ticker, level_id) {
-                        level.line_width = thickness;
+                        level.line.stroke.width = thickness;
                     }
                     self.mark_levels_dirty_for_ticker(&ticker);
                     self.mark_config_dirty();
@@ -3625,7 +3641,7 @@ impl MidasApp {
                             {
                                 if enabled && b.take_profit.is_none() {
                                     // Create TP at 1% offset from entry price.
-                                    let entry = b.entry.price;
+                                    let entry = b.entry.line.price;
                                     let offset = (entry * 0.01).max(0.01);
                                     let tp_price = match b.side {
                                         midas_chart::widget::order_bracket::BracketSide::Long => {
@@ -3637,12 +3653,16 @@ impl MidasApp {
                                     };
                                     b.take_profit =
                                         Some(midas_chart::widget::order_bracket::BracketLeg {
-                                            price: tp_price,
-                                            timestamp: None,
-                                            color: None,
-                                            style: midas_chart::widget::level::LineStyle::Solid,
-                                            line_width: 1.0,
-                                            label: None,
+                                            line: midas_chart::widget::PriceLine {
+                                                price: tp_price,
+                                                extent: midas_chart::widget::LineExtent::FullWidth,
+                                                stroke: midas_chart::widget::LineStroke {
+                                                    color: [0.0, 0.0, 0.0, 1.0],
+                                                    width: 1.0,
+                                                    style: midas_chart::widget::level::LineStyle::Solid,
+                                                },
+                                            },
+                                            role: midas_chart::widget::order_bracket::LegRole::TakeProfit,
                                             projected_pnl: None,
                                             projected_pnl_pct: None,
                                         });
@@ -3660,7 +3680,7 @@ impl MidasApp {
                             {
                                 if enabled && b.stop_loss.is_none() {
                                     // Create SL at 0.5% offset from entry price.
-                                    let entry = b.entry.price;
+                                    let entry = b.entry.line.price;
                                     let offset = (entry * 0.005).max(0.01);
                                     let sl_price = match b.side {
                                         midas_chart::widget::order_bracket::BracketSide::Long => {
@@ -3672,12 +3692,16 @@ impl MidasApp {
                                     };
                                     b.stop_loss =
                                         Some(midas_chart::widget::order_bracket::BracketLeg {
-                                            price: sl_price,
-                                            timestamp: None,
-                                            color: None,
-                                            style: midas_chart::widget::level::LineStyle::Solid,
-                                            line_width: 1.0,
-                                            label: None,
+                                            line: midas_chart::widget::PriceLine {
+                                                price: sl_price,
+                                                extent: midas_chart::widget::LineExtent::FullWidth,
+                                                stroke: midas_chart::widget::LineStroke {
+                                                    color: [0.0, 0.0, 0.0, 1.0],
+                                                    width: 1.0,
+                                                    style: midas_chart::widget::level::LineStyle::Solid,
+                                                },
+                                            },
+                                            role: midas_chart::widget::order_bracket::LegRole::StopLoss,
                                             projected_pnl: None,
                                             projected_pnl_pct: None,
                                         });
@@ -3700,20 +3724,20 @@ impl MidasApp {
                             match field {
                                 "tp" => {
                                     if let Some(ref mut tp) = b.take_profit {
-                                        tp.price = price;
+                                        tp.line.price = price;
                                     }
                                 }
                                 "sl" => {
                                     if let Some(ref mut sl) = b.stop_loss {
-                                        sl.price = price;
+                                        sl.line.price = price;
                                     }
                                 }
                                 "limit" => {
-                                    b.entry.price = price;
+                                    b.entry.line.price = price;
                                 }
                                 "stop" => match b.entry_type {
                                     midas_chart::widget::order_bracket::EntryType::Stop => {
-                                        b.entry.price = price;
+                                        b.entry.line.price = price;
                                     }
                                     midas_chart::widget::order_bracket::EntryType::StopLimit => {
                                         b.entry_stop_price = Some(price);
@@ -4065,7 +4089,7 @@ impl MidasApp {
                                     .find(|a| a.id == ann_id)
                                     .and_then(|a| match &a.kind {
                                         midas_chart::widget::AnnotationKind::OrderBracket(b) => {
-                                            Some((new_price - b.entry.price).abs() >= 0.01)
+                                            Some((new_price - b.entry.line.price).abs() >= 0.01)
                                         }
                                         _ => None,
                                     })
@@ -4077,7 +4101,7 @@ impl MidasApp {
                                             ref mut b,
                                         ) = ann.kind
                                         {
-                                            b.entry.price = new_price;
+                                            b.entry.line.price = new_price;
                                         }
                                     });
                                     dirty = true;
@@ -4365,12 +4389,16 @@ impl MidasApp {
                     use midas_chart::widget::order_bracket::*;
 
                     let make_leg = |price: f64| BracketLeg {
-                        price,
-                        timestamp: None,
-                        color: None,
-                        style: LineStyle::Solid,
-                        line_width: 1.5,
-                        label: None,
+                        line: midas_chart::widget::PriceLine {
+                            price,
+                            extent: midas_chart::widget::LineExtent::FullWidth,
+                            stroke: midas_chart::widget::LineStroke {
+                                color: [0.0, 0.0, 0.0, 1.0],
+                                width: 1.5,
+                                style: LineStyle::Solid,
+                            },
+                        },
+                        role: LegRole::Entry,
                         projected_pnl: None,
                         projected_pnl_pct: None,
                     };
@@ -4419,7 +4447,7 @@ impl MidasApp {
                         if let midas_chart::widget::AnnotationKind::OrderBracket(ref mut bracket) =
                             ann.kind
                         {
-                            let entry_price = bracket.entry.price;
+                            let entry_price = bracket.entry.line.price;
                             let qty = bracket.quantity.unwrap_or(0.0);
                             let sign = match bracket.side {
                                 midas_chart::widget::order_bracket::BracketSide::Long => 1.0,
@@ -4427,11 +4455,11 @@ impl MidasApp {
                             };
                             match leg {
                                 LegRole::Entry => {
-                                    bracket.entry.price = new_price;
+                                    bracket.entry.line.price = new_price;
                                 }
                                 LegRole::TakeProfit => {
                                     if let Some(ref mut tp) = bracket.take_profit {
-                                        tp.price = new_price;
+                                        tp.line.price = new_price;
                                         // Recompute projected P&L if entry has filled.
                                         if bracket.status
                                             == midas_chart::widget::order_bracket::BracketStatus::Active
@@ -4453,7 +4481,7 @@ impl MidasApp {
                                 }
                                 LegRole::StopLoss => {
                                     if let Some(ref mut sl) = bracket.stop_loss {
-                                        sl.price = new_price;
+                                        sl.line.price = new_price;
                                         if bracket.status
                                             == midas_chart::widget::order_bracket::BracketStatus::Active
                                         {
@@ -4593,7 +4621,7 @@ impl MidasApp {
                     .find(|a| a.id == ann_id)
                     .and_then(|a| match &a.kind {
                         midas_chart::widget::AnnotationKind::OrderBracket(b) => {
-                            Some((b.stop_loss.is_some(), b.entry.price, b.side))
+                            Some((b.stop_loss.is_some(), b.entry.line.price, b.side))
                         }
                         _ => None,
                     });
@@ -4619,12 +4647,16 @@ impl MidasApp {
                                 BracketSide::Short => entry_price * 1.02,
                             };
                             b.stop_loss = Some(BracketLeg {
-                                price: sl_price,
-                                timestamp: None,
-                                color: None,
-                                style: midas_chart::widget::level::LineStyle::Solid,
-                                line_width: 1.5,
-                                label: None,
+                                line: midas_chart::widget::PriceLine {
+                                    price: sl_price,
+                                    extent: midas_chart::widget::LineExtent::FullWidth,
+                                    stroke: midas_chart::widget::LineStroke {
+                                        color: [0.0, 0.0, 0.0, 1.0],
+                                        width: 1.5,
+                                        style: midas_chart::widget::level::LineStyle::Solid,
+                                    },
+                                },
+                                role: LegRole::Entry,
                                 projected_pnl: None,
                                 projected_pnl_pct: None,
                             });
@@ -4792,13 +4824,13 @@ impl MidasApp {
                 let (entry_price, entry_stop_price) = match bracket.entry_type {
                     midas_chart::widget::order_bracket::EntryType::Market => (None, None),
                     midas_chart::widget::order_bracket::EntryType::Limit => {
-                        (Some(bracket.entry.price), None)
+                        (Some(bracket.entry.line.price), None)
                     }
                     midas_chart::widget::order_bracket::EntryType::Stop => {
-                        (None, Some(bracket.entry.price))
+                        (None, Some(bracket.entry.line.price))
                     }
                     midas_chart::widget::order_bracket::EntryType::StopLimit => {
-                        (Some(bracket.entry.price), bracket.entry_stop_price)
+                        (Some(bracket.entry.line.price), bracket.entry_stop_price)
                     }
                 };
 
@@ -4831,18 +4863,18 @@ impl MidasApp {
                         outside_rth: false,
                         take_profit: bracket.take_profit.as_ref().map(|tp| {
                             midas_core::broker::TakeProfitParams {
-                                price: tp.price,
+                                price: tp.line.price,
                                 tif: None,
                             }
                         }),
                         stop_loss: bracket.stop_loss.as_ref().map(|sl| {
                             midas_core::broker::StopLossParams {
-                                stop_price: sl.price,
+                                stop_price: sl.line.price,
                                 limit_price: None,
                                 tif: None,
                             }
                         }),
-                        reference_price: Some(bracket.entry.price),
+                        reference_price: Some(bracket.entry.line.price),
                         strategy: None,
                         tags: Vec::new(),
                         entry_kind,
@@ -5179,7 +5211,7 @@ impl MidasApp {
                         {
                             bracket.status = status;
                             if let Some(fill_price) = entry_fill_price {
-                                bracket.entry.price = fill_price;
+                                bracket.entry.line.price = fill_price;
 
                                 // Compute projected P&L on TP/SL legs.
                                 let sign = match bracket.side {
@@ -5187,19 +5219,25 @@ impl MidasApp {
                                     midas_chart::widget::order_bracket::BracketSide::Short => -1.0,
                                 };
                                 if let Some(ref mut tp) = bracket.take_profit {
-                                    let pnl = sign * (tp.price - fill_price) * qty;
+                                    let pnl = sign * (tp.line.price - fill_price) * qty;
                                     tp.projected_pnl = Some(pnl);
                                     tp.projected_pnl_pct = if fill_price.abs() > f64::EPSILON {
-                                        Some(sign * (tp.price - fill_price) / fill_price * 100.0)
+                                        Some(
+                                            sign * (tp.line.price - fill_price) / fill_price
+                                                * 100.0,
+                                        )
                                     } else {
                                         None
                                     };
                                 }
                                 if let Some(ref mut sl) = bracket.stop_loss {
-                                    let pnl = sign * (sl.price - fill_price) * qty;
+                                    let pnl = sign * (sl.line.price - fill_price) * qty;
                                     sl.projected_pnl = Some(pnl);
                                     sl.projected_pnl_pct = if fill_price.abs() > f64::EPSILON {
-                                        Some(sign * (sl.price - fill_price) / fill_price * 100.0)
+                                        Some(
+                                            sign * (sl.line.price - fill_price) / fill_price
+                                                * 100.0,
+                                        )
                                     } else {
                                         None
                                     };
