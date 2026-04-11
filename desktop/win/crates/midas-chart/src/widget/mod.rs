@@ -6,10 +6,12 @@
 
 pub mod bracket_tool;
 pub mod compute;
+pub mod decorator;
 pub mod hit_test;
 pub mod level;
 pub mod marker;
 pub mod order_bracket;
+pub mod price_line;
 pub mod text_note;
 pub mod theme;
 
@@ -17,12 +19,24 @@ pub mod theme;
 
 pub use self::bracket_tool::{BracketTool, BracketToolMode, BracketToolResult};
 pub use self::compute::{ComputeContext, LabelAnchor, Viewport, WidgetLabel, WidgetOutput};
-pub use self::hit_test::{BoundingBox, CursorIcon, HitResult, HitZone, HitZoneKind, Point};
-pub use self::level::{compute_level, segmented_line, HorizontalLevel, LevelExtend, LineStyle};
+pub use self::decorator::{
+    Badge, BadgeBorder, BadgeSegment, BadgeShape, Button, DecoratorAction, DecoratorAnchor,
+    DecoratorGroup, DecoratorItem, FlexDirection, ItemContent, Visibility,
+};
+pub use self::hit_test::{
+    BoundingBox, CursorIcon, HitResult, HitZone, HitZoneKind, ItemPath, Point,
+};
+pub use self::level::{compute_level, compute_price_line_geometry, segmented_line, LineStyle};
+// `HorizontalLevel` (post-Slice-7) lives in `crate::levels`; re-exported
+// here so `midas_chart::widget::HorizontalLevel` keeps resolving for the
+// many downstream call sites that were written against the old
+// renderer-side struct.
 pub use self::marker::{MarkerAnnotation, MarkerIcon};
 pub use self::order_bracket::{BracketLeg, BracketSide, BracketStatus, EntryType, OrderBracket};
+pub use self::price_line::{LineExtent, LineStroke, PriceLine};
 pub use self::text_note::TextNote;
 pub use self::theme::Theme;
+pub use crate::levels::HorizontalLevel;
 
 use midas_core::Timeframe;
 use serde::{Deserialize, Serialize};

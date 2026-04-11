@@ -1,10 +1,9 @@
 use super::*;
 use crate::camera::Camera2D;
 use crate::state::{ChartState, InteractionMode, Momentum, YAnimation};
+use crate::widget::price_line::{LineExtent, LineStroke, PriceLine};
 use crate::widget::{
-    hit_test::HitZoneKind,
-    level::{LevelExtend, LineStyle},
-    Annotation, AnnotationId, AnnotationKind, Presence,
+    hit_test::HitZoneKind, Annotation, AnnotationId, AnnotationKind, LineStyle, Presence,
 };
 
 fn test_state() -> ChartState {
@@ -23,12 +22,17 @@ fn test_level(id: u64, price: f64) -> Annotation {
     Annotation {
         id: AnnotationId(id),
         kind: AnnotationKind::Level(crate::widget::HorizontalLevel {
-            price,
-            color: [1.0, 0.0, 0.0, 1.0],
-            line_width: 1.0,
-            style: LineStyle::default(),
+            id,
+            line: PriceLine {
+                price,
+                extent: LineExtent::default(),
+                stroke: LineStroke {
+                    color: [1.0, 0.0, 0.0, 1.0],
+                    width: 1.0,
+                    style: LineStyle::default(),
+                },
+            },
             label: None,
-            extend: LevelExtend::default(),
             icon: crate::levels::LevelIcon::None,
         }),
         presence: Presence::Active,
@@ -1408,13 +1412,18 @@ use crate::widget::order_bracket::{
 };
 
 fn make_bracket_leg(price: f64) -> BracketLeg {
+    use crate::widget::price_line::{LineExtent, LineStroke, PriceLine};
     BracketLeg {
-        price,
-        timestamp: None,
-        color: None,
-        style: crate::widget::level::LineStyle::default(),
-        line_width: 1.0,
-        label: None,
+        line: PriceLine {
+            price,
+            extent: LineExtent::FullWidth,
+            stroke: LineStroke {
+                color: [0.0, 0.0, 0.0, 1.0],
+                width: 1.0,
+                style: crate::widget::level::LineStyle::default(),
+            },
+        },
+        role: LegRole::Entry,
         projected_pnl: None,
         projected_pnl_pct: None,
     }
@@ -1928,6 +1937,117 @@ fn releasing_bracket_leg_drag_returns_to_idle() {
     );
 }
 
+// ── Slice 6: decorator click routing ─────────────────────────────
+
+#[test]
+fn hit_to_chart_action_emits_decorator_click() {
+    use crate::widget::decorator::DecoratorAction;
+    use crate::widget::hit_test::{HitResult, HitZoneKind, ItemPath};
+    use crate::widget::AnnotationId;
+
+    let hit = HitResult {
+        annotation_id: AnnotationId(42),
+        zone: HitZoneKind::Decorator {
+            group_id: 7,
+            item_path: ItemPath::new(&[2, 0]),
+            action: DecoratorAction::CloseAnnotation,
+        },
+        distance: 0.0,
+    };
+
+    let action = super::hit_to_chart_action(&hit)
+        .expect("decorator hit should lower to a ChartAction::DecoratorClick");
+
+    match action {
+        ChartAction::DecoratorClick {
+            annotation_id,
+            group_id,
+            item_path,
+            action,
+        } => {
+            assert_eq!(annotation_id, AnnotationId(42));
+            assert_eq!(group_id, 7);
+            assert_eq!(item_path.as_slice(), &[2, 0]);
+            assert_eq!(action, DecoratorAction::CloseAnnotation);
+        }
+        other => panic!("expected DecoratorClick, got {other:?}"),
+    }
+}
+
+#[test]
+fn hit_to_chart_action_passes_through_every_decorator_action_variant() {
+    use crate::widget::decorator::DecoratorAction;
+    use crate::widget::hit_test::{HitResult, HitZoneKind, ItemPath};
+    use crate::widget::AnnotationId;
+
+    // Every variant should round-trip through `hit_to_chart_action`
+    // so the Slice 6 routing is total across the `DecoratorAction`
+    // vocabulary, not just `CloseAnnotation`.
+    let variants = [
+        DecoratorAction::CloseAnnotation,
+        DecoratorAction::CreateTakeProfit,
+        DecoratorAction::CreateStopLoss,
+        DecoratorAction::CycleEntryType,
+        DecoratorAction::EditQuantity,
+        DecoratorAction::EditPrice,
+        DecoratorAction::ToggleLocked,
+        DecoratorAction::Submit,
+        DecoratorAction::Save,
+        DecoratorAction::Custom(99),
+    ];
+
+    for expected in variants {
+        let hit = HitResult {
+            annotation_id: AnnotationId(1),
+            zone: HitZoneKind::Decorator {
+                group_id: 0,
+                item_path: ItemPath::new(&[0]),
+                action: expected,
+            },
+            distance: 0.0,
+        };
+        match super::hit_to_chart_action(&hit) {
+            Some(ChartAction::DecoratorClick { action, .. }) => {
+                assert_eq!(action, expected, "variant should pass through unchanged");
+            }
+            other => panic!("expected DecoratorClick for {expected:?}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn hit_to_chart_action_returns_none_for_non_decorator_zones() {
+    use crate::widget::hit_test::{HitResult, HitZoneKind};
+    use crate::widget::AnnotationId;
+
+    // Line and legacy-bracket-button zones are still handled by the
+    // per-shape hit-test paths. `hit_to_chart_action` must stay silent
+    // so it does not steal clicks from them before Slice 8b.
+    let non_decorator = [
+        HitZoneKind::LevelLine,
+        HitZoneKind::BracketEntry,
+        HitZoneKind::BracketTP,
+        HitZoneKind::BracketSL,
+        HitZoneKind::BracketStopTrigger,
+        HitZoneKind::BracketZone,
+        HitZoneKind::MarkerIcon,
+        HitZoneKind::NoteBody,
+        HitZoneKind::VolumeProfileBar,
+    ];
+
+    for zone in non_decorator {
+        let hit = HitResult {
+            annotation_id: AnnotationId(1),
+            zone,
+            distance: 0.0,
+        };
+        assert!(
+            super::hit_to_chart_action(&hit).is_none(),
+            "zone {zone:?} must not lower to a decorator click"
+        );
+    }
+}
+
 #[test]
 fn apply_drag_bracket_leg_marks_dirty() {
     let mut state = test_state();
@@ -1942,5 +2062,228 @@ fn apply_drag_bracket_leg_marks_dirty() {
     assert!(
         state.dirty.candles > gen_before,
         "DragBracketLeg should mark data dirty"
+    );
+}
+
+// ── Slice 8b: decorator-click routing regression suite ──────────
+
+/// Clone of `test_bracket_annotation` that produces a Draft Long bracket.
+/// Draft is required for `Submit` / `Save` / `RemoveStopLoss` decorator
+/// buttons to emit.
+fn draft_bracket_annotation(id: u64, entry: f64, tp: f64, sl: f64) -> Annotation {
+    Annotation {
+        id: AnnotationId(id),
+        kind: AnnotationKind::OrderBracket(Box::new(OrderBracket {
+            entry: make_bracket_leg(entry),
+            take_profit: Some(make_bracket_leg(tp)),
+            stop_loss: Some(make_bracket_leg(sl)),
+            side: BracketSide::Long,
+            status: BracketStatus::Draft,
+            quantity: Some(100.0),
+            saved: false,
+            filled_qty: None,
+            entry_type: EntryType::Market,
+            entry_stop_price: None,
+            wrong_side_warning: false,
+        })),
+        presence: Presence::Active,
+        visible_timeframes: None,
+        locked: false,
+        created_at: 0,
+        modified_at: 0,
+    }
+}
+
+/// Camera sized 1920x1080 over a $30 price range so the three test
+/// legs of `draft_bracket_annotation` land on well-separated rows.
+fn decorator_test_camera() -> Camera2D {
+    Camera2D {
+        viewport_width: 1920,
+        viewport_height: 1080,
+        time_start: 0.0,
+        time_end: 100_000.0,
+        price_low: 170.0,
+        price_high: 200.0,
+        dpi_scale: 1.0,
+    }
+}
+
+/// Run a mouse press + release at `(x, y)` through the interaction
+/// state machine and return the collected actions.
+fn click_at(
+    state: &mut ChartState,
+    x: f32,
+    y: f32,
+    annotations: &[Annotation],
+) -> Vec<ChartAction> {
+    let _ = handle_event(
+        state,
+        ChartEvent::MousePressed {
+            x,
+            y,
+            button: MouseButton::Left,
+            alt_held: false,
+        },
+        None,
+        false,
+        annotations,
+    );
+    handle_event(
+        state,
+        ChartEvent::MouseReleased {
+            x,
+            y,
+            button: MouseButton::Left,
+            alt_held: false,
+        },
+        None,
+        false,
+        annotations,
+    )
+}
+
+/// Locate the hit-rect center of the first decorator hit zone whose
+/// action equals `target` within the given annotation's groups. Uses
+/// the same compute path the click router uses so the test clicks on
+/// exactly the same pixel the runtime does.
+fn decorator_button_center(
+    ann: &Annotation,
+    target: crate::widget::decorator::DecoratorAction,
+    camera: &Camera2D,
+) -> (f32, f32) {
+    use crate::widget::compute::{ComputeContext, Viewport};
+    use crate::widget::decorator::compute_decorator_group;
+    use crate::widget::order_bracket::decorators::{
+        entry_decorator_group, sl_decorator_group, tp_decorator_group,
+    };
+    use crate::widget::theme::Theme;
+
+    let theme = Theme::default();
+    let data = super::EmptyCandleData;
+    let hovered_groups: [(AnnotationId, u16); 3] = [(ann.id, 0), (ann.id, 1), (ann.id, 2)];
+    let ctx = ComputeContext {
+        camera,
+        data: &data,
+        viewport: Viewport {
+            width: camera.viewport_width,
+            height: camera.viewport_height,
+        },
+        theme: &theme,
+        snap_fn: &|_| None,
+        candle_duration_ms: 0.0,
+        collapse_gaps: false,
+        separator_y: camera.viewport_height as f32,
+        dpi_scale: 1.0,
+        hovered_annotation: Some((ann.id, HitZoneKind::LevelLine)),
+        hovered_decorator_groups: &hovered_groups,
+        selected_annotation: None,
+        drag_ghost: None,
+    };
+
+    let bracket = match &ann.kind {
+        AnnotationKind::OrderBracket(b) => b.as_ref(),
+        _ => panic!("draft_bracket_annotation must be an OrderBracket"),
+    };
+
+    let mut outputs = Vec::new();
+    outputs.push(compute_decorator_group(
+        &entry_decorator_group(bracket),
+        &bracket.entry.line,
+        ann.id,
+        &ctx,
+        1.0,
+    ));
+    if let Some(tp) = bracket.take_profit.as_ref() {
+        if let Some(g) = tp_decorator_group(bracket) {
+            outputs.push(compute_decorator_group(&g, &tp.line, ann.id, &ctx, 1.0));
+        }
+    }
+    if let Some(sl) = bracket.stop_loss.as_ref() {
+        if let Some(g) = sl_decorator_group(bracket) {
+            outputs.push(compute_decorator_group(&g, &sl.line, ann.id, &ctx, 1.0));
+        }
+    }
+
+    for out in outputs {
+        for z in out.hit_zones {
+            if let HitZoneKind::Decorator { action, .. } = z.kind {
+                if action == target {
+                    let cx = (z.rect[0] + z.rect[2]) / 2.0;
+                    let cy = (z.rect[1] + z.rect[3]) / 2.0;
+                    return (cx, cy);
+                }
+            }
+        }
+    }
+    panic!("no decorator hit zone found for action {target:?}");
+}
+
+fn assert_decorator_click_routes(
+    target: crate::widget::decorator::DecoratorAction,
+    annotations: &[Annotation],
+) {
+    let camera = decorator_test_camera();
+    let mut state = ChartState::new(camera.clone());
+    let (cx, cy) = decorator_button_center(&annotations[0], target, &camera);
+    let actions = click_at(&mut state, cx, cy, annotations);
+    let hit = actions.iter().find_map(|a| match a {
+        ChartAction::DecoratorClick { action, .. } => Some(*action),
+        _ => None,
+    });
+    assert_eq!(
+        hit,
+        Some(target),
+        "click at ({cx},{cy}) should route through DecoratorClick with action {target:?}, got {actions:?}"
+    );
+}
+
+#[test]
+fn bracket_submit_click_routes_through_decorator_click() {
+    let annotations = vec![draft_bracket_annotation(10, 185.0, 192.0, 182.0)];
+    assert_decorator_click_routes(
+        crate::widget::decorator::DecoratorAction::Submit,
+        &annotations,
+    );
+}
+
+#[test]
+fn bracket_save_click_routes_through_decorator_click() {
+    let annotations = vec![draft_bracket_annotation(10, 185.0, 192.0, 182.0)];
+    assert_decorator_click_routes(
+        crate::widget::decorator::DecoratorAction::Save,
+        &annotations,
+    );
+}
+
+#[test]
+fn bracket_cancel_click_routes_through_decorator_click() {
+    let annotations = vec![draft_bracket_annotation(10, 185.0, 192.0, 182.0)];
+    assert_decorator_click_routes(
+        crate::widget::decorator::DecoratorAction::CloseAnnotation,
+        &annotations,
+    );
+}
+
+#[test]
+fn bracket_cancel_sl_click_routes_through_decorator_click() {
+    let annotations = vec![draft_bracket_annotation(10, 185.0, 192.0, 182.0)];
+    assert_decorator_click_routes(
+        crate::widget::decorator::DecoratorAction::RemoveStopLoss,
+        &annotations,
+    );
+}
+
+#[test]
+fn bracket_toggle_sl_click_routes_through_decorator_click() {
+    // Draft bracket with no SL — the entry decorator group still
+    // emits the hover-only `CreateStopLoss` stack button (successor
+    // to the legacy `[SL]` toggle), which is what this test clicks.
+    let mut ann = draft_bracket_annotation(10, 185.0, 192.0, 182.0);
+    if let AnnotationKind::OrderBracket(ref mut b) = ann.kind {
+        b.stop_loss = None;
+    }
+    assert_decorator_click_routes(
+        crate::widget::decorator::DecoratorAction::CreateStopLoss,
+        &[ann],
     );
 }

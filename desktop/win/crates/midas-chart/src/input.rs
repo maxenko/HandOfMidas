@@ -62,6 +62,13 @@ pub struct ChartInput<'a> {
     pub gatr_bright_ranges: &'a [(usize, usize)],
     /// Currently hovered annotation element (for hover highlight in compute pass).
     pub hovered_annotation: Option<(AnnotationId, HitZoneKind)>,
+    /// Decorator groups that are currently expanded. Tuples of
+    /// `(annotation_id, group_id)`. Threaded through
+    /// [`crate::widget::compute::ComputeContext`] so decorator compute
+    /// can emit hover-gated items whose parent line is no longer under
+    /// the cursor (first-frame hover edge case — see
+    /// `plan/decorator-system/05-interaction.md`).
+    pub hovered_decorator_groups: &'a [(AnnotationId, u16)],
     /// Currently selected annotation (for selection glow in compute pass).
     pub selected_annotation: Option<AnnotationId>,
     /// Drag ghost: annotation being dragged and its original (pre-drag) price.

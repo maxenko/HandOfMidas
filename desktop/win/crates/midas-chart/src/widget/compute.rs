@@ -5,7 +5,7 @@
 //! dispatched via `match` on `AnnotationKind`.
 
 use crate::camera::Camera2D;
-use crate::instances::GridLineInstance;
+use crate::instances::{BadgeInstance, GridLineInstance};
 use midas_core::CandleData;
 
 use super::hit_test::{HitZone, HitZoneKind};
@@ -40,6 +40,13 @@ pub struct ComputeContext<'a> {
     pub dpi_scale: f32,
     /// Hovered annotation element for highlight styling.
     pub hovered_annotation: Option<(AnnotationId, HitZoneKind)>,
+    /// Decorator groups that are currently expanded. Each tuple is
+    /// `(annotation_id, group_id)`. Read by `compute_decorator_group`
+    /// to gate `OnGroupHover` items into the output even when the
+    /// parent line is no longer under the cursor. See
+    /// `plan/decorator-system/05-interaction.md` — "Two-pass compute
+    /// inside `compute_decorator_group()`".
+    pub hovered_decorator_groups: &'a [(AnnotationId, u16)],
     /// Currently selected annotation for selection glow.
     pub selected_annotation: Option<AnnotationId>,
     /// Drag ghost: annotation being dragged and its original price.
@@ -66,6 +73,7 @@ pub struct Viewport {
 /// | `fills` | Layer 6 | Behind annotation lines |
 /// | `lines` | Layer 7 | On top of fills |
 /// | `markers` | Layer 8 | On top of lines |
+/// | `badges` | Layer 4.5 | SDF decorator badges (candle bodies → crosshair) |
 /// | `labels` | Layer 10 | iced overlay (above all GPU) |
 /// | `hit_zones` | N/A | Not rendered, used for interaction |
 #[derive(Clone, Debug, Default)]
@@ -76,6 +84,10 @@ pub struct WidgetOutput {
     pub lines: Vec<GridLineInstance>,
     /// Markers and point elements rendered at Layer 8.
     pub markers: Vec<GridLineInstance>,
+    /// Decorator badge instances rendered through the SDF
+    /// `BadgePipeline` at Layer 4.5 (after candle bodies, before the
+    /// crosshair overlay).
+    pub badges: Vec<BadgeInstance>,
     /// Text labels rendered by the iced overlay at Layer 10.
     pub labels: Vec<WidgetLabel>,
     /// Interactive hit zones for mouse event handling (not rendered).
@@ -100,6 +112,10 @@ impl WidgetOutput {
         {
             instance.color[3] *= alpha;
         }
+        for badge in &mut self.badges {
+            badge.fill[3] *= alpha;
+            badge.border[3] *= alpha;
+        }
         for label in &mut self.labels {
             label.bg_color[3] *= alpha;
             label.text_color[3] *= alpha;
@@ -111,13 +127,14 @@ impl WidgetOutput {
         self.fills.extend(other.fills);
         self.lines.extend(other.lines);
         self.markers.extend(other.markers);
+        self.badges.extend(other.badges);
         self.labels.extend(other.labels);
         self.hit_zones.extend(other.hit_zones);
     }
 
     /// Total number of GPU instances across all layers.
     pub fn instance_count(&self) -> usize {
-        self.fills.len() + self.lines.len() + self.markers.len()
+        self.fills.len() + self.lines.len() + self.markers.len() + self.badges.len()
     }
 }
 

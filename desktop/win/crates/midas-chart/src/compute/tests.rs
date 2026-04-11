@@ -3,10 +3,8 @@ use crate::camera::Camera2D;
 use crate::dirty::DirtyFlags;
 use crate::input::ChartInput;
 use crate::level_tool::LevelTool;
-use crate::widget::{
-    level::{LevelExtend, LineStyle},
-    Annotation, AnnotationId, AnnotationKind, Presence,
-};
+use crate::widget::price_line::{LineExtent, LineStroke, PriceLine};
+use crate::widget::{Annotation, AnnotationId, AnnotationKind, LineStyle, Presence};
 use midas_core::CandleData;
 use std::ops::Range;
 
@@ -172,6 +170,7 @@ fn make_input<'a>(
         dirty,
         gatr_bright_ranges: &[],
         hovered_annotation: None,
+        hovered_decorator_groups: &[],
         selected_annotation: None,
         drag_ghost: None,
     }
@@ -209,6 +208,7 @@ fn make_input_with_collapse<'a>(
         dirty,
         gatr_bright_ranges: &[],
         hovered_annotation: None,
+        hovered_decorator_groups: &[],
         selected_annotation: None,
         drag_ghost: None,
     }
@@ -495,12 +495,17 @@ fn levels_rendered_via_widget_output() {
     let annotations = vec![Annotation {
         id: AnnotationId(1),
         kind: AnnotationKind::Level(crate::widget::HorizontalLevel {
-            price: 105.0,
-            color: [1.0, 0.0, 0.0, 1.0],
-            line_width: 1.0,
-            style: LineStyle::default(),
+            id: 1,
+            line: PriceLine {
+                price: 105.0,
+                extent: LineExtent::default(),
+                stroke: LineStroke {
+                    color: [1.0, 0.0, 0.0, 1.0],
+                    width: 1.0,
+                    style: LineStyle::default(),
+                },
+            },
             label: None,
-            extend: LevelExtend::default(),
             icon: crate::levels::LevelIcon::None,
         }),
         presence: Presence::Active,

@@ -46,11 +46,12 @@ pub use dirty::{DirtyFlags, DirtyTracker};
 pub use gerchik_atr::GerchikAtrRender;
 pub use input::ChartInput;
 pub use instances::{
-    AxisLabel, CandleInstance, CrosshairRender, GridLine, GridLineInstance, OhlcvOverlay,
-    SessionBoundary, VolumeInstance,
+    AxisLabel, BadgeInstance, CandleInstance, CrosshairRender, GridLine, GridLineInstance,
+    OhlcvOverlay, SessionBoundary, VolumeInstance,
 };
 pub use interaction::{
-    handle_event, timeline_border_y, volume_handle_y, ChartAction, ChartEvent, Key, MouseButton,
+    handle_event, hit_to_chart_action, timeline_border_y, volume_handle_y, ChartAction, ChartEvent,
+    Key, MouseButton,
 };
 pub use level_tool::{LevelTool, LevelToolMode};
 pub use levels::{price_step_for, HorizontalLevel, LevelIcon};

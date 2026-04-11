@@ -4,6 +4,7 @@
 //! in `WidgetOutput`. The interaction layer queries them to determine
 //! which annotation the user clicked or is hovering over.
 
+use super::decorator::DecoratorAction;
 use super::AnnotationId;
 
 /// A point in screen coordinates (logical pixels).
@@ -32,6 +33,57 @@ pub struct HitResult {
     pub distance: f32,
 }
 
+/// Fixed-capacity breadcrumb into a nested decorator layout.
+///
+/// Wraps a `[u8; 4]` + `u8` length pair. Construction zeroes the unused
+/// tail of the inner array so the derived `PartialEq`/`Hash` are sound
+/// regardless of how the caller supplied the path — without this
+/// invariant, two paths with equal logical length but differing garbage
+/// bytes past the length byte would compare unequal, silently breaking
+/// click dedup and hover-state lookup. Four bytes covers the deepest
+/// realistic nesting (`group → stack_item → child_item → segment`).
+///
+/// This type is `Copy` so that [`HitZoneKind::Decorator`] preserves the
+/// `Copy` derive on `HitZoneKind` itself — the entire hover/hit-test
+/// pipeline depends on `HitZoneKind` being trivially copyable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ItemPath {
+    bytes: [u8; 4],
+    len: u8,
+}
+
+impl ItemPath {
+    /// Construct an `ItemPath` from a slice of byte indices.
+    ///
+    /// Debug-panics if `path.len() > 4`; release clamps to 4 to keep
+    /// the invariant sound even if an upstream bug slips through.
+    pub fn new(path: &[u8]) -> Self {
+        debug_assert!(path.len() <= 4, "ItemPath max depth is 4");
+        let mut bytes = [0u8; 4];
+        let len = path.len().min(4);
+        bytes[..len].copy_from_slice(&path[..len]);
+        Self {
+            bytes,
+            len: len as u8,
+        }
+    }
+
+    /// View the valid prefix of the path as a byte slice.
+    pub fn as_slice(&self) -> &[u8] {
+        &self.bytes[..self.len as usize]
+    }
+
+    /// Number of valid bytes in the path (0..=4).
+    pub fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    /// Whether the path has zero valid bytes.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
 /// Which part of an annotation was hit.
 ///
 /// The interaction layer uses this to determine drag behavior:
@@ -42,6 +94,7 @@ pub struct HitResult {
 /// - `BracketZone` -> select only (no drag)
 /// - `MarkerIcon` -> select only
 /// - `NoteBody` -> 2D drag (price + time)
+/// - `Decorator` -> click routed to `DecoratorAction` via the path
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HitZoneKind {
     /// A level's horizontal line.
@@ -62,17 +115,28 @@ pub enum HitZoneKind {
     NoteBody,
     /// A volume profile's histogram area.
     VolumeProfileBar,
-    /// [Submit] button on a Draft bracket entry line.
-    BracketSubmit,
-    /// [Save] button on a Draft bracket entry line.
-    BracketSave,
-    /// [SL] toggle button on a Draft bracket entry line.
-    BracketToggleSL,
-    /// [X] cancel button on a Draft bracket entry line.
-    BracketCancel,
-    /// [X] cancel-SL button on a Draft bracket SL line.
-    BracketCancelSL,
+    /// Click on a decorator item or segment. `item_path` is a fixed-
+    /// capacity breadcrumb (max depth 4) wrapped in [`ItemPath`] to
+    /// guarantee its unused tail is zeroed — see [`ItemPath`] for the
+    /// rationale.
+    Decorator {
+        /// Stable group id unique within the parent annotation.
+        group_id: u16,
+        /// Breadcrumb into the nested decorator layout.
+        item_path: ItemPath,
+        /// Action emitted when the hit zone is clicked.
+        action: DecoratorAction,
+    },
 }
+
+// Compile-time proof that `HitZoneKind` is still `Copy`. Dropping this
+// derive cascades through the whole hover/hit-test surface (see
+// `plan/decorator-system/03-data-model.md#copy-must-be-preserved`).
+const _: () = {
+    const fn assert_copy<T: Copy>() {}
+    assert_copy::<HitZoneKind>();
+    assert_copy::<ItemPath>();
+};
 
 /// An interactive area registered by a widget during compute.
 ///

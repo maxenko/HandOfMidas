@@ -13,6 +13,7 @@ use crate::level_tool::LevelTool;
 use crate::widget::bracket_tool::BracketTool;
 use crate::widget::hit_test::HitZoneKind;
 use crate::widget::AnnotationId;
+use smallvec::SmallVec;
 
 /// What the active tool needs from the crosshair.
 ///
@@ -180,6 +181,16 @@ pub struct ChartState {
     /// Currently hovered bracket leg for visual highlight.
     /// Set by the app layer on mouse-move; read by `compute_bracket()`.
     pub hovered_annotation: Option<(AnnotationId, HitZoneKind)>,
+    /// Decorator groups that are currently expanded (visible) because
+    /// either their parent line is hovered or the cursor is over one of
+    /// their items. Recomputed on every mouse-move event in the app-layer
+    /// `update()` loop. Threaded through `ChartInput` / `ComputeContext`
+    /// so `compute_decorator_group` can emit `OnGroupHover` items that
+    /// survive the cursor leaving the line and landing on the button.
+    ///
+    /// See `plan/decorator-system/05-interaction.md` — "Hover set update
+    /// strategy" and "First-frame hover edge case (walkthrough)".
+    pub hovered_decorator_groups: SmallVec<[(AnnotationId, u16); 2]>,
 }
 
 impl ChartState {
@@ -207,6 +218,7 @@ impl ChartState {
             level_tool: LevelTool::default(),
             bracket_tool: BracketTool::default(),
             hovered_annotation: None,
+            hovered_decorator_groups: SmallVec::new(),
         }
     }
 
@@ -428,12 +440,11 @@ impl ChartState {
                 // Handled by the app layer — opens bracket context menu.
             }
 
-            // Bracket button actions — handled entirely by the app layer.
-            ChartAction::SubmitBracket { .. }
-            | ChartAction::SaveBracket { .. }
-            | ChartAction::ToggleBracketSL { .. }
-            | ChartAction::CancelBracket { .. }
-            | ChartAction::CancelBracketSL { .. } => {}
+            // Slice 6 decorator routing — every side effect lives on
+            // the app layer (annotation store mutations, broker
+            // commands, inline editors), so the state reducer is a
+            // no-op. The arm exists for exhaustiveness.
+            ChartAction::DecoratorClick { .. } => {}
         }
     }
 

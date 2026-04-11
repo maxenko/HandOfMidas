@@ -10,6 +10,8 @@
 //! the mouse has moved past the drag threshold (4px).
 
 use crate::state::{ChartState, CursorClaim, InteractionMode};
+use crate::widget::decorator::DecoratorAction;
+use crate::widget::hit_test::{HitResult, HitZoneKind, ItemPath};
 use crate::widget::AnnotationId;
 use midas_core::CandleData;
 
@@ -129,31 +131,6 @@ pub enum ChartAction {
         /// Trade direction.
         side: super::widget::order_bracket::BracketSide,
     },
-    /// Submit a Draft bracket to the broker.
-    SubmitBracket {
-        /// Which annotation (OrderBracket) to submit.
-        annotation_id: super::widget::AnnotationId,
-    },
-    /// Save/pin a Draft bracket.
-    SaveBracket {
-        /// Which annotation (OrderBracket) to save.
-        annotation_id: super::widget::AnnotationId,
-    },
-    /// Toggle SL on/off for a Draft bracket.
-    ToggleBracketSL {
-        /// Which annotation (OrderBracket) to toggle SL on.
-        annotation_id: super::widget::AnnotationId,
-    },
-    /// Cancel/remove a Draft bracket.
-    CancelBracket {
-        /// Which annotation (OrderBracket) to cancel.
-        annotation_id: super::widget::AnnotationId,
-    },
-    /// Remove the SL leg from a Draft bracket.
-    CancelBracketSL {
-        /// Which annotation (OrderBracket) to remove SL from.
-        annotation_id: super::widget::AnnotationId,
-    },
     /// Right-click on a bracket leg — opens bracket context menu.
     RightClickBracketLeg {
         /// Which annotation (OrderBracket) owns the leg.
@@ -165,6 +142,56 @@ pub enum ChartAction {
         /// Screen Y for context menu placement.
         y: f32,
     },
+    /// Click on a decorator item emitted from [`HitZoneKind::Decorator`].
+    ///
+    /// Produced by [`hit_to_chart_action`] (or the `hit_test_decorators`
+    /// click path in `handle_mouse_released`) when a mouse-press lands
+    /// inside a decorator item whose `action` is set. The app layer
+    /// matches on `action` and maps each [`DecoratorAction`] variant to
+    /// a broker command, UI state change, or persistence side effect.
+    DecoratorClick {
+        /// Which annotation owns the clicked decorator item.
+        annotation_id: AnnotationId,
+        /// Stable group id unique within the parent annotation.
+        group_id: u16,
+        /// Breadcrumb into the nested decorator layout.
+        item_path: ItemPath,
+        /// The semantic action bound to the clicked item.
+        action: DecoratorAction,
+    },
+}
+
+/// Convert a [`HitResult`] into the matching [`ChartAction`] where a
+/// direct lowering exists.
+///
+/// Wires [`HitZoneKind::Decorator`] to [`ChartAction::DecoratorClick`];
+/// every other zone kind is outside this helper's scope and returns
+/// `None`. The function is pure and allocation-free.
+pub fn hit_to_chart_action(hit: &HitResult) -> Option<ChartAction> {
+    match hit.zone {
+        HitZoneKind::Decorator {
+            group_id,
+            item_path,
+            action,
+        } => Some(ChartAction::DecoratorClick {
+            annotation_id: hit.annotation_id,
+            group_id,
+            item_path,
+            action,
+        }),
+        // Line, bracket-leg, marker, note and volume-profile zones are
+        // still handled by the per-shape hit-test paths in
+        // `handle_mouse_pressed` / `handle_mouse_released`.
+        HitZoneKind::LevelLine
+        | HitZoneKind::BracketEntry
+        | HitZoneKind::BracketTP
+        | HitZoneKind::BracketSL
+        | HitZoneKind::BracketStopTrigger
+        | HitZoneKind::BracketZone
+        | HitZoneKind::MarkerIcon
+        | HitZoneKind::NoteBody
+        | HitZoneKind::VolumeProfileBar => None,
+    }
 }
 
 /// Mouse button discriminant.
@@ -258,44 +285,44 @@ fn hit_test_annotation(
 
         match &ann.kind {
             crate::widget::AnnotationKind::Level(level) => {
-                let leg_y = camera.price_to_y(level.price);
+                let leg_y = camera.price_to_y(level.line.price);
                 let dist = (cursor_y - leg_y).abs();
                 if dist <= LEVEL_HIT_TOLERANCE_PX && best.as_ref().is_none_or(|b| dist < b.2) {
-                    let offset = level.price - cursor_price;
+                    let offset = level.line.price - cursor_price;
                     best = Some((ann.id, HitZoneKind::LevelLine, dist, offset, None));
                 }
             }
             crate::widget::AnnotationKind::OrderBracket(bracket) => {
                 let clamp_ctx = Some(BracketClampCtx {
-                    entry_price: bracket.entry.price,
+                    entry_price: bracket.entry.line.price,
                     side: bracket.side,
                 });
 
                 // TP leg.
                 if let Some(ref tp) = bracket.take_profit {
-                    let leg_y = camera.price_to_y(tp.price);
+                    let leg_y = camera.price_to_y(tp.line.price);
                     let dist = (cursor_y - leg_y).abs();
                     if dist <= LEVEL_HIT_TOLERANCE_PX && best.as_ref().is_none_or(|b| dist < b.2) {
-                        let offset = tp.price - cursor_price;
+                        let offset = tp.line.price - cursor_price;
                         best = Some((ann.id, HitZoneKind::BracketTP, dist, offset, clamp_ctx));
                     }
                 }
                 // SL leg.
                 if let Some(ref sl) = bracket.stop_loss {
-                    let leg_y = camera.price_to_y(sl.price);
+                    let leg_y = camera.price_to_y(sl.line.price);
                     let dist = (cursor_y - leg_y).abs();
                     if dist <= LEVEL_HIT_TOLERANCE_PX && best.as_ref().is_none_or(|b| dist < b.2) {
-                        let offset = sl.price - cursor_price;
+                        let offset = sl.line.price - cursor_price;
                         best = Some((ann.id, HitZoneKind::BracketSL, dist, offset, clamp_ctx));
                     }
                 }
                 // Entry leg (non-Market Draft only).
                 if bracket.entry_type != EntryType::Market && bracket.status == BracketStatus::Draft
                 {
-                    let leg_y = camera.price_to_y(bracket.entry.price);
+                    let leg_y = camera.price_to_y(bracket.entry.line.price);
                     let dist = (cursor_y - leg_y).abs();
                     if dist <= LEVEL_HIT_TOLERANCE_PX && best.as_ref().is_none_or(|b| dist < b.2) {
-                        let offset = bracket.entry.price - cursor_price;
+                        let offset = bracket.entry.line.price - cursor_price;
                         best = Some((ann.id, HitZoneKind::BracketEntry, dist, offset, clamp_ctx));
                     }
                 }
@@ -1090,12 +1117,13 @@ fn handle_mouse_released(
     match prev_mode {
         InteractionMode::PendingDrag { start_x, start_y } => {
             // Released without exceeding drag threshold -- this is a click.
-            // Check bracket button hit zones first (higher priority).
-            let vp_w = state.camera.viewport_width as f32;
-            if let Some(btn_action) =
-                hit_test_bracket_buttons(annotations, start_x, start_y, &state.camera, vp_w)
+            // Decorator hit zones own every bracket/level interaction
+            // button; fall through to line-level hit-testing only when no
+            // decorator item was hit.
+            if let Some(dec_action) =
+                hit_test_decorators(annotations, start_x, start_y, &state.camera)
             {
-                actions.push(btn_action);
+                actions.push(dec_action);
             } else if let Some((ann_id, kind, _, _)) =
                 hit_test_annotation(annotations, start_y, &state.camera)
             {
@@ -1406,146 +1434,172 @@ fn clamp_bracket_leg_price(
     }
 }
 
-/// Button half-height for hit zone rectangles (pixels above/below label y).
-const BUTTON_HIT_HALF_H: f32 = 8.0;
-/// Right-edge padding for the first button (pixels from viewport right edge).
-const BUTTON_RIGHT_PAD: f32 = 8.0;
-/// Horizontal gap between adjacent buttons.
-const BUTTON_GAP: f32 = 4.0;
+/// Zero-candle `CandleData` stub for layout-only decorator hit-testing.
+///
+/// The decorator compute path only reads `camera`, `viewport` and hover
+/// state from the `ComputeContext`; the `data` field is still a required
+/// trait object, so we hand it this fixed-nothing implementation when
+/// testing clicks on bracket/level decorator groups.
+struct EmptyCandleData;
 
-/// Estimate pixel width of a button label: char_count * 7.0 + 12.0 padding.
-fn button_width(text: &str) -> f32 {
-    text.len() as f32 * 7.0 + 12.0
+impl CandleData for EmptyCandleData {
+    fn len(&self) -> usize {
+        0
+    }
+    fn timestamp(&self, _idx: usize) -> i64 {
+        0
+    }
+    fn open(&self, _idx: usize) -> f32 {
+        0.0
+    }
+    fn high(&self, _idx: usize) -> f32 {
+        0.0
+    }
+    fn low(&self, _idx: usize) -> f32 {
+        0.0
+    }
+    fn close(&self, _idx: usize) -> f32 {
+        0.0
+    }
+    fn volume(&self, _idx: usize) -> u32 {
+        0
+    }
+    fn price_range(&self, _range: std::ops::Range<usize>) -> (f32, f32) {
+        (0.0, 0.0)
+    }
+    fn find_index_by_time(&self, _ts: i64) -> usize {
+        0
+    }
 }
 
-/// Hit-test bracket action buttons for a click at `(cx, cy)`.
+/// Hit-test decorator-emitted buttons and badges at a click coordinate.
 ///
-/// For every Draft `OrderBracket` annotation, computes button positions
-/// using the same right-to-left layout as `compute_bracket()` and checks
-/// whether the click falls inside a button rect. Returns the first
-/// matching `ChartAction`, or `None`.
-fn hit_test_bracket_buttons(
+/// Walks every interactive annotation in `annotations`, rebuilds its
+/// decorator groups (draft brackets get entry/TP/SL groups; levels get
+/// their standard group), runs `compute_decorator_group()` against the
+/// current camera, and returns the first `HitZoneKind::Decorator` that
+/// contains `(cx, cy)` as a `ChartAction::DecoratorClick`.
+///
+/// First-hit-only to avoid ambiguous click routing when adjacent legs
+/// overlap at extreme zoom. Annotations are iterated in reverse render
+/// order so the most recently added wins.
+///
+/// Non-draft brackets are still considered because TP/SL/entry editor
+/// actions (`EditPrice`, `CycleEntryType`, etc.) should remain
+/// clickable after submission. For now no non-draft bracket decorator
+/// emits a clickable button, so this is a pure scope-widening: the
+/// function is safe to call against any bracket state.
+fn hit_test_decorators(
     annotations: &[crate::widget::Annotation],
     cx: f32,
     cy: f32,
     camera: &crate::camera::Camera2D,
-    vp_width: f32,
 ) -> Option<ChartAction> {
-    use crate::widget::order_bracket::BracketStatus;
+    use crate::widget::compute::{ComputeContext, Viewport};
+    use crate::widget::decorator::compute_decorator_group;
+    use crate::widget::hit_test::HitZoneKind;
+    use crate::widget::order_bracket::decorators::{
+        entry_decorator_group, sl_decorator_group, tp_decorator_group,
+    };
+    use crate::widget::theme::Theme;
 
-    for ann in annotations {
-        if !ann.presence.is_interactive() {
+    let theme = Theme::default();
+    let data = EmptyCandleData;
+    let snap_fn: &dyn Fn(f32) -> Option<(f32, usize)> = &|_| None;
+
+    // Iterate in reverse render order so the latest-added annotation wins
+    // when two decorator groups overlap.
+    for ann in annotations.iter().rev() {
+        if !ann.presence.is_interactive() || ann.locked {
             continue;
         }
-        let bracket = match &ann.kind {
-            crate::widget::AnnotationKind::OrderBracket(b) => b,
-            _ => continue,
+
+        // Pre-seed hover/expanded state for this annotation so
+        // `OnGroupHover` items (Submit / Save / Close / RemoveSL) are
+        // emitted by the compute pass at click time.
+        let mut hovered_groups: smallvec::SmallVec<[(crate::widget::AnnotationId, u16); 4]> =
+            smallvec::SmallVec::new();
+        hovered_groups.push((ann.id, 0));
+        hovered_groups.push((ann.id, 1));
+        hovered_groups.push((ann.id, 2));
+
+        let ctx = ComputeContext {
+            camera,
+            data: &data,
+            viewport: Viewport {
+                width: camera.viewport_width,
+                height: camera.viewport_height,
+            },
+            theme: &theme,
+            snap_fn,
+            candle_duration_ms: 0.0,
+            collapse_gaps: false,
+            separator_y: camera.viewport_height as f32,
+            dpi_scale: 1.0,
+            hovered_annotation: Some((ann.id, HitZoneKind::LevelLine)),
+            hovered_decorator_groups: &hovered_groups,
+            selected_annotation: None,
+            drag_ghost: None,
         };
-        if bracket.status != BracketStatus::Draft {
-            continue;
-        }
 
-        let ann_id = ann.id;
-
-        // ── Entry line buttons ────────────────────────────────
-        let entry_y = camera.price_to_y(bracket.entry.price);
-        let mut cursor = vp_width - BUTTON_RIGHT_PAD;
-
-        // Button order (right to left): [X], [Submit], [Save], [SL]
-        // Priority for narrow viewports: drop [SL] first, then
-        // [Save], then [X]. [Submit] always emits if it fits.
-
-        // [X] cancel
-        // NOTE: overflow logic must mirror emit_entry_buttons() in
-        // order_bracket/mod.rs — if a button doesn't fit, ALL further
-        // buttons to the left are skipped (early return).
-        let x_text = "X";
-        let x_w = button_width(x_text);
-        let x_right = cursor;
-        let x_left = x_right - x_w;
-        if x_left < 0.0 {
-            // Button doesn't fit — skip all remaining entry buttons.
-            // Fall through to SL line button check below.
-        } else {
-            if hit_rect(cx, cy, x_left, entry_y, x_right) {
-                return Some(ChartAction::CancelBracket {
-                    annotation_id: ann_id,
-                });
-            }
-            cursor = x_left - BUTTON_GAP;
-
-            // [Submit] — only if entry price != 0.0
-            if bracket.entry.price != 0.0 {
-                let submit_text = "Submit";
-                let submit_w = button_width(submit_text);
-                let submit_right = cursor;
-                let submit_left = submit_right - submit_w;
-                if submit_left < 0.0 {
-                    // Stop — no more entry buttons fit.
-                } else {
-                    if hit_rect(cx, cy, submit_left, entry_y, submit_right) {
-                        return Some(ChartAction::SubmitBracket {
-                            annotation_id: ann_id,
+        let check_zone = |zones: Vec<crate::widget::hit_test::HitZone>| -> Option<ChartAction> {
+            for z in zones {
+                if cx >= z.rect[0] && cx <= z.rect[2] && cy >= z.rect[1] && cy <= z.rect[3] {
+                    if let HitZoneKind::Decorator {
+                        group_id,
+                        item_path,
+                        action,
+                    } = z.kind
+                    {
+                        return Some(ChartAction::DecoratorClick {
+                            annotation_id: ann.id,
+                            group_id,
+                            item_path,
+                            action,
                         });
                     }
-                    cursor = submit_left - BUTTON_GAP;
                 }
             }
+            None
+        };
 
-            // [Save] — only if [Submit] (or all prior) fit
-            if cursor > 0.0 {
-                let save_text = "Save";
-                let save_w = button_width(save_text);
-                let save_right = cursor;
-                let save_left = save_right - save_w;
-                if save_left >= 0.0 {
-                    if hit_rect(cx, cy, save_left, entry_y, save_right) {
-                        return Some(ChartAction::SaveBracket {
-                            annotation_id: ann_id,
-                        });
+        match &ann.kind {
+            crate::widget::AnnotationKind::OrderBracket(bracket) => {
+                let group = entry_decorator_group(bracket);
+                let out = compute_decorator_group(&group, &bracket.entry.line, ann.id, &ctx, 1.0);
+                if let Some(action) = check_zone(out.hit_zones) {
+                    return Some(action);
+                }
+                if let Some(tp) = bracket.take_profit.as_ref() {
+                    if let Some(group) = tp_decorator_group(bracket) {
+                        let out = compute_decorator_group(&group, &tp.line, ann.id, &ctx, 1.0);
+                        if let Some(action) = check_zone(out.hit_zones) {
+                            return Some(action);
+                        }
                     }
-                    cursor = save_left - BUTTON_GAP;
-
-                    // [SL] — only when SL is not set
-                    if bracket.stop_loss.is_none() {
-                        let sl_text = "SL";
-                        let sl_w = button_width(sl_text);
-                        let sl_right = cursor;
-                        let sl_left = sl_right - sl_w;
-                        if sl_left >= 0.0 && hit_rect(cx, cy, sl_left, entry_y, sl_right) {
-                            return Some(ChartAction::ToggleBracketSL {
-                                annotation_id: ann_id,
-                            });
+                }
+                if let Some(sl) = bracket.stop_loss.as_ref() {
+                    if let Some(group) = sl_decorator_group(bracket) {
+                        let out = compute_decorator_group(&group, &sl.line, ann.id, &ctx, 1.0);
+                        if let Some(action) = check_zone(out.hit_zones) {
+                            return Some(action);
                         }
                     }
                 }
             }
-        }
-
-        // ── SL line [X] button ────────────────────────────────
-        if let Some(ref sl) = bracket.stop_loss {
-            let sl_y = camera.price_to_y(sl.price);
-            let sl_x_text = "X";
-            let sl_x_w = button_width(sl_x_text);
-            let sl_x_right = vp_width - BUTTON_RIGHT_PAD;
-            let sl_x_left = sl_x_right - sl_x_w;
-            if sl_x_left >= 0.0 && hit_rect(cx, cy, sl_x_left, sl_y, sl_x_right) {
-                return Some(ChartAction::CancelBracketSL {
-                    annotation_id: ann_id,
-                });
+            crate::widget::AnnotationKind::Level(level) => {
+                for group in level.to_decorators(ann.locked) {
+                    let out = compute_decorator_group(&group, &level.line, ann.id, &ctx, 1.0);
+                    if let Some(action) = check_zone(out.hit_zones) {
+                        return Some(action);
+                    }
+                }
             }
+            _ => {}
         }
     }
 
     None
-}
-
-/// Check if `(cx, cy)` falls within a button rectangle.
-fn hit_rect(cx: f32, cy: f32, left: f32, center_y: f32, right: f32) -> bool {
-    cx >= left
-        && cx <= right
-        && cy >= center_y - BUTTON_HIT_HALF_H
-        && cy <= center_y + BUTTON_HIT_HALF_H
 }
 
 #[cfg(test)]

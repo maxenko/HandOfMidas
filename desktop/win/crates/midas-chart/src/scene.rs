@@ -9,7 +9,7 @@
 //! and consumed by `midas-render`.
 
 use crate::instances::{
-    AxisLabel, CandleInstance, CrosshairRender, GridLineInstance, VolumeInstance,
+    AxisLabel, BadgeInstance, CandleInstance, CrosshairRender, GridLineInstance, VolumeInstance,
 };
 use crate::timeline::TimelineLabel;
 use crate::widget::WidgetOutput;
@@ -67,6 +67,14 @@ pub struct ChartScene {
     /// labels for annotations computed through the widget pipeline
     /// (levels, brackets, etc.).
     pub widget_output: WidgetOutput,
+
+    /// Flattened SDF decorator badge instances for this frame.
+    ///
+    /// Populated by [`compute_chart_scene()`](crate::compute::compute_chart_scene)
+    /// from [`WidgetOutput::badges`]. The `midas-render` `BadgePipeline`
+    /// uploads this vec once per frame and draws it between candle
+    /// bodies and the crosshair overlay.
+    pub badges: Vec<BadgeInstance>,
 
     /// Dirty generation counters -- renderer compares to decide what to upload.
     pub generations: SceneGenerations,

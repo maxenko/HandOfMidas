@@ -124,8 +124,15 @@ fn build_grid_instances(
 
     // 2. Separator line (timeline border between price and volume areas).
     out.push(GridLineInstance {
-        rect: [0.0, separator_y, viewport_width, separator_y + 1.0],
-        color: [0.45, 0.45, 0.50, 0.35],
+        rect: [0.0, separator_y, viewport_width, separator_y + 2.0],
+        color: [0.50, 0.50, 0.55, 0.60],
+    });
+
+    // 2b. Priceline border (vertical, left of price axis labels).
+    let priceline_x = viewport_width - 60.0;
+    out.push(GridLineInstance {
+        rect: [priceline_x, 0.0, priceline_x + 2.0, separator_y],
+        color: [0.50, 0.50, 0.55, 0.60],
     });
 
     // 3. Vertical time lines at every date label position.
@@ -256,6 +263,7 @@ fn compute_normal_scene(
     );
     let volume_profile_instances = build_volume_profile(input, data, camera, vis_start, vis_end);
 
+    let badges = widget_output.badges.clone();
     ChartScene {
         projection,
         viewport_width: input.viewport_width,
@@ -274,6 +282,7 @@ fn compute_normal_scene(
         timeline_labels,
         volume_profile_instances,
         widget_output,
+        badges,
         generations: SceneGenerations {
             candles: input.dirty.candles,
             camera: input.dirty.camera,
@@ -418,6 +427,7 @@ fn compute_collapsed_scene(
     );
     let volume_profile_instances = build_volume_profile(input, data, camera, vis_start, vis_end);
 
+    let badges = widget_output.badges.clone();
     ChartScene {
         projection,
         viewport_width: input.viewport_width,
@@ -436,6 +446,7 @@ fn compute_collapsed_scene(
         timeline_labels,
         volume_profile_instances,
         widget_output,
+        badges,
         generations: SceneGenerations {
             candles: input.dirty.candles,
             camera: input.dirty.camera,
@@ -1092,6 +1103,7 @@ fn compute_widget_annotations(
         separator_y: input.viewport_height as f32 * (1.0 - input.timeline_border_ratio),
         dpi_scale: input.dpi_scale,
         hovered_annotation: input.hovered_annotation,
+        hovered_decorator_groups: input.hovered_decorator_groups,
         selected_annotation: input.selected_annotation,
         drag_ghost: input.drag_ghost,
     };
