@@ -199,6 +199,22 @@ const BRACKET_TP_ZONE: [f32; 4] = [0.20, 0.78, 0.35, 0.06];
 /// Orange zone fill at 6% alpha (between entry and SL).
 const BRACKET_SL_ZONE: [f32; 4] = [1.0, 0.60, 0.0, 0.06];
 
+/// Minimum vertical gap (logical px) between the TP and SL decorator
+/// badges before they are considered visually overlapping.
+///
+/// The badges are 20 logical px tall (see `Badge { height: 20.0 }` in
+/// `decorators.rs`); 22 px leaves a one-pixel clearance on either side
+/// of the midpoint when the stacking branch kicks in. Chosen to match
+/// the screen-space heuristic described in Slice 0 of the
+/// ticker-order-state plan — when the TP and SL price lines land within
+/// this many screen pixels of each other, `compute_bracket()` shifts
+/// each decorator group's anchor by half of this gap so the badges
+/// stack vertically instead of overlapping horizontally.
+const BRACKET_BADGE_HEIGHT_PX: f32 = 20.0;
+/// Screen-space threshold for the TP/SL overlap stacking heuristic.
+/// Pads the badge height by 2 px so stacked badges never touch.
+const BADGE_STACK_GAP_PX: f32 = BRACKET_BADGE_HEIGHT_PX + 2.0;
+
 // ── Phase 3: chart rendering helpers ─────────────────────────────────
 
 impl OrderBracket {
@@ -590,7 +606,29 @@ pub fn compute_bracket(
         }
     }
 
-    // ── Take-profit line ────────────────────────────────────────────
+    // ── Take-profit & stop-loss lines ───────────────────────────────
+    //
+    // Slice 0 overlap stacking: when TP and SL price lines land so
+    // close together in screen-space that their decorator badges would
+    // overlap horizontally, we anchor each badge to a synthetic
+    // `PriceLine` whose price is offset by half of `BADGE_STACK_GAP`
+    // pixels (converted back to price via `camera.y_to_price()`). The
+    // underlying leg lines and hit zones still emit at the real prices
+    // — only the decorator anchor shifts so the badges stack cleanly
+    // above and below the midpoint.
+    //
+    // Detection runs in screen space so it naturally handles any
+    // combination of price scale and viewport height without having to
+    // plumb `gatr_abs` through the compute pipeline.
+    let tp_sl_badges_overlap = match (bracket.take_profit.as_ref(), bracket.stop_loss.as_ref()) {
+        (Some(tp), Some(sl)) => {
+            let tp_y = ctx.camera.price_to_y(tp.line.price);
+            let sl_y = ctx.camera.price_to_y(sl.line.price);
+            (tp_y - sl_y).abs() < BADGE_STACK_GAP_PX
+        }
+        _ => false,
+    };
+
     if let Some(ref tp) = bracket.take_profit {
         let tp_stroke = bracket.leg_style(LegRole::TakeProfit);
         let tp_line = PriceLine {
@@ -608,9 +646,23 @@ pub fn compute_bracket(
             /* draw_hit_zone */ true,
         );
         if let Some(group) = tp_decorator_group(bracket) {
+            // When TP/SL badges would overlap, shift the TP badge anchor
+            // upward by half a badge gap (i.e. toward higher prices on
+            // an inverted-Y chart — screen-Y decreases as price rises).
+            let decorator_line = if tp_sl_badges_overlap {
+                let base_y = ctx.camera.price_to_y(tp.line.price);
+                let target_y = base_y - BADGE_STACK_GAP_PX * 0.5;
+                PriceLine {
+                    price: ctx.camera.y_to_price(target_y),
+                    extent: tp_line.extent,
+                    stroke: tp_line.stroke.clone(),
+                }
+            } else {
+                tp_line.clone()
+            };
             output.merge(compute_decorator_group(
                 &group,
-                &tp_line,
+                &decorator_line,
                 annotation_id,
                 ctx,
                 alpha,
@@ -618,7 +670,6 @@ pub fn compute_bracket(
         }
     }
 
-    // ── Stop-loss line ──────────────────────────────────────────────
     if let Some(ref sl) = bracket.stop_loss {
         let sl_stroke = bracket.leg_style(LegRole::StopLoss);
         let sl_line = PriceLine {
@@ -636,9 +687,22 @@ pub fn compute_bracket(
             /* draw_hit_zone */ true,
         );
         if let Some(group) = sl_decorator_group(bracket) {
+            // Symmetric shift: SL badge moves downward in screen space
+            // (toward lower prices) to clear the TP badge.
+            let decorator_line = if tp_sl_badges_overlap {
+                let base_y = ctx.camera.price_to_y(sl.line.price);
+                let target_y = base_y + BADGE_STACK_GAP_PX * 0.5;
+                PriceLine {
+                    price: ctx.camera.y_to_price(target_y),
+                    extent: sl_line.extent,
+                    stroke: sl_line.stroke.clone(),
+                }
+            } else {
+                sl_line.clone()
+            };
             output.merge(compute_decorator_group(
                 &group,
-                &sl_line,
+                &decorator_line,
                 annotation_id,
                 ctx,
                 alpha,

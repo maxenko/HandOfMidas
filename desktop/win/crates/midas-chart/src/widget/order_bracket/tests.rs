@@ -1416,3 +1416,196 @@ fn bracket_status_draft_resolves_to_pattern_stroke_on_price_line() {
     let stroke = b.leg_style(LegRole::TakeProfit);
     assert_eq!(stroke.style, LineStyle::Pattern(smallvec![6.0, 4.0]));
 }
+
+// -----------------------------------------------------------------------
+// Slice 0: SL stroke is dotted across every BracketStatus variant.
+// -----------------------------------------------------------------------
+
+/// The Slice 0 contract from the ticker-order-state plan: the SL leg
+/// must render dotted no matter what status the bracket is in. The
+/// match in `leg_style()` is exhaustive on `BracketStatus`, so this
+/// test iterates every variant and asserts the dotted invariant. If a
+/// new `BracketStatus` variant is ever added, the `match` below must
+/// grow a new arm — at which point this test forces a decision about
+/// the SL stroke for that variant.
+#[test]
+fn leg_style_sl_dotted_across_all_statuses() {
+    let statuses = [
+        BracketStatus::Draft,
+        BracketStatus::Pending,
+        BracketStatus::PartialFill,
+        BracketStatus::Active,
+        BracketStatus::Closed,
+        BracketStatus::Cancelled,
+    ];
+    for status in statuses {
+        // Compile-time exhaustiveness guard: if a new BracketStatus
+        // variant lands, this match needs updating and the compiler
+        // will catch the omission here.
+        match status {
+            BracketStatus::Draft
+            | BracketStatus::Pending
+            | BracketStatus::PartialFill
+            | BracketStatus::Active
+            | BracketStatus::Closed
+            | BracketStatus::Cancelled => {}
+        }
+        let mut b = make_bracket(185.0, 192.0, 182.0);
+        b.status = status;
+        let stroke = b.leg_style(LegRole::StopLoss);
+        assert_eq!(
+            stroke.style,
+            LineStyle::dotted(),
+            "SL stroke must be dotted for status {:?}, got {:?}",
+            status,
+            stroke.style
+        );
+    }
+}
+
+// -----------------------------------------------------------------------
+// Slice 0: tight TP/SL overlap stacking test.
+// -----------------------------------------------------------------------
+
+/// When TP and SL prices land close enough that the decorator badges
+/// would overlap horizontally, `compute_bracket` must offset each
+/// badge vertically in screen space so they clear each other.
+///
+/// We build a Draft bracket with entry=100.00, tp=100.10, sl=99.90 on
+/// a camera where one price unit maps to roughly 10.8 px, so the raw
+/// gap between TP and SL lines is ~2.2 px — well below the 22 px
+/// badge-height threshold the compute pass uses. The test asserts
+/// that the resulting BadgeInstance rects for the TP and SL leg
+/// decorators do not overlap on the Y axis.
+#[test]
+fn compute_bracket_tight_prices_stack_badges_vertically() {
+    let b = make_bracket(100.00, 100.10, 99.90);
+    let camera = Camera2D {
+        viewport_width: 1920,
+        viewport_height: 1080,
+        time_start: 0.0,
+        time_end: 100_000.0,
+        price_low: 50.0,
+        price_high: 150.0,
+        dpi_scale: 1.0,
+    };
+    let data = CandleBuffer::new();
+    let theme = Theme::default();
+    let aid = AnnotationId(11);
+    let ctx = make_compute_ctx(&camera, &data, &theme, None);
+
+    // Raw Y gap between the TP and SL price lines on this camera.
+    let tp_y_raw = camera.price_to_y(100.10);
+    let sl_y_raw = camera.price_to_y(99.90);
+    assert!(
+        (tp_y_raw - sl_y_raw).abs() < 22.0,
+        "fixture must place TP/SL inside the overlap threshold, got gap {}",
+        (tp_y_raw - sl_y_raw).abs()
+    );
+
+    let out = compute_bracket(&b, aid, &ctx, 1.0);
+
+    // TP and SL decorator badges are uniquely identifiable via their
+    // price-segment labels ("100.10" and "99.90"). These labels are
+    // centered on the decorator badge's Y, so the label screen_y is
+    // the same as the badge center-Y.
+    let tp_label = out
+        .labels
+        .iter()
+        .find(|l| l.text == "100.10")
+        .expect("TP price segment must render as 100.10");
+    let sl_label = out
+        .labels
+        .iter()
+        .find(|l| l.text == "99.90")
+        .expect("SL price segment must render as 99.90");
+
+    // TP must sit visually above SL (y decreases with rising price
+    // and the stacking shim moves TP up / SL down).
+    assert!(
+        tp_label.screen_y < sl_label.screen_y,
+        "TP badge (y={}) must sit above SL badge (y={}) after stacking",
+        tp_label.screen_y,
+        sl_label.screen_y,
+    );
+
+    // The gap between the two badges must be at least `badge_height`
+    // so the 20-px-tall bodies clear each other vertically.
+    let gap = sl_label.screen_y - tp_label.screen_y;
+    assert!(
+        gap >= 20.0,
+        "TP/SL badge gap must be >= badge height (20px) after stacking, got {}",
+        gap
+    );
+
+    // Underlying leg lines still emit at the true prices: segmented
+    // line rects centered on `price_to_y(100.10)` and `price_to_y(99.90)`.
+    let tp_line_present = out
+        .lines
+        .iter()
+        .any(|l| ((l.rect[1] + l.rect[3]) * 0.5 - tp_y_raw).abs() < 2.0);
+    let sl_line_present = out
+        .lines
+        .iter()
+        .any(|l| ((l.rect[1] + l.rect[3]) * 0.5 - sl_y_raw).abs() < 2.0);
+    assert!(
+        tp_line_present,
+        "TP leg line must still render at the true TP price"
+    );
+    assert!(
+        sl_line_present,
+        "SL leg line must still render at the true SL price"
+    );
+}
+
+/// Regression guard: when TP and SL are far apart the stacking branch
+/// must *not* fire — badges keep their natural anchor on each price
+/// line. This prevents the overlap shim from accidentally displacing
+/// decorator groups in the common case.
+#[test]
+fn compute_bracket_wide_prices_do_not_shift_badges() {
+    let b = make_bracket(185.0, 192.0, 178.0);
+    let camera = Camera2D {
+        viewport_width: 1920,
+        viewport_height: 1080,
+        time_start: 0.0,
+        time_end: 100_000.0,
+        price_low: 170.0,
+        price_high: 200.0,
+        dpi_scale: 1.0,
+    };
+    let data = CandleBuffer::new();
+    let theme = Theme::default();
+    let aid = AnnotationId(13);
+    let ctx = make_compute_ctx(&camera, &data, &theme, None);
+
+    let out = compute_bracket(&b, aid, &ctx, 1.0);
+
+    // With this camera the TP and SL lines are ~500 px apart — the
+    // stacking shim must leave their decorator anchors on the real
+    // price lines.
+    let tp_label = out
+        .labels
+        .iter()
+        .find(|l| l.text == "192.00")
+        .expect("TP price label present");
+    let sl_label = out
+        .labels
+        .iter()
+        .find(|l| l.text == "178.00")
+        .expect("SL price label present");
+    let expected_tp_y = camera.price_to_y(192.0);
+    let expected_sl_y = camera.price_to_y(178.0);
+    assert!(
+        (tp_label.screen_y - expected_tp_y).abs() < 1.0,
+        "TP badge should sit on the TP price line ({}), got {}",
+        expected_tp_y,
+        tp_label.screen_y
+    );
+    assert!(
+        (sl_label.screen_y - expected_sl_y).abs() < 1.0,
+        "SL badge should sit on the SL price line ({}), got {}",
+        expected_sl_y,
+        sl_label.screen_y
+    );
+}
