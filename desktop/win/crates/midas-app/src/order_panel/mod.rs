@@ -336,17 +336,17 @@ pub fn validate_bracket(
 
     // Entry type-specific validation.
     match bracket.entry_type {
-        EntryType::Market if bracket.entry.price <= 0.0 => {
+        EntryType::Market if bracket.entry.line.price <= 0.0 => {
             errors.push(("entry".into(), "No market price available".into()));
         }
-        EntryType::Limit if bracket.entry.price <= 0.0 => {
+        EntryType::Limit if bracket.entry.line.price <= 0.0 => {
             errors.push(("entry".into(), "Limit price must be positive".into()));
         }
-        EntryType::Stop if bracket.entry.price <= 0.0 => {
+        EntryType::Stop if bracket.entry.line.price <= 0.0 => {
             errors.push(("entry".into(), "Stop price must be positive".into()));
         }
         EntryType::StopLimit => {
-            if bracket.entry.price <= 0.0 {
+            if bracket.entry.line.price <= 0.0 {
                 errors.push(("entry".into(), "Limit price must be positive".into()));
             }
             match bracket.entry_stop_price {
@@ -362,13 +362,13 @@ pub fn validate_bracket(
                 Some(sp) => {
                     // BUY: limit must be ≤ stop; SELL: limit must be ≥ stop.
                     match bracket.side {
-                        BracketSide::Long if bracket.entry.price > sp => {
+                        BracketSide::Long if bracket.entry.line.price > sp => {
                             errors.push((
                                 "entry".into(),
                                 "Limit price must be at or below stop for BUY".into(),
                             ));
                         }
-                        BracketSide::Short if bracket.entry.price < sp => {
+                        BracketSide::Short if bracket.entry.line.price < sp => {
                             errors.push((
                                 "entry".into(),
                                 "Limit price must be at or above stop for SELL".into(),
@@ -384,10 +384,10 @@ pub fn validate_bracket(
 
     if let Some(ref sl) = bracket.stop_loss {
         match bracket.side {
-            BracketSide::Long if sl.price >= bracket.entry.price => {
+            BracketSide::Long if sl.line.price >= bracket.entry.line.price => {
                 errors.push(("sl".into(), "Stop loss must be below entry for BUY".into()));
             }
-            BracketSide::Short if sl.price <= bracket.entry.price => {
+            BracketSide::Short if sl.line.price <= bracket.entry.line.price => {
                 errors.push(("sl".into(), "Stop loss must be above entry for SELL".into()));
             }
             _ => {}
@@ -475,7 +475,7 @@ pub fn sync_panel_from_bracket(
     }
 
     // Entry price → limit_price / stop_price depending on entry_type.
-    let entry_str = format!("{:.2}", bracket.entry.price);
+    let entry_str = format!("{:.2}", bracket.entry.line.price);
     match bracket.entry_type {
         midas_chart::widget::order_bracket::EntryType::Market => {
             // Market entry tracks last_price; no panel input to sync.
@@ -497,7 +497,7 @@ pub fn sync_panel_from_bracket(
     // TP: sync enabled flag and price value.
     state.tp_enabled = bracket.take_profit.is_some();
     if let Some(ref tp) = bracket.take_profit {
-        state.tp_value = format!("{:.2}", tp.price);
+        state.tp_value = format!("{:.2}", tp.line.price);
     } else {
         state.tp_value.clear();
     }
@@ -505,7 +505,7 @@ pub fn sync_panel_from_bracket(
     // SL: sync enabled flag and price value.
     state.sl_enabled = bracket.stop_loss.is_some();
     if let Some(ref sl) = bracket.stop_loss {
-        state.sl_value = format!("{:.2}", sl.price);
+        state.sl_value = format!("{:.2}", sl.line.price);
     } else {
         state.sl_value.clear();
     }
@@ -543,7 +543,7 @@ pub fn normalize_bracket(bracket: &mut midas_chart::widget::order_bracket::Order
         }
         EntryType::StopLimit => {
             if bracket.entry_stop_price.is_none() {
-                bracket.entry_stop_price = Some(bracket.entry.price);
+                bracket.entry_stop_price = Some(bracket.entry.line.price);
             }
         }
     }
@@ -552,13 +552,13 @@ pub fn normalize_bracket(bracket: &mut midas_chart::widget::order_bracket::Order
     // Long TP must be above entry; Short TP must be below entry.
     // If on wrong side (e.g., after a side flip), mirror it.
     if let Some(ref mut tp) = bracket.take_profit {
-        if tp.price <= 0.0 {
+        if tp.line.price <= 0.0 {
             bracket.take_profit = None;
         } else {
-            let offset = (tp.price - bracket.entry.price).abs();
-            tp.price = match bracket.side {
-                BracketSide::Long => bracket.entry.price + offset,
-                BracketSide::Short => bracket.entry.price - offset,
+            let offset = (tp.line.price - bracket.entry.line.price).abs();
+            tp.line.price = match bracket.side {
+                BracketSide::Long => bracket.entry.line.price + offset,
+                BracketSide::Short => bracket.entry.line.price - offset,
             };
         }
     }
@@ -567,19 +567,19 @@ pub fn normalize_bracket(bracket: &mut midas_chart::widget::order_bracket::Order
     // Long SL must be below entry; Short SL must be above entry.
     // If on wrong side (e.g., after a side flip), mirror it.
     if let Some(ref mut sl) = bracket.stop_loss {
-        if sl.price <= 0.0 {
+        if sl.line.price <= 0.0 {
             bracket.stop_loss = None;
         } else {
-            let offset = (sl.price - bracket.entry.price).abs();
-            sl.price = match bracket.side {
-                BracketSide::Long => bracket.entry.price - offset,
-                BracketSide::Short => bracket.entry.price + offset,
+            let offset = (sl.line.price - bracket.entry.line.price).abs();
+            sl.line.price = match bracket.side {
+                BracketSide::Long => bracket.entry.line.price - offset,
+                BracketSide::Short => bracket.entry.line.price + offset,
             };
         }
     }
 
     // ── Validate entry price ───────────────────────────────────────
-    if bracket.entry.price <= 0.0 {
+    if bracket.entry.line.price <= 0.0 {
         // Degenerate bracket — mark as cancelled so it doesn't render
         // interactively but is still visible as a dim line.
         bracket.status = midas_chart::widget::order_bracket::BracketStatus::Cancelled;
@@ -606,16 +606,16 @@ pub fn reposition_bracket(
     bracket: &mut midas_chart::widget::order_bracket::OrderBracket,
     current_price: f64,
 ) {
-    let delta = current_price - bracket.entry.price;
-    bracket.entry.price += delta;
+    let delta = current_price - bracket.entry.line.price;
+    bracket.entry.line.price += delta;
     if let Some(ref mut sp) = bracket.entry_stop_price {
         *sp += delta;
     }
     if let Some(ref mut tp) = bracket.take_profit {
-        tp.price += delta;
+        tp.line.price += delta;
     }
     if let Some(ref mut sl) = bracket.stop_loss {
-        sl.price += delta;
+        sl.line.price += delta;
     }
 }
 
@@ -665,12 +665,16 @@ pub fn create_bracket_annotation(
     use midas_chart::widget::order_bracket::*;
 
     let make_leg = |price: f64| BracketLeg {
-        price,
-        timestamp: None,
-        color: None,
-        style: LineStyle::Solid,
-        line_width: 1.5,
-        label: None,
+        line: midas_chart::widget::PriceLine {
+            price,
+            extent: midas_chart::widget::LineExtent::FullWidth,
+            stroke: midas_chart::widget::LineStroke {
+                color: [0.0, 0.0, 0.0, 1.0],
+                width: 1.5,
+                style: LineStyle::Solid,
+            },
+        },
+        role: LegRole::Entry,
         projected_pnl: None,
         projected_pnl_pct: None,
     };

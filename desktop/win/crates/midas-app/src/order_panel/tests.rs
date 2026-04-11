@@ -109,11 +109,11 @@ fn create_bracket_long_with_tp_sl() {
         create_bracket_annotation(BracketSide::Long, 185.0, Some(192.0), Some(182.0), 100.0);
     assert_eq!(bracket.side, BracketSide::Long);
     assert_eq!(bracket.status, BracketStatus::Pending);
-    assert!((bracket.entry.price - 185.0).abs() < f64::EPSILON);
+    assert!((bracket.entry.line.price - 185.0).abs() < f64::EPSILON);
     assert!(bracket.take_profit.is_some());
-    assert!((bracket.take_profit.unwrap().price - 192.0).abs() < f64::EPSILON);
+    assert!((bracket.take_profit.unwrap().line.price - 192.0).abs() < f64::EPSILON);
     assert!(bracket.stop_loss.is_some());
-    assert!((bracket.stop_loss.unwrap().price - 182.0).abs() < f64::EPSILON);
+    assert!((bracket.stop_loss.unwrap().line.price - 182.0).abs() < f64::EPSILON);
     assert_eq!(bracket.quantity, Some(100.0));
 }
 
@@ -136,7 +136,7 @@ fn create_bracket_no_legs() {
     let bracket = create_bracket_annotation(BracketSide::Long, 185.0, None, None, 200.0);
     assert!(bracket.take_profit.is_none());
     assert!(bracket.stop_loss.is_none());
-    assert!((bracket.entry.price - 185.0).abs() < f64::EPSILON);
+    assert!((bracket.entry.line.price - 185.0).abs() < f64::EPSILON);
 }
 
 // -- map_lifecycle_to_chart_status tests --
@@ -283,23 +283,31 @@ fn validate_bracket_valid_long_with_sl() {
 
     let bracket = OrderBracket {
         entry: BracketLeg {
-            price: 185.0,
-            timestamp: None,
-            color: None,
-            style: LineStyle::Solid,
-            line_width: 1.5,
-            label: None,
+            line: midas_chart::widget::PriceLine {
+                price: 185.0,
+                extent: midas_chart::widget::LineExtent::FullWidth,
+                stroke: midas_chart::widget::LineStroke {
+                    color: [0.0, 0.0, 0.0, 1.0],
+                    width: 1.5,
+                    style: LineStyle::Solid,
+                },
+            },
+            role: LegRole::Entry,
             projected_pnl: None,
             projected_pnl_pct: None,
         },
         take_profit: None,
         stop_loss: Some(BracketLeg {
-            price: 180.0,
-            timestamp: None,
-            color: None,
-            style: LineStyle::Solid,
-            line_width: 1.5,
-            label: None,
+            line: midas_chart::widget::PriceLine {
+                price: 180.0,
+                extent: midas_chart::widget::LineExtent::FullWidth,
+                stroke: midas_chart::widget::LineStroke {
+                    color: [0.0, 0.0, 0.0, 1.0],
+                    width: 1.5,
+                    style: LineStyle::Solid,
+                },
+            },
+            role: LegRole::Entry,
             projected_pnl: None,
             projected_pnl_pct: None,
         }),
@@ -323,12 +331,16 @@ fn validate_bracket_zero_entry_price() {
 
     let bracket = OrderBracket {
         entry: BracketLeg {
-            price: 0.0,
-            timestamp: None,
-            color: None,
-            style: LineStyle::Solid,
-            line_width: 1.5,
-            label: None,
+            line: midas_chart::widget::PriceLine {
+                price: 0.0,
+                extent: midas_chart::widget::LineExtent::FullWidth,
+                stroke: midas_chart::widget::LineStroke {
+                    color: [0.0, 0.0, 0.0, 1.0],
+                    width: 1.5,
+                    style: LineStyle::Solid,
+                },
+            },
+            role: LegRole::Entry,
             projected_pnl: None,
             projected_pnl_pct: None,
         },
@@ -357,12 +369,16 @@ fn validate_bracket_zero_quantity() {
 
     let bracket = OrderBracket {
         entry: BracketLeg {
-            price: 185.0,
-            timestamp: None,
-            color: None,
-            style: LineStyle::Solid,
-            line_width: 1.5,
-            label: None,
+            line: midas_chart::widget::PriceLine {
+                price: 185.0,
+                extent: midas_chart::widget::LineExtent::FullWidth,
+                stroke: midas_chart::widget::LineStroke {
+                    color: [0.0, 0.0, 0.0, 1.0],
+                    width: 1.5,
+                    style: LineStyle::Solid,
+                },
+            },
+            role: LegRole::Entry,
             projected_pnl: None,
             projected_pnl_pct: None,
         },
@@ -391,23 +407,31 @@ fn validate_bracket_long_sl_above_entry() {
 
     let bracket = OrderBracket {
         entry: BracketLeg {
-            price: 185.0,
-            timestamp: None,
-            color: None,
-            style: LineStyle::Solid,
-            line_width: 1.5,
-            label: None,
+            line: midas_chart::widget::PriceLine {
+                price: 185.0,
+                extent: midas_chart::widget::LineExtent::FullWidth,
+                stroke: midas_chart::widget::LineStroke {
+                    color: [0.0, 0.0, 0.0, 1.0],
+                    width: 1.5,
+                    style: LineStyle::Solid,
+                },
+            },
+            role: LegRole::Entry,
             projected_pnl: None,
             projected_pnl_pct: None,
         },
         take_profit: None,
         stop_loss: Some(BracketLeg {
-            price: 190.0,
-            timestamp: None,
-            color: None,
-            style: LineStyle::Solid,
-            line_width: 1.5,
-            label: None,
+            line: midas_chart::widget::PriceLine {
+                price: 190.0,
+                extent: midas_chart::widget::LineExtent::FullWidth,
+                stroke: midas_chart::widget::LineStroke {
+                    color: [0.0, 0.0, 0.0, 1.0],
+                    width: 1.5,
+                    style: LineStyle::Solid,
+                },
+            },
+            role: LegRole::Entry,
             projected_pnl: None,
             projected_pnl_pct: None,
         }),
@@ -436,23 +460,31 @@ fn validate_bracket_short_sl_below_entry() {
 
     let bracket = OrderBracket {
         entry: BracketLeg {
-            price: 185.0,
-            timestamp: None,
-            color: None,
-            style: LineStyle::Solid,
-            line_width: 1.5,
-            label: None,
+            line: midas_chart::widget::PriceLine {
+                price: 185.0,
+                extent: midas_chart::widget::LineExtent::FullWidth,
+                stroke: midas_chart::widget::LineStroke {
+                    color: [0.0, 0.0, 0.0, 1.0],
+                    width: 1.5,
+                    style: LineStyle::Solid,
+                },
+            },
+            role: LegRole::Entry,
             projected_pnl: None,
             projected_pnl_pct: None,
         },
         take_profit: None,
         stop_loss: Some(BracketLeg {
-            price: 180.0,
-            timestamp: None,
-            color: None,
-            style: LineStyle::Solid,
-            line_width: 1.5,
-            label: None,
+            line: midas_chart::widget::PriceLine {
+                price: 180.0,
+                extent: midas_chart::widget::LineExtent::FullWidth,
+                stroke: midas_chart::widget::LineStroke {
+                    color: [0.0, 0.0, 0.0, 1.0],
+                    width: 1.5,
+                    style: LineStyle::Solid,
+                },
+            },
+            role: LegRole::Entry,
             projected_pnl: None,
             projected_pnl_pct: None,
         }),
@@ -483,12 +515,16 @@ fn validate_bracket_stop_limit_missing_stop_price() {
 
     let bracket = OrderBracket {
         entry: BracketLeg {
-            price: 184.50,
-            timestamp: None,
-            color: None,
-            style: LineStyle::Solid,
-            line_width: 1.5,
-            label: None,
+            line: midas_chart::widget::PriceLine {
+                price: 184.50,
+                extent: midas_chart::widget::LineExtent::FullWidth,
+                stroke: midas_chart::widget::LineStroke {
+                    color: [0.0, 0.0, 0.0, 1.0],
+                    width: 1.5,
+                    style: LineStyle::Solid,
+                },
+            },
+            role: LegRole::Entry,
             projected_pnl: None,
             projected_pnl_pct: None,
         },
@@ -519,12 +555,16 @@ fn validate_bracket_stop_limit_buy_limit_above_stop() {
 
     let bracket = OrderBracket {
         entry: BracketLeg {
-            price: 186.00, // limit price above stop — invalid for BUY
-            timestamp: None,
-            color: None,
-            style: LineStyle::Solid,
-            line_width: 1.5,
-            label: None,
+            line: midas_chart::widget::PriceLine {
+                price: 186.00,
+                extent: midas_chart::widget::LineExtent::FullWidth,
+                stroke: midas_chart::widget::LineStroke {
+                    color: [0.0, 0.0, 0.0, 1.0],
+                    width: 1.5,
+                    style: LineStyle::Solid,
+                },
+            },
+            role: LegRole::Entry,
             projected_pnl: None,
             projected_pnl_pct: None,
         },
@@ -555,12 +595,16 @@ fn validate_bracket_stop_limit_valid_buy() {
 
     let bracket = OrderBracket {
         entry: BracketLeg {
-            price: 184.50, // limit below stop — valid for BUY
-            timestamp: None,
-            color: None,
-            style: LineStyle::Solid,
-            line_width: 1.5,
-            label: None,
+            line: midas_chart::widget::PriceLine {
+                price: 184.50,
+                extent: midas_chart::widget::LineExtent::FullWidth,
+                stroke: midas_chart::widget::LineStroke {
+                    color: [0.0, 0.0, 0.0, 1.0],
+                    width: 1.5,
+                    style: LineStyle::Solid,
+                },
+            },
+            role: LegRole::Entry,
             projected_pnl: None,
             projected_pnl_pct: None,
         },
@@ -789,32 +833,44 @@ fn sync_panel_from_bracket_populates_tp_sl() {
 
     let bracket = OrderBracket {
         entry: BracketLeg {
-            price: 100.0,
-            timestamp: None,
-            color: None,
-            style: LineStyle::Solid,
-            line_width: 1.0,
-            label: None,
+            line: midas_chart::widget::PriceLine {
+                price: 100.0,
+                extent: midas_chart::widget::LineExtent::FullWidth,
+                stroke: midas_chart::widget::LineStroke {
+                    color: [0.0, 0.0, 0.0, 1.0],
+                    width: 1.0,
+                    style: LineStyle::Solid,
+                },
+            },
+            role: LegRole::Entry,
             projected_pnl: None,
             projected_pnl_pct: None,
         },
         take_profit: Some(BracketLeg {
-            price: 101.0,
-            timestamp: None,
-            color: None,
-            style: LineStyle::Solid,
-            line_width: 1.0,
-            label: None,
+            line: midas_chart::widget::PriceLine {
+                price: 101.0,
+                extent: midas_chart::widget::LineExtent::FullWidth,
+                stroke: midas_chart::widget::LineStroke {
+                    color: [0.0, 0.0, 0.0, 1.0],
+                    width: 1.0,
+                    style: LineStyle::Solid,
+                },
+            },
+            role: LegRole::Entry,
             projected_pnl: None,
             projected_pnl_pct: None,
         }),
         stop_loss: Some(BracketLeg {
-            price: 99.5,
-            timestamp: None,
-            color: None,
-            style: LineStyle::Solid,
-            line_width: 1.0,
-            label: None,
+            line: midas_chart::widget::PriceLine {
+                price: 99.5,
+                extent: midas_chart::widget::LineExtent::FullWidth,
+                stroke: midas_chart::widget::LineStroke {
+                    color: [0.0, 0.0, 0.0, 1.0],
+                    width: 1.0,
+                    style: LineStyle::Solid,
+                },
+            },
+            role: LegRole::Entry,
             projected_pnl: None,
             projected_pnl_pct: None,
         }),
@@ -841,12 +897,16 @@ fn sync_panel_from_bracket_clears_missing_legs() {
 
     let bracket = OrderBracket {
         entry: BracketLeg {
-            price: 100.0,
-            timestamp: None,
-            color: None,
-            style: LineStyle::Solid,
-            line_width: 1.0,
-            label: None,
+            line: midas_chart::widget::PriceLine {
+                price: 100.0,
+                extent: midas_chart::widget::LineExtent::FullWidth,
+                stroke: midas_chart::widget::LineStroke {
+                    color: [0.0, 0.0, 0.0, 1.0],
+                    width: 1.0,
+                    style: LineStyle::Solid,
+                },
+            },
+            role: LegRole::Entry,
             projected_pnl: None,
             projected_pnl_pct: None,
         },
@@ -879,12 +939,16 @@ fn sync_panel_from_bracket_limit_entry() {
 
     let bracket = OrderBracket {
         entry: BracketLeg {
-            price: 180.50,
-            timestamp: None,
-            color: None,
-            style: LineStyle::Solid,
-            line_width: 1.0,
-            label: None,
+            line: midas_chart::widget::PriceLine {
+                price: 180.50,
+                extent: midas_chart::widget::LineExtent::FullWidth,
+                stroke: midas_chart::widget::LineStroke {
+                    color: [0.0, 0.0, 0.0, 1.0],
+                    width: 1.0,
+                    style: LineStyle::Solid,
+                },
+            },
+            role: LegRole::Entry,
             projected_pnl: None,
             projected_pnl_pct: None,
         },
@@ -935,32 +999,44 @@ fn reposition_bracket_shifts_all_legs() {
 
     let mut bracket = OrderBracket {
         entry: BracketLeg {
-            price: 100.0,
-            timestamp: None,
-            color: None,
-            style: LineStyle::Solid,
-            line_width: 1.0,
-            label: None,
+            line: midas_chart::widget::PriceLine {
+                price: 100.0,
+                extent: midas_chart::widget::LineExtent::FullWidth,
+                stroke: midas_chart::widget::LineStroke {
+                    color: [0.0, 0.0, 0.0, 1.0],
+                    width: 1.0,
+                    style: LineStyle::Solid,
+                },
+            },
+            role: LegRole::Entry,
             projected_pnl: None,
             projected_pnl_pct: None,
         },
         take_profit: Some(BracketLeg {
-            price: 102.0,
-            timestamp: None,
-            color: None,
-            style: LineStyle::Solid,
-            line_width: 1.0,
-            label: None,
+            line: midas_chart::widget::PriceLine {
+                price: 102.0,
+                extent: midas_chart::widget::LineExtent::FullWidth,
+                stroke: midas_chart::widget::LineStroke {
+                    color: [0.0, 0.0, 0.0, 1.0],
+                    width: 1.0,
+                    style: LineStyle::Solid,
+                },
+            },
+            role: LegRole::Entry,
             projected_pnl: None,
             projected_pnl_pct: None,
         }),
         stop_loss: Some(BracketLeg {
-            price: 99.0,
-            timestamp: None,
-            color: None,
-            style: LineStyle::Solid,
-            line_width: 1.0,
-            label: None,
+            line: midas_chart::widget::PriceLine {
+                price: 99.0,
+                extent: midas_chart::widget::LineExtent::FullWidth,
+                stroke: midas_chart::widget::LineStroke {
+                    color: [0.0, 0.0, 0.0, 1.0],
+                    width: 1.0,
+                    style: LineStyle::Solid,
+                },
+            },
+            role: LegRole::Entry,
             projected_pnl: None,
             projected_pnl_pct: None,
         }),
@@ -975,7 +1051,7 @@ fn reposition_bracket_shifts_all_legs() {
     };
 
     reposition_bracket(&mut bracket, 110.0);
-    assert!((bracket.entry.price - 110.0).abs() < f64::EPSILON);
-    assert!((bracket.take_profit.unwrap().price - 112.0).abs() < f64::EPSILON);
-    assert!((bracket.stop_loss.unwrap().price - 109.0).abs() < f64::EPSILON);
+    assert!((bracket.entry.line.price - 110.0).abs() < f64::EPSILON);
+    assert!((bracket.take_profit.unwrap().line.price - 112.0).abs() < f64::EPSILON);
+    assert!((bracket.stop_loss.unwrap().line.price - 109.0).abs() < f64::EPSILON);
 }
