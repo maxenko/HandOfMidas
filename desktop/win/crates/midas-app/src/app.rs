@@ -2085,16 +2085,8 @@ impl MidasApp {
             }
         }
 
-        // 4. Resolve linked panel display state and fire EnsureDraftBracket.
-        let panel_info = self.panel_display_for_chart(chart_id);
-        if let Some((side, entry_type)) = panel_info {
-            let _ = self.update(Message::Ticker(
-                symbol.clone(),
-                crate::ticker_state::TickerMsg::EnsureDraftBracket { side, entry_type },
-            ));
-        }
-
-        // 5. Bind linked order panels to the same symbol.
+        // 4. Bind linked order panels to the same symbol FIRST — so
+        //    panel_display_for_chart can find them by the new symbol.
         let source_link = self
             .charts
             .get(&chart_id)
@@ -2106,6 +2098,16 @@ impl MidasApp {
         );
         for op_id in order_targets {
             self.bind_panel_to_symbol(op_id, symbol.clone());
+        }
+
+        // 5. NOW resolve linked panel display state and fire EnsureDraftBracket.
+        //    Panels are already bound to the new symbol, so the lookup works.
+        let panel_info = self.panel_display_for_chart(chart_id);
+        if let Some((side, entry_type)) = panel_info {
+            let _ = self.update(Message::Ticker(
+                symbol.clone(),
+                crate::ticker_state::TickerMsg::EnsureDraftBracket { side, entry_type },
+            ));
         }
     }
 
@@ -3534,9 +3536,26 @@ impl MidasApp {
                     if let Some(p) = self.order_panels.get_mut(&panel_id) {
                         p.state.entry_type = new_type;
                     }
+                    // First set the entry type on the existing bracket (if any).
+                    let _ = self.update(Message::Ticker(
+                        sym_key.clone(),
+                        crate::ticker_state::TickerMsg::SetEntryType(new_type),
+                    ));
+                    // If no bracket exists after SetEntryType (e.g., switching
+                    // from Market to Stop Limit with no prior bracket), create
+                    // one. EnsureDraftBracket is idempotent — if a bracket
+                    // already exists, it returns early.
+                    let side = self
+                        .order_panels
+                        .get(&panel_id)
+                        .map(|p| p.state.side)
+                        .unwrap_or(crate::order_panel::OrderSide::Buy);
                     return self.update(Message::Ticker(
                         sym_key,
-                        crate::ticker_state::TickerMsg::SetEntryType(new_type),
+                        crate::ticker_state::TickerMsg::EnsureDraftBracket {
+                            side,
+                            entry_type: new_type,
+                        },
                     ));
                 }
 
