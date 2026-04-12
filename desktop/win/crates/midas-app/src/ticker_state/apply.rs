@@ -290,6 +290,9 @@ impl TickerState {
                             ));
                     if stale && current_price > 0.0 {
                         // Replace with fresh defaults at the current price.
+                        // Reset ALL fields to a clean Draft state — the old
+                        // bracket might have been Pending/Active/saved from a
+                        // prior session and those flags make it non-interactive.
                         let prices = default_initial_prices(
                             side, entry_type, current_price, self.gatr_abs,
                         );
@@ -297,6 +300,10 @@ impl TickerState {
                         b.take_profit = Some(make_leg(prices.take_profit, LegRole::TakeProfit));
                         b.stop_loss = Some(make_leg(prices.stop_loss, LegRole::StopLoss));
                         b.entry_stop_price = prices.stop_trigger;
+                        b.status = BracketStatus::Draft;
+                        b.saved = false;
+                        b.filled_qty = None;
+                        b.wrong_side_warning = false;
                     }
                     b.side = bracket_side;
                     b.entry_type = entry_type;
