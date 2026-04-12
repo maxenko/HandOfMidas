@@ -286,7 +286,7 @@ fn default_updated_at() -> DateTime<Utc> {
 /// Serde helper for `entries`. Represents the map as an array of
 /// `[side, entry_type, memory]` triples so that JSON — which requires
 /// string keys on objects — can round-trip it losslessly.
-mod entries_serde {
+pub(crate) mod entries_serde {
     use super::{EntryMemory, EntryType, HashMap, OrderSide};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -297,7 +297,7 @@ mod entries_serde {
         memory: EntryMemory,
     }
 
-    pub(super) fn serialize<S: Serializer>(
+    pub(crate) fn serialize<S: Serializer>(
         map: &HashMap<(OrderSide, EntryType), EntryMemory>,
         s: S,
     ) -> Result<S::Ok, S::Error> {
@@ -312,7 +312,7 @@ mod entries_serde {
         vec.serialize(s)
     }
 
-    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
         d: D,
     ) -> Result<HashMap<(OrderSide, EntryType), EntryMemory>, D::Error> {
         let vec = Vec::<Triple>::deserialize(d)?;

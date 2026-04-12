@@ -236,6 +236,16 @@ pub struct MidasApp {
         crate::annotation_store::SymbolKey,
         crate::ticker_order_intent::reducer::PreSnapState,
     >,
+    /// Per-symbol ticker state map (Slice 0 of the ticker state machine
+    /// plan). All per-symbol state will migrate here; currently inert.
+    pub tickers: std::collections::HashMap<
+        crate::annotation_store::SymbolKey,
+        crate::ticker_state::TickerState,
+    >,
+    /// No-reentry guard for the `Message::Ticker` dispatch cycle.
+    /// Set to `true` while processing effects; asserted `false` at
+    /// entry to prevent feedback loops.
+    pub ticker_dispatch_active: bool,
 }
 
 /// Pending drag: press started but hold threshold not yet reached.
@@ -583,6 +593,14 @@ pub enum Message {
     /// in `ticker_order_intent::reducer::apply_order_intent_msg`
     /// returns `Task::none()` for every variant in Slice 1a.
     OrderIntent(crate::ticker_order_intent::OrderIntentAppMsg),
+
+    // -- Ticker state machine (Slice 0; stubs returning empty effects) --
+    /// Route a per-symbol ticker state message through
+    /// `TickerState::apply()`. Slice 0 stubs return empty effects.
+    Ticker(
+        crate::annotation_store::SymbolKey,
+        crate::ticker_state::TickerMsg,
+    ),
 }
 
 // ── Constructor + helpers ─────────────────────────────────────────────
@@ -906,6 +924,8 @@ impl MidasApp {
             snapped_this_session: std::collections::HashSet::new(),
             anchor_seed_toasts_shown: std::collections::HashSet::new(),
             gatr_undo_slots: std::collections::HashMap::new(),
+            tickers: std::collections::HashMap::new(),
+            ticker_dispatch_active: false,
         };
 
         // Register broker bridge in provider registry.
@@ -2588,6 +2608,18 @@ impl MidasApp {
         Task::done(Message::OrderIntent(
             crate::ticker_order_intent::OrderIntentAppMsg::MaybeSnapToGatr { symbol: key },
         ))
+    }
+
+    /// Lazy factory access to a per-symbol `TickerState`. Creates a
+    /// fresh default state if the symbol is not yet in the map.
+    #[allow(dead_code)] // used by Slices 1+
+    pub fn ticker_mut(
+        &mut self,
+        symbol: &crate::annotation_store::SymbolKey,
+    ) -> &mut crate::ticker_state::TickerState {
+        self.tickers
+            .entry(symbol.clone())
+            .or_insert_with(|| crate::ticker_state::TickerState::new(symbol.clone()))
     }
 
     /// Set a plain (no-action) toast, replacing any existing one.
@@ -6244,6 +6276,45 @@ impl MidasApp {
 
             Message::OrderIntent(msg) => {
                 crate::ticker_order_intent::apply_order_intent_msg(self, msg)
+            }
+
+            Message::Ticker(sym, msg) => {
+                assert!(
+                    !self.ticker_dispatch_active,
+                    "re-entrant ticker dispatch"
+                );
+                self.ticker_dispatch_active = true;
+                let state = self
+                    .tickers
+                    .entry(sym.clone())
+                    .or_insert_with(|| crate::ticker_state::TickerState::new(sym.clone()));
+                let effects = state.apply(msg);
+                for effect in effects {
+                    match effect {
+                        crate::ticker_state::TickerEffect::ProjectBracket(_b) => {
+                            // TODO Slice 1: project to annotation_store
+                        }
+                        crate::ticker_state::TickerEffect::RemoveBracket(_id) => {
+                            // TODO Slice 1: remove from annotation_store
+                        }
+                        crate::ticker_state::TickerEffect::Toast { message, action } => {
+                            self.toast = Some(ToastState {
+                                message,
+                                created_at: Instant::now(),
+                                action,
+                            });
+                        }
+                        crate::ticker_state::TickerEffect::PersistDirty => {
+                            // TODO Slice 0: wire to persistence handle
+                        }
+                        crate::ticker_state::TickerEffect::SubmitToBroker { .. } => {
+                            // TODO Slice 2: wire to broker_bridge
+                        }
+                        _ => {}
+                    }
+                }
+                self.ticker_dispatch_active = false;
+                iced::Task::none()
             }
         }
     }

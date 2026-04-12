@@ -17,6 +17,8 @@ mod order_panel;
 mod registry;
 mod theme;
 mod ticker_order_intent;
+#[allow(dead_code)] // Slice 0: full API surface defined, not yet wired to live paths
+mod ticker_state;
 mod watchlist;
 mod watchlist_columns;
 
