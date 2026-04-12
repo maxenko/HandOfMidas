@@ -1125,10 +1125,12 @@ mod hydration {
 
     #[test]
     fn hydrate_dirty_same_symbol_is_noop() {
-        let mut panel = OrderPanelState::default();
-        panel.symbol = "AAPL".to_string();
-        panel.quantity = "999".to_string();
-        panel.dirty = true;
+        let mut panel = OrderPanelState {
+            symbol: "AAPL".to_string(),
+            quantity: "999".to_string(),
+            dirty: true,
+            ..Default::default()
+        };
 
         let intent = fixture_intent("AAPL");
         panel.hydrate_from_intent(&intent, Some(124.00));
@@ -1140,10 +1142,12 @@ mod hydration {
 
     #[test]
     fn hydrate_dirty_different_symbol_proceeds() {
-        let mut panel = OrderPanelState::default();
-        panel.symbol = "MSFT".to_string();
-        panel.quantity = "999".to_string();
-        panel.dirty = true;
+        let mut panel = OrderPanelState {
+            symbol: "MSFT".to_string(),
+            quantity: "999".to_string(),
+            dirty: true,
+            ..Default::default()
+        };
 
         let intent = fixture_intent("AAPL");
         panel.hydrate_from_intent(&intent, Some(124.00));

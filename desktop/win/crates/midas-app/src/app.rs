@@ -2394,6 +2394,19 @@ impl MidasApp {
         self.workspace.focused_chart_id()
     }
 
+    /// Returns the symbol currently displayed on the focused chart,
+    /// or `None` if no chart is focused or the chart has no symbol.
+    ///
+    /// Used by the ticker-intent reducer's mid-drag-ticker-switch guard
+    /// to reject bracket-drag messages whose captured symbol does not
+    /// match the currently visible chart.
+    pub(crate) fn active_chart_symbol(&self) -> Option<String> {
+        self.active_chart_id()
+            .and_then(|id| self.charts.get(&id))
+            .map(|chart| chart.symbol.clone())
+            .filter(|s| !s.is_empty())
+    }
+
     /// Focus the pane displaying the given chart, if it exists in the layout.
     ///
     /// Called from message handlers so that interacting with any pane
@@ -2419,6 +2432,200 @@ impl MidasApp {
         crate::ticker_order_intent::bootstrap::bootstrap_from_annotations(
             &self.annotation_store,
             &self.order_intent_handle,
+        );
+    }
+
+    /// Build a [`crate::ticker_order_intent::TickerOrderIntent`] snapshot
+    /// from a panel's current state and route it through the Slice 3
+    /// reducer as an `UpdateFromPanel` message.
+    ///
+    /// Called from the panel-action handler after any edit that sets
+    /// `panel.state.dirty = true`. The reducer merges the compound-key
+    /// bucket into the cached intent, upserts, and propagates the new
+    /// leg prices into the linked bracket annotation (if any).
+    fn sync_panel_to_intent(&mut self, panel_id: midas_core::OrderPanelId) {
+        use crate::annotation_store::SymbolKey;
+        use crate::ticker_order_intent::{
+            reducer::apply_update_from_surface, EntryMemory, IntentSource, TickerOrderIntent,
+            CURRENT_VERSION,
+        };
+        use midas_chart::widget::order_bracket::EntryType;
+        use std::collections::HashMap;
+
+        let Some(panel) = self.order_panels.get(&panel_id) else {
+            return;
+        };
+        let symbol_str = panel.state.symbol.clone();
+        if symbol_str.is_empty() {
+            return;
+        }
+        let key = SymbolKey::new(&symbol_str);
+        let state = &panel.state;
+
+        // Pick the entry-price string based on entry_type.
+        let entry_price_or_offset = match state.entry_type {
+            EntryType::Market => None,
+            EntryType::Limit | EntryType::StopLimit => state.limit_price.parse::<f64>().ok(),
+            EntryType::Stop => state.stop_price.parse::<f64>().ok(),
+        };
+
+        let memory = EntryMemory {
+            entry_price_or_offset,
+            quantity: state.quantity.parse::<f64>().ok(),
+            tp_enabled: state.tp_enabled,
+            tp_value: state.tp_value.clone(),
+            tp_mode: state.tp_mode,
+            sl_enabled: state.sl_enabled,
+            sl_value: state.sl_value.clone(),
+            sl_mode: state.sl_mode,
+            sl_type: state.sl_type,
+            sl_limit_value: state.sl_limit_value.clone(),
+        };
+
+        let cached = self.order_intent_handle.snapshot(&key);
+        let gatr_anchor = cached
+            .as_ref()
+            .map(|c| c.gatr_anchor)
+            .unwrap_or_default();
+        let pinned = cached.as_ref().map(|c| c.pinned).unwrap_or(false);
+        let broker_order_id = cached.as_ref().and_then(|c| c.broker_order_id);
+
+        let mut entries: HashMap<
+            (crate::order_panel::OrderSide, EntryType),
+            EntryMemory,
+        > = cached
+            .as_ref()
+            .map(|c| c.entries.clone())
+            .unwrap_or_default();
+        entries.insert((state.side, state.entry_type), memory);
+
+        let snapshot = TickerOrderIntent {
+            version: CURRENT_VERSION,
+            symbol: key.clone(),
+            last_side: state.side,
+            last_entry_type: state.entry_type,
+            entries,
+            gatr_anchor,
+            live_annotation_id: state.bracket_annotation_id,
+            broker_order_id,
+            pinned,
+            updated_at: chrono::Utc::now(),
+        };
+
+        apply_update_from_surface(
+            &mut self.annotation_store,
+            &self.order_intent_handle,
+            &mut self.order_panels,
+            None, // panel source — active chart symbol is irrelevant
+            key,
+            snapshot,
+            IntentSource::Panel,
+        );
+    }
+
+    /// Build a [`crate::ticker_order_intent::TickerOrderIntent`] snapshot
+    /// from the current annotation-store state of a bracket and route
+    /// it through the Slice 3 reducer as an `UpdateFromBracketDrag`
+    /// message.
+    ///
+    /// Called from the `ChartDragBracketLeg` handler after the
+    /// annotation has been mutated in-place by the drag. The captured
+    /// `symbol_at_drag_start` is the symbol the annotation belongs to,
+    /// which the reducer compares against the currently focused
+    /// chart's symbol — a mismatch means the user swapped tickers
+    /// mid-drag and the message is dropped.
+    fn sync_drag_to_intent(
+        &mut self,
+        symbol_at_drag_start: String,
+        annotation_id: AnnotationId,
+    ) {
+        use crate::annotation_store::SymbolKey;
+        use crate::ticker_order_intent::{
+            reducer::apply_update_from_surface, EntryMemory, IntentSource, TickerOrderIntent,
+            CURRENT_VERSION,
+        };
+        use midas_chart::widget::order_bracket::EntryType;
+        use std::collections::HashMap;
+
+        let key = SymbolKey::new(&symbol_at_drag_start);
+        let Some(bracket) = self
+            .annotation_store
+            .get_bracket(&symbol_at_drag_start, annotation_id)
+            .cloned()
+        else {
+            return;
+        };
+
+        let side = match bracket.side {
+            midas_chart::widget::order_bracket::BracketSide::Long => {
+                crate::order_panel::OrderSide::Buy
+            }
+            midas_chart::widget::order_bracket::BracketSide::Short => {
+                crate::order_panel::OrderSide::Sell
+            }
+        };
+        let entry_type = bracket.entry_type;
+
+        let memory = EntryMemory {
+            entry_price_or_offset: Some(bracket.entry.line.price),
+            quantity: bracket.quantity,
+            tp_enabled: bracket.take_profit.is_some(),
+            tp_value: bracket
+                .take_profit
+                .as_ref()
+                .map(|tp| format!("{:.2}", tp.line.price))
+                .unwrap_or_default(),
+            tp_mode: crate::order_panel::PriceInputMode::Absolute,
+            sl_enabled: bracket.stop_loss.is_some(),
+            sl_value: bracket
+                .stop_loss
+                .as_ref()
+                .map(|sl| format!("{:.2}", sl.line.price))
+                .unwrap_or_default(),
+            sl_mode: crate::order_panel::PriceInputMode::Absolute,
+            sl_type: crate::order_panel::StopLossType::Stop,
+            sl_limit_value: String::new(),
+        };
+
+        let cached = self.order_intent_handle.snapshot(&key);
+        let gatr_anchor = cached
+            .as_ref()
+            .map(|c| c.gatr_anchor)
+            .unwrap_or_default();
+        let pinned = cached.as_ref().map(|c| c.pinned).unwrap_or(false);
+        let broker_order_id = cached.as_ref().and_then(|c| c.broker_order_id);
+
+        let mut entries: HashMap<
+            (crate::order_panel::OrderSide, EntryType),
+            EntryMemory,
+        > = cached
+            .as_ref()
+            .map(|c| c.entries.clone())
+            .unwrap_or_default();
+        entries.insert((side, entry_type), memory);
+
+        let snapshot = TickerOrderIntent {
+            version: CURRENT_VERSION,
+            symbol: key.clone(),
+            last_side: side,
+            last_entry_type: entry_type,
+            entries,
+            gatr_anchor,
+            live_annotation_id: Some(annotation_id),
+            broker_order_id,
+            pinned,
+            updated_at: chrono::Utc::now(),
+        };
+
+        let active = self.active_chart_symbol().map(|s| SymbolKey::new(&s));
+        apply_update_from_surface(
+            &mut self.annotation_store,
+            &self.order_intent_handle,
+            &mut self.order_panels,
+            active.as_ref(),
+            key,
+            snapshot,
+            IntentSource::Chart,
         );
     }
 
@@ -3919,6 +4126,12 @@ impl MidasApp {
                     self.mark_levels_dirty_for_ticker(&symbol);
                 }
 
+                // Slice 3: route the post-edit panel state through the
+                // ticker-intent reducer so the per-compound-key memory
+                // is updated and any linked annotation is synchronized.
+                // The reducer is idempotent for no-op edits.
+                self.sync_panel_to_intent(panel_id);
+
                 Task::none()
             }
 
@@ -4767,6 +4980,14 @@ impl MidasApp {
                         );
                     }
                 }
+                // Slice 3: route the post-drag bracket state through
+                // the ticker-intent reducer. Captures the symbol at
+                // drag-start (the annotation's owning symbol) so the
+                // reducer's mid-drag-ticker-switch guard can drop the
+                // message if the user swapped tickers while dragging.
+                if let Some(symbol_at_drag_start) = ticker {
+                    self.sync_drag_to_intent(symbol_at_drag_start, ann_id);
+                }
                 Task::none()
             }
 
@@ -5113,11 +5334,20 @@ impl MidasApp {
                     .find(|(_, p)| p.state.bracket_annotation_id == Some(ann_id))
                     .map(|(id, _)| *id);
 
-                // Remove from annotation store.
-                self.annotation_store.remove(&symbol, ann_id);
+                // Slice 3: route through the ticker-intent reducer
+                // which removes the annotation, clears
+                // `live_annotation_id`, preserves compound-key memory,
+                // and resets the linked panel's `dirty` flag.
+                crate::ticker_order_intent::reducer::apply_cancel_live_bracket(
+                    &mut self.annotation_store,
+                    &self.order_intent_handle,
+                    &mut self.order_panels,
+                    &crate::annotation_store::SymbolKey::new(&symbol),
+                );
 
                 if let Some(pid) = panel_id {
-                    // Clear panel bracket ownership.
+                    // Clear panel bracket ownership (`dirty` already
+                    // reset by the reducer above).
                     if let Some(p) = self.order_panels.get_mut(&pid) {
                         p.state.bracket_active = None;
                         p.state.bracket_annotation_id = None;
