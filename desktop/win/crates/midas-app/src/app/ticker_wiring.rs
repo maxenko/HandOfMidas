@@ -62,28 +62,21 @@ impl MidasApp {
             }
         }
 
-        // 4. Restore per-ticker camera if saved.
+        // 4. Mark camera for deferred restore AFTER new data loads.
+        //
+        // Do NOT set the camera here — the chart still has the previous
+        // ticker's candle buffer. Setting camera bounds for AMD while
+        // NVDA candles are rendered causes a visual desync (NVDA candles
+        // frozen at AMD's price/time range, grid moves under them).
+        //
+        // The actual restore happens in the DataLoaded handler: it loads
+        // the new candle data first (apply_candle_data), THEN applies the
+        // saved camera. The pending flag also suppresses the default
+        // "last 200 candles" camera reset so it doesn't clobber the
+        // saved position.
         if let Some(ts) = self.tickers.get(&symbol) {
-            if let Some(saved) = ts.saved_camera() {
+            if ts.saved_camera().is_some() {
                 if let Some(chart) = self.charts.get_mut(&chart_id) {
-                    let duration = saved.time_end - saved.time_start;
-                    if saved.was_at_live_edge {
-                        // User was watching live price action. Shift the time
-                        // window so the latest candle is near the right edge,
-                        // preserving the zoom level (same duration).
-                        let latest = chart.latest_candle_time().unwrap_or(saved.time_end);
-                        let margin = duration * 0.02;
-                        chart.chart_state.camera.time_end = latest + margin;
-                        chart.chart_state.camera.time_start =
-                            chart.chart_state.camera.time_end - duration;
-                    } else {
-                        // User was examining history. Restore verbatim.
-                        chart.chart_state.camera.time_start = saved.time_start;
-                        chart.chart_state.camera.time_end = saved.time_end;
-                    }
-                    chart.chart_state.camera.price_low = saved.price_low;
-                    chart.chart_state.camera.price_high = saved.price_high;
-                    chart.chart_state.dirty.mark_camera();
                     chart.camera_restored_pending = true;
                 }
             }
