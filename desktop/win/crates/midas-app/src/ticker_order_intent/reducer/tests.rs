@@ -1464,6 +1464,8 @@ fn apply_ensure_draft_bracket_creates_draft_for_buy_limit_with_no_existing_brack
         &mut store,
         &handle,
         &SymbolKey::new("AAPL"),
+        OrderSide::Buy,
+        EntryType::Limit,
         Some(150.0),
         Some(1.5),
     );
@@ -1502,6 +1504,8 @@ fn apply_ensure_draft_bracket_skips_when_market_entry_type() {
         &mut store,
         &handle,
         &SymbolKey::new("AAPL"),
+        OrderSide::Buy,
+        EntryType::Market,
         Some(150.0),
         Some(1.5),
     );
@@ -1509,8 +1513,9 @@ fn apply_ensure_draft_bracket_skips_when_market_entry_type() {
     assert!(store.get("AAPL").is_empty());
 }
 
-/// If `live_annotation_id` already points to an existing annotation,
-/// leave it alone — do not create a second bracket.
+/// If `live_annotation_id` already points to an existing annotation
+/// that matches the panel's (side, entry_type), leave it alone — do
+/// not create a second bracket.
 #[test]
 fn apply_ensure_draft_bracket_skips_when_live_annotation_id_already_set_and_annotation_exists() {
     let mut store = AnnotationStore::new();
@@ -1532,10 +1537,14 @@ fn apply_ensure_draft_bracket_skips_when_live_annotation_id_already_set_and_anno
             Some(ann_id),
         ),
     );
+    // Panel matches the existing bracket (Buy / Limit, which is what
+    // `make_bracket` produces).
     let outcome = apply_ensure_draft_bracket(
         &mut store,
         &handle,
         &SymbolKey::new("AAPL"),
+        OrderSide::Buy,
+        EntryType::Limit,
         Some(150.0),
         Some(1.5),
     );
@@ -1567,6 +1576,8 @@ fn apply_ensure_draft_bracket_creates_fresh_when_live_annotation_id_set_but_anno
         &mut store,
         &handle,
         &SymbolKey::new("AAPL"),
+        OrderSide::Sell,
+        EntryType::Stop,
         Some(150.0),
         Some(1.5),
     );
@@ -1580,8 +1591,8 @@ fn apply_ensure_draft_bracket_creates_fresh_when_live_annotation_id_set_but_anno
     assert_eq!(bracket.entry_type, EntryType::Stop);
 }
 
-/// The created bracket respects `intent.last_side` / `intent.last_entry_type`
-/// — not a default compound key.
+/// The created bracket respects the panel's `(side, entry_type)` — not
+/// a default compound key.
 #[test]
 fn apply_ensure_draft_bracket_uses_panel_current_compound_key() {
     let mut store = AnnotationStore::new();
@@ -1603,6 +1614,8 @@ fn apply_ensure_draft_bracket_uses_panel_current_compound_key() {
         &mut store,
         &handle,
         &SymbolKey::new("AAPL"),
+        OrderSide::Sell,
+        EntryType::StopLimit,
         Some(150.0),
         Some(1.0),
     );
@@ -1618,19 +1631,221 @@ fn apply_ensure_draft_bracket_uses_panel_current_compound_key() {
     );
 }
 
-/// No intent for the symbol → nothing to do.
+// ── Fresh-intent reconciliation (the user's "open ADD" bug) ──────────
+
+/// Intent is missing entirely. Panel shows Buy Stop Limit. The reducer
+/// must synthesize a fresh intent at `(Buy, StopLimit)`, populate the
+/// bucket from defaults, and produce a draft with BOTH the entry line
+/// and the stop trigger so the user sees two grabbable lines.
 #[test]
-fn apply_ensure_draft_bracket_skips_when_no_intent() {
+fn apply_ensure_draft_bracket_creates_intent_from_panel_when_intent_missing() {
     let mut store = AnnotationStore::new();
     let handle = MockHandle::new();
     let outcome = apply_ensure_draft_bracket(
         &mut store,
         &handle,
+        &SymbolKey::new("ADD"),
+        OrderSide::Buy,
+        EntryType::StopLimit,
+        Some(100.0),
+        Some(2.0),
+    );
+    assert_eq!(outcome, EnsureDraftOutcome::Created);
+
+    let intent = handle.snapshot(&SymbolKey::new("ADD")).unwrap();
+    assert_eq!(intent.last_side, OrderSide::Buy);
+    assert_eq!(intent.last_entry_type, EntryType::StopLimit);
+    let mem = intent
+        .entries
+        .get(&(OrderSide::Buy, EntryType::StopLimit))
+        .expect("bucket seeded");
+    assert!(
+        mem.entry_price_or_offset.is_some(),
+        "bucket should carry a default entry price"
+    );
+    let ann_id = intent.live_annotation_id.expect("draft created");
+    let bracket = store.get_bracket("ADD", ann_id).expect("bracket present");
+    assert_eq!(bracket.entry_type, EntryType::StopLimit);
+    assert_eq!(bracket.side, BracketSide::Long);
+    assert!(
+        bracket.entry_stop_price.is_some(),
+        "StopLimit draft must carry both entry and stop trigger"
+    );
+}
+
+/// Intent exists but `last_entry_type = Market`. Panel shows Stop
+/// Limit. The reducer must rewrite the intent's compound key to match
+/// the panel and build a StopLimit draft (two lines).
+#[test]
+fn apply_ensure_draft_bracket_updates_intent_last_entry_type_when_panel_disagrees() {
+    let mut store = AnnotationStore::new();
+    let handle = MockHandle::new();
+    handle.seed(
+        SymbolKey::new("ADD"),
+        make_intent("ADD", OrderSide::Buy, EntryType::Market, vec![], None),
+    );
+    let outcome = apply_ensure_draft_bracket(
+        &mut store,
+        &handle,
+        &SymbolKey::new("ADD"),
+        OrderSide::Buy,
+        EntryType::StopLimit,
+        Some(100.0),
+        Some(2.0),
+    );
+    assert_eq!(outcome, EnsureDraftOutcome::Created);
+    let intent = handle.snapshot(&SymbolKey::new("ADD")).unwrap();
+    assert_eq!(intent.last_entry_type, EntryType::StopLimit);
+    let ann_id = intent.live_annotation_id.unwrap();
+    let bracket = store.get_bracket("ADD", ann_id).unwrap();
+    assert_eq!(bracket.entry_type, EntryType::StopLimit);
+    assert!(bracket.entry_stop_price.is_some());
+}
+
+/// A live Market bracket exists but the panel now shows Stop Limit.
+/// The reducer must remove the stale Market bracket and create a fresh
+/// Stop Limit one, reporting `ReplacedStale`.
+#[test]
+fn apply_ensure_draft_bracket_replaces_live_market_bracket_when_panel_says_stoplimit() {
+    let mut store = AnnotationStore::new();
+    // Live bracket is a Market bracket.
+    let mut market_bracket = make_bracket(100.0, None, None);
+    market_bracket.entry_type = EntryType::Market;
+    let stale_id = store.add(
+        "ADD",
+        AnnotationKind::OrderBracket(Box::new(market_bracket)),
+    );
+    let handle = MockHandle::new();
+    handle.seed(
+        SymbolKey::new("ADD"),
+        make_intent(
+            "ADD",
+            OrderSide::Buy,
+            EntryType::Market,
+            vec![],
+            Some(stale_id),
+        ),
+    );
+
+    let outcome = apply_ensure_draft_bracket(
+        &mut store,
+        &handle,
+        &SymbolKey::new("ADD"),
+        OrderSide::Buy,
+        EntryType::StopLimit,
+        Some(100.0),
+        Some(2.0),
+    );
+    assert_eq!(outcome, EnsureDraftOutcome::ReplacedStale);
+
+    // Old bracket is gone.
+    assert!(store.get_bracket("ADD", stale_id).is_none());
+
+    let intent = handle.snapshot(&SymbolKey::new("ADD")).unwrap();
+    let new_id = intent.live_annotation_id.unwrap();
+    assert_ne!(new_id, stale_id);
+    let bracket = store.get_bracket("ADD", new_id).unwrap();
+    assert_eq!(bracket.entry_type, EntryType::StopLimit);
+    assert!(bracket.entry_stop_price.is_some());
+}
+
+/// Simulates the user changing entry type from Limit to StopLimit via
+/// the panel: the reducer drops the old Limit draft and creates a
+/// StopLimit draft with both entry and stop trigger. This is the
+/// integration-style regression for the panel→chart desync.
+#[test]
+fn set_entry_type_triggers_ensure_draft_bracket() {
+    let mut store = AnnotationStore::new();
+    // Step 1: first call lands a Limit draft.
+    let handle = MockHandle::new();
+    let _ = apply_ensure_draft_bracket(
+        &mut store,
+        &handle,
         &SymbolKey::new("AAPL"),
+        OrderSide::Buy,
+        EntryType::Limit,
         Some(150.0),
         Some(1.5),
     );
-    assert_eq!(outcome, EnsureDraftOutcome::SkippedNoIntent);
+    let limit_id = handle
+        .snapshot(&SymbolKey::new("AAPL"))
+        .and_then(|i| i.live_annotation_id)
+        .expect("limit draft created");
+    assert_eq!(
+        store.get_bracket("AAPL", limit_id).unwrap().entry_type,
+        EntryType::Limit
+    );
+
+    // Step 2: user toggles to StopLimit. Same function, new panel
+    // entry type. The old Limit bracket must be replaced.
+    let outcome = apply_ensure_draft_bracket(
+        &mut store,
+        &handle,
+        &SymbolKey::new("AAPL"),
+        OrderSide::Buy,
+        EntryType::StopLimit,
+        Some(150.0),
+        Some(1.5),
+    );
+    assert_eq!(outcome, EnsureDraftOutcome::ReplacedStale);
+    assert!(
+        store.get_bracket("AAPL", limit_id).is_none(),
+        "old Limit bracket must be gone"
+    );
+    let new_id = handle
+        .snapshot(&SymbolKey::new("AAPL"))
+        .and_then(|i| i.live_annotation_id)
+        .unwrap();
+    let new_bracket = store.get_bracket("AAPL", new_id).unwrap();
+    assert_eq!(new_bracket.entry_type, EntryType::StopLimit);
+    assert!(
+        new_bracket.entry_stop_price.is_some(),
+        "StopLimit draft must carry a stop trigger"
+    );
+}
+
+/// A live Buy bracket exists but the panel now shows Sell. The reducer
+/// must remove the stale bracket and create a Short one.
+#[test]
+fn apply_ensure_draft_bracket_replaces_live_buy_bracket_when_panel_says_sell() {
+    let mut store = AnnotationStore::new();
+    let mut buy_bracket = make_bracket(149.0, Some(152.0), Some(147.0));
+    buy_bracket.side = BracketSide::Long;
+    buy_bracket.entry_type = EntryType::Limit;
+    let stale_id = store.add("AAPL", AnnotationKind::OrderBracket(Box::new(buy_bracket)));
+    let handle = MockHandle::new();
+    handle.seed(
+        SymbolKey::new("AAPL"),
+        make_intent(
+            "AAPL",
+            OrderSide::Buy,
+            EntryType::Limit,
+            vec![(
+                (OrderSide::Buy, EntryType::Limit),
+                make_memory(149.0, Some(152.0), Some(147.0), true),
+            )],
+            Some(stale_id),
+        ),
+    );
+
+    let outcome = apply_ensure_draft_bracket(
+        &mut store,
+        &handle,
+        &SymbolKey::new("AAPL"),
+        OrderSide::Sell,
+        EntryType::Limit,
+        Some(150.0),
+        Some(1.5),
+    );
+    assert_eq!(outcome, EnsureDraftOutcome::ReplacedStale);
+    assert!(store.get_bracket("AAPL", stale_id).is_none());
+
+    let intent = handle.snapshot(&SymbolKey::new("AAPL")).unwrap();
+    assert_eq!(intent.last_side, OrderSide::Sell);
+    let new_id = intent.live_annotation_id.unwrap();
+    let bracket = store.get_bracket("AAPL", new_id).unwrap();
+    assert_eq!(bracket.side, BracketSide::Short);
+    assert_eq!(bracket.entry_type, EntryType::Limit);
 }
 
 // ── Fix 2: sanitize_entry_memory_offsets via apply_snap_to_intent ────

@@ -1597,10 +1597,44 @@ impl MidasApp {
         // Limit reveals `limit_price`). Route through the reducer's
         // `MaybeSnapToGatr` handler so the intent is corrected and
         // the panel hydrates from the corrected memory.
-        let _ = crate::ticker_order_intent::reducer::apply_maybe_snap(
-            self,
-            crate::annotation_store::SymbolKey::new(&symbol_upper),
-        );
+        let key = crate::annotation_store::SymbolKey::new(&symbol_upper);
+        let _ = crate::ticker_order_intent::reducer::apply_maybe_snap(self, key.clone());
+
+        // Reconcile the intent + live bracket to match the panel's new
+        // entry type. If the previous bracket was for a different
+        // entry type (e.g. Market → StopLimit), the reducer drops it
+        // and creates a fresh one with the correct shape (StopLimit
+        // produces two lines; Market produces none).
+        if let Some((panel_side, panel_entry_type)) =
+            self.order_panels.get(&panel_id).map(|p| (p.state.side, p.state.entry_type))
+        {
+            let (current_price, gatr_abs) = self
+                .market_cache
+                .get(key.as_str())
+                .map(|s| (s.last_price, s.gatr_abs))
+                .unwrap_or((None, None));
+            let _ = crate::ticker_order_intent::reducer::apply_ensure_draft_bracket(
+                &mut self.annotation_store,
+                &self.order_intent_handle,
+                &key,
+                panel_side,
+                panel_entry_type,
+                current_price,
+                gatr_abs,
+            );
+            // Sync the panel's `bracket_annotation_id` back to whatever
+            // the reducer just recorded — it may have replaced a stale
+            // live bracket.
+            if let Some(new_ann_id) = self
+                .order_intent_handle
+                .snapshot(&key)
+                .and_then(|i| i.live_annotation_id)
+            {
+                if let Some(p) = self.order_panels.get_mut(&panel_id) {
+                    p.state.bracket_annotation_id = Some(new_ann_id);
+                }
+            }
+        }
 
         // Update the bracket annotation.
         if let Some(ann_id) = ann_id {
@@ -2792,6 +2826,46 @@ impl MidasApp {
         );
     }
 
+    /// Look up the `(side, entry_type)` currently displayed by the
+    /// order panel linked to `chart_id`.
+    ///
+    /// Preference order:
+    ///
+    /// 1. The first panel whose `source_chart` matches `chart_id`.
+    /// 2. The first panel whose `symbol` matches the chart's symbol.
+    ///
+    /// Returns `None` when no panel is linked to the chart at all —
+    /// the caller then skips reconciliation, because there is no UI
+    /// surface the reducer should mirror.
+    fn panel_display_for_chart(
+        &self,
+        chart_id: ChartId,
+    ) -> Option<(
+        crate::order_panel::OrderSide,
+        midas_chart::widget::order_bracket::EntryType,
+    )> {
+        let chart_symbol = self.charts.get(&chart_id).map(|c| c.symbol.clone());
+        // (1) Direct `source_chart` link.
+        if let Some(panel) = self
+            .order_panels
+            .values()
+            .find(|p| p.state.source_chart == Some(chart_id))
+        {
+            return Some((panel.state.side, panel.state.entry_type));
+        }
+        // (2) Fallback: symbol match (case-insensitive).
+        if let Some(sym) = chart_symbol.as_deref().filter(|s| !s.is_empty()) {
+            if let Some(panel) = self
+                .order_panels
+                .values()
+                .find(|p| p.state.symbol.eq_ignore_ascii_case(sym))
+            {
+                return Some((panel.state.side, panel.state.entry_type));
+            }
+        }
+        None
+    }
+
     /// Hydrate the order panel linked to `chart_id` from the intent
     /// store, if any. Called from `ActivateChart` so switching charts
     /// lands the panel on the last-used side/type/prices for that
@@ -3046,18 +3120,29 @@ impl MidasApp {
                     // for the panel's current `(side, entry_type)` compound,
                     // so the user sees their bracket shape immediately on
                     // activation without having to click Place Order.
-                    let (current_price, gatr_abs) = self
-                        .market_cache
-                        .get(key.as_str())
-                        .map(|s| (s.last_price, s.gatr_abs))
-                        .unwrap_or((None, None));
-                    let _ = crate::ticker_order_intent::reducer::apply_ensure_draft_bracket(
-                        &mut self.annotation_store,
-                        &self.order_intent_handle,
-                        &key,
-                        current_price,
-                        gatr_abs,
-                    );
+                    //
+                    // The panel's displayed `(side, entry_type)` is the
+                    // canonical truth — the reducer reconciles the intent
+                    // to match it and replaces any stale live bracket.
+                    if let Some((panel_side, panel_entry_type)) =
+                        self.panel_display_for_chart(id)
+                    {
+                        let (current_price, gatr_abs) = self
+                            .market_cache
+                            .get(key.as_str())
+                            .map(|s| (s.last_price, s.gatr_abs))
+                            .unwrap_or((None, None));
+                        let _ =
+                            crate::ticker_order_intent::reducer::apply_ensure_draft_bracket(
+                                &mut self.annotation_store,
+                                &self.order_intent_handle,
+                                &key,
+                                panel_side,
+                                panel_entry_type,
+                                current_price,
+                                gatr_abs,
+                            );
+                    }
                 }
                 // Slice 2 hydration — idempotent when the reducer
                 // already re-hydrated.
@@ -4348,10 +4433,43 @@ impl MidasApp {
                 // is corrected and the panel is re-hydrated from the
                 // corrected memory before the sync below persists it.
                 if let Some(sym) = side_change_symbol {
-                    let _ = crate::ticker_order_intent::reducer::apply_maybe_snap(
-                        self,
-                        crate::annotation_store::SymbolKey::new(&sym),
-                    );
+                    let key = crate::annotation_store::SymbolKey::new(&sym);
+                    let _ =
+                        crate::ticker_order_intent::reducer::apply_maybe_snap(self, key.clone());
+
+                    // Reconcile the live bracket so a Buy→Sell (or vice
+                    // versa) toggle replaces any stale opposite-side
+                    // bracket. The panel's display is canonical.
+                    if let Some((panel_side, panel_entry_type)) = self
+                        .order_panels
+                        .get(&panel_id)
+                        .map(|p| (p.state.side, p.state.entry_type))
+                    {
+                        let (current_price, gatr_abs) = self
+                            .market_cache
+                            .get(key.as_str())
+                            .map(|s| (s.last_price, s.gatr_abs))
+                            .unwrap_or((None, None));
+                        let _ =
+                            crate::ticker_order_intent::reducer::apply_ensure_draft_bracket(
+                                &mut self.annotation_store,
+                                &self.order_intent_handle,
+                                &key,
+                                panel_side,
+                                panel_entry_type,
+                                current_price,
+                                gatr_abs,
+                            );
+                        if let Some(new_ann_id) = self
+                            .order_intent_handle
+                            .snapshot(&key)
+                            .and_then(|i| i.live_annotation_id)
+                        {
+                            if let Some(p) = self.order_panels.get_mut(&panel_id) {
+                                p.state.bracket_annotation_id = Some(new_ann_id);
+                            }
+                        }
+                    }
                 }
 
                 // Slice 3: route the post-edit panel state through the
@@ -4745,6 +4863,46 @@ impl MidasApp {
                 // repositioned to the current price the moment its
                 // market data lands.
                 let key = crate::annotation_store::SymbolKey::new(&symbol_upper);
+
+                // Fresh price data just landed. Walk every panel linked
+                // to this symbol and ensure its draft bracket matches the
+                // panel's currently displayed `(side, entry_type)`. This
+                // handles the "no intent existed on activation, but now
+                // we have a price" case so the user sees the bracket
+                // shape for their last-selected entry type immediately.
+                let (cp, gatr) = self
+                    .market_cache
+                    .get(key.as_str())
+                    .map(|s| (s.last_price, s.gatr_abs))
+                    .unwrap_or((None, None));
+                let targets: Vec<(OrderPanelId, crate::order_panel::OrderSide, midas_chart::widget::order_bracket::EntryType)> =
+                    self.order_panels
+                        .values()
+                        .filter(|p| p.state.symbol.eq_ignore_ascii_case(&symbol_upper))
+                        .map(|p| (p.id, p.state.side, p.state.entry_type))
+                        .collect();
+                for (pid, panel_side, panel_entry_type) in targets {
+                    let _ =
+                        crate::ticker_order_intent::reducer::apply_ensure_draft_bracket(
+                            &mut self.annotation_store,
+                            &self.order_intent_handle,
+                            &key,
+                            panel_side,
+                            panel_entry_type,
+                            cp,
+                            gatr,
+                        );
+                    if let Some(new_ann_id) = self
+                        .order_intent_handle
+                        .snapshot(&key)
+                        .and_then(|i| i.live_annotation_id)
+                    {
+                        if let Some(p) = self.order_panels.get_mut(&pid) {
+                            p.state.bracket_annotation_id = Some(new_ann_id);
+                        }
+                    }
+                }
+
                 if !self.snapped_this_session.contains(&key) {
                     self.snapped_this_session.insert(key.clone());
                     return Task::done(Message::OrderIntent(

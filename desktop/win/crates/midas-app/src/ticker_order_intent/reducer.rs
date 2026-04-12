@@ -791,50 +791,58 @@ fn sanitize_entry_memory_offsets(
 pub enum EnsureDraftOutcome {
     /// A fresh Draft bracket annotation was created.
     Created,
-    /// Skipped because the intent's entry type is Market.
+    /// The existing live bracket's `(side, entry_type)` no longer matches
+    /// the panel's display state — the stale bracket was removed and a
+    /// fresh one was created in its place.
+    ReplacedStale,
+    /// Skipped because the panel's entry type is Market.
     SkippedMarket,
-    /// Skipped because a live bracket already exists in the store.
+    /// Skipped because a live bracket already exists in the store and
+    /// its `(side, entry_type)` matches the panel's display state.
     SkippedLiveExists,
-    /// Skipped because no intent exists for the symbol.
-    SkippedNoIntent,
     /// Skipped because no reference price (stored or live) is available.
     SkippedNoPrice,
 }
 
 /// Ensure a `Draft` bracket annotation exists for `symbol` that
-/// reflects the panel's current compound-key memory.
+/// reflects the panel's **currently displayed** `(side, entry_type)`.
 ///
-/// Fix 1: on `ActivateChart`, the user expects to see the bracket shape
-/// for their currently-selected `(side, entry_type)` without having to
-/// click Place Order. This function is the single authority for that
-/// creation — called from `app.rs` after `apply_maybe_snap` and before
-/// `hydrate_order_panel_for_chart`. The panel never creates annotations
-/// on its own.
+/// # The single source of truth
 ///
-/// # Early-exit rules
+/// The panel's on-screen `(side, entry_type)` is canonical for "what the
+/// user is looking at right now". The intent's `last_side` /
+/// `last_entry_type` MUST match the panel; any mismatch is a bug. This
+/// function is the single authority that reconciles the two surfaces
+/// and (when applicable) creates or replaces the live `Draft` bracket.
 ///
-/// 1. No intent for the symbol → return.
-/// 2. `intent.last_entry_type == Market` → return. Market orders have
-///    no user-set price to preview.
-/// 3. `intent.live_annotation_id` already points to an annotation that
-///    still exists in the store → return. Leave the live bracket alone.
-///    (If the id is set but the annotation was removed externally, fall
-///    through and create a fresh one.)
-/// 4. The current compound's `entry_price_or_offset` is `None` AND the
-///    market cache has no `current_price` → return. We cannot place a
-///    draft without a reference price.
+/// # Flow
 ///
-/// When none of the early exits fire, a fresh `BracketStatus::Draft`
-/// `OrderBracket` is built from the active [`EntryMemory`] (falling
-/// back to [`super::price_defaults::default_initial_prices`] for any
-/// missing fields), inserted into `annotation_store`, and
-/// `intent.live_annotation_id` is updated through the handle with
-/// `IntentSource::Bootstrap` so the D4 first-touch anchor-seed rule
-/// does not fire on a system-created bracket.
+/// 1. **Reconcile**. Fetch the intent (create a fresh one on miss).
+///    If `intent.last_side != panel_side` OR
+///    `intent.last_entry_type != panel_entry_type`, rewrite those fields.
+///    Populate the `(panel_side, panel_entry_type)` bucket from
+///    [`default_initial_prices`] when it is empty. Upsert with
+///    `IntentSource::Bootstrap` (no anchor-seed).
+/// 2. **Replace stale live bracket**. If the live bracket exists but its
+///    `side` / `entry_type` no longer matches the panel, remove it and
+///    clear `intent.live_annotation_id`. Fall through to create a fresh
+///    one. Report [`EnsureDraftOutcome::ReplacedStale`] on success.
+/// 3. **Early-exit on Market**. Market orders execute at market; there
+///    is no user-editable price line to preview.
+/// 4. **Early-exit when a matching live bracket already exists**.
+/// 5. **Create the draft**. Build a fresh `BracketStatus::Draft`
+///    `OrderBracket` from the reconciled [`EntryMemory`], falling back
+///    to [`default_initial_prices`] for any missing fields, insert it
+///    into `annotation_store`, and record the new id on the intent.
+///    Upsert with `IntentSource::Bootstrap` so the D4 first-touch
+///    anchor-seed rule does not fire on a system-created bracket.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_ensure_draft_bracket(
     annotation_store: &mut AnnotationStore,
     handle: &impl TickerIntentAccess,
     symbol: &SymbolKey,
+    panel_side: OrderSide,
+    panel_entry_type: midas_chart::widget::order_bracket::EntryType,
     current_price: Option<f64>,
     gatr_abs: Option<f64>,
 ) -> EnsureDraftOutcome {
@@ -846,18 +854,101 @@ pub(crate) fn apply_ensure_draft_bracket(
 
     use super::price_defaults::default_initial_prices;
 
-    // (1) Intent must exist.
-    let Some(intent_arc) = handle.snapshot(symbol) else {
-        return EnsureDraftOutcome::SkippedNoIntent;
-    };
-    let intent: TickerOrderIntent = (*intent_arc).clone();
+    // ── (1) Reconcile intent.last_(side|entry_type) with the panel. ──
+    //
+    // Load the current intent (or construct a fresh empty one). When
+    // the compound key disagrees with the panel, fix it here — this is
+    // the architectural rule: panel's display is canonical.
+    let initial_intent: TickerOrderIntent = handle
+        .snapshot(symbol)
+        .map(|arc| (*arc).clone())
+        .unwrap_or_else(|| TickerOrderIntent::new(symbol.clone()));
 
-    // (2) Market orders never get a draft bracket.
-    if intent.last_entry_type == EntryType::Market {
+    let needs_reconcile = initial_intent.last_side != panel_side
+        || initial_intent.last_entry_type != panel_entry_type;
+    let mut intent = initial_intent;
+    if needs_reconcile {
+        intent.last_side = panel_side;
+        intent.last_entry_type = panel_entry_type;
+    }
+
+    // Ensure the (panel_side, panel_entry_type) bucket exists. If it is
+    // empty, seed it from the defaults so the panel and the bracket are
+    // positioned on the same rules.
+    let bucket_key = (panel_side, panel_entry_type);
+    let bucket_empty = intent
+        .entries
+        .get(&bucket_key)
+        .map(|m| m.entry_price_or_offset.is_none())
+        .unwrap_or(true);
+    if bucket_empty {
+        if let Some(cp) = current_price.filter(|p| p.is_finite() && *p > 0.0) {
+            let defaults =
+                default_initial_prices(panel_side, panel_entry_type, cp, gatr_abs);
+            let memory = intent.entries.entry(bucket_key).or_default();
+            if memory.entry_price_or_offset.is_none() {
+                memory.entry_price_or_offset = Some(defaults.entry);
+            }
+        }
+    }
+
+    // Persist any reconcile-only changes (no draft bracket mutation
+    // yet). We always upsert after a reconcile so the store reflects
+    // the panel's display even on a no-price early-exit below.
+    if needs_reconcile || bucket_empty {
+        intent.updated_at = chrono::Utc::now();
+        let _ = handle.upsert(OrderIntentMsg::Upsert {
+            symbol: symbol.clone(),
+            intent: Box::new(intent.clone()),
+            source: IntentSource::Bootstrap,
+        });
+    }
+
+    // ── (2) Replace a stale live bracket whose (side, entry_type) no
+    //        longer matches the panel. ────────────────────────────────
+    let mut stale_replaced = false;
+    if let Some(ann_id) = intent.live_annotation_id {
+        let stale = annotation_store
+            .get_bracket(symbol.as_str(), ann_id)
+            .map(|b| {
+                let ann_side = match b.side {
+                    BracketSide::Long => OrderSide::Buy,
+                    BracketSide::Short => OrderSide::Sell,
+                };
+                ann_side != panel_side || b.entry_type != panel_entry_type
+            });
+        match stale {
+            Some(true) => {
+                // Drop the stale bracket and clear the back-link.
+                annotation_store.remove(symbol.as_str(), ann_id);
+                intent.live_annotation_id = None;
+                stale_replaced = true;
+            }
+            Some(false) => { /* matches — handled below */ }
+            None => {
+                // Back-link points at a missing annotation; clear and
+                // fall through to create a fresh draft.
+                intent.live_annotation_id = None;
+            }
+        }
+    }
+
+    // ── (3) Market orders never get a draft preview line. ────────────
+    if panel_entry_type == EntryType::Market {
+        // If we cleared a stale non-Market bracket above, persist the
+        // cleared id so the panel stays in sync.
+        if stale_replaced {
+            intent.updated_at = chrono::Utc::now();
+            let _ = handle.upsert(OrderIntentMsg::Upsert {
+                symbol: symbol.clone(),
+                intent: Box::new(intent),
+                source: IntentSource::Bootstrap,
+            });
+        }
         return EnsureDraftOutcome::SkippedMarket;
     }
 
-    // (3) Already have a live bracket that exists in the store.
+    // ── (4) If the live bracket already exists and matches, stop. ────
     if let Some(ann_id) = intent.live_annotation_id {
         if annotation_store
             .get_by_id(symbol.as_str(), ann_id)
@@ -865,33 +956,40 @@ pub(crate) fn apply_ensure_draft_bracket(
         {
             return EnsureDraftOutcome::SkippedLiveExists;
         }
-        // Stale back-link — the annotation was removed externally.
-        // Fall through and create a fresh draft.
+        // Missing annotation — fall through to create a fresh one.
+        intent.live_annotation_id = None;
     }
 
+    // ── (5) Create the draft. ────────────────────────────────────────
     let memory = intent
         .entries
-        .get(&(intent.last_side, intent.last_entry_type))
+        .get(&bucket_key)
         .cloned()
         .unwrap_or_default();
 
-    // (4) Need a reference price. Prefer stored entry, else market.
+    // Need a reference price. Prefer stored entry, else market.
     let reference_price = memory
         .entry_price_or_offset
         .filter(|p| p.is_finite() && *p > 0.0)
         .or_else(|| current_price.filter(|p| p.is_finite() && *p > 0.0));
     let Some(reference_price) = reference_price else {
+        // No price available. Persist any cleared-stale state before
+        // bailing so the intent doesn't carry a dangling live id.
+        if stale_replaced {
+            intent.updated_at = chrono::Utc::now();
+            let _ = handle.upsert(OrderIntentMsg::Upsert {
+                symbol: symbol.clone(),
+                intent: Box::new(intent),
+                source: IntentSource::Bootstrap,
+            });
+        }
         return EnsureDraftOutcome::SkippedNoPrice;
     };
     let effective_current = current_price
         .filter(|p| p.is_finite() && *p > 0.0)
         .unwrap_or(reference_price);
-    let defaults = default_initial_prices(
-        intent.last_side,
-        intent.last_entry_type,
-        effective_current,
-        gatr_abs,
-    );
+    let defaults =
+        default_initial_prices(panel_side, panel_entry_type, effective_current, gatr_abs);
 
     // Resolve each leg: stored memory wins, else defaults.
     let entry_price = memory
@@ -899,7 +997,7 @@ pub(crate) fn apply_ensure_draft_bracket(
         .filter(|p| p.is_finite() && *p > 0.0)
         .unwrap_or(defaults.entry);
 
-    let stop_trigger = match intent.last_entry_type {
+    let stop_trigger = match panel_entry_type {
         EntryType::StopLimit => defaults.stop_trigger,
         _ => None,
     };
@@ -944,7 +1042,7 @@ pub(crate) fn apply_ensure_draft_bracket(
         entry: make_leg(entry_price, LegRole::Entry),
         take_profit: tp_price.map(|p| make_leg(p, LegRole::TakeProfit)),
         stop_loss: sl_price.map(|p| make_leg(p, LegRole::StopLoss)),
-        side: match intent.last_side {
+        side: match panel_side {
             OrderSide::Buy => BracketSide::Long,
             OrderSide::Sell => BracketSide::Short,
         },
@@ -952,7 +1050,7 @@ pub(crate) fn apply_ensure_draft_bracket(
         quantity: memory.quantity,
         saved: false,
         filled_qty: None,
-        entry_type: intent.last_entry_type,
+        entry_type: panel_entry_type,
         entry_stop_price: stop_trigger,
         wrong_side_warning: false,
     };
@@ -964,16 +1062,19 @@ pub(crate) fn apply_ensure_draft_bracket(
 
     // Record the new annotation id on the intent. Source = Bootstrap
     // so the D4 first-touch rule does not treat this as a user touch.
-    let mut updated = intent;
-    updated.live_annotation_id = Some(ann_id);
-    updated.updated_at = chrono::Utc::now();
+    intent.live_annotation_id = Some(ann_id);
+    intent.updated_at = chrono::Utc::now();
     let _ = handle.upsert(OrderIntentMsg::Upsert {
         symbol: symbol.clone(),
-        intent: Box::new(updated),
+        intent: Box::new(intent),
         source: IntentSource::Bootstrap,
     });
 
-    EnsureDraftOutcome::Created
+    if stale_replaced {
+        EnsureDraftOutcome::ReplacedStale
+    } else {
+        EnsureDraftOutcome::Created
+    }
 }
 
 /// Apply a `MaybeSnapToGatr` message: route into the pure

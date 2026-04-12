@@ -630,7 +630,7 @@ mod tests {
             })
             .collect();
         assert_eq!(texts.len(), 2);
-        assert!(texts.iter().any(|t| *t == "LOCK"), "lock item present");
+        assert!(texts.contains(&"LOCK"), "lock item present");
         assert!(
             texts.iter().any(|t| t.contains("Support")),
             "label item present"

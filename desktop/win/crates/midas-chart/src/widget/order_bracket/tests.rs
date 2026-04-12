@@ -1611,3 +1611,60 @@ fn compute_bracket_wide_prices_do_not_shift_badges() {
         sl_label.screen_y
     );
 }
+
+/// A StopLimit draft with both `entry.line.price` and
+/// `entry_stop_price` must produce two distinct labels on the chart:
+/// the limit entry line ("LMT" / entry) and the stop trigger line
+/// ("STP"). Regression for the user-reported "only one line shows"
+/// bug where a StopLimit bracket rendered as a single-line Market
+/// bracket.
+#[test]
+fn stoplimit_draft_renders_two_distinct_lines() {
+    use crate::widget::hit_test::HitZoneKind;
+
+    let mut b = make_bracket(103.0, 110.0, 98.0);
+    b.entry_type = EntryType::StopLimit;
+    b.side = BracketSide::Long;
+    b.status = BracketStatus::Draft;
+    b.entry_stop_price = Some(102.0);
+
+    let camera = Camera2D {
+        viewport_width: 1920,
+        viewport_height: 1080,
+        time_start: 0.0,
+        time_end: 100_000.0,
+        price_low: 90.0,
+        price_high: 120.0,
+        dpi_scale: 1.0,
+    };
+    let data = CandleBuffer::new();
+    let theme = Theme::default();
+    let aid = AnnotationId(77);
+    let ctx = make_compute_ctx(&camera, &data, &theme, None);
+    let out = compute_bracket(&b, aid, &ctx, 1.0);
+
+    // The STP label must be present alongside the entry line label.
+    let has_stp_label = out.labels.iter().any(|l| l.text.starts_with("STP "));
+    assert!(
+        has_stp_label,
+        "StopLimit draft should emit a STP trigger label; got labels: {:?}",
+        out.labels.iter().map(|l| &l.text).collect::<Vec<_>>()
+    );
+
+    // The entry line is at price 103.0, the stop trigger at 102.0 —
+    // they must land at different Y positions.
+    let entry_y = camera.price_to_y(103.0);
+    let stop_y = camera.price_to_y(102.0);
+    assert!((entry_y - stop_y).abs() > 1.0, "entry and stop y must differ");
+
+    // A draft StopLimit must emit a draggable hit zone for the stop
+    // trigger so the user can grab it independently.
+    let has_stop_hit_zone = out
+        .hit_zones
+        .iter()
+        .any(|z| z.kind == HitZoneKind::BracketStopTrigger);
+    assert!(
+        has_stop_hit_zone,
+        "StopLimit draft must emit a BracketStopTrigger hit zone"
+    );
+}
