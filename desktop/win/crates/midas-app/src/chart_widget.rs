@@ -164,7 +164,26 @@ pub struct ChartWidgetState {
 /// (`BracketTP`, `BracketSL`, `BracketEntry`, `BracketStopTrigger`).
 /// Returns the closest within 6px tolerance.
 ///
-/// Mirrors `hit_test_annotation` in `interaction/mod.rs` for consistency.
+/// TODO: Replace with `midas_chart::interaction::hit_test_annotation` once
+/// the chart_widget snapshot uses a unified `Vec<Annotation>` that includes
+/// levels as `AnnotationKind::Level` instead of separate `StoredLevel[]`.
+/// The two functions have the same guards and tolerance (6 px), but diverge
+/// in three ways:
+///
+/// - **Input model**: this function takes separate `levels: &[StoredLevel]`
+///   plus bracket-only `&[Annotation]`; the chart-crate version takes a
+///   unified `&[Annotation]` slice.
+/// - **Return type**: the chart-crate version returns an extra `f64`
+///   offset and `Option<BracketClampCtx>` needed for drag clamping;
+///   this function only returns `(AnnotationId, HitZoneKind)`.
+/// - **Tie-breaking**: the chart-crate version uses priority-based
+///   disambiguation (`leg_priority()` + `BRACKET_TIE_EPSILON_PX`)
+///   for overlapping bracket legs; this function uses naive "strictly
+///   closer" ordering.
+///
+/// Unifying requires migrating `ChartRenderSnapshot` to carry a single
+/// `Vec<Annotation>` that includes levels, at which point this function
+/// can delegate to the chart-crate version and discard the extras.
 fn annotation_at_cursor(
     annotations: &[Annotation],
     levels: &[StoredLevel],
