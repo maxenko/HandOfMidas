@@ -16,12 +16,21 @@
 //!    collapsed denominator would produce garbage deltas.
 //! 4. `intent.gatr_anchor.anchor_price.is_none()` → `None`. The first
 //!    save is the anchor-seed; no snap happens that frame.
-//! 5. `intent.live_annotation_id.is_none()` → `None`. Nothing on the
-//!    chart to reposition.
-//! 6. Otherwise, delegate to
+//! 5. Otherwise, delegate to
 //!    [`crate::order_panel::should_reposition`] verbatim. On a true
 //!    result, return a [`SnapPlan`] carrying the shift delta and the
 //!    fresh anchor at the current price.
+//!
+//! # Single source of truth
+//!
+//! This function does **not** consult `intent.live_annotation_id`. Both
+//! the chart bracket annotation and the order-panel input fields are
+//! views of the same [`TickerOrderIntent`]; a panel-only intent with no
+//! live bracket is as legitimately "stale" as a bracket-backed one. The
+//! reducer that consumes the [`SnapPlan`] applies `plan.delta` to the
+//! intent's active `EntryMemory` bucket *and* to the linked annotation
+//! (when one exists). Both surfaces stay in lockstep because they
+//! receive the same delta.
 
 use chrono::Utc;
 
@@ -39,11 +48,14 @@ pub const MIN_GATR_ABS: f64 = 1e-9;
 /// A proposed snap action returned by [`maybe_snap`].
 ///
 /// The caller applies this by:
-/// 1. Stashing the pre-snap bracket state for undo.
-/// 2. Calling [`crate::order_panel::reposition_bracket`] on the linked
+/// 1. Stashing the pre-snap intent (and bracket, if any) for undo.
+/// 2. Shifting every absolute price in the active `EntryMemory` bucket
+///    by `plan.delta`.
+/// 3. If `intent.live_annotation_id.is_some()`, calling
+///    [`crate::order_panel::reposition_bracket`] on the linked
 ///    annotation with `current_price` (which equals
 ///    `intent.gatr_anchor.anchor_price + plan.delta`).
-/// 3. Writing `plan.new_anchor` into the intent's `gatr_anchor`.
+/// 4. Writing `plan.new_anchor` into the intent's `gatr_anchor`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SnapPlan {
     /// Signed price delta to apply to every bracket leg.
@@ -103,8 +115,6 @@ pub fn maybe_snap(
     if !anchor_price.is_finite() {
         return None;
     }
-    // Guard 5: must have a live bracket to reposition.
-    intent.live_annotation_id?;
 
     // Delegate the threshold check to the existing helper so the
     // semantics match the recall path at `app.rs:1683-1698` exactly.

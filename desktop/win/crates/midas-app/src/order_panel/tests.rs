@@ -1206,6 +1206,30 @@ mod hydration {
     }
 
     #[test]
+    fn dirty_on_different_symbol_still_hydrates() {
+        // Covers the Slice 4 (panel-input extension) guard: switching
+        // tickers must always proceed even when the outgoing panel has
+        // unsaved edits. The dirty flag only blocks same-symbol
+        // re-hydration.
+        let mut panel = OrderPanelState {
+            symbol: "ACME".to_string(),
+            limit_price: "112.66".to_string(),
+            entry_type: EntryType::Limit,
+            dirty: true,
+            ..Default::default()
+        };
+
+        let intent = fixture_intent("PLTR");
+        panel.hydrate_from_intent(&intent, Some(14.45));
+
+        assert_eq!(panel.symbol, "PLTR");
+        assert!(!panel.dirty, "cross-ticker hydration clears dirty");
+        // The fixture's compound is (Buy, Stop); hydration overwrote
+        // the old Limit value.
+        assert_eq!(panel.entry_type, EntryType::Stop);
+    }
+
+    #[test]
     fn rehydrate_compound_within_same_side_lands_on_new_type_bucket() {
         let mut panel = OrderPanelState::default();
         // Seed intent with (Buy, Stop) AND (Buy, Limit) distinct.
@@ -1241,3 +1265,11 @@ mod hydration {
         assert_eq!(panel.sl_value, "195.00");
     }
 }
+
+// Slice 4 panel-input snap tests previously lived here as
+// `mod snap_panel`. They have been moved to
+// `crate::ticker_order_intent::reducer::tests` as part of the
+// single-source-of-truth refactor: the snap policy is now a reducer
+// concern, not a panel-view concern. The panel is purely a view of
+// `TickerOrderIntent` — snapping its fields directly would create a
+// second source of truth.

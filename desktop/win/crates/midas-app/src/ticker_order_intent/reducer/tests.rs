@@ -40,8 +40,8 @@ use crate::ticker_order_intent::{
 };
 
 use super::{
-    apply_cancel_live_bracket, apply_remove_live_bracket, apply_update_from_surface,
-    UpdateSurfaceOutcome,
+    apply_cancel_live_bracket, apply_remove_live_bracket, apply_snap_to_intent,
+    apply_update_from_surface, UpdateSurfaceOutcome,
 };
 
 // ── Mock `TickerIntentAccess` ───────────────────────────────────────
@@ -994,6 +994,391 @@ fn anchor_lifecycle_chart_source_seeds_anchor() {
     let intent = handle.snapshot(&SymbolKey::new("AAPL")).unwrap();
     assert_eq!(intent.gatr_anchor.anchor_price, Some(120.0));
     assert_eq!(intent.gatr_anchor.anchor_gatr, Some(1.5));
+}
+
+// ── Single-source-of-truth snap tests ────────────────────────────
+//
+// These drive [`super::apply_snap_to_intent`] — the pure-function
+// half of `MaybeSnapToGatr`. Previously, panel-input snapping lived
+// in `order_panel::snap_panel_to_current_price`. The refactor moves
+// every snap decision into the reducer so the panel and the chart
+// bracket are both views of the same intent.
+
+/// Build an intent with a stale GATR anchor and a populated
+/// `(Buy, EntryType)` bucket. `anchor_price` is the "where the
+/// bracket was last endorsed" marker used by the recency guard.
+fn snap_intent(
+    symbol: &str,
+    entry_type: EntryType,
+    anchor_price: f64,
+    bucket_entry: Option<f64>,
+    bucket_tp: Option<f64>,
+    bucket_sl: Option<f64>,
+    live_id: Option<AnnotationId>,
+) -> TickerOrderIntent {
+    let memory = EntryMemory {
+        entry_price_or_offset: bucket_entry,
+        quantity: Some(100.0),
+        tp_enabled: bucket_tp.is_some(),
+        tp_value: bucket_tp.map(|p| format!("{:.2}", p)).unwrap_or_default(),
+        tp_mode: PriceInputMode::Absolute,
+        sl_enabled: bucket_sl.is_some(),
+        sl_value: bucket_sl.map(|p| format!("{:.2}", p)).unwrap_or_default(),
+        sl_mode: PriceInputMode::Absolute,
+        sl_type: StopLossType::Stop,
+        sl_limit_value: String::new(),
+    };
+    TickerOrderIntent {
+        version: CURRENT_VERSION,
+        symbol: SymbolKey::new(symbol),
+        last_side: OrderSide::Buy,
+        last_entry_type: entry_type,
+        entries: [((OrderSide::Buy, entry_type), memory)].into_iter().collect(),
+        gatr_anchor: GatrAnchor {
+            anchor_price: Some(anchor_price),
+            anchor_gatr: Some(0.40),
+        },
+        live_annotation_id: live_id,
+        broker_order_id: None,
+        pinned: false,
+        // Beyond the recency guard so the snap can fire.
+        updated_at: chrono::Utc::now() - chrono::Duration::try_hours(2).unwrap(),
+    }
+}
+
+/// Panel-only PLTR regression: no chart bracket, stored
+/// `(Buy, Limit).entry_price_or_offset = 112.66`, market at 14.45.
+/// After `apply_snap_to_intent`, the EntryMemory is shifted to
+/// ~14.45 and the hydrated panel shows the corrected limit_price.
+#[test]
+fn snap_panel_only_pltr_regression() {
+    let mut store = AnnotationStore::new();
+    let handle = MockHandle::new();
+    let symbol = SymbolKey::new("PLTR");
+
+    handle.seed(
+        symbol.clone(),
+        snap_intent(
+            "PLTR",
+            EntryType::Limit,
+            112.66, // stale anchor from the ACME era
+            Some(112.66),
+            None,
+            None,
+            None, // no live bracket — panel-only
+        ),
+    );
+
+    let mut panels = panels_map(vec![make_panel(1, "PLTR", None)]);
+
+    let applied = apply_snap_to_intent(&mut store, &handle, &mut panels, &symbol, 14.45, Some(0.40))
+        .expect("snap should fire");
+    assert!((applied.delta + 98.21).abs() < 1e-6, "delta = 14.45 - 112.66");
+
+    // Intent EntryMemory shifted.
+    let intent = handle.snapshot(&symbol).unwrap();
+    let mem = intent
+        .entries
+        .get(&(OrderSide::Buy, EntryType::Limit))
+        .unwrap();
+    let new_entry = mem.entry_price_or_offset.unwrap();
+    assert!(
+        (new_entry - 14.45).abs() < 1e-6,
+        "EntryMemory.entry_price_or_offset shifted from 112.66 to ~14.45, got {new_entry}"
+    );
+    // Anchor refreshed to current price.
+    assert_eq!(intent.gatr_anchor.anchor_price, Some(14.45));
+
+    // Hydrated panel shows the corrected value.
+    let panel = panels.values().next().unwrap();
+    assert_eq!(panel.state.limit_price, "14.45");
+}
+
+/// Both surfaces lockstep: an intent with a stale `(Buy, Limit)`
+/// bucket AND a stale live bracket annotation. After
+/// `apply_snap_to_intent`, both are shifted by the same delta.
+#[test]
+fn snap_lockstep_shifts_entry_memory_and_annotation() {
+    let mut store = AnnotationStore::new();
+    // Live bracket at the stale price era.
+    let ann_id = store.add(
+        "PLTR",
+        AnnotationKind::OrderBracket(Box::new(make_bracket(112.66, Some(115.0), Some(110.0)))),
+    );
+
+    let handle = MockHandle::new();
+    handle.seed(
+        SymbolKey::new("PLTR"),
+        snap_intent(
+            "PLTR",
+            EntryType::Limit,
+            112.66,
+            Some(112.66),
+            Some(115.0),
+            Some(110.0),
+            Some(ann_id),
+        ),
+    );
+
+    let mut panels = panels_map(vec![make_panel(1, "PLTR", Some(ann_id))]);
+    let symbol = SymbolKey::new("PLTR");
+
+    let applied = apply_snap_to_intent(&mut store, &handle, &mut panels, &symbol, 14.45, Some(0.40))
+        .expect("snap should fire");
+    let delta = applied.delta;
+
+    // Intent shifted.
+    let intent = handle.snapshot(&symbol).unwrap();
+    let mem = intent
+        .entries
+        .get(&(OrderSide::Buy, EntryType::Limit))
+        .unwrap();
+    assert!((mem.entry_price_or_offset.unwrap() - (112.66 + delta)).abs() < 1e-6);
+    let new_tp: f64 = mem.tp_value.parse().unwrap();
+    assert!((new_tp - (115.0 + delta)).abs() < 1e-6);
+    let new_sl: f64 = mem.sl_value.parse().unwrap();
+    assert!((new_sl - (110.0 + delta)).abs() < 1e-6);
+
+    // Chart bracket shifted by the same delta.
+    let bracket = store.get_bracket("PLTR", ann_id).unwrap();
+    assert!((bracket.entry.line.price - (112.66 + delta)).abs() < 1e-6);
+
+    // Undo slot seeded with both the prev intent and the bracket clone.
+    assert_eq!(applied.pre_snap.annotation_id, Some(ann_id));
+    assert!(applied.pre_snap.bracket.is_some());
+    let prev_entry = applied
+        .pre_snap
+        .prev_intent
+        .entries
+        .get(&(OrderSide::Buy, EntryType::Limit))
+        .unwrap()
+        .entry_price_or_offset;
+    assert_eq!(prev_entry, Some(112.66));
+}
+
+/// Panel-only snap has no bracket to reposition → `pre_snap.bracket`
+/// is `None` and `pre_snap.annotation_id` is `None`.
+#[test]
+fn snap_panel_only_pre_snap_has_no_bracket() {
+    let mut store = AnnotationStore::new();
+    let handle = MockHandle::new();
+    let symbol = SymbolKey::new("PLTR");
+    handle.seed(
+        symbol.clone(),
+        snap_intent("PLTR", EntryType::Limit, 112.66, Some(112.66), None, None, None),
+    );
+    let mut panels = panels_map(vec![make_panel(1, "PLTR", None)]);
+
+    let applied =
+        apply_snap_to_intent(&mut store, &handle, &mut panels, &symbol, 14.45, Some(0.40)).unwrap();
+    assert!(applied.pre_snap.annotation_id.is_none());
+    assert!(applied.pre_snap.bracket.is_none());
+}
+
+/// The snap skips TP/SL fields that are in Offset / Percent mode
+/// (they are relative to entry, not absolute).
+#[test]
+fn snap_skips_offset_and_percent_mode_fields() {
+    let mut store = AnnotationStore::new();
+    let handle = MockHandle::new();
+    let symbol = SymbolKey::new("PLTR");
+
+    let memory = EntryMemory {
+        entry_price_or_offset: Some(112.66),
+        quantity: Some(100.0),
+        tp_enabled: true,
+        tp_value: "1.00".to_string(), // offset: +1.00 off entry
+        tp_mode: PriceInputMode::Offset,
+        sl_enabled: true,
+        sl_value: "2.5".to_string(), // percent: 2.5% below entry
+        sl_mode: PriceInputMode::Percent,
+        sl_type: StopLossType::Stop,
+        sl_limit_value: String::new(),
+    };
+    handle.seed(
+        symbol.clone(),
+        TickerOrderIntent {
+            version: CURRENT_VERSION,
+            symbol: symbol.clone(),
+            last_side: OrderSide::Buy,
+            last_entry_type: EntryType::Limit,
+            entries: [((OrderSide::Buy, EntryType::Limit), memory)]
+                .into_iter()
+                .collect(),
+            gatr_anchor: GatrAnchor {
+                anchor_price: Some(112.66),
+                anchor_gatr: Some(0.40),
+            },
+            live_annotation_id: None,
+            broker_order_id: None,
+            pinned: false,
+            updated_at: chrono::Utc::now() - chrono::Duration::try_hours(2).unwrap(),
+        },
+    );
+    let mut panels = panels_map(vec![make_panel(1, "PLTR", None)]);
+
+    apply_snap_to_intent(&mut store, &handle, &mut panels, &symbol, 14.45, Some(0.40)).unwrap();
+
+    let intent = handle.snapshot(&symbol).unwrap();
+    let mem = intent
+        .entries
+        .get(&(OrderSide::Buy, EntryType::Limit))
+        .unwrap();
+    // Entry shifted.
+    assert!((mem.entry_price_or_offset.unwrap() - 14.45).abs() < 1e-6);
+    // TP / SL untouched — the string values round-trip verbatim.
+    assert_eq!(mem.tp_value, "1.00");
+    assert_eq!(mem.sl_value, "2.5");
+}
+
+/// Market entry type: `entry_price_or_offset` is not shifted (it is
+/// always the live last_price, not a stored absolute), but absolute
+/// TP / SL fields in that bucket still are.
+#[test]
+fn snap_market_bucket_skips_entry_but_shifts_absolute_tp_sl() {
+    let mut store = AnnotationStore::new();
+    let handle = MockHandle::new();
+    let symbol = SymbolKey::new("PLTR");
+
+    let memory = EntryMemory {
+        entry_price_or_offset: Some(112.66), // stale; Market ignores it
+        quantity: Some(100.0),
+        tp_enabled: true,
+        tp_value: "120.00".to_string(),
+        tp_mode: PriceInputMode::Absolute,
+        sl_enabled: true,
+        sl_value: "110.00".to_string(),
+        sl_mode: PriceInputMode::Absolute,
+        sl_type: StopLossType::Stop,
+        sl_limit_value: String::new(),
+    };
+    handle.seed(
+        symbol.clone(),
+        TickerOrderIntent {
+            version: CURRENT_VERSION,
+            symbol: symbol.clone(),
+            last_side: OrderSide::Buy,
+            last_entry_type: EntryType::Market,
+            entries: [((OrderSide::Buy, EntryType::Market), memory)]
+                .into_iter()
+                .collect(),
+            gatr_anchor: GatrAnchor {
+                anchor_price: Some(112.66),
+                anchor_gatr: Some(0.40),
+            },
+            live_annotation_id: None,
+            broker_order_id: None,
+            pinned: false,
+            updated_at: chrono::Utc::now() - chrono::Duration::try_hours(2).unwrap(),
+        },
+    );
+    let mut panels = panels_map(vec![make_panel(1, "PLTR", None)]);
+
+    apply_snap_to_intent(&mut store, &handle, &mut panels, &symbol, 14.45, Some(0.40)).unwrap();
+
+    let intent = handle.snapshot(&symbol).unwrap();
+    let mem = intent
+        .entries
+        .get(&(OrderSide::Buy, EntryType::Market))
+        .unwrap();
+    // Market entry: stored entry_price_or_offset is NOT shifted.
+    assert_eq!(mem.entry_price_or_offset, Some(112.66));
+    // TP / SL shifted by the same delta.
+    let delta = 14.45 - 112.66;
+    let new_tp: f64 = mem.tp_value.parse().unwrap();
+    assert!((new_tp - (120.0 + delta)).abs() < 1e-6);
+    let new_sl: f64 = mem.sl_value.parse().unwrap();
+    assert!((new_sl - (110.0 + delta)).abs() < 1e-6);
+}
+
+/// StopLimit SL type: `sl_limit_value` is an absolute dollar level
+/// (the limit leg of the stop-limit order) and is shifted too.
+#[test]
+fn snap_shifts_stoplimit_sl_limit_value() {
+    let mut store = AnnotationStore::new();
+    let handle = MockHandle::new();
+    let symbol = SymbolKey::new("PLTR");
+
+    let memory = EntryMemory {
+        entry_price_or_offset: Some(112.66),
+        quantity: Some(100.0),
+        tp_enabled: false,
+        tp_value: String::new(),
+        tp_mode: PriceInputMode::Absolute,
+        sl_enabled: true,
+        sl_value: "110.00".to_string(),
+        sl_mode: PriceInputMode::Absolute,
+        sl_type: StopLossType::StopLimit,
+        sl_limit_value: "105.00".to_string(),
+    };
+    handle.seed(
+        symbol.clone(),
+        TickerOrderIntent {
+            version: CURRENT_VERSION,
+            symbol: symbol.clone(),
+            last_side: OrderSide::Buy,
+            last_entry_type: EntryType::Limit,
+            entries: [((OrderSide::Buy, EntryType::Limit), memory)]
+                .into_iter()
+                .collect(),
+            gatr_anchor: GatrAnchor {
+                anchor_price: Some(112.66),
+                anchor_gatr: Some(0.40),
+            },
+            live_annotation_id: None,
+            broker_order_id: None,
+            pinned: false,
+            updated_at: chrono::Utc::now() - chrono::Duration::try_hours(2).unwrap(),
+        },
+    );
+    let mut panels = panels_map(vec![make_panel(1, "PLTR", None)]);
+    apply_snap_to_intent(&mut store, &handle, &mut panels, &symbol, 14.45, Some(0.40)).unwrap();
+
+    let intent = handle.snapshot(&symbol).unwrap();
+    let mem = intent
+        .entries
+        .get(&(OrderSide::Buy, EntryType::Limit))
+        .unwrap();
+    let delta = 14.45 - 112.66;
+    let new_sl_limit: f64 = mem.sl_limit_value.parse().unwrap();
+    assert!((new_sl_limit - (105.0 + delta)).abs() < 1e-6);
+}
+
+/// No intent → helper returns `None` without touching the store.
+#[test]
+fn snap_missing_intent_returns_none() {
+    let mut store = AnnotationStore::new();
+    let handle = MockHandle::new();
+    let mut panels = panels_map(vec![]);
+    let symbol = SymbolKey::new("MISSING");
+    let applied =
+        apply_snap_to_intent(&mut store, &handle, &mut panels, &symbol, 14.45, Some(0.40));
+    assert!(applied.is_none());
+}
+
+/// Guards drop the snap → helper returns `None` and no mutations.
+#[test]
+fn snap_respects_pinned_guard() {
+    let mut store = AnnotationStore::new();
+    let handle = MockHandle::new();
+    let symbol = SymbolKey::new("PLTR");
+
+    let mut intent = snap_intent("PLTR", EntryType::Limit, 112.66, Some(112.66), None, None, None);
+    intent.pinned = true;
+    handle.seed(symbol.clone(), intent);
+
+    let mut panels = panels_map(vec![make_panel(1, "PLTR", None)]);
+    assert!(
+        apply_snap_to_intent(&mut store, &handle, &mut panels, &symbol, 14.45, Some(0.40))
+            .is_none()
+    );
+    // Intent unchanged.
+    let intent = handle.snapshot(&symbol).unwrap();
+    let mem = intent
+        .entries
+        .get(&(OrderSide::Buy, EntryType::Limit))
+        .unwrap();
+    assert_eq!(mem.entry_price_or_offset, Some(112.66));
 }
 
 /// With no `current_price` available, anchor-seeding is skipped.

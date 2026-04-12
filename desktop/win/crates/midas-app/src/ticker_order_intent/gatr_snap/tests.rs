@@ -116,9 +116,29 @@ fn tiny_gatr_blocks_snap() {
 }
 
 #[test]
-fn no_live_bracket_blocks_snap() {
+fn no_live_bracket_still_emits_plan() {
+    // Single-source-of-truth refactor: the absence of a chart bracket
+    // does not block the snap. A panel-only intent (user typed a stale
+    // limit price with no chart bracket drawn) is still eligible —
+    // the reducer will shift the EntryMemory and skip the annotation
+    // side-effect.
     let intent = fixture(Some(100.0), Some(1.0), false, 120, None);
-    assert!(maybe_snap(&intent, 110.0, Some(1.0)).is_none());
+    let plan = maybe_snap(&intent, 110.0, Some(1.0))
+        .expect("panel-only intent should still snap");
+    assert!((plan.delta - 10.0).abs() < 1e-9);
+    assert_eq!(plan.new_anchor.anchor_price, Some(110.0));
+}
+
+#[test]
+fn panel_only_intent_with_stale_price_fires() {
+    // PLTR-style fixture: no chart bracket, stale $100 anchor, current
+    // price $14.45 with GATR 0.40 → ratio 213× GATR → snap fires.
+    let intent = fixture(Some(100.0), Some(0.40), false, 120, None);
+    let plan = maybe_snap(&intent, 14.45, Some(0.40))
+        .expect("panel-only stale intent should snap");
+    assert!((plan.delta + 85.55).abs() < 1e-9);
+    assert_eq!(plan.new_anchor.anchor_price, Some(14.45));
+    assert_eq!(plan.reason, SnapReason::DriftExceeded);
 }
 
 #[test]

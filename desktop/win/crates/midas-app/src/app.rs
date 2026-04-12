@@ -1592,6 +1592,16 @@ impl MidasApp {
             }
         }
 
+        // Single-source-of-truth refactor: the entry-type change may
+        // have surfaced a previously-hidden price field (e.g. Market →
+        // Limit reveals `limit_price`). Route through the reducer's
+        // `MaybeSnapToGatr` handler so the intent is corrected and
+        // the panel hydrates from the corrected memory.
+        let _ = crate::ticker_order_intent::reducer::apply_maybe_snap(
+            self,
+            crate::annotation_store::SymbolKey::new(&symbol_upper),
+        );
+
         // Update the bracket annotation.
         if let Some(ann_id) = ann_id {
             let limit_price_str = self
@@ -2814,6 +2824,7 @@ impl MidasApp {
             }
         }
     }
+
 }
 
 // Config persistence (build_config, mark_config_dirty, maybe_save_config,
@@ -3017,9 +3028,22 @@ impl MidasApp {
                 if let Some(pane) = self.workspace.find_pane(id) {
                     self.workspace.set_focus(pane);
                 }
-                // Slice 2: hydrate any order panel linked to this chart
-                // from the ticker intent store so switching charts
-                // restores the last-used inputs for that symbol.
+                // Single-source-of-truth refactor: route through the
+                // reducer's `MaybeSnapToGatr` handler BEFORE hydration
+                // so the intent is corrected first. The reducer then
+                // re-hydrates any linked panel as its last step, so
+                // the post-activation view already reflects the
+                // corrected memory. If the guards drop the snap, we
+                // still need to hydrate explicitly.
+                let sym = self.charts.get(&id).map(|c| c.symbol.clone());
+                if let Some(sym) = sym.as_ref().filter(|s| !s.is_empty()) {
+                    let _ = crate::ticker_order_intent::reducer::apply_maybe_snap(
+                        self,
+                        crate::annotation_store::SymbolKey::new(sym),
+                    );
+                }
+                // Slice 2 hydration — idempotent when the reducer
+                // already re-hydrated.
                 self.hydrate_order_panel_for_chart(id);
                 Task::none()
             }
@@ -3055,6 +3079,19 @@ impl MidasApp {
 
             Message::PaneFocused(pane) => {
                 self.workspace.set_focus(pane);
+                // Single-source-of-truth refactor: the focus change
+                // routes through the reducer's `MaybeSnapToGatr`
+                // handler. The reducer corrects both surfaces (panel
+                // `EntryMemory` and chart bracket annotation) in
+                // lockstep by the same `plan.delta`. The existing
+                // `maybe_emit_snap_for_active_chart` below still fires
+                // the one-shot-per-session toast path.
+                if let Some(sym) = self.active_chart_symbol() {
+                    let _ = crate::ticker_order_intent::reducer::apply_maybe_snap(
+                        self,
+                        crate::annotation_store::SymbolKey::new(&sym),
+                    );
+                }
                 self.maybe_emit_snap_for_active_chart()
             }
 
@@ -3933,6 +3970,14 @@ impl MidasApp {
                 // Fields: (annotation_id, symbol, field_name, parsed_price)
                 let mut annotation_sync: Option<(AnnotationId, String, &str, f64)> = None;
 
+                // Slice 4 (panel-input extension): when the user flips
+                // side (Buy ⇄ Sell), the compound-key rehydrate above
+                // may have just swapped in a previously-stored absolute
+                // price from the opposite-side bucket. Capture the
+                // symbol so we can run the panel-input snap against
+                // the current price after the panel borrow drops.
+                let mut side_change_symbol: Option<String> = None;
+
                 // Structural annotation changes that go beyond a single f64 price.
                 // Applied after the panel borrow drops (below annotation_sync).
                 enum StructuralSync {
@@ -3974,6 +4019,7 @@ impl MidasApp {
                                 structural_sync =
                                     StructuralSync::Side(ann_id, panel.state.symbol.clone(), side);
                             }
+                            side_change_symbol = Some(panel.state.symbol.clone());
                         }
                         OrderPanelAction::SetQuantity(qty) => {
                             if let Some(ann_id) = panel.state.bracket_annotation_id {
@@ -4276,6 +4322,19 @@ impl MidasApp {
                         }
                     });
                     self.mark_levels_dirty_for_ticker(&symbol);
+                }
+
+                // Single-source-of-truth refactor: a side flip may
+                // have surfaced a stale absolute price from the
+                // opposite compound bucket. Route through the
+                // reducer's `MaybeSnapToGatr` handler so the intent
+                // is corrected and the panel is re-hydrated from the
+                // corrected memory before the sync below persists it.
+                if let Some(sym) = side_change_symbol {
+                    let _ = crate::ticker_order_intent::reducer::apply_maybe_snap(
+                        self,
+                        crate::annotation_store::SymbolKey::new(&sym),
+                    );
                 }
 
                 // Slice 3: route the post-edit panel state through the

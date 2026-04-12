@@ -52,24 +52,29 @@ use super::{
     EntryMemory, GatrAnchor, IntentSource, OrderIntentMsg, TickerOrderIntent, UpsertOutcome,
 };
 
-/// Snapshot of a bracket captured immediately before a GATR snap
-/// fires, so the user can undo the repositioning within the TTL
+/// Snapshot of the pre-snap state captured immediately before a GATR
+/// snap fires, so the user can undo the repositioning within the TTL
 /// window.
 ///
-/// Only the minimum required for rollback is stored: the cloned
-/// bracket (all four leg prices live inside it) plus a timestamp.
-/// The 30-second session-bounded TTL is enforced by
-/// [`take_pre_snap`] at drain time.
+/// The full pre-snap [`TickerOrderIntent`] is stashed so undo restores
+/// both surfaces (panel `EntryMemory` + `gatr_anchor`) in one step.
+/// When a chart bracket existed at the time of the snap, the pre-snap
+/// bracket clone is stashed alongside it; a panel-only snap leaves
+/// `bracket = None`.
+///
+/// The 30-second session-bounded TTL is enforced by the
+/// [`apply_undo_snap`] handler at drain time.
 #[derive(Clone, Debug)]
 pub struct PreSnapState {
-    /// The annotation id the snap moved.
-    pub annotation_id: AnnotationId,
-    /// A clone of the bracket before the snap was applied.
-    pub bracket: Box<OrderBracket>,
-    /// The `gatr_anchor` the intent carried before the snap. Undo
-    /// restores this verbatim so the recency guard behaves as if the
-    /// snap never happened.
-    pub prev_anchor: GatrAnchor,
+    /// The annotation id the snap moved, when one existed.
+    pub annotation_id: Option<AnnotationId>,
+    /// A clone of the bracket before the snap was applied. `None`
+    /// when the snap operated on a panel-only intent.
+    pub bracket: Option<Box<OrderBracket>>,
+    /// Full pre-snap intent. Undo upserts this verbatim so both the
+    /// `EntryMemory` fields and the `gatr_anchor` are restored
+    /// atomically.
+    pub prev_intent: Box<TickerOrderIntent>,
     /// When the snap fired. Compared against [`UNDO_TTL`] on drain.
     pub stashed_at: Instant,
 }
@@ -524,36 +529,194 @@ fn apply_leg_prices(bracket: &mut OrderBracket, side: OrderSide, prices: &LegPri
 
 // ── Slice 4: GATR snap / pin / undo handlers ─────────────────────────
 
-/// Apply a `MaybeSnapToGatr` message: reposition the bracket to the
-/// current price and write a fresh GATR anchor if all guards pass.
-///
-/// This is the canonical entry point for the "`$112` stop on a `$14`
-/// chart" bug. Every startup and every chart-activation boundary
-/// fires this message through the dispatcher; the
-/// [`super::gatr_snap::maybe_snap`] guards silently drop the vast
-/// majority of calls so the visible side effect only happens on
-/// genuinely stale brackets.
-///
-/// Flow:
-/// 1. Snapshot the intent. Early-return on missing intent / live id.
-/// 2. Resolve `current_price` + `gatr_abs` from `market_cache`.
-/// 3. Call `maybe_snap`. Early-return on `None`.
-/// 4. Stash the pre-snap bracket state into the per-symbol undo slot.
-/// 5. Apply `reposition_bracket` to the linked annotation.
-/// 6. Write the new `GatrAnchor` into the intent and upsert with
-///    `source = GatrSnap`.
-/// 7. Force a durable flush.
-/// 8. Emit the toast with the `Undo` action button.
-pub(crate) fn apply_maybe_snap(app: &mut MidasApp, symbol: SymbolKey) -> Task<Message> {
-    // Snapshot intent.
-    let intent = match app.order_intent_handle.snapshot(&symbol) {
-        Some(arc) => arc,
-        None => return Task::none(),
-    };
+/// Outcome of [`apply_snap_to_intent`] — the pure-function half of
+/// the `MaybeSnapToGatr` handler. Captures everything the outer
+/// dispatcher needs to stash the undo slot and emit the toast
+/// without re-borrowing `app`.
+#[derive(Debug)]
+pub(crate) struct SnapApplied {
+    /// The delta applied to every absolute price (signed).
+    pub delta: f64,
+    /// The GATR used for the drift ratio shown in the toast.
+    pub gatr_abs: Option<f64>,
+    /// Pre-snap state to stash in `gatr_undo_slots`.
+    pub pre_snap: PreSnapState,
+}
 
-    // Market-cache inputs. `last_price` may not yet be available on a
-    // freshly-loaded symbol; the guard in `maybe_snap` will drop the
-    // call if either is missing/non-finite.
+/// Apply the GATR snap rule to a symbol's intent, updating both
+/// surfaces (chart bracket annotation + `EntryMemory` panel memory)
+/// in lockstep by the same `plan.delta`.
+///
+/// # Design
+///
+/// This is the canonical entry point for the "$112 stop on a $14
+/// chart" bug. Both the chart bracket annotation and the order-panel
+/// input fields are **views** of the same [`TickerOrderIntent`];
+/// this function is the single place where the snap policy is
+/// applied to that intent. Panels and annotations are refreshed as a
+/// downstream side effect — neither makes an independent snap
+/// decision.
+///
+/// # Flow
+///
+/// 1. Snapshot the intent. Early-return on missing intent.
+/// 2. Call [`maybe_snap`]. Early-return on `None`.
+/// 3. Clone the pre-snap intent (for undo). If the intent carries a
+///    live annotation id, also clone the pre-snap bracket.
+/// 4. Shift every absolute price in the active compound bucket
+///    (`intent.entries[(last_side, last_entry_type)]`) by `plan.delta`.
+///    Fields repositioned:
+///      - `entry_price_or_offset` (all non-Market entry types)
+///      - `tp_value` parsed, when `tp_enabled && tp_mode == Absolute`
+///      - `sl_value` parsed, when `sl_enabled && sl_mode == Absolute`
+///      - `sl_limit_value` parsed, when `sl_enabled && sl_type == StopLimit`
+///
+///    Offset / Percent mode fields are relative to entry and not touched.
+/// 5. Write `plan.new_anchor` onto the intent and upsert through the
+///    handle with `source = GatrSnap`.
+/// 6. If `intent.live_annotation_id.is_some()`, reposition the live
+///    annotation by the same delta via
+///    [`crate::order_panel::reposition_bracket`].
+/// 7. Re-hydrate every linked panel so the UI shows the corrected
+///    `limit_price` / `stop_price` / `tp_value` / `sl_value`.
+///
+/// All pre-snap data is returned to the caller in [`SnapApplied`] so
+/// the outer handler can stash the undo slot without re-borrowing.
+pub(crate) fn apply_snap_to_intent(
+    annotation_store: &mut AnnotationStore,
+    handle: &impl TickerIntentAccess,
+    panels: &mut HashMap<OrderPanelId, OrderPanel>,
+    symbol: &SymbolKey,
+    current_price: f64,
+    gatr_abs: Option<f64>,
+) -> Option<SnapApplied> {
+    // (1) Snapshot.
+    let intent = handle.snapshot(symbol)?;
+
+    // (2) Consult the pure snap rule.
+    let SnapPlan {
+        delta,
+        new_anchor,
+        reason: _,
+    } = maybe_snap(&intent, current_price, gatr_abs)?;
+
+    // (3) Clone pre-snap state for the undo slot.
+    let prev_intent = Box::new((*intent).clone());
+    let mut pre_snap_bracket: Option<Box<OrderBracket>> = None;
+    if let Some(ann_id) = intent.live_annotation_id {
+        annotation_store.update(symbol.as_str(), ann_id, |ann| {
+            if let AnnotationKind::OrderBracket(ref bracket) = ann.kind {
+                pre_snap_bracket = Some(bracket.clone());
+            }
+        });
+    }
+
+    // (4) Shift every absolute price in the active compound bucket.
+    let mut updated = (*intent).clone();
+    let key = (updated.last_side, updated.last_entry_type);
+    let memory = updated.entries.entry(key).or_default();
+    shift_entry_memory_prices(memory, updated.last_entry_type, delta);
+
+    // (5) Write the new anchor and upsert.
+    updated.gatr_anchor = new_anchor;
+    updated.updated_at = chrono::Utc::now();
+    let _ = handle.upsert(OrderIntentMsg::Upsert {
+        symbol: symbol.clone(),
+        intent: Box::new(updated.clone()),
+        source: IntentSource::GatrSnap,
+    });
+
+    // (6) Reposition the live annotation, if one exists.
+    if let Some(ann_id) = intent.live_annotation_id {
+        annotation_store.update(symbol.as_str(), ann_id, |ann| {
+            if let AnnotationKind::OrderBracket(ref mut bracket) = ann.kind {
+                crate::order_panel::reposition_bracket(bracket.as_mut(), current_price);
+            }
+        });
+    }
+
+    // (7) Re-hydrate any linked panel so the UI reflects the new prices.
+    for panel in panels.values_mut() {
+        if panel.state.symbol.eq_ignore_ascii_case(symbol.as_str()) {
+            // `hydrate_from_intent` is a no-op when the panel is
+            // dirty on the same symbol — that's the Slice 2 in-flight
+            // edit guard and is exactly the right behavior: a user
+            // mid-edit is not re-anchored over their own typing.
+            panel.state.hydrate_from_intent(&updated, panel.state.last_price);
+        }
+    }
+
+    Some(SnapApplied {
+        delta,
+        gatr_abs,
+        pre_snap: PreSnapState {
+            annotation_id: intent.live_annotation_id,
+            bracket: pre_snap_bracket,
+            prev_intent,
+            stashed_at: Instant::now(),
+        },
+    })
+}
+
+/// Shift every **absolute** price field in an [`EntryMemory`] bucket
+/// by `delta`.
+///
+/// Skips:
+/// - `entry_price_or_offset` for Market entries (the price is the
+///   live last_price, not a stored absolute).
+/// - TP / SL fields in `PriceInputMode::Offset` / `Percent` modes
+///   (they are relative to entry; shifting entry already moved them).
+/// - Unparseable string fields (a half-typed input is left alone).
+fn shift_entry_memory_prices(
+    memory: &mut EntryMemory,
+    entry_type: midas_chart::widget::order_bracket::EntryType,
+    delta: f64,
+) {
+    use crate::order_panel::PriceInputMode;
+    use crate::order_panel::StopLossType;
+    use midas_chart::widget::order_bracket::EntryType;
+
+    // entry_price_or_offset — Limit / Stop / StopLimit only.
+    if !matches!(entry_type, EntryType::Market) {
+        if let Some(ref mut p) = memory.entry_price_or_offset {
+            *p += delta;
+        }
+    }
+
+    // tp_value — only when enabled and absolute.
+    if memory.tp_enabled && memory.tp_mode == PriceInputMode::Absolute {
+        if let Ok(parsed) = memory.tp_value.parse::<f64>() {
+            memory.tp_value = format!("{:.2}", parsed + delta);
+        }
+    }
+
+    // sl_value — only when enabled and absolute.
+    if memory.sl_enabled && memory.sl_mode == PriceInputMode::Absolute {
+        if let Ok(parsed) = memory.sl_value.parse::<f64>() {
+            memory.sl_value = format!("{:.2}", parsed + delta);
+        }
+    }
+
+    // sl_limit_value — only when SL is a stop-limit.
+    if memory.sl_enabled && memory.sl_type == StopLossType::StopLimit {
+        if let Ok(parsed) = memory.sl_limit_value.parse::<f64>() {
+            memory.sl_limit_value = format!("{:.2}", parsed + delta);
+        }
+    }
+}
+
+/// Apply a `MaybeSnapToGatr` message: route into the pure
+/// [`apply_snap_to_intent`] helper, stash the undo slot, flush
+/// durably, and emit the undo toast.
+///
+/// This is the dispatcher half — it resolves `current_price` /
+/// `gatr_abs` from `app.market_cache` and hands the rest to the
+/// pure helper so the policy can be unit-tested without a full
+/// `MidasApp`.
+pub(crate) fn apply_maybe_snap(app: &mut MidasApp, symbol: SymbolKey) -> Task<Message> {
+    // Resolve market-cache inputs. `last_price` may not yet be
+    // available on a freshly-loaded symbol; the guards in
+    // `maybe_snap` will still drop the call when it isn't.
     let (current_price, gatr_abs) = match app.market_cache.get(symbol.as_str()) {
         Some(snap) => (snap.last_price, snap.gatr_abs),
         None => return Task::none(),
@@ -563,70 +726,24 @@ pub(crate) fn apply_maybe_snap(app: &mut MidasApp, symbol: SymbolKey) -> Task<Me
         None => return Task::none(),
     };
 
-    let SnapPlan {
+    let applied = match apply_snap_to_intent(
+        &mut app.annotation_store,
+        &app.order_intent_handle,
+        &mut app.order_panels,
+        &symbol,
+        current_price,
+        gatr_abs,
+    ) {
+        Some(a) => a,
+        None => return Task::none(),
+    };
+
+    let SnapApplied {
         delta,
-        new_anchor,
-        reason: _,
-    } = match maybe_snap(&intent, current_price, gatr_abs) {
-        Some(plan) => plan,
-        None => return Task::none(),
-    };
-
-    // Resolve the live annotation id — must be present per `maybe_snap`
-    // guard 5, but re-check defensively.
-    let ann_id = match intent.live_annotation_id {
-        Some(id) => id,
-        None => return Task::none(),
-    };
-
-    // Stash pre-snap state, then reposition the bracket. The pre-snap
-    // clone captures the annotation's current shape; a subsequent
-    // `Undo` restores it verbatim.
-    //
-    // `AnnotationKind::OrderBracket` stores a `Box<OrderBracket>`; we
-    // clone the box itself so the stashed copy does not share its
-    // heap allocation with the live annotation.
-    let mut stashed: Option<Box<OrderBracket>> = None;
-    app.annotation_store
-        .update(symbol.as_str(), ann_id, |ann| {
-            if let AnnotationKind::OrderBracket(ref mut bracket) = ann.kind {
-                stashed = Some(bracket.clone());
-                crate::order_panel::reposition_bracket(bracket.as_mut(), current_price);
-            }
-        });
-    let stashed = match stashed {
-        Some(b) => b,
-        // Annotation missing or not an OrderBracket — nothing moved,
-        // nothing to undo.
-        None => return Task::none(),
-    };
-
-    app.gatr_undo_slots.insert(
-        symbol.clone(),
-        PreSnapState {
-            annotation_id: ann_id,
-            bracket: stashed,
-            prev_anchor: intent.gatr_anchor,
-            stashed_at: Instant::now(),
-        },
-    );
-
-    // Refresh the linked panel and persist the new anchor on the intent.
-    let mut updated = (*intent).clone();
-    updated.gatr_anchor = new_anchor;
-    updated.updated_at = chrono::Utc::now();
-    let _ = app.order_intent_handle.upsert(OrderIntentMsg::Upsert {
-        symbol: symbol.clone(),
-        intent: Box::new(updated.clone()),
-        source: IntentSource::GatrSnap,
-    });
-
-    // Re-hydrate any linked panel so the UI reflects the new prices.
-    for panel in app.order_panels.values_mut() {
-        if panel.state.symbol.eq_ignore_ascii_case(symbol.as_str()) {
-            panel.state.hydrate_from_intent(&updated, panel.state.last_price);
-        }
-    }
+        gatr_abs,
+        pre_snap,
+    } = applied;
+    app.gatr_undo_slots.insert(symbol.clone(), pre_snap);
 
     // Force a durable flush so a crash between now and the next
     // debounce window does not leave the anchor un-persisted. Run on
@@ -683,10 +800,14 @@ pub(crate) fn apply_toggle_pin(app: &mut MidasApp, symbol: SymbolKey) -> Task<Me
     Task::none()
 }
 
-/// Apply an `UndoSnap` message. Restores the pre-snap bracket state
-/// from the undo slot if it is still within
-/// [`UNDO_TTL`], writes a fresh anchor at the undone price, and
-/// forces a durable flush.
+/// Apply an `UndoSnap` message. Restores both surfaces (panel
+/// `EntryMemory` and live bracket annotation, when present) from
+/// the stashed pre-snap state if it is still within [`UNDO_TTL`],
+/// then forces a durable flush.
+///
+/// The intent is restored verbatim from `pre_snap.prev_intent`, so
+/// both the `EntryMemory` shifts and the `gatr_anchor` are rolled
+/// back in one upsert.
 pub(crate) fn apply_undo_snap(app: &mut MidasApp, symbol: SymbolKey) -> Task<Message> {
     let stash = match app.gatr_undo_slots.remove(&symbol) {
         Some(s) => s,
@@ -696,24 +817,20 @@ pub(crate) fn apply_undo_snap(app: &mut MidasApp, symbol: SymbolKey) -> Task<Mes
         return Task::none();
     }
 
-    // Restore the annotation.
-    let restore_box = stash.bracket.clone();
-    app.annotation_store
-        .update(symbol.as_str(), stash.annotation_id, |ann| {
-            if let AnnotationKind::OrderBracket(ref mut bracket) = ann.kind {
-                *bracket = restore_box.clone();
-            }
-        });
+    // Restore the live annotation, if the snap moved one.
+    if let (Some(ann_id), Some(restore_box)) = (stash.annotation_id, stash.bracket.as_ref()) {
+        let restore_clone = restore_box.clone();
+        app.annotation_store
+            .update(symbol.as_str(), ann_id, |ann| {
+                if let AnnotationKind::OrderBracket(ref mut bracket) = ann.kind {
+                    *bracket = restore_clone.clone();
+                }
+            });
+    }
 
-    // Write the previous anchor back onto the intent so the recency
-    // guard behaves as if the snap never happened.
-    let intent = match app.order_intent_handle.snapshot(&symbol) {
-        Some(arc) => arc,
-        None => return Task::none(),
-    };
-    let mut restored = (*intent).clone();
-    restored.gatr_anchor = stash.prev_anchor;
-    restored.updated_at = chrono::Utc::now();
+    // Restore the intent verbatim so the recency guard behaves as
+    // if the snap never happened.
+    let restored = *stash.prev_intent;
     let _ = app.order_intent_handle.upsert(OrderIntentMsg::Upsert {
         symbol: symbol.clone(),
         intent: Box::new(restored.clone()),
