@@ -535,6 +535,7 @@ pub fn validate_bracket(
 /// `MIN_LEG_PX` pixels from the entry line — guaranteeing the legs are
 /// visually distinct and grabbable regardless of zoom level. Without
 /// camera info, falls back to percentage-only defaults.
+#[allow(dead_code)] // used by legacy paths; may be removed in Slice 4
 pub fn default_bracket_prices(
     last_price: f64,
     side: OrderSide,

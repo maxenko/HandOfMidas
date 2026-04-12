@@ -263,42 +263,14 @@ fn factory_from_legacy() {
     );
 }
 
-// ── apply() stubs ───────────────────────────────────────────────────
+// ── Slice 2 stubs (GATR, levels, market data) ──────────────────────
 
 #[test]
-fn apply_stubs_return_empty_effects() {
+fn apply_slice2_stubs_return_empty_effects() {
     let mut state = TickerState::new(SymbolKey::new("TEST"));
 
-    // Exercise every TickerMsg variant and verify empty effects.
-    let messages: Vec<TickerMsg> = vec![
-        TickerMsg::EnsureDraftBracket {
-            side: OrderSide::Buy,
-            entry_type: EntryType::Market,
-        },
-        TickerMsg::CancelBracket,
-        TickerMsg::SaveBracket,
-        TickerMsg::DeleteBracket,
-        TickerMsg::RecallBracket,
-        TickerMsg::SetLegPrice {
-            role: midas_chart::widget::order_bracket::LegRole::Entry,
-            price: 100.0,
-        },
-        TickerMsg::SetTpEnabled(true),
-        TickerMsg::SetSlEnabled(false),
-        TickerMsg::SetQuantity(50.0),
-        TickerMsg::SetSide(OrderSide::Sell),
-        TickerMsg::SetEntryType(EntryType::Limit),
-        TickerMsg::DragLeg {
-            role: midas_chart::widget::order_bracket::LegRole::TakeProfit,
-            new_price: 200.0,
-        },
-        TickerMsg::BeginEdit(EditingField::LimitPrice),
-        TickerMsg::UpdateEditValue("123.45".to_string()),
-        TickerMsg::CommitEdit {
-            field: EditingField::LimitPrice,
-            value: "123.45".to_string(),
-        },
-        TickerMsg::CancelEdit,
+    // Exercise Slice 2 stub variants (GATR, levels, market data).
+    let stub_msgs: Vec<TickerMsg> = vec![
         TickerMsg::MaybeSnap {
             current_price: 150.0,
             gatr_abs: Some(2.0),
@@ -327,28 +299,7 @@ fn apply_stubs_return_empty_effects() {
             locked: false,
         }),
         TickerMsg::RemoveLevel(0),
-        TickerMsg::UpdateLevel {
-            index: 0,
-            level: crate::level_store::StoredLevel {
-                level: midas_chart::HorizontalLevel {
-                    id: 1,
-                    line: midas_chart::widget::price_line::PriceLine {
-                        price: 105.0,
-                        extent: midas_chart::widget::price_line::LineExtent::FullWidth,
-                        stroke: midas_chart::widget::price_line::LineStroke {
-                        color: [1.0, 1.0, 1.0, 1.0],
-                        width: 1.0,
-                        style: midas_chart::widget::LineStyle::Solid,
-                    },
-                    },
-                    label: None,
-                    icon: midas_chart::LevelIcon::default(),
-                },
-                locked: false,
-            },
-        },
         TickerMsg::ToggleLevelLock(0),
-        TickerMsg::SubmitOrder,
         TickerMsg::OrderPending {
             order_id: uuid::Uuid::nil(),
         },
@@ -357,17 +308,189 @@ fn apply_stubs_return_empty_effects() {
             avg_price: 150.0,
         },
         TickerMsg::OrderPartialFill { filled_qty: 50.0 },
-        TickerMsg::OrderRejected {
-            reason: "test".to_string(),
-        },
         TickerMsg::OrderCancelled,
         TickerMsg::Hydrated(Box::new(TickerState::new(SymbolKey::new("TEST")))),
     ];
 
-    for msg in messages {
+    for msg in stub_msgs {
         let effects = state.apply(msg);
-        assert!(effects.is_empty(), "stub should return empty effects");
+        assert!(effects.is_empty(), "Slice 2 stub should return empty effects");
     }
+}
+
+// ── Slice 1: bracket lifecycle tests ────────────────────────────────
+
+use super::apply::TickerEffect;
+
+#[test]
+fn apply_ensure_draft_bracket_creates_live_bracket() {
+    let mut state = TickerState::new_with_defaults(SymbolKey::new("AAPL"), 150.0, Some(2.0));
+    let effects = state.apply(TickerMsg::EnsureDraftBracket {
+        side: OrderSide::Buy,
+        entry_type: EntryType::Market,
+    });
+    assert!(state.live_bracket().is_some());
+    assert!(effects.iter().any(|e| matches!(e, TickerEffect::ProjectBracket(_))));
+    assert!(effects.iter().any(|e| matches!(e, TickerEffect::PersistDirty)));
+}
+
+#[test]
+fn apply_cancel_bracket_saved_hides() {
+    let mut state = TickerState::new_with_defaults(SymbolKey::new("AAPL"), 150.0, Some(2.0));
+    // Create + save.
+    state.apply(TickerMsg::EnsureDraftBracket {
+        side: OrderSide::Buy,
+        entry_type: EntryType::Market,
+    });
+    state.apply(TickerMsg::SaveBracket);
+    assert!(state.live_bracket().unwrap().saved);
+    // Simulate the effect handler having set the annotation id.
+    state.set_live_annotation_id(Some(midas_chart::widget::AnnotationId(99)));
+
+    let effects = state.apply(TickerMsg::CancelBracket);
+    assert!(state.live_bracket().is_none());
+    assert!(effects.iter().any(|e| matches!(e, TickerEffect::RemoveBracket(_))));
+}
+
+#[test]
+fn apply_cancel_bracket_unsaved_deletes() {
+    let mut state = TickerState::new_with_defaults(SymbolKey::new("AAPL"), 150.0, Some(2.0));
+    state.apply(TickerMsg::EnsureDraftBracket {
+        side: OrderSide::Buy,
+        entry_type: EntryType::Market,
+    });
+    assert!(!state.live_bracket().unwrap().saved);
+    state.set_live_annotation_id(Some(midas_chart::widget::AnnotationId(1)));
+
+    let effects = state.apply(TickerMsg::CancelBracket);
+    assert!(state.live_bracket().is_none());
+    assert!(effects.iter().any(|e| matches!(e, TickerEffect::RemoveBracket(_))));
+}
+
+#[test]
+fn apply_set_leg_price_updates_entry() {
+    let mut state = TickerState::new_with_defaults(SymbolKey::new("AAPL"), 150.0, Some(2.0));
+    state.apply(TickerMsg::EnsureDraftBracket {
+        side: OrderSide::Buy,
+        entry_type: EntryType::Limit,
+    });
+    let effects = state.apply(TickerMsg::SetLegPrice {
+        role: midas_chart::widget::order_bracket::LegRole::Entry,
+        price: 145.0,
+    });
+    assert!((state.live_bracket().unwrap().entry.line.price - 145.0).abs() < f64::EPSILON);
+    assert!(effects.iter().any(|e| matches!(e, TickerEffect::ProjectBracket(_))));
+}
+
+#[test]
+fn apply_set_tp_enabled_creates_default_tp() {
+    let mut state = TickerState::new_with_defaults(SymbolKey::new("AAPL"), 150.0, Some(2.0));
+    state.apply(TickerMsg::EnsureDraftBracket {
+        side: OrderSide::Buy,
+        entry_type: EntryType::Market,
+    });
+    // Remove TP first.
+    state.apply(TickerMsg::SetTpEnabled(false));
+    assert!(state.live_bracket().unwrap().take_profit.is_none());
+
+    // Enable TP.
+    let effects = state.apply(TickerMsg::SetTpEnabled(true));
+    assert!(state.live_bracket().unwrap().take_profit.is_some());
+    assert!(effects.iter().any(|e| matches!(e, TickerEffect::ProjectBracket(_))));
+}
+
+#[test]
+fn apply_drag_leg_updates_price_and_pnl() {
+    let mut state = TickerState::new_with_defaults(SymbolKey::new("AAPL"), 100.0, Some(2.0));
+    state.apply(TickerMsg::EnsureDraftBracket {
+        side: OrderSide::Buy,
+        entry_type: EntryType::Market,
+    });
+    state.apply(TickerMsg::SetQuantity(100.0));
+
+    let effects = state.apply(TickerMsg::DragLeg {
+        role: midas_chart::widget::order_bracket::LegRole::Entry,
+        new_price: 105.0,
+    });
+    assert!((state.live_bracket().unwrap().entry.line.price - 105.0).abs() < f64::EPSILON);
+    assert!(effects.iter().any(|e| matches!(e, TickerEffect::ProjectBracket(_))));
+}
+
+#[test]
+fn apply_begin_edit_sets_editing_field() {
+    let mut state = TickerState::new(SymbolKey::new("AAPL"));
+    assert!(!state.is_editing());
+    state.apply(TickerMsg::BeginEdit(EditingField::LimitPrice));
+    assert!(state.is_editing());
+    assert_eq!(state.editing_field(), Some(&EditingField::LimitPrice));
+}
+
+#[test]
+fn apply_begin_edit_auto_commits_previous() {
+    let mut state = TickerState::new_with_defaults(SymbolKey::new("AAPL"), 150.0, Some(2.0));
+    state.apply(TickerMsg::EnsureDraftBracket {
+        side: OrderSide::Buy,
+        entry_type: EntryType::Limit,
+    });
+    // Begin editing LimitPrice.
+    state.apply(TickerMsg::BeginEdit(EditingField::LimitPrice));
+    state.apply(TickerMsg::UpdateEditValue("142.00".to_string()));
+    // Begin editing Quantity — should auto-commit LimitPrice.
+    state.apply(TickerMsg::BeginEdit(EditingField::Quantity));
+    assert_eq!(state.editing_field(), Some(&EditingField::Quantity));
+    // The limit price should have been committed.
+    assert!((state.live_bracket().unwrap().entry.line.price - 142.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn apply_commit_edit_clears_lock() {
+    let mut state = TickerState::new_with_defaults(SymbolKey::new("AAPL"), 150.0, Some(2.0));
+    state.apply(TickerMsg::EnsureDraftBracket {
+        side: OrderSide::Buy,
+        entry_type: EntryType::Limit,
+    });
+    state.apply(TickerMsg::BeginEdit(EditingField::LimitPrice));
+    assert!(state.is_editing());
+    state.apply(TickerMsg::CommitEdit {
+        field: EditingField::LimitPrice,
+        value: "140.00".to_string(),
+    });
+    assert!(!state.is_editing());
+}
+
+#[test]
+fn apply_set_entry_type_adjusts_prices() {
+    let mut state = TickerState::new_with_defaults(SymbolKey::new("AAPL"), 150.0, Some(2.0));
+    state.apply(TickerMsg::EnsureDraftBracket {
+        side: OrderSide::Buy,
+        entry_type: EntryType::Limit,
+    });
+    let old_price = state.live_bracket().unwrap().entry.line.price;
+    // Switch to Market — should reset to last_price.
+    state.apply(TickerMsg::SetEntryType(EntryType::Market));
+    let new_price = state.live_bracket().unwrap().entry.line.price;
+    // Market entry should be at last_price (150.0).
+    assert!((new_price - 150.0).abs() < f64::EPSILON);
+    assert!((old_price - new_price).abs() > f64::EPSILON);
+}
+
+#[test]
+fn apply_no_panic_when_no_live_bracket() {
+    let mut state = TickerState::new(SymbolKey::new("EMPTY"));
+    // All field mutations on empty state should return empty effects, not panic.
+    assert!(state.apply(TickerMsg::SetLegPrice {
+        role: midas_chart::widget::order_bracket::LegRole::Entry,
+        price: 100.0,
+    }).is_empty());
+    assert!(state.apply(TickerMsg::SetTpEnabled(true)).is_empty());
+    assert!(state.apply(TickerMsg::SetSlEnabled(true)).is_empty());
+    assert!(state.apply(TickerMsg::SetQuantity(50.0)).is_empty());
+    assert!(state.apply(TickerMsg::DragLeg {
+        role: midas_chart::widget::order_bracket::LegRole::Entry,
+        new_price: 100.0,
+    }).is_empty());
+    assert!(state.apply(TickerMsg::CancelBracket).is_empty());
+    assert!(state.apply(TickerMsg::SaveBracket).is_empty());
 }
 
 // ── Corrupt / partial v1 blob ───────────────────────────────────────

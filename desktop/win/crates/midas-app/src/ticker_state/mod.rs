@@ -226,6 +226,32 @@ impl TickerState {
     pub fn version(&self) -> u32 {
         self.version
     }
+
+    // ── Effect-handler setters ──────────────────────────────────
+
+    /// Set the live annotation ID. Called by the effect handler after
+    /// `annotation_store.add()` returns the newly assigned ID.
+    pub fn set_live_annotation_id(&mut self, id: Option<AnnotationId>) {
+        self.live_annotation_id = id;
+    }
+
+    /// Set the live bracket. Called by the effect handler when
+    /// recalling a bracket from `annotation_store` or injecting an
+    /// externally constructed bracket.
+    pub fn set_live_bracket(&mut self, bracket: Option<OrderBracket>) {
+        self.live_bracket = bracket;
+    }
+
+    /// Set the cached market price. Called by the effect handler so
+    /// `apply()` can reference the latest price for bracket defaults.
+    pub fn set_last_price(&mut self, price: Option<f64>) {
+        self.last_price = price;
+    }
+
+    /// Set the cached GATR absolute value.
+    pub fn set_gatr_abs(&mut self, gatr: Option<f64>) {
+        self.gatr_abs = gatr;
+    }
 }
 
 // ── EditingField ────────────────────────────────────────────────────

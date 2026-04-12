@@ -1299,8 +1299,10 @@ impl MidasApp {
     /// then mark all charts showing that symbol as dirty so bracket lines
     /// re-render.
     ///
-    /// This is the single call site for the "find bracket → sync panel →
-    /// mark dirty" pattern that was previously copy-pasted 10+ times.
+    /// Superseded by the `ProjectBracket` effect handler in the
+    /// `Message::Ticker` routing arm, but kept for non-bracket annotation
+    /// paths that still use it.
+    #[allow(dead_code)]
     fn sync_panel_and_redraw(
         &mut self,
         panel_id: midas_core::OrderPanelId,
@@ -1331,8 +1333,6 @@ impl MidasApp {
         old_symbol: &str,
         new_symbol: &str,
     ) -> bool {
-        use midas_chart::widget::order_bracket::*;
-
         let panel = match self.order_panels.get(&panel_id) {
             Some(p) => p,
             None => return false,
@@ -1355,46 +1355,13 @@ impl MidasApp {
             return false;
         }
 
-        // Cache and remove the current Draft bracket for the old symbol.
-        if let Some(ann_id) = panel.state.bracket_annotation_id {
-            let is_draft = self
-                .annotation_store
-                .get(&old_upper)
-                .iter()
-                .find(|a| a.id == ann_id)
-                .and_then(|a| match &a.kind {
-                    midas_chart::widget::AnnotationKind::OrderBracket(b) => {
-                        Some(b.status == BracketStatus::Draft)
-                    }
-                    _ => None,
-                })
-                .unwrap_or(false);
-
-            if is_draft {
-                let is_saved = self
-                    .annotation_store
-                    .get(&old_upper)
-                    .iter()
-                    .find(|a| a.id == ann_id)
-                    .and_then(|a| match &a.kind {
-                        midas_chart::widget::AnnotationKind::OrderBracket(b) => Some(b.saved),
-                        _ => None,
-                    })
-                    .unwrap_or(false);
-
-                if !is_saved {
-                    self.annotation_store.remove(&old_upper, ann_id);
-                    self.mark_levels_dirty_for_ticker(&old_upper);
-                } else {
-                    // Saved brackets: hide on symbol change, can be recalled when user returns.
-                    self.annotation_store.update(&old_upper, ann_id, |ann| {
-                        ann.presence = midas_chart::widget::Presence::Hidden;
-                    });
-                    self.mark_levels_dirty_for_ticker(&old_upper);
-                }
-            }
-            // Pending/Active brackets stay in AnnotationStore under old
-            // symbol — they represent live broker orders.
+        // Cancel the old symbol's bracket via TickerState.
+        {
+            let old_key = crate::annotation_store::SymbolKey::new(&old_upper);
+            let _ = self.update(Message::Ticker(
+                old_key,
+                crate::ticker_state::TickerMsg::CancelBracket,
+            ));
         }
 
         // Clear the panel's annotation link (it pointed to old symbol).
@@ -1402,305 +1369,38 @@ impl MidasApp {
             p.state.bracket_annotation_id = None;
         }
 
-        // Try to find and recall a hidden saved bracket for the new symbol.
-        let hidden_ann = self
-            .annotation_store
-            .get(&new_upper)
-            .iter()
-            .find(|a| {
-                a.presence == midas_chart::widget::Presence::Hidden
-                    && matches!(&a.kind, midas_chart::widget::AnnotationKind::OrderBracket(b)
-                        if b.status == BracketStatus::Draft && b.saved)
-            })
-            .map(|a| a.id);
-
-        if let Some(hidden_id) = hidden_ann {
-            // Unhide the bracket.
-            self.annotation_store.update(&new_upper, hidden_id, |ann| {
-                ann.presence = midas_chart::widget::Presence::Active;
-            });
-            if let Some(p) = self.order_panels.get_mut(&panel_id) {
-                p.state.bracket_annotation_id = Some(hidden_id);
-            }
-            // Sync panel inputs from the recalled bracket.
-            if let Some(bracket_data) = self
-                .annotation_store
-                .get(&new_upper)
-                .iter()
-                .find(|a| a.id == hidden_id)
-                .and_then(|a| match &a.kind {
-                    midas_chart::widget::AnnotationKind::OrderBracket(b) => Some(b.as_ref()),
-                    _ => None,
-                })
-            {
-                if let Some(p) = self.order_panels.get_mut(&panel_id) {
-                    crate::order_panel::sync_panel_from_bracket(&mut p.state, bracket_data);
-                }
-            }
-            self.mark_levels_dirty_for_ticker(&new_upper);
-            return true;
-        }
-
-        // Create a fresh Draft bracket at market price
-        // (0.0 if no data yet — will be updated on DataLoaded).
-        let bracket_side = match self
+        // Create a fresh draft bracket for the new symbol via TickerState.
+        let side = match self
             .order_panels
             .get(&panel_id)
             .and_then(|p| p.state.bracket_active)
         {
-            Some(crate::order_panel::OrderSide::Buy) => BracketSide::Long,
-            Some(crate::order_panel::OrderSide::Sell) => BracketSide::Short,
+            Some(s) => s,
             None => return false,
         };
-
-        let last_price = self
-            .market_cache
-            .get(&new_upper)
-            .and_then(|snap| snap.last_price)
-            .unwrap_or(0.0);
-
-        let make_leg = |price: f64| BracketLeg {
-            line: midas_chart::widget::PriceLine {
-                price,
-                extent: midas_chart::widget::LineExtent::FullWidth,
-                stroke: midas_chart::widget::LineStroke {
-                    color: [0.0, 0.0, 0.0, 1.0],
-                    width: 1.0,
-                    style: midas_chart::widget::level::LineStyle::Solid,
-                },
-            },
-            role: LegRole::Entry,
-            projected_pnl: None,
-            projected_pnl_pct: None,
-        };
-
-        let bracket = OrderBracket {
-            entry: make_leg(last_price),
-            take_profit: None,
-            stop_loss: None,
-            side: bracket_side,
-            status: BracketStatus::Draft,
-            quantity: None,
-            saved: false,
-            filled_qty: None,
-            entry_type: midas_chart::widget::order_bracket::EntryType::Market,
-            entry_stop_price: None,
-            wrong_side_warning: false,
-        };
-
-        let ann_id = self.annotation_store.add(
-            &new_upper,
-            midas_chart::widget::AnnotationKind::OrderBracket(Box::new(bracket)),
-        );
-        if let Some(p) = self.order_panels.get_mut(&panel_id) {
-            p.state.bracket_annotation_id = Some(ann_id);
-        }
-
-        self.mark_levels_dirty_for_ticker(&new_upper);
-        false
-    }
-
-    /// Compute and set `wrong_side_warning` on a bracket based on entry
-    /// price vs. market price. Uses bid/ask from market_cache if available,
-    /// falls back to last_price.
-    fn update_wrong_side_warning(&mut self, ticker: &str, ann_id: AnnotationId) {
-        use midas_chart::widget::order_bracket::{BracketSide, EntryType};
-
-        let last_price = self
-            .market_cache
-            .get(ticker)
-            .and_then(|s| s.last_price)
-            .unwrap_or(0.0);
-        if last_price <= 0.0 {
-            return;
-        }
-
-        self.annotation_store.update(ticker, ann_id, |ann| {
-            if let midas_chart::widget::AnnotationKind::OrderBracket(ref mut b) = ann.kind {
-                b.wrong_side_warning = match (b.entry_type, b.side) {
-                    // Limit BUY above market = marketable (warn)
-                    (EntryType::Limit, BracketSide::Long) => b.entry.line.price > last_price,
-                    // Limit SELL below market = marketable (warn)
-                    (EntryType::Limit, BracketSide::Short) => b.entry.line.price < last_price,
-                    // Stop BUY below market (warn)
-                    (EntryType::Stop, BracketSide::Long) => b.entry.line.price < last_price,
-                    // Stop SELL above market (warn)
-                    (EntryType::Stop, BracketSide::Short) => b.entry.line.price > last_price,
-                    // StopLimit: warn based on limit price (entry.price)
-                    (EntryType::StopLimit, BracketSide::Long) => b.entry.line.price > last_price,
-                    (EntryType::StopLimit, BracketSide::Short) => b.entry.line.price < last_price,
-                    // Market: never warn
-                    (EntryType::Market, _) => false,
-                };
-            }
-        });
-    }
-
-    /// Handle entry type change for an order panel.
-    ///
-    /// Updates panel state, updates the bracket annotation's `entry_type`,
-    /// and adjusts entry price: switching to Market resets to `last_price`;
-    /// switching from Market to Limit/Stop/StopLimit defaults the price
-    /// input to `last_price` as a starting point.
-    fn handle_set_entry_type(
-        &mut self,
-        panel_id: OrderPanelId,
-        new_type: midas_chart::widget::order_bracket::EntryType,
-    ) {
-        use midas_chart::widget::order_bracket::EntryType;
-
-        let panel = match self.order_panels.get(&panel_id) {
-            Some(p) => p,
-            None => return,
-        };
-        let symbol = panel.state.symbol.clone();
-        if symbol.is_empty() {
-            return;
-        }
-        let symbol_upper = symbol.to_uppercase();
-        let old_type = panel.state.entry_type;
-        let ann_id = panel.state.bracket_annotation_id;
-
-        let last_price = self
-            .market_cache
-            .get(&symbol_upper)
-            .and_then(|snap| snap.last_price)
-            .unwrap_or(0.0);
-
-        // Default price inputs when switching away from Market.
-        if old_type == EntryType::Market && new_type != EntryType::Market && last_price > 0.0 {
-            let side = self
-                .order_panels
-                .get(&panel_id)
-                .map(|p| p.state.side)
-                .unwrap_or(crate::order_panel::OrderSide::Buy);
-            let is_buy = side == crate::order_panel::OrderSide::Buy;
-
-            if let Some(p) = self.order_panels.get_mut(&panel_id) {
-                if p.state.limit_price.is_empty() {
-                    p.state.limit_price = format!("{:.2}", last_price);
-                }
-                if p.state.stop_price.is_empty() {
-                    // Stop defaults: +2% for buy, -2% for sell.
-                    let stop_default = if is_buy {
-                        last_price * 1.02
-                    } else {
-                        last_price * 0.98
-                    };
-                    p.state.stop_price = format!("{:.2}", stop_default);
-                }
-            }
-        }
-
-        // Update panel state.
-        if let Some(p) = self.order_panels.get_mut(&panel_id) {
-            p.state.entry_type = new_type;
-        }
-
-        // Slice 2: re-hydrate panel inputs from the ticker intent's
-        // `(side, new_type)` bucket. Soft rehydrate — does not bump
-        // `dirty`. Falls through silently when no intent exists.
-        let intent_snapshot = self
+        let entry_type = self
             .order_panels
             .get(&panel_id)
-            .map(|p| crate::annotation_store::SymbolKey::new(&p.state.symbol))
-            .and_then(|key| self.order_intent_handle.snapshot(&key));
-        if let Some(intent) = intent_snapshot {
-            if let Some(p) = self.order_panels.get_mut(&panel_id) {
-                let side = p.state.side;
-                p.state.rehydrate_for_compound(&intent, side, new_type);
-            }
-        }
+            .map(|p| p.state.entry_type)
+            .unwrap_or_default();
 
-        // Single-source-of-truth refactor: the entry-type change may
-        // have surfaced a previously-hidden price field (e.g. Market →
-        // Limit reveals `limit_price`). Route through the reducer's
-        // `MaybeSnapToGatr` handler so the intent is corrected and
-        // the panel hydrates from the corrected memory.
-        let key = crate::annotation_store::SymbolKey::new(&symbol_upper);
-        let _ = crate::ticker_order_intent::reducer::apply_maybe_snap(self, key.clone());
-
-        // Reconcile the intent + live bracket to match the panel's new
-        // entry type. If the previous bracket was for a different
-        // entry type (e.g. Market → StopLimit), the reducer drops it
-        // and creates a fresh one with the correct shape (StopLimit
-        // produces two lines; Market produces none).
-        if let Some((panel_side, panel_entry_type)) =
-            self.order_panels.get(&panel_id).map(|p| (p.state.side, p.state.entry_type))
+        let new_key = crate::annotation_store::SymbolKey::new(&new_upper);
+        // Seed market data on the ticker state before creating the bracket.
+        let (mc_price, mc_gatr) = self
+            .market_cache
+            .get(&new_upper)
+            .map(|s| (s.last_price, s.gatr_abs))
+            .unwrap_or((None, None));
         {
-            let (current_price, gatr_abs) = self
-                .market_cache
-                .get(key.as_str())
-                .map(|s| (s.last_price, s.gatr_abs))
-                .unwrap_or((None, None));
-            let _ = crate::ticker_order_intent::reducer::apply_ensure_draft_bracket(
-                &mut self.annotation_store,
-                &self.order_intent_handle,
-                &key,
-                panel_side,
-                panel_entry_type,
-                current_price,
-                gatr_abs,
-            );
-            // Sync the panel's `bracket_annotation_id` back to whatever
-            // the reducer just recorded — it may have replaced a stale
-            // live bracket.
-            if let Some(new_ann_id) = self
-                .order_intent_handle
-                .snapshot(&key)
-                .and_then(|i| i.live_annotation_id)
-            {
-                if let Some(p) = self.order_panels.get_mut(&panel_id) {
-                    p.state.bracket_annotation_id = Some(new_ann_id);
-                }
-            }
+            let ts = self.ticker_mut(&new_key);
+            ts.set_last_price(mc_price);
+            ts.set_gatr_abs(mc_gatr);
         }
-
-        // Update the bracket annotation.
-        if let Some(ann_id) = ann_id {
-            let limit_price_str = self
-                .order_panels
-                .get(&panel_id)
-                .map(|p| p.state.limit_price.clone())
-                .unwrap_or_default();
-            let stop_price_str = self
-                .order_panels
-                .get(&panel_id)
-                .map(|p| p.state.stop_price.clone())
-                .unwrap_or_default();
-
-            self.annotation_store.update(&symbol_upper, ann_id, |ann| {
-                if let midas_chart::widget::AnnotationKind::OrderBracket(ref mut b) = ann.kind {
-                    b.entry_type = new_type;
-                    b.wrong_side_warning = false;
-                    match new_type {
-                        EntryType::Market => {
-                            b.entry.line.price = last_price;
-                            b.entry_stop_price = None;
-                        }
-                        EntryType::Limit => {
-                            if let Ok(p) = limit_price_str.parse::<f64>() {
-                                b.entry.line.price = p;
-                            }
-                            b.entry_stop_price = None;
-                        }
-                        EntryType::Stop => {
-                            if let Ok(p) = stop_price_str.parse::<f64>() {
-                                b.entry.line.price = p;
-                            }
-                            b.entry_stop_price = None;
-                        }
-                        EntryType::StopLimit => {
-                            if let Ok(p) = limit_price_str.parse::<f64>() {
-                                b.entry.line.price = p;
-                            }
-                            b.entry_stop_price = stop_price_str.parse::<f64>().ok();
-                        }
-                    }
-                }
-            });
-            self.mark_levels_dirty_for_ticker(&symbol_upper);
-        }
+        let _ = self.update(Message::Ticker(
+            new_key,
+            crate::ticker_state::TickerMsg::EnsureDraftBracket { side, entry_type },
+        ));
+        false
     }
 
     /// Update Draft brackets that have `entry.price == 0.0` for a symbol.
@@ -1708,457 +1408,30 @@ impl MidasApp {
     /// Called when chart data finishes loading. If a panel activated a
     /// bracket before data was available, the entry price is 0.0; this
     /// patches it to the last close price from the newly loaded data.
+    /// Routes through `TickerState::apply()`.
     fn update_zero_price_brackets(&mut self, symbol: &str, price: f64) {
         let sym_upper = symbol.to_uppercase();
-        let panel_ids: Vec<OrderPanelId> = self
-            .order_panels
-            .iter()
-            .filter(|(_, p)| {
-                p.state.bracket_active.is_some()
-                    && p.state.symbol.to_uppercase() == sym_upper
-                    && p.state.bracket_annotation_id.is_some()
+        let sym_key = crate::annotation_store::SymbolKey::new(&sym_upper);
+
+        // Check if the TickerState's live bracket has zero entry price.
+        let needs_update = self
+            .tickers
+            .get(&sym_key)
+            .and_then(|ts| ts.live_bracket())
+            .map(|b| {
+                b.status == midas_chart::widget::order_bracket::BracketStatus::Draft
+                    && b.entry.line.price.abs() < f64::EPSILON
             })
-            .map(|(id, _)| *id)
-            .collect();
+            .unwrap_or(false);
 
-        for pid in panel_ids {
-            let ann_id = match self
-                .order_panels
-                .get(&pid)
-                .and_then(|p| p.state.bracket_annotation_id)
-            {
-                Some(id) => id,
-                None => continue,
-            };
-
-            // Only update Draft brackets with zero entry price.
-            let needs_update = self
-                .annotation_store
-                .get(&sym_upper)
-                .iter()
-                .find(|a| a.id == ann_id)
-                .and_then(|a| match &a.kind {
-                    midas_chart::widget::AnnotationKind::OrderBracket(b) => Some(
-                        b.status == midas_chart::widget::order_bracket::BracketStatus::Draft
-                            && b.entry.line.price.abs() < f64::EPSILON,
-                    ),
-                    _ => None,
-                })
-                .unwrap_or(false);
-
-            if needs_update {
-                self.annotation_store.update(&sym_upper, ann_id, |ann| {
-                    if let midas_chart::widget::AnnotationKind::OrderBracket(ref mut b) = ann.kind {
-                        b.entry.line.price = price;
-                    }
-                });
-                self.mark_levels_dirty_for_ticker(&sym_upper);
-            }
-        }
-    }
-
-    /// Handle the BUY/X/SELL bracket toggle for an order panel.
-    fn handle_set_bracket_mode(
-        &mut self,
-        panel_id: OrderPanelId,
-        mode: Option<crate::order_panel::OrderSide>,
-    ) {
-        use midas_chart::widget::order_bracket::*;
-
-        let panel = match self.order_panels.get(&panel_id) {
-            Some(p) => p,
-            None => return,
-        };
-        let symbol = panel.state.symbol.clone();
-        if symbol.is_empty() {
-            return;
-        }
-        let symbol_upper = symbol.to_uppercase();
-        let old_ann_id = panel.state.bracket_annotation_id;
-        let panel_entry_type = panel.state.entry_type;
-        let panel_limit_price = panel.state.limit_price.clone();
-        let panel_stop_price = panel.state.stop_price.clone();
-
-        match mode {
-            Some(side) => {
-                let bracket_side = match side {
-                    crate::order_panel::OrderSide::Buy => BracketSide::Long,
-                    crate::order_panel::OrderSide::Sell => BracketSide::Short,
-                };
-
-                // If there's already a visible bracket for this panel, just flip side.
-                // Skip if the annotation is Hidden (handled by the recall path below).
-                let old_is_active = old_ann_id
-                    .and_then(|id| {
-                        self.annotation_store
-                            .get(&symbol_upper)
-                            .iter()
-                            .find(|a| a.id == id)
-                            .map(|a| a.presence == midas_chart::widget::Presence::Active)
-                    })
-                    .unwrap_or(false);
-
-                if old_is_active {
-                    let ann_id = old_ann_id.unwrap(); // safe: old_is_active implies Some
-                    self.annotation_store.update(&symbol_upper, ann_id, |ann| {
-                        if let midas_chart::widget::AnnotationKind::OrderBracket(ref mut b) =
-                            ann.kind
-                        {
-                            b.side = bracket_side;
-                            // normalize mirrors TP/SL to correct side instead of deleting.
-                            crate::order_panel::normalize_bracket(b);
-                        }
-                    });
-                    if let Some(p) = self.order_panels.get_mut(&panel_id) {
-                        p.state.side = side;
-                        p.state.bracket_active = Some(side);
-                    }
-                    // Sync panel from the normalized bracket.
-                    if let Some(bracket_data) = self
-                        .annotation_store
-                        .get(&symbol_upper)
-                        .iter()
-                        .find(|a| a.id == ann_id)
-                        .and_then(|a| match &a.kind {
-                            midas_chart::widget::AnnotationKind::OrderBracket(b) => {
-                                Some(b.as_ref())
-                            }
-                            _ => None,
-                        })
-                    {
-                        if let Some(p) = self.order_panels.get_mut(&panel_id) {
-                            crate::order_panel::sync_panel_from_bracket(&mut p.state, bracket_data);
-                        }
-                    }
-                    self.mark_levels_dirty_for_ticker(&symbol_upper);
-                    return;
-                }
-
-                // Check if panel has a hidden saved bracket to recall.
-                if let Some(ann_id) = old_ann_id {
-                    let is_hidden_saved = self
-                        .annotation_store
-                        .get(&symbol_upper)
-                        .iter()
-                        .find(|a| a.id == ann_id)
-                        .map(|a| {
-                            a.presence == midas_chart::widget::Presence::Hidden
-                                && matches!(
-                                    &a.kind,
-                                    midas_chart::widget::AnnotationKind::OrderBracket(b)
-                                        if b.saved && b.status == BracketStatus::Draft
-                                )
-                        })
-                        .unwrap_or(false);
-
-                    if is_hidden_saved {
-                        // Check if the recalled bracket's side matches.
-                        let bracket_side_matches = self
-                            .annotation_store
-                            .get(&symbol_upper)
-                            .iter()
-                            .find(|a| a.id == ann_id)
-                            .and_then(|a| match &a.kind {
-                                midas_chart::widget::AnnotationKind::OrderBracket(b) => {
-                                    Some(b.side == bracket_side)
-                                }
-                                _ => None,
-                            })
-                            .unwrap_or(false);
-
-                        if bracket_side_matches {
-                            // Unhide and optionally reposition.
-                            let last_price = self
-                                .market_cache
-                                .get(&symbol_upper)
-                                .and_then(|snap| snap.last_price)
-                                .unwrap_or(0.0);
-                            let gatr_abs = self
-                                .market_cache
-                                .get(&symbol_upper)
-                                .and_then(|snap| snap.gatr_abs);
-
-                            // Read entry price for reposition check.
-                            let entry_price = self
-                                .annotation_store
-                                .get(&symbol_upper)
-                                .iter()
-                                .find(|a| a.id == ann_id)
-                                .and_then(|a| match &a.kind {
-                                    midas_chart::widget::AnnotationKind::OrderBracket(b) => {
-                                        Some(b.entry.line.price)
-                                    }
-                                    _ => None,
-                                })
-                                .unwrap_or(0.0);
-
-                            let needs_reposition = last_price > 0.0
-                                && crate::order_panel::should_reposition(
-                                    entry_price,
-                                    last_price,
-                                    gatr_abs,
-                                );
-
-                            self.annotation_store.update(&symbol_upper, ann_id, |ann| {
-                                ann.presence = midas_chart::widget::Presence::Active;
-                                if let midas_chart::widget::AnnotationKind::OrderBracket(
-                                    ref mut b,
-                                ) = ann.kind
-                                {
-                                    // Normalize stale data from old code versions.
-                                    crate::order_panel::normalize_bracket(b);
-                                    if needs_reposition {
-                                        crate::order_panel::reposition_bracket(b, last_price);
-                                    }
-                                }
-                            });
-
-                            if let Some(p) = self.order_panels.get_mut(&panel_id) {
-                                p.state.side = side;
-                                p.state.bracket_active = Some(side);
-                                p.state.bracket_annotation_id = Some(ann_id);
-                            }
-
-                            // Sync panel inputs from the (possibly repositioned) bracket.
-                            if let Some(bracket_data) = self
-                                .annotation_store
-                                .get(&symbol_upper)
-                                .iter()
-                                .find(|a| a.id == ann_id)
-                                .and_then(|a| match &a.kind {
-                                    midas_chart::widget::AnnotationKind::OrderBracket(b) => {
-                                        Some(b.as_ref())
-                                    }
-                                    _ => None,
-                                })
-                            {
-                                if let Some(p) = self.order_panels.get_mut(&panel_id) {
-                                    crate::order_panel::sync_panel_from_bracket(
-                                        &mut p.state,
-                                        bracket_data,
-                                    );
-                                }
-                            }
-
-                            self.mark_levels_dirty_for_ticker(&symbol_upper);
-                            return;
-                        }
-                        // Side doesn't match — fall through to create fresh bracket.
-                        // (The hidden bracket stays hidden for potential future recall.)
-                    }
-                }
-
-                // Check for existing saved Draft bracket in AnnotationStore.
-                let saved_ann = self
-                    .annotation_store
-                    .get(&symbol_upper)
-                    .iter()
-                    .find(|a| {
-                        matches!(&a.kind, midas_chart::widget::AnnotationKind::OrderBracket(b)
-                            if b.status == BracketStatus::Draft && b.saved)
-                    })
-                    .map(|a| a.id);
-
-                if let Some(existing_id) = saved_ann {
-                    // Re-link to existing saved bracket; update side if needed.
-                    self.annotation_store
-                        .update(&symbol_upper, existing_id, |ann| {
-                            if let midas_chart::widget::AnnotationKind::OrderBracket(ref mut b) =
-                                ann.kind
-                            {
-                                b.side = bracket_side;
-                            }
-                        });
-                    if let Some(p) = self.order_panels.get_mut(&panel_id) {
-                        p.state.side = side;
-                        p.state.bracket_active = Some(side);
-                        p.state.bracket_annotation_id = Some(existing_id);
-                    }
-                    // Sync panel inputs from the re-linked bracket.
-                    if let Some(bracket_data) = self
-                        .annotation_store
-                        .get(&symbol_upper)
-                        .iter()
-                        .find(|a| a.id == existing_id)
-                        .and_then(|a| match &a.kind {
-                            midas_chart::widget::AnnotationKind::OrderBracket(b) => {
-                                Some(b.as_ref())
-                            }
-                            _ => None,
-                        })
-                    {
-                        if let Some(p) = self.order_panels.get_mut(&panel_id) {
-                            crate::order_panel::sync_panel_from_bracket(&mut p.state, bracket_data);
-                        }
-                    }
-                    self.mark_levels_dirty_for_ticker(&symbol_upper);
-                    return;
-                }
-
-                // Create a new bracket with default TP/SL.
-                let last_price = self
-                    .market_cache
-                    .get(&symbol_upper)
-                    .and_then(|snap| snap.last_price)
-                    .unwrap_or(0.0);
-
-                let tp_enabled = self
-                    .order_panels
-                    .get(&panel_id)
-                    .is_none_or(|p| p.state.tp_enabled);
-                let sl_enabled = self
-                    .order_panels
-                    .get(&panel_id)
-                    .is_none_or(|p| p.state.sl_enabled);
-                let panel_side = match bracket_side {
-                    BracketSide::Long => crate::order_panel::OrderSide::Buy,
-                    BracketSide::Short => crate::order_panel::OrderSide::Sell,
-                };
-                // Derive price-per-pixel from the first chart showing this symbol
-                // so that default TP/SL offsets are always visually distinct.
-                let price_per_pixel = self
-                    .charts
-                    .values()
-                    .chain(self.floating_charts.values())
-                    .find(|c| c.symbol.eq_ignore_ascii_case(&symbol_upper))
-                    .map(|c| {
-                        let cam = &c.chart_state.camera;
-                        let range = cam.price_high - cam.price_low;
-                        if cam.viewport_height > 0 {
-                            range / cam.viewport_height as f64
-                        } else {
-                            0.0
-                        }
-                    })
-                    .filter(|&ppp| ppp > 0.0);
-                let (_entry, tp_price, sl_price) = crate::order_panel::default_bracket_prices(
-                    last_price,
-                    panel_side,
-                    tp_enabled,
-                    sl_enabled,
-                    price_per_pixel,
-                );
-
-                let make_leg = |price: f64| BracketLeg {
-                    line: midas_chart::widget::PriceLine {
-                        price,
-                        extent: midas_chart::widget::LineExtent::FullWidth,
-                        stroke: midas_chart::widget::LineStroke {
-                            color: [0.0, 0.0, 0.0, 1.0],
-                            width: 1.0,
-                            style: midas_chart::widget::level::LineStyle::Solid,
-                        },
-                    },
-                    role: LegRole::Entry,
-                    projected_pnl: None,
-                    projected_pnl_pct: None,
-                };
-
-                // Determine entry price based on entry type.
-                // For Stop/StopLimit, default to reasonable offsets from last
-                // price when panel fields are empty or unparseable.
-                let default_stop = if bracket_side == BracketSide::Long {
-                    last_price * 1.02
-                } else {
-                    last_price * 0.98
-                };
-                let entry_price = match panel_entry_type {
-                    EntryType::Market => last_price,
-                    EntryType::Limit => panel_limit_price.parse::<f64>().unwrap_or(last_price),
-                    EntryType::Stop => panel_stop_price.parse::<f64>().unwrap_or(default_stop),
-                    EntryType::StopLimit => panel_limit_price.parse::<f64>().unwrap_or(last_price),
-                };
-                let entry_stop = if panel_entry_type == EntryType::StopLimit {
-                    Some(panel_stop_price.parse::<f64>().unwrap_or(default_stop))
-                } else {
-                    None
-                };
-
-                let bracket = OrderBracket {
-                    entry: make_leg(entry_price),
-                    take_profit: tp_price.map(&make_leg),
-                    stop_loss: sl_price.map(&make_leg),
-                    side: bracket_side,
-                    status: BracketStatus::Draft,
-                    quantity: None,
-                    saved: false,
-                    filled_qty: None,
-                    entry_type: panel_entry_type,
-                    entry_stop_price: entry_stop,
-                    wrong_side_warning: false,
-                };
-
-                let ann_id = self.annotation_store.add(
-                    &symbol_upper,
-                    midas_chart::widget::AnnotationKind::OrderBracket(Box::new(bracket)),
-                );
-
-                if let Some(p) = self.order_panels.get_mut(&panel_id) {
-                    p.state.side = side;
-                    p.state.bracket_active = Some(side);
-                    p.state.bracket_annotation_id = Some(ann_id);
-                }
-
-                // Sync panel inputs from the newly created bracket.
-                if let Some(bracket_data) = self
-                    .annotation_store
-                    .get(&symbol_upper)
-                    .iter()
-                    .find(|a| a.id == ann_id)
-                    .and_then(|a| match &a.kind {
-                        midas_chart::widget::AnnotationKind::OrderBracket(b) => Some(b.as_ref()),
-                        _ => None,
-                    })
-                {
-                    if let Some(p) = self.order_panels.get_mut(&panel_id) {
-                        crate::order_panel::sync_panel_from_bracket(&mut p.state, bracket_data);
-                    }
-                }
-
-                self.mark_levels_dirty_for_ticker(&symbol_upper);
-            }
-
-            None => {
-                // [X] toggle: delete unsaved bracket, hide saved ones.
-                if let Some(ann_id) = old_ann_id {
-                    let is_saved = self
-                        .annotation_store
-                        .get(&symbol_upper)
-                        .iter()
-                        .find(|a| a.id == ann_id)
-                        .and_then(|a| match &a.kind {
-                            midas_chart::widget::AnnotationKind::OrderBracket(b) => Some(b.saved),
-                            _ => None,
-                        })
-                        .unwrap_or(false);
-
-                    if is_saved {
-                        // Hide — zero GPU cost, persists to disk, recallable.
-                        self.annotation_store.update(&symbol_upper, ann_id, |ann| {
-                            ann.presence = midas_chart::widget::Presence::Hidden;
-                        });
-                        self.mark_levels_dirty_for_ticker(&symbol_upper);
-                        // Keep bracket_annotation_id so recall can find it.
-                        if let Some(p) = self.order_panels.get_mut(&panel_id) {
-                            p.state.bracket_active = None;
-                            // bracket_annotation_id stays set for recall
-                        }
-                    } else {
-                        // Unsaved: delete entirely.
-                        self.annotation_store.remove(&symbol_upper, ann_id);
-                        self.mark_levels_dirty_for_ticker(&symbol_upper);
-                        if let Some(p) = self.order_panels.get_mut(&panel_id) {
-                            p.state.bracket_active = None;
-                            p.state.bracket_annotation_id = None;
-                        }
-                    }
-                } else {
-                    if let Some(p) = self.order_panels.get_mut(&panel_id) {
-                        p.state.bracket_active = None;
-                        p.state.bracket_annotation_id = None;
-                    }
-                }
-            }
+        if needs_update {
+            let _ = self.update(Message::Ticker(
+                sym_key,
+                crate::ticker_state::TickerMsg::SetLegPrice {
+                    role: midas_chart::widget::order_bracket::LegRole::Entry,
+                    price,
+                },
+            ));
         }
     }
 
@@ -4012,16 +3285,90 @@ impl MidasApp {
             Message::OrderPanelMsg(panel_id, action) => {
                 use crate::order_panel::OrderPanelAction;
 
-                // SetBracketMode needs broader access to self (annotation_store, cache).
+                // SetBracketMode routes through TickerState.
                 if let OrderPanelAction::SetBracketMode(mode) = action {
-                    self.handle_set_bracket_mode(panel_id, mode);
-                    return Task::none();
+                    let symbol = self
+                        .order_panels
+                        .get(&panel_id)
+                        .map(|p| p.state.symbol.clone())
+                        .unwrap_or_default();
+                    if symbol.is_empty() {
+                        return Task::none();
+                    }
+                    let sym_key = crate::annotation_store::SymbolKey::new(&symbol);
+
+                    // Seed the ticker state with market data so apply() can
+                    // compute sensible default prices.
+                    {
+                        let (mc_price, mc_gatr) = self
+                            .market_cache
+                            .get(&symbol.to_uppercase())
+                            .map(|s| (s.last_price, s.gatr_abs))
+                            .unwrap_or((None, None));
+                        let ts = self.ticker_mut(&sym_key);
+                        ts.set_last_price(mc_price);
+                        ts.set_gatr_abs(mc_gatr);
+                    }
+
+                    match mode {
+                        Some(side) => {
+                            let entry_type = self
+                                .order_panels
+                                .get(&panel_id)
+                                .map(|p| p.state.entry_type)
+                                .unwrap_or_default();
+                            if let Some(p) = self.order_panels.get_mut(&panel_id) {
+                                p.state.side = side;
+                                p.state.bracket_active = Some(side);
+                            }
+                            return self.update(Message::Ticker(
+                                sym_key,
+                                crate::ticker_state::TickerMsg::EnsureDraftBracket {
+                                    side,
+                                    entry_type,
+                                },
+                            ));
+                        }
+                        None => {
+                            if let Some(p) = self.order_panels.get_mut(&panel_id) {
+                                p.state.bracket_active = None;
+                            }
+                            return self.update(Message::Ticker(
+                                sym_key,
+                                crate::ticker_state::TickerMsg::CancelBracket,
+                            ));
+                        }
+                    }
                 }
 
-                // SetEntryType needs annotation_store + market_cache access.
+                // SetEntryType routes through TickerState.
                 if let OrderPanelAction::SetEntryType(new_type) = action {
-                    self.handle_set_entry_type(panel_id, new_type);
-                    return Task::none();
+                    let symbol = self
+                        .order_panels
+                        .get(&panel_id)
+                        .map(|p| p.state.symbol.clone())
+                        .unwrap_or_default();
+                    if symbol.is_empty() {
+                        return Task::none();
+                    }
+                    let sym_key = crate::annotation_store::SymbolKey::new(&symbol);
+                    {
+                        let (mc_price, mc_gatr) = self
+                            .market_cache
+                            .get(&symbol.to_uppercase())
+                            .map(|s| (s.last_price, s.gatr_abs))
+                            .unwrap_or((None, None));
+                        let ts = self.ticker_mut(&sym_key);
+                        ts.set_last_price(mc_price);
+                        ts.set_gatr_abs(mc_gatr);
+                    }
+                    if let Some(p) = self.order_panels.get_mut(&panel_id) {
+                        p.state.entry_type = new_type;
+                    }
+                    return self.update(Message::Ticker(
+                        sym_key,
+                        crate::ticker_state::TickerMsg::SetEntryType(new_type),
+                    ));
                 }
 
                 // ConfirmYes needs broader access to self (broker_bridge, market_cache),
@@ -4389,149 +3736,57 @@ impl MidasApp {
                     }
                 }
 
-                // Structural sync (side, quantity, TP/SL toggle).
+                // Structural sync (side, quantity, TP/SL toggle) via TickerState.
                 match structural_sync {
-                    StructuralSync::Side(ann_id, ref symbol, side) => {
-                        use midas_chart::widget::order_bracket::BracketSide;
-                        let bracket_side = match side {
-                            crate::order_panel::OrderSide::Buy => BracketSide::Long,
-                            crate::order_panel::OrderSide::Sell => BracketSide::Short,
-                        };
-                        self.annotation_store.update(symbol, ann_id, |ann| {
-                            if let midas_chart::widget::AnnotationKind::OrderBracket(ref mut b) =
-                                ann.kind
-                            {
-                                b.side = bracket_side;
-                                crate::order_panel::normalize_bracket(b);
-                            }
-                        });
-                        self.sync_panel_and_redraw(panel_id, ann_id, symbol);
+                    StructuralSync::Side(_ann_id, ref symbol, side) => {
+                        let sym_key = crate::annotation_store::SymbolKey::new(symbol);
+                        let _ = self.update(Message::Ticker(
+                            sym_key,
+                            crate::ticker_state::TickerMsg::SetSide(side),
+                        ));
                     }
-                    StructuralSync::Quantity(ann_id, ref symbol, ref qty_str) => {
-                        let qty = qty_str.parse::<f64>().ok();
-                        self.annotation_store.update(symbol, ann_id, |ann| {
-                            if let midas_chart::widget::AnnotationKind::OrderBracket(ref mut b) =
-                                ann.kind
-                            {
-                                b.quantity = qty;
-                            }
-                        });
+                    StructuralSync::Quantity(_ann_id, ref symbol, ref qty_str) => {
+                        if let Ok(qty) = qty_str.parse::<f64>() {
+                            let sym_key = crate::annotation_store::SymbolKey::new(symbol);
+                            let _ = self.update(Message::Ticker(
+                                sym_key,
+                                crate::ticker_state::TickerMsg::SetQuantity(qty),
+                            ));
+                        }
                     }
-                    StructuralSync::ToggleTp(ann_id, ref symbol, enabled, _last_price) => {
-                        self.annotation_store.update(symbol, ann_id, |ann| {
-                            if let midas_chart::widget::AnnotationKind::OrderBracket(ref mut b) =
-                                ann.kind
-                            {
-                                if enabled && b.take_profit.is_none() {
-                                    // Create TP at 1% offset from entry price.
-                                    let entry = b.entry.line.price;
-                                    let offset = (entry * 0.01).max(0.01);
-                                    let tp_price = match b.side {
-                                        midas_chart::widget::order_bracket::BracketSide::Long => {
-                                            entry + offset
-                                        }
-                                        midas_chart::widget::order_bracket::BracketSide::Short => {
-                                            entry - offset
-                                        }
-                                    };
-                                    b.take_profit =
-                                        Some(midas_chart::widget::order_bracket::BracketLeg {
-                                            line: midas_chart::widget::PriceLine {
-                                                price: tp_price,
-                                                extent: midas_chart::widget::LineExtent::FullWidth,
-                                                stroke: midas_chart::widget::LineStroke {
-                                                    color: [0.0, 0.0, 0.0, 1.0],
-                                                    width: 1.0,
-                                                    style: midas_chart::widget::level::LineStyle::Solid,
-                                                },
-                                            },
-                                            role: midas_chart::widget::order_bracket::LegRole::TakeProfit,
-                                            projected_pnl: None,
-                                            projected_pnl_pct: None,
-                                        });
-                                } else if !enabled {
-                                    b.take_profit = None;
-                                }
-                            }
-                        });
-                        self.sync_panel_and_redraw(panel_id, ann_id, symbol);
+                    StructuralSync::ToggleTp(_ann_id, ref symbol, enabled, _last_price) => {
+                        let sym_key = crate::annotation_store::SymbolKey::new(symbol);
+                        let _ = self.update(Message::Ticker(
+                            sym_key,
+                            crate::ticker_state::TickerMsg::SetTpEnabled(enabled),
+                        ));
                     }
-                    StructuralSync::ToggleSl(ann_id, ref symbol, enabled, _last_price) => {
-                        self.annotation_store.update(symbol, ann_id, |ann| {
-                            if let midas_chart::widget::AnnotationKind::OrderBracket(ref mut b) =
-                                ann.kind
-                            {
-                                if enabled && b.stop_loss.is_none() {
-                                    // Create SL at 0.5% offset from entry price.
-                                    let entry = b.entry.line.price;
-                                    let offset = (entry * 0.005).max(0.01);
-                                    let sl_price = match b.side {
-                                        midas_chart::widget::order_bracket::BracketSide::Long => {
-                                            entry - offset
-                                        }
-                                        midas_chart::widget::order_bracket::BracketSide::Short => {
-                                            entry + offset
-                                        }
-                                    };
-                                    b.stop_loss =
-                                        Some(midas_chart::widget::order_bracket::BracketLeg {
-                                            line: midas_chart::widget::PriceLine {
-                                                price: sl_price,
-                                                extent: midas_chart::widget::LineExtent::FullWidth,
-                                                stroke: midas_chart::widget::LineStroke {
-                                                    color: [0.0, 0.0, 0.0, 1.0],
-                                                    width: 1.0,
-                                                    style: midas_chart::widget::level::LineStyle::Solid,
-                                                },
-                                            },
-                                            role: midas_chart::widget::order_bracket::LegRole::StopLoss,
-                                            projected_pnl: None,
-                                            projected_pnl_pct: None,
-                                        });
-                                } else if !enabled {
-                                    b.stop_loss = None;
-                                }
-                            }
-                        });
-                        self.sync_panel_and_redraw(panel_id, ann_id, symbol);
+                    StructuralSync::ToggleSl(_ann_id, ref symbol, enabled, _last_price) => {
+                        let sym_key = crate::annotation_store::SymbolKey::new(symbol);
+                        let _ = self.update(Message::Ticker(
+                            sym_key,
+                            crate::ticker_state::TickerMsg::SetSlEnabled(enabled),
+                        ));
                     }
                     StructuralSync::None => {}
                 }
 
-                // Panel → Chart annotation sync (price fields).
-                if let Some((ann_id, symbol, field, price)) = annotation_sync {
-                    self.annotation_store.update(&symbol, ann_id, |ann| {
-                        if let midas_chart::widget::AnnotationKind::OrderBracket(ref mut b) =
-                            ann.kind
-                        {
-                            match field {
-                                "tp" => {
-                                    if let Some(ref mut tp) = b.take_profit {
-                                        tp.line.price = price;
-                                    }
-                                }
-                                "sl" => {
-                                    if let Some(ref mut sl) = b.stop_loss {
-                                        sl.line.price = price;
-                                    }
-                                }
-                                "limit" => {
-                                    b.entry.line.price = price;
-                                }
-                                "stop" => match b.entry_type {
-                                    midas_chart::widget::order_bracket::EntryType::Stop => {
-                                        b.entry.line.price = price;
-                                    }
-                                    midas_chart::widget::order_bracket::EntryType::StopLimit => {
-                                        b.entry_stop_price = Some(price);
-                                    }
-                                    _ => {}
-                                },
-                                _ => {}
-                            }
-                        }
-                    });
-                    self.mark_levels_dirty_for_ticker(&symbol);
+                // Panel → Chart annotation sync (price fields) via TickerState.
+                if let Some((_ann_id, symbol, field, price)) = annotation_sync {
+                    let sym_key = crate::annotation_store::SymbolKey::new(&symbol);
+                    let role = match field {
+                        "tp" => Some(midas_chart::widget::order_bracket::LegRole::TakeProfit),
+                        "sl" => Some(midas_chart::widget::order_bracket::LegRole::StopLoss),
+                        "limit" => Some(midas_chart::widget::order_bracket::LegRole::Entry),
+                        "stop" => Some(midas_chart::widget::order_bracket::LegRole::StopTrigger),
+                        _ => None,
+                    };
+                    if let Some(role) = role {
+                        let _ = self.update(Message::Ticker(
+                            sym_key,
+                            crate::ticker_state::TickerMsg::SetLegPrice { role, price },
+                        ));
+                    }
                 }
 
                 // Single-source-of-truth refactor: a side flip may
@@ -4915,51 +4170,32 @@ impl MidasApp {
                     self.market_cache.insert(symbol.clone(), snapshot);
                 }
 
-                // Sync draft bracket entry prices for Market-type panels tracking this symbol.
-                // Non-Market brackets preserve user-specified entry prices.
+                // Sync draft bracket entry prices for Market-type brackets via TickerState.
                 let symbol_upper = symbol.to_uppercase();
                 if let Some(new_price) = self
                     .market_cache
                     .get(&symbol_upper)
                     .and_then(|s| s.last_price)
                 {
-                    let mut dirty = false;
-                    for panel in self.order_panels.values() {
-                        if panel.state.bracket_active.is_some()
-                            && panel.state.symbol.to_uppercase() == symbol_upper
-                            && panel.state.entry_type
-                                == midas_chart::widget::order_bracket::EntryType::Market
-                        {
-                            if let Some(ann_id) = panel.state.bracket_annotation_id {
-                                let should_update = self
-                                    .annotation_store
-                                    .get(&symbol_upper)
-                                    .iter()
-                                    .find(|a| a.id == ann_id)
-                                    .and_then(|a| match &a.kind {
-                                        midas_chart::widget::AnnotationKind::OrderBracket(b) => {
-                                            Some((new_price - b.entry.line.price).abs() >= 0.01)
-                                        }
-                                        _ => None,
-                                    })
-                                    .unwrap_or(false);
-
-                                if should_update {
-                                    self.annotation_store.update(&symbol_upper, ann_id, |ann| {
-                                        if let midas_chart::widget::AnnotationKind::OrderBracket(
-                                            ref mut b,
-                                        ) = ann.kind
-                                        {
-                                            b.entry.line.price = new_price;
-                                        }
-                                    });
-                                    dirty = true;
-                                }
-                            }
-                        }
-                    }
-                    if dirty {
-                        self.mark_levels_dirty_for_ticker(&symbol_upper);
+                    let sym_key = crate::annotation_store::SymbolKey::new(&symbol_upper);
+                    // Check if the TickerState's live bracket needs a price update.
+                    let needs_update = self
+                        .tickers
+                        .get(&sym_key)
+                        .and_then(|ts| ts.live_bracket())
+                        .map(|b| {
+                            b.entry_type == midas_chart::widget::order_bracket::EntryType::Market
+                                && (new_price - b.entry.line.price).abs() >= 0.01
+                        })
+                        .unwrap_or(false);
+                    if needs_update {
+                        let _ = self.update(Message::Ticker(
+                            sym_key,
+                            crate::ticker_state::TickerMsg::SetLegPrice {
+                                role: midas_chart::widget::order_bracket::LegRole::Entry,
+                                price: new_price,
+                            },
+                        ));
                     }
                 }
 
@@ -5340,175 +4576,48 @@ impl MidasApp {
 
             // -- Bracket drag --
             Message::ChartDragBracketLeg(chart_id, annotation_id, leg, new_price) => {
-                use midas_chart::widget::order_bracket::LegRole;
-
                 let ann_id = AnnotationId(annotation_id);
-
-                // Resolve the ticker for this chart so we can look up the
-                // annotation in the per-symbol store.
                 let ticker = self.chart_ticker(chart_id).map(str::to_owned);
                 if let Some(ref ticker) = ticker {
-                    let updated = self.annotation_store.update(ticker, ann_id, |ann| {
-                        if let midas_chart::widget::AnnotationKind::OrderBracket(ref mut bracket) =
-                            ann.kind
-                        {
-                            let entry_price = bracket.entry.line.price;
-                            let qty = bracket.quantity.unwrap_or(0.0);
-                            let sign = match bracket.side {
-                                midas_chart::widget::order_bracket::BracketSide::Long => 1.0,
-                                midas_chart::widget::order_bracket::BracketSide::Short => -1.0,
-                            };
-                            match leg {
-                                LegRole::Entry => {
-                                    bracket.entry.line.price = new_price;
-                                }
-                                LegRole::TakeProfit => {
-                                    if let Some(ref mut tp) = bracket.take_profit {
-                                        tp.line.price = new_price;
-                                        // Recompute projected P&L if entry has filled.
-                                        if bracket.status
-                                            == midas_chart::widget::order_bracket::BracketStatus::Active
-                                        {
-                                            tp.projected_pnl =
-                                                Some(sign * (new_price - entry_price) * qty);
-                                            tp.projected_pnl_pct =
-                                                if entry_price.abs() > f64::EPSILON {
-                                                    Some(
-                                                        sign * (new_price - entry_price)
-                                                            / entry_price
-                                                            * 100.0,
-                                                    )
-                                                } else {
-                                                    None
-                                                };
-                                        }
-                                    }
-                                }
-                                LegRole::StopLoss => {
-                                    if let Some(ref mut sl) = bracket.stop_loss {
-                                        sl.line.price = new_price;
-                                        if bracket.status
-                                            == midas_chart::widget::order_bracket::BracketStatus::Active
-                                        {
-                                            sl.projected_pnl =
-                                                Some(sign * (new_price - entry_price) * qty);
-                                            sl.projected_pnl_pct =
-                                                if entry_price.abs() > f64::EPSILON {
-                                                    Some(
-                                                        sign * (new_price - entry_price)
-                                                            / entry_price
-                                                            * 100.0,
-                                                    )
-                                                } else {
-                                                    None
-                                                };
-                                        }
-                                    }
-                                }
-                                LegRole::StopTrigger => {
-                                    bracket.entry_stop_price = Some(new_price);
-                                }
-                            }
-                        }
-                    });
-                    if updated {
-                        tracing::debug!(
-                            "Bracket leg drag: chart={chart_id:?} ann={annotation_id} \
-                             leg={leg:?} price={new_price:.4}"
-                        );
-                        // Mark levels dirty on all charts showing this symbol
-                        // so the GPU re-renders the bracket lines.
-                        self.mark_levels_dirty_for_ticker(ticker);
+                    let sym_key = crate::annotation_store::SymbolKey::new(ticker);
+                    // Route the drag through TickerState. The effect handler
+                    // projects the bracket into annotation_store and syncs
+                    // panels automatically.
+                    let _ = self.update(Message::Ticker(
+                        sym_key,
+                        crate::ticker_state::TickerMsg::DragLeg {
+                            role: leg,
+                            new_price,
+                        },
+                    ));
 
-                        // Entry leg drag: sync panel inputs and compute warnings.
-                        if leg == LegRole::Entry {
-                            // Find the panel linked to this annotation.
-                            let panel_id = self
-                                .order_panels
-                                .iter()
-                                .find(|(_, p)| p.state.bracket_annotation_id == Some(ann_id))
-                                .map(|(id, _)| *id);
-                            if let Some(pid) = panel_id {
-                                if let Some(p) = self.order_panels.get_mut(&pid) {
-                                    let price_str = format!("{:.2}", new_price);
-                                    match p.state.entry_type {
-                                        // StopLimit: drag adjusts limit price only.
-                                        // Stop price is only editable via panel
-                                        // input (V1 — second drag line deferred).
-                                        midas_chart::widget::order_bracket::EntryType::Limit
-                                        | midas_chart::widget::order_bracket::EntryType::StopLimit => {
-                                            p.state.limit_price = price_str;
-                                        }
-                                        midas_chart::widget::order_bracket::EntryType::Stop => {
-                                            p.state.stop_price = price_str;
-                                        }
-                                        _ => {}
-                                    }
+                    // Send price modification to broker engine (kept in
+                    // app.rs because broker_bridge is not in TickerState).
+                    if let Some(ref bridge) = self.broker_bridge {
+                        let order_id = self
+                            .order_annotation_links
+                            .values()
+                            .find(|link| link.annotation_id == annotation_id)
+                            .and_then(|link| match leg {
+                                midas_chart::widget::order_bracket::LegRole::TakeProfit => {
+                                    link.tp_order_id
                                 }
-                                // Compute directional warning.
-                                self.update_wrong_side_warning(ticker, ann_id);
+                                midas_chart::widget::order_bracket::LegRole::StopLoss => {
+                                    link.sl_order_id
+                                }
+                                _ => None,
+                            });
+                        if let Some(order_id) = order_id {
+                            if let Err(e) = bridge.modify_bracket_leg(order_id, new_price) {
+                                tracing::error!(
+                                    "Failed to send ModifyBracketLeg to broker: {e}"
+                                );
                             }
                         }
-
-                        // TP/SL/StopTrigger leg drag: sync panel string inputs.
-                        if matches!(
-                            leg,
-                            LegRole::TakeProfit | LegRole::StopLoss | LegRole::StopTrigger
-                        ) {
-                            let panel_id = self
-                                .order_panels
-                                .iter()
-                                .find(|(_, p)| p.state.bracket_annotation_id == Some(ann_id))
-                                .map(|(id, _)| *id);
-                            if let Some(pid) = panel_id {
-                                if let Some(p) = self.order_panels.get_mut(&pid) {
-                                    let price_str = format!("{:.2}", new_price);
-                                    match leg {
-                                        LegRole::TakeProfit => p.state.tp_value = price_str,
-                                        LegRole::StopLoss => p.state.sl_value = price_str,
-                                        LegRole::StopTrigger => p.state.stop_price = price_str,
-                                        _ => {}
-                                    }
-                                }
-                            }
-                        }
-
-                        // Send price modification to broker engine.
-                        if let Some(ref bridge) = self.broker_bridge {
-                            let order_id = self
-                                .order_annotation_links
-                                .values()
-                                .find(|link| link.annotation_id == annotation_id)
-                                .and_then(|link| match leg {
-                                    LegRole::TakeProfit => link.tp_order_id,
-                                    LegRole::StopLoss => link.sl_order_id,
-                                    LegRole::Entry | LegRole::StopTrigger => None,
-                                });
-                            if let Some(order_id) = order_id {
-                                if let Err(e) = bridge.modify_bracket_leg(order_id, new_price) {
-                                    tracing::error!(
-                                        "Failed to send ModifyBracketLeg to broker: {e}"
-                                    );
-                                } else {
-                                    tracing::debug!(
-                                        "ModifyBracketLeg sent: order={order_id} \
-                                         price={new_price:.4}"
-                                    );
-                                }
-                            }
-                        }
-                    } else {
-                        tracing::warn!(
-                            "Bracket leg drag: annotation {annotation_id} not found \
-                             for symbol {ticker}"
-                        );
                     }
                 }
                 // Slice 3: route the post-drag bracket state through
-                // the ticker-intent reducer. Captures the symbol at
-                // drag-start (the annotation's owning symbol) so the
-                // reducer's mid-drag-ticker-switch guard can drop the
-                // message if the user swapped tickers while dragging.
+                // the ticker-intent reducer.
                 if let Some(symbol_at_drag_start) = ticker {
                     self.sync_drag_to_intent(symbol_at_drag_start, ann_id);
                 }
@@ -5525,85 +4634,27 @@ impl MidasApp {
                 if symbol.is_empty() {
                     return Task::none();
                 }
-
-                // Read current bracket state.
-                let bracket_info = self
+                // Read current SL state to determine toggle direction.
+                let has_sl = self
                     .annotation_store
                     .get(&symbol)
                     .iter()
                     .find(|a| a.id == ann_id)
                     .and_then(|a| match &a.kind {
                         midas_chart::widget::AnnotationKind::OrderBracket(b) => {
-                            Some((b.stop_loss.is_some(), b.entry.line.price, b.side))
+                            Some(b.stop_loss.is_some())
                         }
-                        _ => None,
-                    });
-
-                let Some((has_sl, entry_price, side)) = bracket_info else {
-                    return Task::none();
-                };
-
-                // No-op if entry price is zero (no market data).
-                if entry_price <= 0.0 && !has_sl {
-                    return Task::none();
-                }
-
-                self.annotation_store.update(&symbol, ann_id, |ann| {
-                    if let midas_chart::widget::AnnotationKind::OrderBracket(ref mut b) = ann.kind {
-                        if b.stop_loss.is_some() {
-                            b.stop_loss = None;
-                        } else {
-                            // Add SL at 2% below (Long) or above (Short).
-                            use midas_chart::widget::order_bracket::*;
-                            let sl_price = match side {
-                                BracketSide::Long => entry_price * 0.98,
-                                BracketSide::Short => entry_price * 1.02,
-                            };
-                            b.stop_loss = Some(BracketLeg {
-                                line: midas_chart::widget::PriceLine {
-                                    price: sl_price,
-                                    extent: midas_chart::widget::LineExtent::FullWidth,
-                                    stroke: midas_chart::widget::LineStroke {
-                                        color: [0.0, 0.0, 0.0, 1.0],
-                                        width: 1.5,
-                                        style: midas_chart::widget::level::LineStyle::Solid,
-                                    },
-                                },
-                                role: LegRole::Entry,
-                                projected_pnl: None,
-                                projected_pnl_pct: None,
-                            });
-                        }
-                    }
-                });
-
-                // Sync panel SL string from the updated annotation.
-                if let Some(bracket_data) = self
-                    .annotation_store
-                    .get(&symbol)
-                    .iter()
-                    .find(|a| a.id == ann_id)
-                    .and_then(|a| match &a.kind {
-                        midas_chart::widget::AnnotationKind::OrderBracket(b) => Some(b.as_ref()),
                         _ => None,
                     })
-                {
-                    let pid = self
-                        .order_panels
-                        .iter()
-                        .find(|(_, p)| p.state.bracket_annotation_id == Some(ann_id))
-                        .map(|(id, _)| *id);
-                    if let Some(pid) = pid {
-                        if let Some(p) = self.order_panels.get_mut(&pid) {
-                            crate::order_panel::sync_panel_from_bracket(&mut p.state, bracket_data);
-                        }
-                    }
-                }
-                self.mark_levels_dirty_for_ticker(&symbol);
-                Task::none()
+                    .unwrap_or(false);
+                let sym_key = crate::annotation_store::SymbolKey::new(&symbol);
+                self.update(Message::Ticker(
+                    sym_key,
+                    crate::ticker_state::TickerMsg::SetSlEnabled(!has_sl),
+                ))
             }
 
-            Message::ChartBracketCancelSL(chart_id, ann_id) => {
+            Message::ChartBracketCancelSL(chart_id, _ann_id) => {
                 let symbol = self
                     .charts
                     .get(&chart_id)
@@ -5612,26 +4663,11 @@ impl MidasApp {
                 if symbol.is_empty() {
                     return Task::none();
                 }
-
-                self.annotation_store.update(&symbol, ann_id, |ann| {
-                    if let midas_chart::widget::AnnotationKind::OrderBracket(ref mut b) = ann.kind {
-                        b.stop_loss = None;
-                    }
-                });
-
-                // Sync panel — clear SL string since leg was removed.
-                let pid = self
-                    .order_panels
-                    .iter()
-                    .find(|(_, p)| p.state.bracket_annotation_id == Some(ann_id))
-                    .map(|(id, _)| *id);
-                if let Some(pid) = pid {
-                    if let Some(p) = self.order_panels.get_mut(&pid) {
-                        p.state.sl_value.clear();
-                    }
-                }
-                self.mark_levels_dirty_for_ticker(&symbol);
-                Task::none()
+                let sym_key = crate::annotation_store::SymbolKey::new(&symbol);
+                self.update(Message::Ticker(
+                    sym_key,
+                    crate::ticker_state::TickerMsg::SetSlEnabled(false),
+                ))
             }
 
             Message::ChartBracketTogglePin(chart_id, _ann_id) => {
@@ -5654,22 +4690,18 @@ impl MidasApp {
 
             Message::ChartBracketSave(_chart_id, ann_id) => {
                 // Find the symbol from whichever panel owns this bracket.
-                let panel_info = self
+                let symbol = self
                     .order_panels
                     .iter()
                     .find(|(_, p)| p.state.bracket_annotation_id == Some(ann_id))
-                    .map(|(id, p)| (*id, p.state.symbol.clone()));
+                    .map(|(_id, p)| p.state.symbol.clone());
 
-                if let Some((_panel_id, symbol)) = panel_info {
-                    self.annotation_store.update(&symbol, ann_id, |ann| {
-                        if let midas_chart::widget::AnnotationKind::OrderBracket(ref mut b) =
-                            ann.kind
-                        {
-                            b.saved = true;
-                        }
-                    });
-                    // Re-render so the saved bracket shows brighter alpha.
-                    self.mark_levels_dirty_for_ticker(&symbol);
+                if let Some(symbol) = symbol {
+                    let sym_key = crate::annotation_store::SymbolKey::new(&symbol);
+                    return self.update(Message::Ticker(
+                        sym_key,
+                        crate::ticker_state::TickerMsg::SaveBracket,
+                    ));
                 }
                 Task::none()
             }
@@ -5774,12 +4806,14 @@ impl MidasApp {
                     }
                 };
 
-                // Transition bracket to Pending.
-                self.annotation_store.update(&symbol, ann_id, |ann| {
-                    if let midas_chart::widget::AnnotationKind::OrderBracket(ref mut b) = ann.kind {
-                        b.status = midas_chart::widget::order_bracket::BracketStatus::Pending;
-                    }
-                });
+                // Transition bracket to Pending via TickerState.
+                {
+                    let sym_key = crate::annotation_store::SymbolKey::new(&symbol);
+                    let _ = self.update(Message::Ticker(
+                        sym_key,
+                        crate::ticker_state::TickerMsg::SubmitOrder,
+                    ));
+                }
 
                 // Send to broker engine.
                 if let Some(ref bridge) = self.broker_bridge {
@@ -5821,16 +4855,16 @@ impl MidasApp {
                         }
                         Err(e) => {
                             tracing::error!("Failed to send bracket to broker: {e}");
-                            // Revert to Draft on broker rejection.
-                            self.annotation_store.update(&symbol, ann_id, |ann| {
-                                if let midas_chart::widget::AnnotationKind::OrderBracket(
-                                    ref mut b,
-                                ) = ann.kind
-                                {
-                                    b.status =
-                                        midas_chart::widget::order_bracket::BracketStatus::Draft;
-                                }
-                            });
+                            // Revert to Draft via TickerState.
+                            {
+                                let sym_key = crate::annotation_store::SymbolKey::new(&symbol);
+                                let _ = self.update(Message::Ticker(
+                                    sym_key,
+                                    crate::ticker_state::TickerMsg::OrderRejected {
+                                        reason: e.to_string(),
+                                    },
+                                ));
+                            }
                             if let Some(pid) = panel_id {
                                 if let Some(p) = self.order_panels.get_mut(&pid) {
                                     p.state.errors =
@@ -6291,11 +5325,62 @@ impl MidasApp {
                 let effects = state.apply(msg);
                 for effect in effects {
                     match effect {
-                        crate::ticker_state::TickerEffect::ProjectBracket(_b) => {
-                            // TODO Slice 1: project to annotation_store
+                        crate::ticker_state::TickerEffect::ProjectBracket(ref bracket) => {
+                            let ann_id_opt = self.tickers.get(&sym)
+                                .and_then(|s| s.live_annotation_id());
+                            if let Some(ann_id) = ann_id_opt {
+                                // Update existing annotation.
+                                self.annotation_store.update(
+                                    sym.as_str(),
+                                    ann_id,
+                                    |ann| {
+                                        ann.kind = midas_chart::widget::AnnotationKind::OrderBracket(
+                                            Box::new(bracket.clone()),
+                                        );
+                                        ann.presence = midas_chart::widget::Presence::Active;
+                                    },
+                                );
+                            } else {
+                                // Add new annotation.
+                                let new_id = self.annotation_store.add(
+                                    sym.as_str(),
+                                    midas_chart::widget::AnnotationKind::OrderBracket(
+                                        Box::new(bracket.clone()),
+                                    ),
+                                );
+                                if let Some(s) = self.tickers.get_mut(&sym) {
+                                    s.set_live_annotation_id(Some(new_id));
+                                }
+                                // Sync the annotation ID to any panel tracking this symbol.
+                                for panel in self.order_panels.values_mut() {
+                                    if panel.state.symbol.eq_ignore_ascii_case(sym.as_str()) {
+                                        panel.state.bracket_annotation_id = Some(new_id);
+                                    }
+                                }
+                            }
+                            // Sync panel inputs from the bracket.
+                            for panel in self.order_panels.values_mut() {
+                                if panel.state.symbol.eq_ignore_ascii_case(sym.as_str()) {
+                                    crate::order_panel::sync_panel_from_bracket(
+                                        &mut panel.state,
+                                        bracket,
+                                    );
+                                }
+                            }
+                            self.mark_levels_dirty_for_ticker(sym.as_str());
                         }
-                        crate::ticker_state::TickerEffect::RemoveBracket(_id) => {
-                            // TODO Slice 1: remove from annotation_store
+                        crate::ticker_state::TickerEffect::RemoveBracket(id) => {
+                            self.annotation_store.remove(sym.as_str(), id);
+                            // Clear the annotation ID on panels tracking this symbol.
+                            for panel in self.order_panels.values_mut() {
+                                if panel.state.symbol.eq_ignore_ascii_case(sym.as_str())
+                                    && panel.state.bracket_annotation_id == Some(id)
+                                {
+                                    panel.state.bracket_annotation_id = None;
+                                    panel.state.bracket_active = None;
+                                }
+                            }
+                            self.mark_levels_dirty_for_ticker(sym.as_str());
                         }
                         crate::ticker_state::TickerEffect::Toast { message, action } => {
                             self.toast = Some(ToastState {
@@ -6305,7 +5390,7 @@ impl MidasApp {
                             });
                         }
                         crate::ticker_state::TickerEffect::PersistDirty => {
-                            // TODO Slice 0: wire to persistence handle
+                            // TODO Slice 4: wire to persistence handle
                         }
                         crate::ticker_state::TickerEffect::SubmitToBroker { .. } => {
                             // TODO Slice 2: wire to broker_bridge

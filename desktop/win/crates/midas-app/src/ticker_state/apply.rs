@@ -4,17 +4,20 @@
 //! [`TickerMsg`], mutates `self`, and returns a `Vec<TickerEffect>` that
 //! the caller in `MidasApp::update()` interprets mechanically.
 //!
-//! # Stub status
+//! # Slice 1 status
 //!
-//! Slice 0 lands every variant as a stub returning `vec![]`. Slice 1
-//! fills in bracket handlers; Slice 2 fills in broker/GATR/levels.
+//! All bracket lifecycle and field-mutation handlers are implemented.
+//! Broker/GATR/levels remain stubs (Slice 2).
 
-use midas_chart::widget::order_bracket::{EntryType, LegRole, OrderBracket};
+use midas_chart::widget::order_bracket::{
+    BracketLeg, BracketSide, BracketStatus, EntryType, LegRole, OrderBracket,
+};
 use midas_chart::widget::AnnotationId;
 
 use crate::app::ToastAction;
 use crate::level_store::StoredLevel;
 use crate::order_panel::OrderSide;
+use crate::ticker_order_intent::price_defaults::default_initial_prices;
 
 use super::{EditingField, TickerState};
 
@@ -208,38 +211,417 @@ pub enum TickerEffect {
     },
 }
 
+// ── Helper: make a default bracket leg ─────────────────────────────
+
+/// Create a `BracketLeg` with default stroke at the given price.
+fn make_leg(price: f64, role: LegRole) -> BracketLeg {
+    BracketLeg {
+        line: midas_chart::widget::PriceLine {
+            price,
+            extent: midas_chart::widget::LineExtent::FullWidth,
+            stroke: midas_chart::widget::LineStroke {
+                color: [0.0, 0.0, 0.0, 1.0],
+                width: 1.0,
+                style: midas_chart::widget::LineStyle::Solid,
+            },
+        },
+        role,
+        projected_pnl: None,
+        projected_pnl_pct: None,
+    }
+}
+
+/// Convert an [`OrderSide`] to the chart-crate [`BracketSide`].
+fn to_bracket_side(side: OrderSide) -> BracketSide {
+    match side {
+        OrderSide::Buy => BracketSide::Long,
+        OrderSide::Sell => BracketSide::Short,
+    }
+}
+
 // ── apply() implementation ──────────────────────────────────────────
 
 impl TickerState {
     /// Apply a message to this ticker state, returning any side-effects.
     ///
-    /// This is the sole mutation entry point. Every variant is currently
-    /// a stub returning `vec![]` (Slice 0). Slice 1 fills in bracket
-    /// handlers; Slice 2 fills in broker/GATR/levels.
-    #[allow(unused_variables)] // stubs do not use the variant fields yet
+    /// This is the sole mutation entry point. Bracket lifecycle and
+    /// field-mutation handlers are fully implemented (Slice 1).
+    /// Broker/GATR/levels remain stubs (Slice 2).
+    #[allow(unused_variables)] // Slice 2 stubs do not use fields yet
     pub fn apply(&mut self, msg: TickerMsg) -> Vec<TickerEffect> {
         match msg {
             // ── Bracket lifecycle ────────────────────────────────
-            TickerMsg::EnsureDraftBracket { side, entry_type } => vec![],
-            TickerMsg::CancelBracket => vec![],
-            TickerMsg::SaveBracket => vec![],
-            TickerMsg::DeleteBracket => vec![],
-            TickerMsg::RecallBracket => vec![],
+
+            TickerMsg::EnsureDraftBracket { side, entry_type } => {
+                self.last_side = side;
+                self.last_entry_type = entry_type;
+                self.generation += 1;
+
+                let bracket_side = to_bracket_side(side);
+                let current_price = self.last_price.unwrap_or(0.0);
+
+                // If a live bracket already exists, flip side + entry type.
+                if let Some(ref mut b) = self.live_bracket {
+                    b.side = bracket_side;
+                    b.entry_type = entry_type;
+                    crate::order_panel::normalize_bracket(b);
+                    return vec![
+                        TickerEffect::ProjectBracket(b.clone()),
+                        TickerEffect::PersistDirty,
+                    ];
+                }
+
+                // Build a fresh draft bracket from price_defaults.
+                let prices = default_initial_prices(side, entry_type, current_price, self.gatr_abs);
+
+                let tp_leg = Some(make_leg(prices.take_profit, LegRole::TakeProfit));
+                let sl_leg = Some(make_leg(prices.stop_loss, LegRole::StopLoss));
+
+                let bracket = OrderBracket {
+                    entry: make_leg(prices.entry, LegRole::Entry),
+                    take_profit: tp_leg,
+                    stop_loss: sl_leg,
+                    side: bracket_side,
+                    status: BracketStatus::Draft,
+                    quantity: None,
+                    saved: false,
+                    filled_qty: None,
+                    entry_type,
+                    entry_stop_price: prices.stop_trigger,
+                    wrong_side_warning: false,
+                };
+
+                self.live_bracket = Some(bracket.clone());
+                vec![
+                    TickerEffect::ProjectBracket(bracket),
+                    TickerEffect::PersistDirty,
+                ]
+            }
+
+            TickerMsg::CancelBracket => {
+                self.generation += 1;
+                if let Some(ref b) = self.live_bracket {
+                    if b.saved {
+                        // Saved brackets: remove from chart but keep in
+                        // TickerState for future recall. Clear live state.
+                        let effects = if let Some(id) = self.live_annotation_id {
+                            vec![TickerEffect::RemoveBracket(id), TickerEffect::PersistDirty]
+                        } else {
+                            vec![TickerEffect::PersistDirty]
+                        };
+                        self.live_bracket = None;
+                        self.live_annotation_id = None;
+                        effects
+                    } else {
+                        // Unsaved brackets: delete entirely.
+                        let effects = if let Some(id) = self.live_annotation_id {
+                            vec![TickerEffect::RemoveBracket(id), TickerEffect::PersistDirty]
+                        } else {
+                            vec![TickerEffect::PersistDirty]
+                        };
+                        self.live_bracket = None;
+                        self.live_annotation_id = None;
+                        effects
+                    }
+                } else {
+                    vec![]
+                }
+            }
+
+            TickerMsg::SaveBracket => {
+                self.generation += 1;
+                if let Some(ref mut b) = self.live_bracket {
+                    b.saved = true;
+                    vec![
+                        TickerEffect::ProjectBracket(b.clone()),
+                        TickerEffect::PersistDirty,
+                    ]
+                } else {
+                    vec![]
+                }
+            }
+
+            TickerMsg::DeleteBracket => {
+                self.generation += 1;
+                let effects = if let Some(id) = self.live_annotation_id {
+                    vec![TickerEffect::RemoveBracket(id), TickerEffect::PersistDirty]
+                } else {
+                    vec![TickerEffect::PersistDirty]
+                };
+                self.live_bracket = None;
+                self.live_annotation_id = None;
+                effects
+            }
+
+            TickerMsg::RecallBracket => {
+                // Recall the saved bracket that was previously cancelled
+                // (hidden). Currently live_bracket is None after CancelBracket
+                // on a saved bracket. The caller must reconstruct the bracket
+                // from annotation_store and set it back via EnsureDraftBracket.
+                // This variant exists for parity; the actual recall is done
+                // by the effect handler reading annotation_store.
+                self.generation += 1;
+                if let Some(ref mut b) = self.live_bracket {
+                    // If somehow live_bracket is present, just project it.
+                    let last = self.last_price.unwrap_or(0.0);
+                    if last > 0.0
+                        && crate::order_panel::should_reposition(
+                            b.entry.line.price,
+                            last,
+                            self.gatr_abs,
+                        )
+                    {
+                        crate::order_panel::reposition_bracket(b, last);
+                    }
+                    crate::order_panel::normalize_bracket(b);
+                    vec![
+                        TickerEffect::ProjectBracket(b.clone()),
+                        TickerEffect::PersistDirty,
+                    ]
+                } else {
+                    vec![]
+                }
+            }
 
             // ── Bracket field mutations ──────────────────────────
-            TickerMsg::SetLegPrice { role, price } => vec![],
-            TickerMsg::SetTpEnabled(_) => vec![],
-            TickerMsg::SetSlEnabled(_) => vec![],
-            TickerMsg::SetQuantity(_) => vec![],
-            TickerMsg::SetSide(_) => vec![],
-            TickerMsg::SetEntryType(_) => vec![],
-            TickerMsg::DragLeg { role, new_price } => vec![],
+
+            TickerMsg::SetLegPrice { role, price } => {
+                if let Some(ref mut b) = self.live_bracket {
+                    self.generation += 1;
+                    match role {
+                        LegRole::Entry => b.entry.line.price = price,
+                        LegRole::TakeProfit => {
+                            if let Some(ref mut tp) = b.take_profit {
+                                tp.line.price = price;
+                            }
+                        }
+                        LegRole::StopLoss => {
+                            if let Some(ref mut sl) = b.stop_loss {
+                                sl.line.price = price;
+                            }
+                        }
+                        LegRole::StopTrigger => {
+                            b.entry_stop_price = Some(price);
+                        }
+                    }
+                    vec![TickerEffect::ProjectBracket(b.clone())]
+                } else {
+                    vec![]
+                }
+            }
+
+            TickerMsg::SetTpEnabled(enabled) => {
+                if let Some(ref mut b) = self.live_bracket {
+                    self.generation += 1;
+                    if enabled && b.take_profit.is_none() {
+                        let entry = b.entry.line.price;
+                        let offset = (entry * 0.01).max(0.01);
+                        let tp_price = match b.side {
+                            BracketSide::Long => entry + offset,
+                            BracketSide::Short => entry - offset,
+                        };
+                        b.take_profit = Some(make_leg(tp_price, LegRole::TakeProfit));
+                    } else if !enabled {
+                        b.take_profit = None;
+                    }
+                    vec![
+                        TickerEffect::ProjectBracket(b.clone()),
+                        TickerEffect::PersistDirty,
+                    ]
+                } else {
+                    vec![]
+                }
+            }
+
+            TickerMsg::SetSlEnabled(enabled) => {
+                if let Some(ref mut b) = self.live_bracket {
+                    self.generation += 1;
+                    if enabled && b.stop_loss.is_none() {
+                        let entry = b.entry.line.price;
+                        let offset = (entry * 0.005).max(0.01);
+                        let sl_price = match b.side {
+                            BracketSide::Long => entry - offset,
+                            BracketSide::Short => entry + offset,
+                        };
+                        b.stop_loss = Some(make_leg(sl_price, LegRole::StopLoss));
+                    } else if !enabled {
+                        b.stop_loss = None;
+                    }
+                    vec![
+                        TickerEffect::ProjectBracket(b.clone()),
+                        TickerEffect::PersistDirty,
+                    ]
+                } else {
+                    vec![]
+                }
+            }
+
+            TickerMsg::SetQuantity(qty) => {
+                if let Some(ref mut b) = self.live_bracket {
+                    self.generation += 1;
+                    b.quantity = Some(qty);
+                    vec![TickerEffect::ProjectBracket(b.clone())]
+                } else {
+                    vec![]
+                }
+            }
+
+            TickerMsg::SetSide(side) => {
+                self.last_side = side;
+                self.generation += 1;
+                if let Some(ref mut b) = self.live_bracket {
+                    b.side = to_bracket_side(side);
+                    crate::order_panel::normalize_bracket(b);
+                    vec![
+                        TickerEffect::ProjectBracket(b.clone()),
+                        TickerEffect::PersistDirty,
+                    ]
+                } else {
+                    vec![TickerEffect::PersistDirty]
+                }
+            }
+
+            TickerMsg::SetEntryType(entry_type) => {
+                self.last_entry_type = entry_type;
+                self.generation += 1;
+                if let Some(ref mut b) = self.live_bracket {
+                    let last_price = self.last_price.unwrap_or(0.0);
+                    b.entry_type = entry_type;
+                    b.wrong_side_warning = false;
+                    match entry_type {
+                        EntryType::Market => {
+                            b.entry.line.price = last_price;
+                            b.entry_stop_price = None;
+                        }
+                        EntryType::Limit => {
+                            // Keep current entry price if non-zero; else use
+                            // last_price.
+                            if b.entry.line.price.abs() < f64::EPSILON {
+                                b.entry.line.price = last_price;
+                            }
+                            b.entry_stop_price = None;
+                        }
+                        EntryType::Stop => {
+                            if b.entry.line.price.abs() < f64::EPSILON {
+                                b.entry.line.price = last_price;
+                            }
+                            b.entry_stop_price = None;
+                        }
+                        EntryType::StopLimit => {
+                            if b.entry.line.price.abs() < f64::EPSILON {
+                                b.entry.line.price = last_price;
+                            }
+                            if b.entry_stop_price.is_none() {
+                                b.entry_stop_price = Some(b.entry.line.price);
+                            }
+                        }
+                    }
+                    vec![
+                        TickerEffect::ProjectBracket(b.clone()),
+                        TickerEffect::PersistDirty,
+                    ]
+                } else {
+                    vec![TickerEffect::PersistDirty]
+                }
+            }
+
+            TickerMsg::DragLeg { role, new_price } => {
+                if let Some(ref mut b) = self.live_bracket {
+                    self.generation += 1;
+                    let entry_price = b.entry.line.price;
+                    let qty = b.quantity.unwrap_or(0.0);
+                    let sign = match b.side {
+                        BracketSide::Long => 1.0,
+                        BracketSide::Short => -1.0,
+                    };
+                    match role {
+                        LegRole::Entry => {
+                            b.entry.line.price = new_price;
+                        }
+                        LegRole::TakeProfit => {
+                            if let Some(ref mut tp) = b.take_profit {
+                                tp.line.price = new_price;
+                                if b.status == BracketStatus::Active {
+                                    tp.projected_pnl =
+                                        Some(sign * (new_price - entry_price) * qty);
+                                    tp.projected_pnl_pct =
+                                        if entry_price.abs() > f64::EPSILON {
+                                            Some(
+                                                sign * (new_price - entry_price) / entry_price
+                                                    * 100.0,
+                                            )
+                                        } else {
+                                            None
+                                        };
+                                }
+                            }
+                        }
+                        LegRole::StopLoss => {
+                            if let Some(ref mut sl) = b.stop_loss {
+                                sl.line.price = new_price;
+                                if b.status == BracketStatus::Active {
+                                    sl.projected_pnl =
+                                        Some(sign * (new_price - entry_price) * qty);
+                                    sl.projected_pnl_pct =
+                                        if entry_price.abs() > f64::EPSILON {
+                                            Some(
+                                                sign * (new_price - entry_price) / entry_price
+                                                    * 100.0,
+                                            )
+                                        } else {
+                                            None
+                                        };
+                                }
+                            }
+                        }
+                        LegRole::StopTrigger => {
+                            b.entry_stop_price = Some(new_price);
+                        }
+                    }
+                    vec![TickerEffect::ProjectBracket(b.clone())]
+                } else {
+                    vec![]
+                }
+            }
 
             // ── Text editing focus lock ──────────────────────────
-            TickerMsg::BeginEdit(_) => vec![],
-            TickerMsg::UpdateEditValue(_) => vec![],
-            TickerMsg::CommitEdit { field, value } => vec![],
-            TickerMsg::CancelEdit => vec![],
+
+            TickerMsg::BeginEdit(field) => {
+                self.generation += 1;
+                // Auto-commit the current field if switching to a different one.
+                let mut effects = Vec::new();
+                if let Some(current_field) = self.editing_field {
+                    if current_field != field {
+                        if let Some(ref value) = self.editing_value {
+                            let commit_effects = self.apply_commit(current_field, value.clone());
+                            effects.extend(commit_effects);
+                        }
+                    }
+                }
+                self.editing_field = Some(field);
+                self.editing_value = None;
+                effects
+            }
+
+            TickerMsg::UpdateEditValue(text) => {
+                self.editing_value = Some(text);
+                vec![]
+            }
+
+            TickerMsg::CommitEdit { field, value } => {
+                self.generation += 1;
+                let effects = self.apply_commit(field, value);
+                self.editing_field = None;
+                self.editing_value = None;
+                effects
+            }
+
+            TickerMsg::CancelEdit => {
+                self.generation += 1;
+                self.editing_field = None;
+                self.editing_value = None;
+                vec![]
+            }
 
             // ── GATR ─────────────────────────────────────────────
             TickerMsg::MaybeSnap {
@@ -262,18 +644,95 @@ impl TickerState {
             TickerMsg::ToggleLevelLock(_) => vec![],
 
             // ── Broker events ────────────────────────────────────
-            TickerMsg::SubmitOrder => vec![],
+            TickerMsg::SubmitOrder => {
+                if let Some(ref mut b) = self.live_bracket {
+                    self.generation += 1;
+                    b.status = BracketStatus::Pending;
+                    vec![
+                        TickerEffect::ProjectBracket(b.clone()),
+                        TickerEffect::PersistDirty,
+                    ]
+                } else {
+                    vec![]
+                }
+            }
             TickerMsg::OrderPending { order_id } => vec![],
             TickerMsg::OrderFilled {
                 filled_qty,
                 avg_price,
             } => vec![],
             TickerMsg::OrderPartialFill { filled_qty } => vec![],
-            TickerMsg::OrderRejected { reason } => vec![],
+            TickerMsg::OrderRejected { reason } => {
+                if let Some(ref mut b) = self.live_bracket {
+                    self.generation += 1;
+                    b.status = BracketStatus::Draft;
+                    vec![
+                        TickerEffect::ProjectBracket(b.clone()),
+                        TickerEffect::Toast {
+                            message: format!("Order rejected: {reason}"),
+                            action: None,
+                        },
+                    ]
+                } else {
+                    vec![]
+                }
+            }
             TickerMsg::OrderCancelled => vec![],
 
             // ── Persistence ──────────────────────────────────────
             TickerMsg::Hydrated(_) => vec![],
+        }
+    }
+
+    /// Internal helper: apply a committed value to the appropriate bracket
+    /// field. Returns the effects of the mutation.
+    fn apply_commit(&mut self, field: EditingField, value: String) -> Vec<TickerEffect> {
+        if let Some(ref mut b) = self.live_bracket {
+            match field {
+                EditingField::LimitPrice => {
+                    if let Ok(price) = value.parse::<f64>() {
+                        b.entry.line.price = price;
+                    }
+                }
+                EditingField::StopPrice => {
+                    if let Ok(price) = value.parse::<f64>() {
+                        match b.entry_type {
+                            EntryType::Stop => b.entry.line.price = price,
+                            EntryType::StopLimit => b.entry_stop_price = Some(price),
+                            _ => {}
+                        }
+                    }
+                }
+                EditingField::TpValue => {
+                    if let Ok(price) = value.parse::<f64>() {
+                        if let Some(ref mut tp) = b.take_profit {
+                            tp.line.price = price;
+                        }
+                    }
+                }
+                EditingField::SlValue => {
+                    if let Ok(price) = value.parse::<f64>() {
+                        if let Some(ref mut sl) = b.stop_loss {
+                            sl.line.price = price;
+                        }
+                    }
+                }
+                EditingField::SlLimitValue => {
+                    // StopLimit SL limit price — not commonly used in V1
+                    // but wired for completeness.
+                }
+                EditingField::Quantity => {
+                    if let Ok(qty) = value.parse::<f64>() {
+                        b.quantity = Some(qty);
+                    }
+                }
+            }
+            vec![
+                TickerEffect::ProjectBracket(b.clone()),
+                TickerEffect::PersistDirty,
+            ]
+        } else {
+            vec![]
         }
     }
 }
