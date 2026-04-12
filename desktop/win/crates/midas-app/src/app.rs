@@ -4404,42 +4404,51 @@ impl MidasApp {
                 // market data lands.
                 let key = crate::annotation_store::SymbolKey::new(&symbol_upper);
 
-                // Fresh price data just landed. Walk every panel linked
-                // to this symbol and ensure its draft bracket matches the
-                // panel's currently displayed `(side, entry_type)`. This
-                // handles the "no intent existed on activation, but now
-                // we have a price" case so the user sees the bracket
-                // shape for their last-selected entry type immediately.
+                // Fresh price data just landed. Update the TickerState
+                // with the new market data, then ensure a draft bracket
+                // exists for each linked panel. This handles the "no
+                // bracket on initial app load" case: bind_chart_to_symbol
+                // ran at startup before market data was available, so
+                // EnsureDraftBracket had no price to work with. Now that
+                // we have real prices, re-fire it through TickerState.
                 let (cp, gatr) = self
                     .market_cache
                     .get(key.as_str())
                     .map(|s| (s.last_price, s.gatr_abs))
                     .unwrap_or((None, None));
-                let targets: Vec<(OrderPanelId, crate::order_panel::OrderSide, midas_chart::widget::order_bracket::EntryType)> =
-                    self.order_panels
-                        .values()
-                        .filter(|p| p.state.symbol.eq_ignore_ascii_case(&symbol_upper))
-                        .map(|p| (p.id, p.state.side, p.state.entry_type))
-                        .collect();
-                for (pid, panel_side, panel_entry_type) in targets {
-                    let _ =
-                        crate::ticker_order_intent::reducer::apply_ensure_draft_bracket(
-                            &mut self.annotation_store,
-                            &self.order_intent_handle,
-                            &key,
-                            panel_side,
-                            panel_entry_type,
-                            cp,
-                            gatr,
-                        );
-                    if let Some(new_ann_id) = self
-                        .order_intent_handle
-                        .snapshot(&key)
-                        .and_then(|i| i.live_annotation_id)
-                    {
-                        if let Some(p) = self.order_panels.get_mut(&pid) {
-                            p.state.bracket_annotation_id = Some(new_ann_id);
-                        }
+                if let Some(new_price) = cp {
+                    let gatr_val = gatr.unwrap_or(new_price * 0.005);
+                    let _ = self.update(Message::Ticker(
+                        key.clone(),
+                        crate::ticker_state::TickerMsg::UpdateMarketData {
+                            last_price: new_price,
+                            gatr_abs: Some(gatr_val),
+                        },
+                    ));
+                }
+                // Walk every panel linked to this symbol. If TickerState
+                // has no live bracket yet, fire EnsureDraftBracket with
+                // the panel's current (side, entry_type).
+                let no_bracket = self
+                    .tickers
+                    .get(&key)
+                    .map(|ts| ts.live_bracket().is_none())
+                    .unwrap_or(true);
+                if no_bracket {
+                    let targets: Vec<(crate::order_panel::OrderSide, midas_chart::widget::order_bracket::EntryType)> =
+                        self.order_panels
+                            .values()
+                            .filter(|p| p.state.symbol.eq_ignore_ascii_case(&symbol_upper))
+                            .map(|p| (p.state.side, p.state.entry_type))
+                            .collect();
+                    for (panel_side, panel_entry_type) in targets {
+                        let _ = self.update(Message::Ticker(
+                            key.clone(),
+                            crate::ticker_state::TickerMsg::EnsureDraftBracket {
+                                side: panel_side,
+                                entry_type: panel_entry_type,
+                            },
+                        ));
                     }
                 }
 
