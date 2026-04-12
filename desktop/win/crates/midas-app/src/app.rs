@@ -97,7 +97,15 @@ pub enum LoadState {
 #[derive(Clone)]
 pub struct ChartPanel {
     /// The ticker symbol displayed in this chart (e.g. "AAPL").
+    ///
+    /// Backward compat — kept during Slice 3 migration. New code reads
+    /// `bound_symbol` instead. Slice 4 removes this field.
     pub symbol: String,
+    /// Bound symbol key resolved from the symbol-link color group.
+    ///
+    /// Set by [`MidasApp::bind_chart_to_symbol`]. `None` means the chart
+    /// is unbound (empty placeholder). Persisted in config for restart.
+    pub bound_symbol: Option<crate::annotation_store::SymbolKey>,
     /// Active timeframe for this chart.
     pub timeframe: Timeframe,
     /// Loaded candle data, shared via Arc for zero-copy access.
@@ -1199,6 +1207,14 @@ impl MidasApp {
         let mut panel = Self::make_empty_panel();
         panel.symbol = cfg.symbol.clone();
         panel.symbol_input = cfg.symbol.clone();
+        // Restore bound_symbol from config, falling back to the legacy
+        // `symbol` field when the config predates Slice 3.
+        panel.bound_symbol = cfg
+            .bound_symbol
+            .as_deref()
+            .or(Some(cfg.symbol.as_str()))
+            .filter(|s| !s.is_empty())
+            .map(crate::annotation_store::SymbolKey::new);
         panel.timeframe = tf;
         panel.symbol_link = cfg.symbol_link;
         panel.timeframe_link = cfg.timeframe_link;
@@ -1248,6 +1264,7 @@ impl MidasApp {
         };
         ChartPanel {
             symbol: String::new(),
+            bound_symbol: None,
             timeframe: Timeframe::D1,
             data: None,
             chart_state: ChartState::new(camera),
@@ -1458,19 +1475,15 @@ impl MidasApp {
             .unwrap_or(Timeframe::D1);
 
         if let Some(chart) = self.charts.get_mut(&chart_id) {
-            chart.symbol = symbol.clone();
-            chart.symbol_input = symbol.clone();
             chart.load_state = LoadState::Loading;
             chart.chart_state.dirty.mark_data();
         }
 
-        // Single-source-of-truth reconciliation: a fresh ticker was
-        // just loaded into this chart. If a linked order panel exists,
-        // rebuild the draft bracket against the panel's current
-        // `(side, entry_type)` — replacing any stale live bracket from
-        // the previous symbol. Idempotent / no-op when no panel links
-        // to this chart.
-        self.reconcile_ticker_activation(chart_id);
+        // Bind through the single mutation point — sets bound_symbol,
+        // lazy-creates TickerState, seeds market data, fires
+        // EnsureDraftBracket, and binds linked panels.
+        let key = crate::annotation_store::SymbolKey::new(&symbol);
+        self.bind_chart_to_symbol(chart_id, key);
 
         self.load_chart_async(chart_id, &symbol, tf)
     }
@@ -1511,6 +1524,7 @@ impl MidasApp {
                 .map(|(wid, panel)| (*wid, panel.symbol_link)),
         );
         let symbol = new_symbol.trim().to_uppercase();
+        let float_key = crate::annotation_store::SymbolKey::new(&symbol);
         for wid in floating_targets {
             let tf = self
                 .floating_charts
@@ -1518,6 +1532,7 @@ impl MidasApp {
                 .map(|c| c.timeframe)
                 .unwrap_or(Timeframe::D1);
             if let Some(chart) = self.floating_charts.get_mut(&wid) {
+                chart.bound_symbol = Some(float_key.clone());
                 chart.symbol = symbol.clone();
                 chart.symbol_input = symbol.clone();
                 chart.gatr_hover = false;
@@ -1527,7 +1542,9 @@ impl MidasApp {
             tasks.push(self.load_floating_chart_async(wid, &symbol, tf));
         }
 
-        // Order panels.
+        // Order panels — route through handle_order_panel_symbol_change
+        // for bracket lifecycle (cancel old, create new), then bind.
+        let sym_key = crate::annotation_store::SymbolKey::new(&symbol);
         let order_targets: Vec<OrderPanelId> = find_link_targets(
             source_link,
             self.order_panels.iter().map(|(id, p)| (*id, p.symbol_link)),
@@ -1539,8 +1556,8 @@ impl MidasApp {
                 .map(|p| p.state.symbol.clone())
                 .unwrap_or_default();
             let recalled = self.handle_order_panel_symbol_change(op_id, &old_sym, &symbol);
+            self.bind_panel_to_symbol(op_id, sym_key.clone());
             if let Some(panel) = self.order_panels.get_mut(&op_id) {
-                panel.state.symbol = symbol.clone();
                 if !recalled {
                     panel.state.tp_value.clear();
                     panel.state.sl_value.clear();
@@ -1895,6 +1912,99 @@ impl MidasApp {
             .or_insert_with(|| crate::ticker_state::TickerState::new(symbol.clone()))
     }
 
+    /// Bind a docked chart to a symbol.
+    ///
+    /// This is the **single mutation point** for setting a chart's active
+    /// symbol. It:
+    /// 1. Sets `bound_symbol` and the backward-compat `symbol` field.
+    /// 2. Lazy-creates a [`crate::ticker_state::TickerState`] for the
+    ///    symbol.
+    /// 3. Seeds the ticker state with cached market data (if available).
+    /// 4. Fires `EnsureDraftBracket` so a linked order panel gets a
+    ///    bracket immediately.
+    ///
+    /// Every user-facing path that changes a chart's symbol must route
+    /// through this helper.
+    pub(crate) fn bind_chart_to_symbol(
+        &mut self,
+        chart_id: ChartId,
+        symbol: crate::annotation_store::SymbolKey,
+    ) {
+        // 1. Set bound_symbol + backward-compat fields.
+        if let Some(chart) = self.charts.get_mut(&chart_id) {
+            chart.bound_symbol = Some(symbol.clone());
+            chart.symbol = symbol.as_str().to_string();
+            chart.symbol_input = symbol.as_str().to_string();
+        }
+
+        // 2. Lazy-create TickerState.
+        self.tickers
+            .entry(symbol.clone())
+            .or_insert_with(|| crate::ticker_state::TickerState::new(symbol.clone()));
+
+        // 3. Seed market data from cache.
+        let (price, gatr) = self
+            .market_cache
+            .get(symbol.as_str())
+            .map(|s| (s.last_price, s.gatr_abs))
+            .unwrap_or((None, None));
+        if let Some(p) = price {
+            if let Some(ts) = self.tickers.get_mut(&symbol) {
+                ts.set_last_price(Some(p));
+                ts.set_gatr_abs(gatr);
+            }
+        }
+
+        // 4. Resolve linked panel display state and fire EnsureDraftBracket.
+        let panel_info = self.panel_display_for_chart(chart_id);
+        if let Some((side, entry_type)) = panel_info {
+            let _ = self.update(Message::Ticker(
+                symbol.clone(),
+                crate::ticker_state::TickerMsg::EnsureDraftBracket { side, entry_type },
+            ));
+        }
+
+        // 5. Bind linked order panels to the same symbol.
+        let source_link = self
+            .charts
+            .get(&chart_id)
+            .map(|c| c.symbol_link)
+            .unwrap_or(LinkMode::Unlinked);
+        let order_targets: Vec<OrderPanelId> = crate::link::find_link_targets(
+            source_link,
+            self.order_panels.iter().map(|(id, p)| (*id, p.symbol_link)),
+        );
+        for op_id in order_targets {
+            self.bind_panel_to_symbol(op_id, symbol.clone());
+        }
+    }
+
+    /// Bind an order panel to a symbol.
+    ///
+    /// Sets `bound_symbol` and the backward-compat `state.symbol` field,
+    /// then hydrates the panel from `TickerState` if one exists.
+    pub(crate) fn bind_panel_to_symbol(
+        &mut self,
+        panel_id: OrderPanelId,
+        symbol: crate::annotation_store::SymbolKey,
+    ) {
+        if let Some(panel) = self.order_panels.get_mut(&panel_id) {
+            panel.bound_symbol = Some(symbol.clone());
+            panel.state.symbol = symbol.as_str().to_string();
+        }
+        // Hydrate panel from TickerState if available.
+        if let Some(ts) = self.tickers.get(&symbol) {
+            if let Some(panel) = self.order_panels.get_mut(&panel_id) {
+                // Sync the live bracket annotation ID.
+                panel.state.bracket_annotation_id = ts.live_annotation_id();
+                // Sync panel fields from bracket if present.
+                if let Some(bracket) = ts.live_bracket() {
+                    crate::order_panel::sync_panel_from_bracket(&mut panel.state, bracket);
+                }
+            }
+        }
+    }
+
     /// Set a plain (no-action) toast, replacing any existing one.
     ///
     /// This is the single mutation point for the toast state used by
@@ -2219,96 +2329,6 @@ impl MidasApp {
         }
     }
 
-    /// Run the full ticker-activation reconciliation pipeline for a
-    /// chart that just had its symbol set or changed.
-    ///
-    /// # Architecture rule
-    ///
-    /// This helper is the **single point of entry** for the "ticker
-    /// loaded into chart + linked panel exists → rebuild bracket"
-    /// rule. Every user-facing path that can change a docked chart's
-    /// symbol routes through [`Self::load_symbol_for_chart`], which
-    /// calls this helper, which forwards into the reducer. The panel
-    /// and watchlist gain zero direct-mutation paths over the intent
-    /// or annotation store — all bracket reconciliation flows through
-    /// [`crate::ticker_order_intent::reducer::apply_ensure_draft_bracket`].
-    ///
-    /// # Flow
-    ///
-    /// 1. Resolve the chart's symbol. No-op when empty (a freshly
-    ///    created empty pane has no symbol yet).
-    /// 2. Route the symbol through
-    ///    [`crate::ticker_order_intent::reducer::apply_maybe_snap`] so
-    ///    any stale GATR anchor is re-evaluated against the current
-    ///    price.
-    /// 3. Locate the linked panel via [`Self::panel_display_for_chart`]
-    ///    — source-chart link first, symbol-match fallback second.
-    ///    No-op when no panel is linked (the bracket only matters when
-    ///    there is a UI surface to mirror).
-    /// 4. Forward `(symbol, panel_side, panel_entry_type,
-    ///    current_price, gatr_abs)` into
-    ///    [`crate::ticker_order_intent::reducer::apply_ensure_draft_bracket`].
-    ///    The reducer reconciles intent compound key, replaces any
-    ///    stale live bracket whose `(side, entry_type)` disagrees, and
-    ///    creates a fresh Draft bracket when appropriate.
-    /// 5. Sync the new `live_annotation_id` back onto the panel's
-    ///    `bracket_annotation_id` so the panel's drag-edit path
-    ///    targets the fresh bracket.
-    ///
-    /// # Safety wrt recursion
-    ///
-    /// The reducer tags its upserts with [`crate::ticker_order_intent::IntentSource::Bootstrap`],
-    /// which the `apply_update_from_surface` recursion guard ignores.
-    /// Calling this helper from many triggers is safe.
-    fn reconcile_ticker_activation(&mut self, chart_id: ChartId) {
-        use crate::annotation_store::SymbolKey;
-
-        let symbol = match self.charts.get(&chart_id) {
-            Some(chart) if !chart.symbol.is_empty() => chart.symbol.clone(),
-            _ => return,
-        };
-        let key = SymbolKey::new(&symbol);
-
-        let _ = crate::ticker_order_intent::reducer::apply_maybe_snap(self, key.clone());
-
-        let Some((panel_side, panel_entry_type)) = self.panel_display_for_chart(chart_id)
-        else {
-            return;
-        };
-
-        let (current_price, gatr_abs) = self
-            .market_cache
-            .get(key.as_str())
-            .map(|s| (s.last_price, s.gatr_abs))
-            .unwrap_or((None, None));
-
-        let _ = crate::ticker_order_intent::reducer::apply_ensure_draft_bracket(
-            &mut self.annotation_store,
-            &self.order_intent_handle,
-            &key,
-            panel_side,
-            panel_entry_type,
-            current_price,
-            gatr_abs,
-        );
-
-        // Sync the panel's `bracket_annotation_id` to whatever the
-        // reducer just recorded — it may have replaced a stale bracket.
-        if let Some(new_ann_id) = self
-            .order_intent_handle
-            .snapshot(&key)
-            .and_then(|i| i.live_annotation_id)
-        {
-            for panel in self.order_panels.values_mut() {
-                let links_to_chart = panel.state.source_chart == Some(chart_id);
-                let matches_symbol = panel.state.symbol.eq_ignore_ascii_case(&symbol);
-                if links_to_chart || matches_symbol {
-                    panel.state.bracket_annotation_id = Some(new_ann_id);
-                }
-            }
-        }
-    }
-
 }
 
 // Config persistence (build_config, mark_config_dirty, maybe_save_config,
@@ -2439,13 +2459,22 @@ impl MidasApp {
                         if let Some(chart) = self.charts.get_mut(&chart_id) {
                             Self::apply_candle_data(chart, buffer, false);
                         }
-                        // A restored chart with a saved symbol was never
-                        // routed through `load_symbol_for_chart`, so the
-                        // reconciliation pipeline never fired. Run it now
-                        // that the candle data has landed — any linked
-                        // panel gets its bracket shape matching its
-                        // current `(side, entry_type)` display state.
-                        self.reconcile_ticker_activation(chart_id);
+                        // Bind the chart through the single mutation
+                        // point. This fires EnsureDraftBracket so any
+                        // linked panel gets a bracket matching its
+                        // current `(side, entry_type)`. THIS is the fix
+                        // for the "no bracket on initial load" bug —
+                        // `bind_chart_to_symbol` lazy-creates the
+                        // TickerState and fires the bracket lifecycle.
+                        let sym = self
+                            .charts
+                            .get(&chart_id)
+                            .map(|c| c.symbol.clone())
+                            .unwrap_or_default();
+                        if !sym.is_empty() {
+                            let key = crate::annotation_store::SymbolKey::new(&sym);
+                            self.bind_chart_to_symbol(chart_id, key);
+                        }
                     }
                     Err(e) => {
                         if let Some(chart) = self.charts.get_mut(&chart_id) {
@@ -2519,12 +2548,18 @@ impl MidasApp {
                 if let Some(pane) = self.workspace.find_pane(id) {
                     self.workspace.set_focus(pane);
                 }
-                // Single-source-of-truth reconciliation. The helper
-                // corrects the intent against the panel's currently
-                // displayed `(side, entry_type)` and replaces any
-                // stale live bracket. No-op when the chart has no
-                // symbol or no linked panel.
-                self.reconcile_ticker_activation(id);
+                // Bind through the single mutation point. Fires
+                // EnsureDraftBracket so the linked panel's bracket
+                // matches its current `(side, entry_type)`.
+                let sym = self
+                    .charts
+                    .get(&id)
+                    .map(|c| c.symbol.clone())
+                    .unwrap_or_default();
+                if !sym.is_empty() {
+                    let key = crate::annotation_store::SymbolKey::new(&sym);
+                    self.bind_chart_to_symbol(id, key);
+                }
                 // Slice 2 hydration — idempotent when the reducer
                 // already re-hydrated.
                 self.hydrate_order_panel_for_chart(id);
@@ -4035,6 +4070,7 @@ impl MidasApp {
                         .iter()
                         .map(|(wid, p)| (*wid, p.symbol_link)),
                 );
+                let wl_sym_key = crate::annotation_store::SymbolKey::new(&symbol);
                 for wid in floating_targets {
                     let tf = self
                         .floating_charts
@@ -4042,6 +4078,7 @@ impl MidasApp {
                         .map(|c| c.timeframe)
                         .unwrap_or(Timeframe::D1);
                     if let Some(chart) = self.floating_charts.get_mut(&wid) {
+                        chart.bound_symbol = Some(wl_sym_key.clone());
                         chart.symbol = symbol.clone();
                         chart.symbol_input = symbol.clone();
                         chart.load_state = LoadState::Loading;
@@ -4050,7 +4087,7 @@ impl MidasApp {
                     tasks.push(self.load_floating_chart_async(wid, &symbol, tf));
                 }
 
-                // Propagate to order panels.
+                // Propagate to order panels via bind_panel_to_symbol.
                 let order_targets: Vec<OrderPanelId> = find_link_targets(
                     wl_link,
                     self.order_panels.iter().map(|(id, p)| (*id, p.symbol_link)),
@@ -4062,8 +4099,8 @@ impl MidasApp {
                         .map(|p| p.state.symbol.clone())
                         .unwrap_or_default();
                     let recalled = self.handle_order_panel_symbol_change(op_id, &old_sym, &symbol);
+                    self.bind_panel_to_symbol(op_id, wl_sym_key.clone());
                     if let Some(panel) = self.order_panels.get_mut(&op_id) {
-                        panel.state.symbol = symbol.clone();
                         if !recalled {
                             panel.state.tp_value.clear();
                             panel.state.sl_value.clear();
@@ -4093,6 +4130,31 @@ impl MidasApp {
                 self.link_picker_open = None;
                 if let Some(panel) = self.order_panels.get_mut(&op_id) {
                     panel.symbol_link = mode;
+                }
+                // Adopt group symbol when joining a link group.
+                let group_symbol = match mode {
+                    LinkMode::Color(color) => self
+                        .charts
+                        .values()
+                        .chain(self.floating_charts.values())
+                        .find(|p| {
+                            matches!(p.symbol_link, LinkMode::Color(c) if c == color)
+                                && !p.symbol.is_empty()
+                        })
+                        .map(|p| p.symbol.clone()),
+                    LinkMode::ListenAll => self
+                        .charts
+                        .values()
+                        .chain(self.floating_charts.values())
+                        .find(|p| {
+                            matches!(p.symbol_link, LinkMode::Color(_)) && !p.symbol.is_empty()
+                        })
+                        .map(|p| p.symbol.clone()),
+                    LinkMode::Unlinked => None,
+                };
+                if let Some(symbol) = group_symbol {
+                    let key = crate::annotation_store::SymbolKey::new(&symbol);
+                    self.bind_panel_to_symbol(op_id, key);
                 }
                 self.flush_config()
             }
@@ -4401,7 +4463,9 @@ impl MidasApp {
                         .get(&wid)
                         .map(|c| c.timeframe)
                         .unwrap_or(Timeframe::D1);
+                    let fkey = crate::annotation_store::SymbolKey::new(&symbol);
                     if let Some(chart) = self.floating_charts.get_mut(&wid) {
+                        chart.bound_symbol = Some(fkey);
                         chart.symbol = symbol.clone();
                         chart.symbol_input = symbol.clone();
                         chart.load_state = LoadState::Loading;

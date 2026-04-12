@@ -157,6 +157,10 @@ impl MidasApp {
                                     viewport_height: Some(cam.viewport_height),
                                     symbol_link: panel.symbol_link,
                                     timeframe_link: panel.timeframe_link,
+                                    bound_symbol: panel
+                                        .bound_symbol
+                                        .as_ref()
+                                        .map(|k| k.as_str().to_string()),
                                 });
                                 tree.push(LayoutNode::Chart { chart_index: idx });
                             }

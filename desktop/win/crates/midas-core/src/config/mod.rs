@@ -157,6 +157,12 @@ pub struct ChartConfig {
     /// Timeframe link mode for cross-chart timeframe synchronization.
     #[serde(default, skip_serializing_if = "LinkMode::is_unlinked")]
     pub timeframe_link: LinkMode,
+    /// Bound symbol key from the symbol-link color group.
+    ///
+    /// Persisted so the binding survives restart. If absent, falls back
+    /// to the legacy `symbol` field during restoration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound_symbol: Option<String>,
 }
 
 /// Serde default for bool fields that should default to `true`.
@@ -214,6 +220,12 @@ pub struct OrderPanelConfig {
     /// Defaults to `None` if missing from config (backward compat).
     #[serde(default)]
     pub bracket_active: Option<String>,
+    /// Bound symbol key from the symbol-link color group.
+    ///
+    /// Persisted so the binding survives restart. If absent, falls back
+    /// to the legacy `symbol` field during restoration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound_symbol: Option<String>,
 }
 
 impl Default for OrderPanelConfig {
@@ -224,6 +236,7 @@ impl Default for OrderPanelConfig {
             quantity: default_order_quantity(),
             symbol_link: LinkMode::default(),
             bracket_active: None,
+            bound_symbol: None,
         }
     }
 }

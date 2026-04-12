@@ -91,6 +91,7 @@ fn save_load_roundtrip_preserves_all_fields() {
             viewport_height: None,
             symbol_link: LinkMode::default(),
             timeframe_link: LinkMode::default(),
+            bound_symbol: None,
         }],
         levels: msft_levels,
         watchlists: Vec::new(),
@@ -229,6 +230,7 @@ fn chart_config_with_levels_survives_roundtrip() {
                 viewport_height: None,
                 symbol_link: LinkMode::default(),
                 timeframe_link: LinkMode::default(),
+                bound_symbol: None,
             },
             ChartConfig {
                 symbol: "TSLA".into(),
@@ -247,6 +249,7 @@ fn chart_config_with_levels_survives_roundtrip() {
                 viewport_height: None,
                 symbol_link: LinkMode::default(),
                 timeframe_link: LinkMode::default(),
+                bound_symbol: None,
             },
         ],
         levels: aapl_levels,
@@ -425,6 +428,7 @@ fn atomic_write_does_not_corrupt_on_success() {
             viewport_height: None,
             symbol_link: LinkMode::default(),
             timeframe_link: LinkMode::default(),
+            bound_symbol: None,
         }],
         levels: HashMap::new(),
         watchlists: Vec::new(),
@@ -521,6 +525,7 @@ fn roundtrip_with_camera_and_collapse_gaps_and_line_width() {
                 viewport_height: None,
                 symbol_link: LinkMode::default(),
                 timeframe_link: LinkMode::default(),
+                bound_symbol: None,
             },
             ChartConfig {
                 symbol: "QQQ".into(),
@@ -539,6 +544,7 @@ fn roundtrip_with_camera_and_collapse_gaps_and_line_width() {
                 viewport_height: None,
                 symbol_link: LinkMode::default(),
                 timeframe_link: LinkMode::default(),
+                bound_symbol: None,
             },
         ],
         levels: spy_levels,
@@ -756,6 +762,7 @@ fn chart_config_levels_not_serialized() {
             viewport_height: None,
             symbol_link: LinkMode::default(),
             timeframe_link: LinkMode::default(),
+            bound_symbol: None,
         }],
         ..Default::default()
     };
@@ -873,6 +880,7 @@ fn non_default_link_modes_roundtrip() {
             viewport_height: None,
             symbol_link: LinkMode::Color(LinkColor::Blue),
             timeframe_link: LinkMode::ListenAll,
+            bound_symbol: None,
         }],
         ..Default::default()
     };

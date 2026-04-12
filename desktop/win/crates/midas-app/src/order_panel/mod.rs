@@ -854,11 +854,21 @@ pub struct OrderPanel {
     pub state: OrderPanelState,
     /// Symbol link group for cross-panel symbol propagation.
     pub symbol_link: LinkMode,
+    /// Bound symbol key resolved from the symbol-link color group.
+    ///
+    /// Set by [`crate::app::MidasApp::bind_panel_to_symbol`]. `None`
+    /// means the panel is unbound. Persisted in config for restart.
+    pub bound_symbol: Option<crate::annotation_store::SymbolKey>,
 }
 
 impl OrderPanel {
     /// Create a new dockable order panel with the given symbol.
     pub fn new(id: OrderPanelId, symbol: String) -> Self {
+        let bound = if symbol.is_empty() {
+            None
+        } else {
+            Some(crate::annotation_store::SymbolKey::new(&symbol))
+        };
         let state = OrderPanelState {
             symbol,
             visible: true, // always visible in docked mode
@@ -868,6 +878,7 @@ impl OrderPanel {
             id,
             state,
             symbol_link: LinkMode::default(),
+            bound_symbol: bound,
         }
     }
 
@@ -886,9 +897,11 @@ impl OrderPanel {
             quantity: self.state.quantity.clone(),
             symbol_link: self.symbol_link,
             bracket_active,
+            bound_symbol: self.bound_symbol.as_ref().map(|k| k.as_str().to_string()),
         }
     }
 
+    /// Restore a panel from a saved config.
     /// Restore a panel from a saved config.
     pub fn from_config(id: OrderPanelId, config: &midas_core::config::OrderPanelConfig) -> Self {
         let bracket_active = config.bracket_active.as_deref().and_then(|s| match s {
@@ -896,6 +909,13 @@ impl OrderPanel {
             "SELL" => Some(OrderSide::Sell),
             _ => None,
         });
+        // Restore bound_symbol from config, falling back to the legacy `symbol` field.
+        let bound_symbol = config
+            .bound_symbol
+            .as_deref()
+            .or(Some(config.symbol.as_str()))
+            .filter(|s| !s.is_empty())
+            .map(crate::annotation_store::SymbolKey::new);
         let state = OrderPanelState {
             symbol: config.symbol.clone(),
             side: if config.side == "SELL" {
@@ -912,6 +932,7 @@ impl OrderPanel {
             id,
             state,
             symbol_link: config.symbol_link,
+            bound_symbol,
         }
     }
 

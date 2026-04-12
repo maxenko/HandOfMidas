@@ -11,7 +11,7 @@ use crate::annotation_store::SymbolKey;
 use crate::order_panel::OrderSide;
 use crate::ticker_order_intent::{EntryMemory, GatrAnchor, TickerOrderIntent};
 
-use super::apply::TickerMsg;
+use super::apply::{TickerEffect, TickerMsg};
 use super::{migrate_v1_v2, EditingField, TickerState, CURRENT_VERSION};
 
 // ── Serde round-trip ────────────────────────────────────────────────
@@ -635,8 +635,6 @@ fn update_market_data_skips_snap_while_editing() {
 
 // ── Slice 1: bracket lifecycle tests ────────────────────────────────
 
-use super::apply::TickerEffect;
-
 #[test]
 fn apply_ensure_draft_bracket_creates_live_bracket() {
     let mut state = TickerState::new_with_defaults(SymbolKey::new("AAPL"), 150.0, Some(2.0));
@@ -847,4 +845,225 @@ fn v2_blob_missing_new_fields_deserializes_cleanly() {
     assert_eq!(state.symbol().as_str(), "PARTIAL");
     assert!(state.live_bracket().is_none());
     assert_eq!(state.generation(), 0);
+}
+
+// ── Slice 3: bound_symbol + bind helpers ──────────────────────────
+
+#[test]
+fn bind_creates_ticker_state_and_bracket() {
+    // Simulates `bind_chart_to_symbol` step 2 + 4: lazy-create
+    // TickerState and fire EnsureDraftBracket. The actual helpers
+    // live on MidasApp (integration-level), but the underlying
+    // TickerState operations are testable here.
+    let sym = SymbolKey::new("BIND");
+    let mut tickers: HashMap<SymbolKey, TickerState> = HashMap::new();
+
+    // Step 2: lazy-create.
+    tickers
+        .entry(sym.clone())
+        .or_insert_with(|| TickerState::new(sym.clone()));
+    assert!(tickers.contains_key(&sym));
+
+    // Step 3: seed market data.
+    let ts = tickers.get_mut(&sym).unwrap();
+    ts.set_last_price(Some(150.0));
+    ts.set_gatr_abs(Some(2.0));
+
+    // Step 4: fire EnsureDraftBracket.
+    let effects = ts.apply(TickerMsg::EnsureDraftBracket {
+        side: OrderSide::Buy,
+        entry_type: EntryType::Market,
+    });
+
+    assert!(ts.live_bracket().is_some(), "bracket should exist after bind");
+    assert!(
+        effects.iter().any(|e| matches!(e, TickerEffect::ProjectBracket(_))),
+        "should project bracket on creation"
+    );
+}
+
+#[test]
+fn ensure_draft_bracket_produces_bracket_with_market_data() {
+    let sym = SymbolKey::new("MARKET");
+    let mut state = TickerState::new(sym);
+    state.set_last_price(Some(200.0));
+    state.set_gatr_abs(Some(3.0));
+
+    state.apply(TickerMsg::EnsureDraftBracket {
+        side: OrderSide::Buy,
+        entry_type: EntryType::Market,
+    });
+
+    let bracket = state.live_bracket().expect("bracket should exist");
+    // Market entry should be near the last price.
+    assert!(
+        (bracket.entry.line.price - 200.0).abs() < 0.01,
+        "entry price should match last_price for Market"
+    );
+}
+
+#[test]
+fn unbound_state_has_no_bracket() {
+    // A freshly created TickerState (simulating bound_symbol = None)
+    // should have no bracket.
+    let state = TickerState::new(SymbolKey::new("EMPTY"));
+    assert!(
+        state.live_bracket().is_none(),
+        "fresh state should have no bracket"
+    );
+}
+
+#[test]
+fn config_bound_symbol_round_trip() {
+    use midas_core::config::ChartConfig;
+
+    let cfg = ChartConfig {
+        symbol: "AAPL".to_string(),
+        timeframe: "1D".to_string(),
+        levels: vec![],
+        camera_time_start: None,
+        camera_time_end: None,
+        camera_price_low: None,
+        camera_price_high: None,
+        collapse_gaps: false,
+        timeline_border_ratio: 0.20,
+        volume_scale: 1.0,
+        show_volume_profile: false,
+        show_levels: true,
+        viewport_width: None,
+        viewport_height: None,
+        symbol_link: midas_core::link::LinkMode::Unlinked,
+        timeframe_link: midas_core::link::LinkMode::Unlinked,
+        bound_symbol: Some("AAPL".to_string()),
+    };
+
+    let toml_str = toml::to_string_pretty(&cfg).expect("serialize");
+    let restored: ChartConfig = toml::from_str(&toml_str).expect("deserialize");
+    assert_eq!(restored.bound_symbol, Some("AAPL".to_string()));
+}
+
+#[test]
+fn config_bound_symbol_absent_backward_compat() {
+    use midas_core::config::ChartConfig;
+
+    // Simulate a pre-Slice-3 config without bound_symbol.
+    let toml_str = r#"
+        symbol = "MSFT"
+        timeframe = "5m"
+    "#;
+    let cfg: ChartConfig = toml::from_str(toml_str).expect("deserialize");
+    assert!(cfg.bound_symbol.is_none(), "absent field should be None");
+    // Restoration code falls back to `symbol` — tested at integration level.
+}
+
+#[test]
+fn order_panel_config_bound_symbol_round_trip() {
+    use midas_core::config::OrderPanelConfig;
+
+    let cfg = OrderPanelConfig {
+        symbol: "TSLA".to_string(),
+        side: "BUY".to_string(),
+        quantity: "100".to_string(),
+        symbol_link: midas_core::link::LinkMode::Unlinked,
+        bracket_active: None,
+        bound_symbol: Some("TSLA".to_string()),
+    };
+
+    let toml_str = toml::to_string_pretty(&cfg).expect("serialize");
+    let restored: OrderPanelConfig = toml::from_str(&toml_str).expect("deserialize");
+    assert_eq!(restored.bound_symbol, Some("TSLA".to_string()));
+}
+
+#[test]
+fn order_panel_config_absent_bound_symbol_backward_compat() {
+    use midas_core::config::OrderPanelConfig;
+
+    let toml_str = r#"
+        symbol = "SPY"
+        side = "SELL"
+        quantity = "50"
+    "#;
+    let cfg: OrderPanelConfig = toml::from_str(toml_str).expect("deserialize");
+    assert!(cfg.bound_symbol.is_none());
+}
+
+#[test]
+fn symbol_link_propagation_targets_matching_panels() {
+    // Pure propagation logic — verifies find_link_targets works for
+    // order panels (the same function used by bind_chart_to_symbol).
+    use crate::link::find_link_targets;
+    use midas_core::{LinkColor, LinkMode, OrderPanelId};
+
+    let pink = LinkMode::Color(LinkColor::Purple);
+    let targets = find_link_targets(
+        pink,
+        vec![
+            (OrderPanelId::new(1), LinkMode::Color(LinkColor::Purple)),
+            (OrderPanelId::new(2), LinkMode::Color(LinkColor::Blue)),
+            (OrderPanelId::new(3), LinkMode::Color(LinkColor::Purple)),
+            (OrderPanelId::new(4), LinkMode::Unlinked),
+            (OrderPanelId::new(5), LinkMode::ListenAll),
+        ],
+    );
+    assert_eq!(
+        targets,
+        vec![OrderPanelId::new(1), OrderPanelId::new(3), OrderPanelId::new(5)],
+    );
+}
+
+#[test]
+fn order_panel_from_config_restores_bound_symbol() {
+    use crate::order_panel::OrderPanel;
+    use midas_core::config::OrderPanelConfig;
+
+    let cfg = OrderPanelConfig {
+        symbol: "GOOG".to_string(),
+        bound_symbol: Some("GOOG".to_string()),
+        ..Default::default()
+    };
+    let panel = OrderPanel::from_config(midas_core::OrderPanelId::new(1), &cfg);
+    assert_eq!(
+        panel.bound_symbol.as_ref().map(|k| k.as_str()),
+        Some("GOOG"),
+    );
+}
+
+#[test]
+fn order_panel_from_config_falls_back_to_symbol() {
+    use crate::order_panel::OrderPanel;
+    use midas_core::config::OrderPanelConfig;
+
+    // Pre-Slice-3 config: no bound_symbol field.
+    let cfg = OrderPanelConfig {
+        symbol: "AMZN".to_string(),
+        bound_symbol: None,
+        ..Default::default()
+    };
+    let panel = OrderPanel::from_config(midas_core::OrderPanelId::new(2), &cfg);
+    assert_eq!(
+        panel.bound_symbol.as_ref().map(|k| k.as_str()),
+        Some("AMZN"),
+        "should fall back to the legacy symbol field"
+    );
+}
+
+#[test]
+fn order_panel_to_config_persists_bound_symbol() {
+    use crate::order_panel::OrderPanel;
+
+    let panel = OrderPanel::new(midas_core::OrderPanelId::new(3), "META".to_string());
+    assert_eq!(
+        panel.bound_symbol.as_ref().map(|k| k.as_str()),
+        Some("META"),
+    );
+    let cfg = panel.to_config();
+    assert_eq!(cfg.bound_symbol, Some("META".to_string()));
+}
+
+#[test]
+fn order_panel_empty_symbol_has_no_bound() {
+    use crate::order_panel::OrderPanel;
+
+    let panel = OrderPanel::new(midas_core::OrderPanelId::new(4), String::new());
+    assert!(panel.bound_symbol.is_none());
 }
