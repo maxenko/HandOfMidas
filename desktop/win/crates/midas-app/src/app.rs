@@ -129,6 +129,39 @@ pub struct ChartPanel {
     pub timeframe_link: LinkMode,
     /// Whether the G.ATR badge is currently hovered (triggers candle dimming).
     pub gatr_hover: bool,
+    /// Set `true` when a saved camera is restored in `bind_chart_to_symbol`.
+    /// Cleared after `DataLoaded` re-evaluates the camera (live-edge shift
+    /// or empty-history fallback), or on the first user pan gesture.
+    pub camera_restored_pending: bool,
+}
+
+impl ChartPanel {
+    /// The timestamp of the most recent candle in the loaded data.
+    ///
+    /// Returns `None` if no data is loaded or the buffer is empty.
+    pub fn latest_candle_time(&self) -> Option<f64> {
+        self.data.as_ref().and_then(|buf| {
+            if buf.is_empty() {
+                None
+            } else {
+                Some(buf.timestamps[buf.len() - 1] as f64)
+            }
+        })
+    }
+
+    /// Whether any candle timestamp in the loaded data falls within
+    /// `[start, end]`.
+    ///
+    /// Used by the D5 graceful-fallback logic to detect an empty
+    /// historical viewport and shift to the latest available data.
+    pub fn has_candles_in_range(&self, start: f64, end: f64) -> bool {
+        let Some(buf) = self.data.as_ref() else {
+            return false;
+        };
+        buf.timestamps
+            .iter()
+            .any(|&ts| (ts as f64) >= start && (ts as f64) <= end)
+    }
 }
 
 // ── Application state ─────────────────────────────────────────────────
@@ -1378,6 +1411,7 @@ impl MidasApp {
             symbol_link: LinkMode::Unlinked,
             timeframe_link: LinkMode::Unlinked,
             gatr_hover: false,
+            camera_restored_pending: false,
         }
     }
 
@@ -2090,7 +2124,12 @@ impl MidasApp {
                             let sym = chart.symbol.clone();
                             let count = buffer.len();
                             let tf = chart.timeframe;
-                            Self::apply_candle_data(chart, buffer, true);
+                            // When a saved camera was restored in
+                            // bind_chart_to_symbol, skip the default "last
+                            // 200 candles" camera reset. The pending flag
+                            // is cleared after the re-restore below.
+                            let reset_camera = !chart.camera_restored_pending;
+                            Self::apply_candle_data(chart, buffer, reset_camera);
                             self.status_message =
                                 format!("{}: {} candles at {}", sym, count, tf.display_name());
                             loaded_symbol = Some(sym);
@@ -2103,6 +2142,47 @@ impl MidasApp {
                                     Self::apply_candle_data(chart, buffer, true);
                                     break;
                                 }
+                            }
+                        }
+
+                        // Re-evaluate the saved camera now that data has
+                        // loaded. For live-edge cameras the initial restore
+                        // in bind_chart_to_symbol used a stale fallback;
+                        // now shift to the real latest candle. For historical
+                        // cameras, check if any data overlaps — if not, fall
+                        // back to latest candle (D5 graceful fallback).
+                        if let Some(chart) = self.charts.get_mut(&chart_id) {
+                            if chart.camera_restored_pending {
+                                let sym_key = chart
+                                    .bound_symbol
+                                    .clone()
+                                    .unwrap_or_else(|| {
+                                        crate::annotation_store::SymbolKey::new(&chart.symbol)
+                                    });
+                                if let Some(ts) = self.tickers.get(&sym_key) {
+                                    if let Some(saved) = ts.saved_camera() {
+                                        let duration = saved.time_end - saved.time_start;
+                                        let needs_shift = if saved.was_at_live_edge {
+                                            true
+                                        } else {
+                                            !chart.has_candles_in_range(
+                                                saved.time_start,
+                                                saved.time_end,
+                                            )
+                                        };
+                                        if needs_shift {
+                                            if let Some(latest) = chart.latest_candle_time() {
+                                                let margin = duration * 0.02;
+                                                chart.chart_state.camera.time_end =
+                                                    latest + margin;
+                                                chart.chart_state.camera.time_start =
+                                                    chart.chart_state.camera.time_end - duration;
+                                                chart.chart_state.dirty.mark_camera();
+                                            }
+                                        }
+                                    }
+                                }
+                                chart.camera_restored_pending = false;
                             }
                         }
 
@@ -2400,7 +2480,11 @@ impl MidasApp {
                     chart
                         .chart_state
                         .apply_action(&midas_chart::ChartAction::Pan { dx, dy });
+                    // First user pan clears the deferred-restore flag so
+                    // DataLoaded won't overwrite user intent.
+                    chart.camera_restored_pending = false;
                 }
+                self.save_camera_for_chart(chart_id);
                 self.mark_config_dirty();
                 Task::none()
             }
@@ -2417,6 +2501,7 @@ impl MidasApp {
                     cam.time_end = pivot_time + right_dt / factor;
                     chart.chart_state.dirty.mark_camera();
                 }
+                self.save_camera_for_chart(chart_id);
                 self.mark_config_dirty();
                 Task::none()
             }
@@ -2433,6 +2518,7 @@ impl MidasApp {
                     cam.price_low = pivot_price - down_dp / factor;
                     chart.chart_state.dirty.mark_camera();
                 }
+                self.save_camera_for_chart(chart_id);
                 self.mark_config_dirty();
                 Task::none()
             }

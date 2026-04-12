@@ -175,7 +175,25 @@ pub enum TickerMsg {
     /// Order cancelled (by user or broker).
     OrderCancelled,
 
-    // ── Persistence ──────────────────────────────────────────────
+    // ── Camera ──────────��────────────────────────────────────────
+    /// Save the current camera viewport for this ticker.
+    ///
+    /// Fired once per user gesture (pan release, scroll-wheel tick)
+    /// — not per frame.
+    SaveCameraState {
+        /// Visible time range start (epoch ms).
+        time_start: f64,
+        /// Visible time range end (epoch ms).
+        time_end: f64,
+        /// Visible price range bottom.
+        price_low: f64,
+        /// Visible price range top.
+        price_high: f64,
+        /// Whether the most recent candle was visible in the viewport.
+        was_at_live_edge: bool,
+    },
+
+    // ── Persistence ���─────────────────────────────────────────────
     /// A persisted state was loaded from disk. Replaces the current
     /// in-memory state wholesale.
     Hydrated(Box<TickerState>),
@@ -320,6 +338,15 @@ impl TickerState {
             TickerMsg::OrderPartialFill { filled_qty } => self.apply_order_partial_fill(filled_qty),
             TickerMsg::OrderRejected { reason } => self.apply_order_rejected(reason),
             TickerMsg::OrderCancelled => self.apply_order_cancelled(),
+
+            // ── Camera ──────────────────────────────────────────────
+            TickerMsg::SaveCameraState {
+                time_start,
+                time_end,
+                price_low,
+                price_high,
+                was_at_live_edge,
+            } => self.apply_save_camera(time_start, time_end, price_low, price_high, was_at_live_edge),
 
             // ── Persistence (one-liner, left inline) ─────────────
             TickerMsg::Hydrated(_) => vec![],
@@ -1114,5 +1141,25 @@ impl TickerState {
         } else {
             vec![]
         }
+    }
+
+    // ── Camera ──────────────────────────────────────────────────────
+
+    /// Store the current camera viewport for later restore.
+    fn apply_save_camera(
+        &mut self,
+        time_start: f64,
+        time_end: f64,
+        price_low: f64,
+        price_high: f64,
+        was_at_live_edge: bool,
+    ) -> Vec<TickerEffect> {
+        self.camera_time_start = Some(time_start);
+        self.camera_time_end = Some(time_end);
+        self.camera_price_low = Some(price_low);
+        self.camera_price_high = Some(price_high);
+        self.camera_was_at_live_edge = was_at_live_edge;
+        self.generation += 1;
+        vec![TickerEffect::PersistDirty]
     }
 }

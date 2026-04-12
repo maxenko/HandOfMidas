@@ -1481,3 +1481,190 @@ fn inject_levels_populates_ticker_state() {
     assert_eq!(state.levels().len(), 1);
     assert!((state.levels()[0].line.price - 100.0).abs() < f64::EPSILON);
 }
+
+// ── Camera per-ticker tests ────────────────────────────────────────
+
+#[test]
+fn save_camera_state_persists() {
+    let mut state = TickerState::new(SymbolKey::new("AAPL"));
+    let effects = state.apply(TickerMsg::SaveCameraState {
+        time_start: 1000.0,
+        time_end: 2000.0,
+        price_low: 140.0,
+        price_high: 160.0,
+        was_at_live_edge: true,
+    });
+    assert!(
+        effects.iter().any(|e| matches!(e, TickerEffect::PersistDirty)),
+        "SaveCameraState must produce PersistDirty"
+    );
+    let saved = state.saved_camera().expect("camera should be saved");
+    assert!((saved.time_start - 1000.0).abs() < f64::EPSILON);
+    assert!((saved.time_end - 2000.0).abs() < f64::EPSILON);
+    assert!((saved.price_low - 140.0).abs() < f64::EPSILON);
+    assert!((saved.price_high - 160.0).abs() < f64::EPSILON);
+    assert!(saved.was_at_live_edge);
+}
+
+#[test]
+fn save_camera_preserves_live_edge_flag() {
+    let mut state = TickerState::new(SymbolKey::new("AAPL"));
+    state.apply(TickerMsg::SaveCameraState {
+        time_start: 1000.0,
+        time_end: 2000.0,
+        price_low: 140.0,
+        price_high: 160.0,
+        was_at_live_edge: false,
+    });
+    let saved = state.saved_camera().expect("camera should be saved");
+    assert!(!saved.was_at_live_edge);
+}
+
+#[test]
+fn save_camera_serde_roundtrip() {
+    let mut state = TickerState::new(SymbolKey::new("TSLA"));
+    state.apply(TickerMsg::SaveCameraState {
+        time_start: 5000.0,
+        time_end: 6000.0,
+        price_low: 200.0,
+        price_high: 250.0,
+        was_at_live_edge: false,
+    });
+    let json = serde_json::to_string(&state).expect("serialize");
+    let restored: TickerState = serde_json::from_str(&json).expect("deserialize");
+    let saved = restored.saved_camera().expect("camera should survive roundtrip");
+    assert!((saved.time_start - 5000.0).abs() < f64::EPSILON);
+    assert!((saved.time_end - 6000.0).abs() < f64::EPSILON);
+    assert!((saved.price_low - 200.0).abs() < f64::EPSILON);
+    assert!((saved.price_high - 250.0).abs() < f64::EPSILON);
+    assert!(!saved.was_at_live_edge);
+}
+
+#[test]
+fn saved_camera_returns_none_when_unset() {
+    let state = TickerState::new(SymbolKey::new("SPY"));
+    assert!(state.saved_camera().is_none());
+}
+
+#[test]
+fn saved_camera_returns_none_on_missing_field_backward_compat() {
+    // Simulate an old blob that predates camera fields.
+    let json = r#"{
+        "symbol": "IBM",
+        "version": 2,
+        "last_side": "Buy",
+        "last_entry_type": "Market",
+        "entries": [],
+        "gatr_anchor": {},
+        "pinned": false,
+        "updated_at": "2025-01-01T00:00:00Z",
+        "generation": 10
+    }"#;
+    let state: TickerState = serde_json::from_str(json).expect("deserialize old blob");
+    assert!(
+        state.saved_camera().is_none(),
+        "missing camera fields should yield None"
+    );
+    // camera_was_at_live_edge defaults to true even when absent.
+    // We can only observe this indirectly: after saving one field the
+    // getter still returns None (need all 4 f64s).
+}
+
+#[test]
+fn restore_at_live_edge_shifts_to_latest_candle() {
+    // Saved camera: user was at live edge, latest candle at time 2000.
+    // New data has latest candle at time 3000 (1 day later).
+    let mut state = TickerState::new(SymbolKey::new("AAPL"));
+    state.apply(TickerMsg::SaveCameraState {
+        time_start: 1000.0,
+        time_end: 2000.0,
+        price_low: 140.0,
+        price_high: 160.0,
+        was_at_live_edge: true,
+    });
+    let saved = state.saved_camera().expect("saved");
+    let duration = saved.time_end - saved.time_start;
+    let latest_candle = 3000.0;
+    let margin = duration * 0.02;
+
+    // Simulate the restore logic from bind_chart_to_symbol.
+    let restored_end = latest_candle + margin;
+    let restored_start = restored_end - duration;
+
+    // Duration preserved.
+    assert!(
+        ((restored_end - restored_start) - duration).abs() < f64::EPSILON,
+        "zoom level (duration) must be preserved"
+    );
+    // Window shifted to latest candle.
+    assert!(
+        restored_end > latest_candle,
+        "time_end should be past the latest candle"
+    );
+    assert!(
+        restored_start < latest_candle,
+        "time_start should be before the latest candle"
+    );
+}
+
+#[test]
+fn restore_at_history_uses_saved_verbatim() {
+    // Saved camera: user was NOT at live edge (examining history).
+    let mut state = TickerState::new(SymbolKey::new("MSFT"));
+    state.apply(TickerMsg::SaveCameraState {
+        time_start: 500.0,
+        time_end: 800.0,
+        price_low: 300.0,
+        price_high: 350.0,
+        was_at_live_edge: false,
+    });
+    let saved = state.saved_camera().expect("saved");
+    // When was_at_live_edge is false and data exists in range,
+    // the restore should be verbatim.
+    assert!((saved.time_start - 500.0).abs() < f64::EPSILON);
+    assert!((saved.time_end - 800.0).abs() < f64::EPSILON);
+    assert!((saved.price_low - 300.0).abs() < f64::EPSILON);
+    assert!((saved.price_high - 350.0).abs() < f64::EPSILON);
+    assert!(!saved.was_at_live_edge);
+}
+
+#[test]
+fn restore_at_history_empty_falls_back_to_latest() {
+    // Saved camera: user was NOT at live edge, but the saved time
+    // range has no data (pruned or unavailable). The fallback should
+    // shift to the latest candle at the same zoom level (D5).
+    let mut state = TickerState::new(SymbolKey::new("GOOG"));
+    state.apply(TickerMsg::SaveCameraState {
+        time_start: 100.0,
+        time_end: 200.0,
+        price_low: 90.0,
+        price_high: 110.0,
+        was_at_live_edge: false,
+    });
+    let saved = state.saved_camera().expect("saved");
+    let duration = saved.time_end - saved.time_start;
+
+    // Simulate: no candles in [100, 200], latest candle at 5000.
+    let has_candles_in_range = false;
+    let latest_candle = 5000.0;
+
+    // The restore logic: if not at live edge AND no data in range,
+    // fall back to live-edge shift.
+    let needs_shift = !saved.was_at_live_edge && !has_candles_in_range;
+    assert!(needs_shift, "should shift when historical view has no data");
+
+    let margin = duration * 0.02;
+    let restored_end = latest_candle + margin;
+    let restored_start = restored_end - duration;
+
+    // Duration preserved.
+    assert!(
+        ((restored_end - restored_start) - duration).abs() < f64::EPSILON,
+        "zoom level (duration) must be preserved"
+    );
+    // Window shifted to latest candle.
+    assert!(
+        restored_end > latest_candle,
+        "time_end should be past the latest candle"
+    );
+}

@@ -175,6 +175,25 @@ pub(crate) mod entries_serde {
 
 pub use apply::{TickerEffect, TickerMsg};
 
+/// Snapshot of a saved per-ticker camera position.
+///
+/// Returned by [`TickerState::saved_camera`] when all four f64 fields
+/// are present. The caller uses this to restore the viewport in
+/// `bind_chart_to_symbol`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SavedCamera {
+    /// Saved time range start (epoch ms).
+    pub time_start: f64,
+    /// Saved time range end (epoch ms).
+    pub time_end: f64,
+    /// Saved price range bottom.
+    pub price_low: f64,
+    /// Saved price range top.
+    pub price_high: f64,
+    /// Whether the user was at the live edge when saved.
+    pub was_at_live_edge: bool,
+}
+
 /// Current on-disk schema version for [`TickerState`].
 ///
 /// Version 2 supersedes `TickerOrderIntent` v1. The migration path is
@@ -257,6 +276,26 @@ pub struct TickerState {
     /// snapshot before the last snap, plus the instant it was taken.
     #[serde(skip)]
     pre_snap: Option<(Box<PreSnapState>, std::time::Instant)>,
+
+    // ── Camera (per-ticker viewport restore) ────────────────────
+    /// Saved camera time range start (epoch ms). `None` for fresh
+    /// tickers that have never been viewed.
+    #[serde(default)]
+    camera_time_start: Option<f64>,
+    /// Saved camera time range end (epoch ms).
+    #[serde(default)]
+    camera_time_end: Option<f64>,
+    /// Saved camera price range bottom.
+    #[serde(default)]
+    camera_price_low: Option<f64>,
+    /// Saved camera price range top.
+    #[serde(default)]
+    camera_price_high: Option<f64>,
+    /// Whether the user was at the live edge (most recent candle visible)
+    /// when the camera was last saved. Defaults to `true` so a fresh
+    /// ticker shows the latest data on first restore.
+    #[serde(default = "default_true")]
+    camera_was_at_live_edge: bool,
 
     // ── Metadata ─────────────────────────────────────────────────
     /// When this state was last written.
@@ -371,6 +410,31 @@ impl TickerState {
     /// Schema version.
     pub fn version(&self) -> u32 {
         self.version
+    }
+
+    /// Return the saved camera state, if all four f64 fields are present.
+    ///
+    /// Returns `None` for a fresh ticker that has never been viewed
+    /// (any of the four fields is `None`). The `was_at_live_edge` flag
+    /// is always available (defaults to `true`).
+    pub fn saved_camera(&self) -> Option<SavedCamera> {
+        match (
+            self.camera_time_start,
+            self.camera_time_end,
+            self.camera_price_low,
+            self.camera_price_high,
+        ) {
+            (Some(time_start), Some(time_end), Some(price_low), Some(price_high)) => {
+                Some(SavedCamera {
+                    time_start,
+                    time_end,
+                    price_low,
+                    price_high,
+                    was_at_live_edge: self.camera_was_at_live_edge,
+                })
+            }
+            _ => None,
+        }
     }
 
     // ── Effect-handler setters ──────────────────────────────────
@@ -554,6 +618,11 @@ pub fn migrate_v1_v2(intent: &TickerOrderIntentV1) -> TickerState {
         editing_field: None,
         editing_value: None,
         pre_snap: None,
+        camera_time_start: None,
+        camera_time_end: None,
+        camera_price_low: None,
+        camera_price_high: None,
+        camera_was_at_live_edge: true,
         updated_at: intent.updated_at,
         generation: 0,
     }

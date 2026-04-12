@@ -62,7 +62,34 @@ impl MidasApp {
             }
         }
 
-        // 4. Bind linked order panels to the same symbol FIRST — so
+        // 4. Restore per-ticker camera if saved.
+        if let Some(ts) = self.tickers.get(&symbol) {
+            if let Some(saved) = ts.saved_camera() {
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    let duration = saved.time_end - saved.time_start;
+                    if saved.was_at_live_edge {
+                        // User was watching live price action. Shift the time
+                        // window so the latest candle is near the right edge,
+                        // preserving the zoom level (same duration).
+                        let latest = chart.latest_candle_time().unwrap_or(saved.time_end);
+                        let margin = duration * 0.02;
+                        chart.chart_state.camera.time_end = latest + margin;
+                        chart.chart_state.camera.time_start =
+                            chart.chart_state.camera.time_end - duration;
+                    } else {
+                        // User was examining history. Restore verbatim.
+                        chart.chart_state.camera.time_start = saved.time_start;
+                        chart.chart_state.camera.time_end = saved.time_end;
+                    }
+                    chart.chart_state.camera.price_low = saved.price_low;
+                    chart.chart_state.camera.price_high = saved.price_high;
+                    chart.chart_state.dirty.mark_camera();
+                    chart.camera_restored_pending = true;
+                }
+            }
+        }
+
+        // 5. Bind linked order panels to the same symbol FIRST — so
         //    panel_display_for_chart can find them by the new symbol.
         let source_link = self
             .charts
@@ -77,7 +104,7 @@ impl MidasApp {
             self.bind_panel_to_symbol(op_id, symbol.clone());
         }
 
-        // 5. NOW resolve linked panel display state and fire EnsureDraftBracket.
+        // 6. NOW resolve linked panel display state and fire EnsureDraftBracket.
         //    Panels are already bound to the new symbol, so the lookup works.
         //    Only create a bracket if bracket_mode is active (not X).
         let bracket_mode = self.tickers.get(&symbol).and_then(|ts| ts.bracket_mode());
@@ -264,6 +291,42 @@ impl MidasApp {
         } else {
             Task::none()
         }
+    }
+
+    /// Save the current camera viewport of a chart to its bound
+    /// `TickerState`.
+    ///
+    /// Computes `was_at_live_edge` by checking whether the latest
+    /// candle's timestamp falls within the visible time window.
+    /// Called from `ChartPan`, `ChartZoom`, and `ChartZoomY` handlers.
+    pub(in crate::app) fn save_camera_for_chart(&mut self, chart_id: ChartId) {
+        let (sym, cam_snapshot, latest) = {
+            let Some(chart) = self.charts.get(&chart_id) else {
+                return;
+            };
+            let Some(ref sym) = chart.bound_symbol else {
+                return;
+            };
+            let cam = &chart.chart_state.camera;
+            (
+                sym.clone(),
+                (cam.time_start, cam.time_end, cam.price_low, cam.price_high),
+                chart.latest_candle_time().unwrap_or(0.0),
+            )
+        };
+        let (time_start, time_end, price_low, price_high) = cam_snapshot;
+        let at_live_edge =
+            latest > 0.0 && latest >= time_start && latest <= time_end;
+        let _ = self.update(Message::Ticker(
+            sym,
+            crate::ticker_state::TickerMsg::SaveCameraState {
+                time_start,
+                time_end,
+                price_low,
+                price_high,
+                was_at_live_edge: at_live_edge,
+            },
+        ));
     }
 
     /// Lazy factory access to a per-symbol `TickerState`. Creates a
