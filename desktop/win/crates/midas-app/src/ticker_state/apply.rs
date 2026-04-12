@@ -4,11 +4,14 @@
 //! [`TickerMsg`], mutates `self`, and returns a `Vec<TickerEffect>` that
 //! the caller in `MidasApp::update()` interprets mechanically.
 //!
-//! # Slice 1 status
+//! # Slice 2 status
 //!
-//! All bracket lifecycle and field-mutation handlers are implemented.
-//! Broker/GATR/levels remain stubs (Slice 2).
+//! All handlers are implemented: bracket lifecycle, field mutations,
+//! broker events, GATR snap/pin/undo, level CRUD, and market data.
 
+use std::time::{Duration, Instant};
+
+use chrono::Utc;
 use midas_chart::widget::order_bracket::{
     BracketLeg, BracketSide, BracketStatus, EntryType, LegRole, OrderBracket,
 };
@@ -17,9 +20,13 @@ use midas_chart::widget::AnnotationId;
 use crate::app::ToastAction;
 use crate::level_store::StoredLevel;
 use crate::order_panel::OrderSide;
+use crate::ticker_order_intent::gatr_snap::{MIN_GATR_ABS, RECENCY_GUARD_SECS};
 use crate::ticker_order_intent::price_defaults::default_initial_prices;
 
-use super::{EditingField, TickerState};
+use super::{EditingField, PreSnapState, TickerState};
+
+/// Session-bounded TTL for the GATR snap undo slot.
+const SNAP_UNDO_TTL: Duration = Duration::from_secs(30);
 
 // ── TickerMsg ───────────────────────────────────────────────────────
 
@@ -244,10 +251,10 @@ fn to_bracket_side(side: OrderSide) -> BracketSide {
 impl TickerState {
     /// Apply a message to this ticker state, returning any side-effects.
     ///
-    /// This is the sole mutation entry point. Bracket lifecycle and
-    /// field-mutation handlers are fully implemented (Slice 1).
-    /// Broker/GATR/levels remain stubs (Slice 2).
-    #[allow(unused_variables)] // Slice 2 stubs do not use fields yet
+    /// This is the sole mutation entry point. All handlers are fully
+    /// implemented: bracket lifecycle, field mutations (Slice 1),
+    /// broker events, GATR snap/pin/undo, level CRUD, and market data
+    /// (Slice 2).
     pub fn apply(&mut self, msg: TickerMsg) -> Vec<TickerEffect> {
         match msg {
             // ── Bracket lifecycle ────────────────────────────────
@@ -624,30 +631,205 @@ impl TickerState {
             }
 
             // ── GATR ─────────────────────────────────────────────
+
             TickerMsg::MaybeSnap {
                 current_price,
                 gatr_abs,
-            } => vec![],
-            TickerMsg::TogglePin => vec![],
-            TickerMsg::UndoSnap => vec![],
+            } => self.apply_maybe_snap(current_price, gatr_abs),
+
+            TickerMsg::TogglePin => {
+                self.generation += 1;
+                self.pinned = !self.pinned;
+                vec![TickerEffect::PersistDirty]
+            }
+
+            TickerMsg::UndoSnap => {
+                if let Some((ref snap, instant)) = self.pre_snap {
+                    if instant.elapsed() <= SNAP_UNDO_TTL {
+                        let snap = snap.clone();
+                        self.generation += 1;
+                        self.entries = snap.entries;
+                        self.gatr_anchor = snap.gatr_anchor;
+                        if let Some(ref bracket) = snap.bracket {
+                            self.live_bracket = Some(*bracket.clone());
+                            self.pre_snap = None;
+                            return vec![
+                                TickerEffect::ProjectBracket(
+                                    self.live_bracket.as_ref()
+                                        .expect("just set live_bracket")
+                                        .clone(),
+                                ),
+                                TickerEffect::PersistDirty,
+                            ];
+                        }
+                        self.pre_snap = None;
+                        return vec![TickerEffect::PersistDirty];
+                    }
+                }
+                // TTL expired or no snap to undo.
+                self.pre_snap = None;
+                vec![]
+            }
 
             // ── Market data ──────────────────────────────────────
             TickerMsg::UpdateMarketData {
                 last_price,
                 gatr_abs,
-            } => vec![],
+            } => {
+                self.last_price = Some(last_price);
+                self.gatr_abs = gatr_abs;
+                // If the user is actively editing, skip auto-snap.
+                if self.editing_field.is_some() {
+                    return vec![];
+                }
+                // Auto-trigger snap check with the fresh data.
+                self.apply_maybe_snap(last_price, gatr_abs)
+            }
 
             // ── Levels ───────────────────────────────────────────
-            TickerMsg::AddLevel(_) => vec![],
-            TickerMsg::RemoveLevel(_) => vec![],
-            TickerMsg::UpdateLevel { index, level } => vec![],
-            TickerMsg::ToggleLevelLock(_) => vec![],
+
+            TickerMsg::AddLevel(level) => {
+                self.generation += 1;
+                self.levels.push(level.clone());
+                let index = self.levels.len() - 1;
+                vec![
+                    TickerEffect::ProjectLevel { index, level },
+                    TickerEffect::PersistDirty,
+                ]
+            }
+
+            TickerMsg::RemoveLevel(index) => {
+                if index < self.levels.len() {
+                    self.generation += 1;
+                    self.levels.remove(index);
+                    vec![TickerEffect::PersistDirty]
+                } else {
+                    vec![]
+                }
+            }
+
+            TickerMsg::UpdateLevel { index, level } => {
+                if index < self.levels.len() {
+                    self.generation += 1;
+                    self.levels[index] = level.clone();
+                    vec![
+                        TickerEffect::ProjectLevel { index, level },
+                        TickerEffect::PersistDirty,
+                    ]
+                } else {
+                    vec![]
+                }
+            }
+
+            TickerMsg::ToggleLevelLock(index) => {
+                if index < self.levels.len() {
+                    self.generation += 1;
+                    self.levels[index].locked = !self.levels[index].locked;
+                    vec![TickerEffect::PersistDirty]
+                } else {
+                    vec![]
+                }
+            }
 
             // ── Broker events ────────────────────────────────────
+
             TickerMsg::SubmitOrder => {
                 if let Some(ref mut b) = self.live_bracket {
                     self.generation += 1;
                     b.status = BracketStatus::Pending;
+                    let bracket = b.clone();
+                    vec![
+                        TickerEffect::SubmitToBroker {
+                            bracket: bracket.clone(),
+                        },
+                        TickerEffect::ProjectBracket(bracket),
+                        TickerEffect::PersistDirty,
+                    ]
+                } else {
+                    vec![]
+                }
+            }
+
+            TickerMsg::OrderPending { order_id: _ } => {
+                // Bracket already in Pending state from SubmitOrder.
+                // Record that the broker acknowledged it. Currently the
+                // order_id is tracked in order_annotation_links, not on
+                // TickerState, so this is a no-op for the state machine.
+                // The caller wires the link externally.
+                if let Some(ref b) = self.live_bracket {
+                    self.generation += 1;
+                    vec![TickerEffect::ProjectBracket(b.clone())]
+                } else {
+                    vec![]
+                }
+            }
+
+            TickerMsg::OrderFilled {
+                filled_qty,
+                avg_price,
+            } => {
+                if let Some(ref mut b) = self.live_bracket {
+                    self.generation += 1;
+                    b.status = BracketStatus::Active;
+                    b.filled_qty = Some(filled_qty);
+                    b.entry.line.price = avg_price;
+
+                    // Compute projected P&L on TP/SL legs.
+                    let sign = match b.side {
+                        BracketSide::Long => 1.0,
+                        BracketSide::Short => -1.0,
+                    };
+                    let qty = b.quantity.unwrap_or(filled_qty);
+                    if let Some(ref mut tp) = b.take_profit {
+                        tp.projected_pnl =
+                            Some(sign * (tp.line.price - avg_price) * qty);
+                        tp.projected_pnl_pct =
+                            if avg_price.abs() > f64::EPSILON {
+                                Some(
+                                    sign * (tp.line.price - avg_price)
+                                        / avg_price
+                                        * 100.0,
+                                )
+                            } else {
+                                None
+                            };
+                    }
+                    if let Some(ref mut sl) = b.stop_loss {
+                        sl.projected_pnl =
+                            Some(sign * (sl.line.price - avg_price) * qty);
+                        sl.projected_pnl_pct =
+                            if avg_price.abs() > f64::EPSILON {
+                                Some(
+                                    sign * (sl.line.price - avg_price)
+                                        / avg_price
+                                        * 100.0,
+                                )
+                            } else {
+                                None
+                            };
+                    }
+
+                    vec![
+                        TickerEffect::ProjectBracket(b.clone()),
+                        TickerEffect::Toast {
+                            message: format!(
+                                "{} filled {filled_qty} @ {avg_price:.2}",
+                                self.symbol.as_str()
+                            ),
+                            action: None,
+                        },
+                        TickerEffect::PersistDirty,
+                    ]
+                } else {
+                    vec![]
+                }
+            }
+
+            TickerMsg::OrderPartialFill { filled_qty } => {
+                if let Some(ref mut b) = self.live_bracket {
+                    self.generation += 1;
+                    b.status = BracketStatus::PartialFill;
+                    b.filled_qty = Some(filled_qty);
                     vec![
                         TickerEffect::ProjectBracket(b.clone()),
                         TickerEffect::PersistDirty,
@@ -656,12 +838,7 @@ impl TickerState {
                     vec![]
                 }
             }
-            TickerMsg::OrderPending { order_id } => vec![],
-            TickerMsg::OrderFilled {
-                filled_qty,
-                avg_price,
-            } => vec![],
-            TickerMsg::OrderPartialFill { filled_qty } => vec![],
+
             TickerMsg::OrderRejected { reason } => {
                 if let Some(ref mut b) = self.live_bracket {
                     self.generation += 1;
@@ -677,11 +854,114 @@ impl TickerState {
                     vec![]
                 }
             }
-            TickerMsg::OrderCancelled => vec![],
+
+            TickerMsg::OrderCancelled => {
+                if let Some(ref mut b) = self.live_bracket {
+                    self.generation += 1;
+                    b.status = BracketStatus::Draft;
+                    vec![
+                        TickerEffect::ProjectBracket(b.clone()),
+                        TickerEffect::Toast {
+                            message: format!(
+                                "{} bracket cancelled",
+                                self.symbol.as_str()
+                            ),
+                            action: None,
+                        },
+                        TickerEffect::PersistDirty,
+                    ]
+                } else {
+                    vec![]
+                }
+            }
 
             // ── Persistence ──────────────────────────────────────
             TickerMsg::Hydrated(_) => vec![],
         }
+    }
+
+    /// Internal helper: evaluate the GATR snap rule and apply it if
+    /// the guards pass.
+    ///
+    /// Reuses the guard logic from [`crate::ticker_order_intent::gatr_snap`]
+    /// and the repositioning helpers from [`crate::order_panel`].
+    fn apply_maybe_snap(
+        &mut self,
+        current_price: f64,
+        gatr_abs: Option<f64>,
+    ) -> Vec<TickerEffect> {
+        // Guard 1: pin.
+        if self.pinned {
+            return vec![];
+        }
+        // Guard 2: recency — fresh user edits are sacred.
+        let now = Utc::now();
+        if now.signed_duration_since(self.updated_at).num_seconds() < RECENCY_GUARD_SECS {
+            return vec![];
+        }
+        // Guard 3: finite inputs + non-tiny GATR.
+        if !current_price.is_finite() {
+            return vec![];
+        }
+        let gatr = match gatr_abs {
+            Some(g) if g.is_finite() && g > MIN_GATR_ABS => g,
+            _ => return vec![],
+        };
+        // Guard 4: anchor must be seeded.
+        let anchor_price = match self.gatr_anchor.anchor_price {
+            Some(p) if p.is_finite() => p,
+            _ => return vec![],
+        };
+        // Guard 5: no live bracket required — snap operates on entries too.
+        // But we need either a bracket or entries to reposition.
+        if self.live_bracket.is_none() && self.entries.is_empty() {
+            return vec![];
+        }
+        // Threshold check using the existing helper.
+        if !crate::order_panel::should_reposition(anchor_price, current_price, Some(gatr)) {
+            return vec![];
+        }
+
+        // Snap fires. Stash pre-snap state for undo.
+        let pre_snap = PreSnapState {
+            bracket: self.live_bracket.as_ref().map(|b| Box::new(b.clone())),
+            entries: self.entries.clone(),
+            gatr_anchor: self.gatr_anchor,
+        };
+        self.pre_snap = Some((Box::new(pre_snap), Instant::now()));
+        self.generation += 1;
+
+        // Shift entry memory prices by delta.
+        let delta = current_price - anchor_price;
+        for mem in self.entries.values_mut() {
+            if let Some(ref mut p) = mem.entry_price_or_offset {
+                *p += delta;
+            }
+        }
+
+        // Update anchor.
+        self.gatr_anchor.anchor_price = Some(current_price);
+        self.gatr_anchor.anchor_gatr = Some(gatr);
+
+        // Reposition bracket if one exists.
+        let mut effects = Vec::new();
+        if let Some(ref mut b) = self.live_bracket {
+            crate::order_panel::reposition_bracket(b, current_price);
+            effects.push(TickerEffect::ProjectBracket(b.clone()));
+        }
+
+        effects.push(TickerEffect::Toast {
+            message: format!("{} re-anchored", self.symbol.as_str()),
+            action: Some(ToastAction {
+                label: "Undo".to_string(),
+                on_click: Box::new(crate::app::Message::Ticker(
+                    self.symbol.clone(),
+                    TickerMsg::UndoSnap,
+                )),
+            }),
+        });
+        effects.push(TickerEffect::PersistDirty);
+        effects
     }
 
     /// Internal helper: apply a committed value to the appropriate bracket

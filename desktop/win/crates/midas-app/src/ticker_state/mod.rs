@@ -252,6 +252,30 @@ impl TickerState {
     pub fn set_gatr_abs(&mut self, gatr: Option<f64>) {
         self.gatr_abs = gatr;
     }
+
+    // ── Test-only setters ──────────────────────────────────────────
+
+    /// Override the GATR anchor. Test-only.
+    #[cfg(test)]
+    pub(crate) fn force_gatr_anchor(&mut self, anchor: GatrAnchor) {
+        self.gatr_anchor = anchor;
+    }
+
+    /// Override `updated_at`. Test-only — used to bypass the recency
+    /// guard in GATR snap tests.
+    #[cfg(test)]
+    pub(crate) fn force_updated_at(&mut self, dt: DateTime<Utc>) {
+        self.updated_at = dt;
+    }
+
+    /// Override the pre-snap instant. Test-only — used to simulate
+    /// expired TTL in undo snap tests.
+    #[cfg(test)]
+    pub(crate) fn force_pre_snap_instant(&mut self, instant: std::time::Instant) {
+        if let Some((_, ref mut ts)) = self.pre_snap {
+            *ts = instant;
+        }
+    }
 }
 
 // ── EditingField ────────────────────────────────────────────────────

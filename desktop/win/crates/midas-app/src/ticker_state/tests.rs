@@ -263,59 +263,374 @@ fn factory_from_legacy() {
     );
 }
 
-// ── Slice 2 stubs (GATR, levels, market data) ──────────────────────
+// ── Slice 2: GATR snap/pin/undo ────────────────────────────────────
+
+/// Build a test level with the given price and id.
+fn test_level(id: u64, price: f64) -> crate::level_store::StoredLevel {
+    crate::level_store::StoredLevel {
+        level: midas_chart::HorizontalLevel {
+            id,
+            line: midas_chart::widget::price_line::PriceLine {
+                price,
+                extent: midas_chart::widget::price_line::LineExtent::FullWidth,
+                stroke: midas_chart::widget::price_line::LineStroke {
+                    color: [1.0, 1.0, 1.0, 1.0],
+                    width: 1.0,
+                    style: midas_chart::widget::LineStyle::Solid,
+                },
+            },
+            label: None,
+            icon: midas_chart::LevelIcon::default(),
+        },
+        locked: false,
+    }
+}
+
+/// Build a state with a stale anchor suitable for snap testing.
+/// The `updated_at` is set far in the past so the recency guard passes.
+fn state_with_stale_anchor(anchor_price: f64, gatr: f64) -> TickerState {
+    let mut state = TickerState::new_with_defaults(SymbolKey::new("SNAP"), anchor_price, Some(gatr));
+    // Create a bracket so snap has something to reposition.
+    state.apply(TickerMsg::EnsureDraftBracket {
+        side: OrderSide::Buy,
+        entry_type: EntryType::Market,
+    });
+    // Seed the GATR anchor.
+    state.force_gatr_anchor(crate::ticker_order_intent::GatrAnchor {
+        anchor_price: Some(anchor_price),
+        anchor_gatr: Some(gatr),
+    });
+    // Push updated_at far into the past so the recency guard passes.
+    state.force_updated_at(chrono::Utc::now() - chrono::Duration::hours(2));
+    state
+}
 
 #[test]
-fn apply_slice2_stubs_return_empty_effects() {
-    let mut state = TickerState::new(SymbolKey::new("TEST"));
+fn gatr_snap_stale_anchor_drift_triggers_reposition() {
+    let mut state = state_with_stale_anchor(100.0, 2.0);
+    let old_entry = state.live_bracket().expect("bracket").entry.line.price;
 
-    // Exercise Slice 2 stub variants (GATR, levels, market data).
-    let stub_msgs: Vec<TickerMsg> = vec![
-        TickerMsg::MaybeSnap {
-            current_price: 150.0,
-            gatr_abs: Some(2.0),
-        },
-        TickerMsg::TogglePin,
-        TickerMsg::UndoSnap,
-        TickerMsg::UpdateMarketData {
-            last_price: 151.0,
-            gatr_abs: Some(2.1),
-        },
-        TickerMsg::AddLevel(crate::level_store::StoredLevel {
-            level: midas_chart::HorizontalLevel {
-                id: 1,
-                line: midas_chart::widget::price_line::PriceLine {
-                    price: 100.0,
-                    extent: midas_chart::widget::price_line::LineExtent::FullWidth,
-                    stroke: midas_chart::widget::price_line::LineStroke {
-                        color: [1.0, 1.0, 1.0, 1.0],
-                        width: 1.0,
-                        style: midas_chart::widget::LineStyle::Solid,
-                    },
-                },
-                label: None,
-                icon: midas_chart::LevelIcon::default(),
-            },
-            locked: false,
-        }),
-        TickerMsg::RemoveLevel(0),
-        TickerMsg::ToggleLevelLock(0),
-        TickerMsg::OrderPending {
-            order_id: uuid::Uuid::nil(),
-        },
-        TickerMsg::OrderFilled {
-            filled_qty: 100.0,
-            avg_price: 150.0,
-        },
-        TickerMsg::OrderPartialFill { filled_qty: 50.0 },
-        TickerMsg::OrderCancelled,
-        TickerMsg::Hydrated(Box::new(TickerState::new(SymbolKey::new("TEST")))),
-    ];
+    // Price drifts by more than 1 GATR (2.0) from anchor (100.0).
+    let effects = state.apply(TickerMsg::MaybeSnap {
+        current_price: 103.0,
+        gatr_abs: Some(2.0),
+    });
 
-    for msg in stub_msgs {
-        let effects = state.apply(msg);
-        assert!(effects.is_empty(), "Slice 2 stub should return empty effects");
-    }
+    // Should have ProjectBracket + Toast (with Undo action) + PersistDirty.
+    assert!(
+        effects.iter().any(|e| matches!(e, TickerEffect::ProjectBracket(_))),
+        "snap should project the repositioned bracket"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            TickerEffect::Toast { ref message, ref action }
+            if message.contains("re-anchored") && action.is_some()
+        )),
+        "snap should emit a toast with Undo action"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(e, TickerEffect::PersistDirty)),
+        "snap should persist"
+    );
+
+    // Bracket entry should have moved toward 103.0.
+    let new_entry = state.live_bracket().expect("bracket").entry.line.price;
+    assert!(
+        (new_entry - old_entry).abs() > 1.0,
+        "bracket should have repositioned"
+    );
+}
+
+#[test]
+fn gatr_snap_pinned_skips() {
+    let mut state = state_with_stale_anchor(100.0, 2.0);
+    state.apply(TickerMsg::TogglePin);
+    assert!(state.pinned());
+
+    let effects = state.apply(TickerMsg::MaybeSnap {
+        current_price: 105.0,
+        gatr_abs: Some(2.0),
+    });
+    assert!(effects.is_empty(), "pinned state should skip snap");
+}
+
+#[test]
+fn pin_toggle_flips_and_persists() {
+    let mut state = TickerState::new(SymbolKey::new("PIN"));
+    assert!(!state.pinned());
+
+    let effects = state.apply(TickerMsg::TogglePin);
+    assert!(state.pinned());
+    assert!(effects.iter().any(|e| matches!(e, TickerEffect::PersistDirty)));
+
+    let effects = state.apply(TickerMsg::TogglePin);
+    assert!(!state.pinned());
+    assert!(effects.iter().any(|e| matches!(e, TickerEffect::PersistDirty)));
+}
+
+#[test]
+fn undo_snap_within_ttl_restores_state() {
+    let mut state = state_with_stale_anchor(100.0, 2.0);
+    let old_entry = state.live_bracket().expect("bracket").entry.line.price;
+
+    // Fire snap.
+    state.apply(TickerMsg::MaybeSnap {
+        current_price: 105.0,
+        gatr_abs: Some(2.0),
+    });
+    let snapped_entry = state.live_bracket().expect("bracket").entry.line.price;
+    assert!(
+        (snapped_entry - old_entry).abs() > 1.0,
+        "snap should have moved the entry"
+    );
+
+    // Undo within TTL.
+    let effects = state.apply(TickerMsg::UndoSnap);
+    assert!(
+        effects.iter().any(|e| matches!(e, TickerEffect::ProjectBracket(_))),
+        "undo should project the restored bracket"
+    );
+    let restored_entry = state.live_bracket().expect("bracket").entry.line.price;
+    assert!(
+        (restored_entry - old_entry).abs() < f64::EPSILON,
+        "undo should restore the original entry price"
+    );
+}
+
+#[test]
+fn undo_snap_expired_ttl_is_noop() {
+    let mut state = state_with_stale_anchor(100.0, 2.0);
+
+    // Fire snap.
+    state.apply(TickerMsg::MaybeSnap {
+        current_price: 105.0,
+        gatr_abs: Some(2.0),
+    });
+
+    // Expire the TTL by replacing the instant.
+    state.force_pre_snap_instant(std::time::Instant::now() - std::time::Duration::from_secs(60));
+
+    let effects = state.apply(TickerMsg::UndoSnap);
+    assert!(effects.is_empty(), "expired undo should be a no-op");
+}
+
+// ── Slice 2: broker event lifecycle ────────────────────────────────
+
+#[test]
+fn submit_pending_filled_lifecycle() {
+    use midas_chart::widget::order_bracket::BracketStatus;
+
+    let mut state = TickerState::new_with_defaults(SymbolKey::new("LIFE"), 150.0, Some(2.0));
+    state.apply(TickerMsg::EnsureDraftBracket {
+        side: OrderSide::Buy,
+        entry_type: EntryType::Market,
+    });
+    state.apply(TickerMsg::SetQuantity(100.0));
+    assert_eq!(state.live_bracket().expect("b").status, BracketStatus::Draft);
+
+    // Submit.
+    let effects = state.apply(TickerMsg::SubmitOrder);
+    assert_eq!(state.live_bracket().expect("b").status, BracketStatus::Pending);
+    assert!(
+        effects.iter().any(|e| matches!(e, TickerEffect::SubmitToBroker { .. })),
+        "submit should emit SubmitToBroker"
+    );
+    assert!(effects.iter().any(|e| matches!(e, TickerEffect::ProjectBracket(_))));
+
+    // Pending acknowledgement.
+    let effects = state.apply(TickerMsg::OrderPending {
+        order_id: uuid::Uuid::now_v7(),
+    });
+    assert!(effects.iter().any(|e| matches!(e, TickerEffect::ProjectBracket(_))));
+
+    // Filled.
+    let effects = state.apply(TickerMsg::OrderFilled {
+        filled_qty: 100.0,
+        avg_price: 150.50,
+    });
+    assert_eq!(state.live_bracket().expect("b").status, BracketStatus::Active);
+    assert!(
+        (state.live_bracket().expect("b").entry.line.price - 150.50).abs() < f64::EPSILON,
+        "fill should update entry to avg_price"
+    );
+    assert!(
+        state.live_bracket().expect("b").filled_qty == Some(100.0),
+        "fill should record filled_qty"
+    );
+    assert!(effects.iter().any(|e| matches!(
+        e,
+        TickerEffect::Toast { ref message, .. } if message.contains("filled")
+    )));
+}
+
+#[test]
+fn order_rejected_reverts_to_draft() {
+    use midas_chart::widget::order_bracket::BracketStatus;
+
+    let mut state = TickerState::new_with_defaults(SymbolKey::new("REJ"), 200.0, Some(3.0));
+    state.apply(TickerMsg::EnsureDraftBracket {
+        side: OrderSide::Sell,
+        entry_type: EntryType::Limit,
+    });
+    state.apply(TickerMsg::SubmitOrder);
+    assert_eq!(state.live_bracket().expect("b").status, BracketStatus::Pending);
+
+    let effects = state.apply(TickerMsg::OrderRejected {
+        reason: "Insufficient margin".to_string(),
+    });
+    assert_eq!(state.live_bracket().expect("b").status, BracketStatus::Draft);
+    assert!(effects.iter().any(|e| matches!(
+        e,
+        TickerEffect::Toast { ref message, .. } if message.contains("Insufficient margin")
+    )));
+}
+
+#[test]
+fn order_partial_fill_updates_qty() {
+    use midas_chart::widget::order_bracket::BracketStatus;
+
+    let mut state = TickerState::new_with_defaults(SymbolKey::new("PART"), 100.0, Some(1.0));
+    state.apply(TickerMsg::EnsureDraftBracket {
+        side: OrderSide::Buy,
+        entry_type: EntryType::Market,
+    });
+    state.apply(TickerMsg::SubmitOrder);
+
+    let effects = state.apply(TickerMsg::OrderPartialFill { filled_qty: 50.0 });
+    assert_eq!(state.live_bracket().expect("b").status, BracketStatus::PartialFill);
+    assert_eq!(state.live_bracket().expect("b").filled_qty, Some(50.0));
+    assert!(effects.iter().any(|e| matches!(e, TickerEffect::ProjectBracket(_))));
+}
+
+#[test]
+fn order_cancelled_reverts_to_draft() {
+    use midas_chart::widget::order_bracket::BracketStatus;
+
+    let mut state = TickerState::new_with_defaults(SymbolKey::new("CANC"), 100.0, Some(1.0));
+    state.apply(TickerMsg::EnsureDraftBracket {
+        side: OrderSide::Buy,
+        entry_type: EntryType::Market,
+    });
+    state.apply(TickerMsg::SubmitOrder);
+    assert_eq!(state.live_bracket().expect("b").status, BracketStatus::Pending);
+
+    let effects = state.apply(TickerMsg::OrderCancelled);
+    assert_eq!(state.live_bracket().expect("b").status, BracketStatus::Draft);
+    assert!(effects.iter().any(|e| matches!(
+        e,
+        TickerEffect::Toast { ref message, .. } if message.contains("cancelled")
+    )));
+}
+
+// ── Slice 2: level CRUD ────────────────────────────────────────────
+
+#[test]
+fn add_level_pushes_and_projects() {
+    let mut state = TickerState::new(SymbolKey::new("LVL"));
+    assert!(state.levels().is_empty());
+
+    let level = test_level(1, 150.0);
+    let effects = state.apply(TickerMsg::AddLevel(level.clone()));
+    assert_eq!(state.levels().len(), 1);
+    assert!((state.levels()[0].line.price - 150.0).abs() < f64::EPSILON);
+    assert!(effects.iter().any(|e| matches!(e, TickerEffect::ProjectLevel { index: 0, .. })));
+    assert!(effects.iter().any(|e| matches!(e, TickerEffect::PersistDirty)));
+}
+
+#[test]
+fn remove_level_shrinks_vec() {
+    let mut state = TickerState::new(SymbolKey::new("LVL"));
+    state.apply(TickerMsg::AddLevel(test_level(1, 100.0)));
+    state.apply(TickerMsg::AddLevel(test_level(2, 200.0)));
+    assert_eq!(state.levels().len(), 2);
+
+    let effects = state.apply(TickerMsg::RemoveLevel(0));
+    assert_eq!(state.levels().len(), 1);
+    assert!((state.levels()[0].line.price - 200.0).abs() < f64::EPSILON);
+    assert!(effects.iter().any(|e| matches!(e, TickerEffect::PersistDirty)));
+}
+
+#[test]
+fn remove_level_out_of_bounds_is_noop() {
+    let mut state = TickerState::new(SymbolKey::new("LVL"));
+    let effects = state.apply(TickerMsg::RemoveLevel(99));
+    assert!(effects.is_empty());
+}
+
+#[test]
+fn update_level_replaces_at_index() {
+    let mut state = TickerState::new(SymbolKey::new("LVL"));
+    state.apply(TickerMsg::AddLevel(test_level(1, 100.0)));
+
+    let new_level = test_level(1, 200.0);
+    let effects = state.apply(TickerMsg::UpdateLevel {
+        index: 0,
+        level: new_level,
+    });
+    assert!((state.levels()[0].line.price - 200.0).abs() < f64::EPSILON);
+    assert!(effects.iter().any(|e| matches!(e, TickerEffect::ProjectLevel { index: 0, .. })));
+    assert!(effects.iter().any(|e| matches!(e, TickerEffect::PersistDirty)));
+}
+
+#[test]
+fn toggle_level_lock_flips() {
+    let mut state = TickerState::new(SymbolKey::new("LVL"));
+    state.apply(TickerMsg::AddLevel(test_level(1, 100.0)));
+    assert!(!state.levels()[0].locked);
+
+    let effects = state.apply(TickerMsg::ToggleLevelLock(0));
+    assert!(state.levels()[0].locked);
+    assert!(effects.iter().any(|e| matches!(e, TickerEffect::PersistDirty)));
+
+    state.apply(TickerMsg::ToggleLevelLock(0));
+    assert!(!state.levels()[0].locked);
+}
+
+// ── Slice 2: UpdateMarketData triggers auto-snap ───────────────────
+
+#[test]
+fn update_market_data_triggers_auto_snap_when_stale() {
+    let mut state = state_with_stale_anchor(100.0, 2.0);
+    let old_entry = state.live_bracket().expect("bracket").entry.line.price;
+
+    // UpdateMarketData with a price that drifts > 1 GATR from anchor.
+    let effects = state.apply(TickerMsg::UpdateMarketData {
+        last_price: 103.0,
+        gatr_abs: Some(2.0),
+    });
+
+    assert_eq!(state.last_price(), Some(103.0));
+    assert_eq!(state.gatr_abs(), Some(2.0));
+    assert!(
+        effects.iter().any(|e| matches!(e, TickerEffect::ProjectBracket(_))),
+        "market data update should trigger auto-snap"
+    );
+
+    let new_entry = state.live_bracket().expect("bracket").entry.line.price;
+    assert!(
+        (new_entry - old_entry).abs() > 1.0,
+        "auto-snap should reposition bracket"
+    );
+}
+
+#[test]
+fn update_market_data_skips_snap_while_editing() {
+    let mut state = state_with_stale_anchor(100.0, 2.0);
+    state.apply(TickerMsg::BeginEdit(EditingField::LimitPrice));
+
+    let effects = state.apply(TickerMsg::UpdateMarketData {
+        last_price: 105.0,
+        gatr_abs: Some(2.0),
+    });
+
+    // Market data should still be cached.
+    assert_eq!(state.last_price(), Some(105.0));
+    // But no snap effects should fire.
+    assert!(
+        !effects.iter().any(|e| matches!(e, TickerEffect::ProjectBracket(_))),
+        "editing lock should suppress auto-snap"
+    );
 }
 
 // ── Slice 1: bracket lifecycle tests ────────────────────────────────
