@@ -230,8 +230,7 @@ pub struct MidasApp {
     /// session. Prevents the toast from re-firing on every subsequent
     /// panel edit for the same anchor seed.
     #[allow(dead_code)] // used by future snap toast deduplication
-    pub anchor_seed_toasts_shown:
-        std::collections::HashSet<crate::annotation_store::SymbolKey>,
+    pub anchor_seed_toasts_shown: std::collections::HashSet<crate::annotation_store::SymbolKey>,
     /// Pre-snap undo slot, populated when the GATR snap rule fires
     /// and drained when the user clicks the `Undo` action button on
     /// the snap toast. 30-second session-bounded TTL enforced at
@@ -599,7 +598,6 @@ pub enum Message {
     /// Periodic tick for animations and status bar clock.
     Tick,
 
-
     // -- Ticker state machine (Slice 0; stubs returning empty effects) --
     /// Route a per-symbol ticker state message through
     /// `TickerState::apply()`. Slice 0 stubs return empty effects.
@@ -870,22 +868,21 @@ impl MidasApp {
         // we populate `self.tickers` from the cache. On shutdown,
         // `flush_now()` + `shutdown()` ensures all dirty states are
         // durably written.
-        let ticker_persist =
-            match crate::ticker_state::persist::TickerStatePersistHandle::open(
-                ticker_state_path.clone(),
-            ) {
-                Ok(h) => h,
-                Err(e) => {
-                    tracing::error!(
-                        "failed to open ticker-state persist at {}: {e}",
-                        ticker_state_path.display()
-                    );
-                    panic!(
-                        "ticker-state persist open failed at {}: {e}",
-                        ticker_state_path.display()
-                    );
-                }
-            };
+        let ticker_persist = match crate::ticker_state::persist::TickerStatePersistHandle::open(
+            ticker_state_path.clone(),
+        ) {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::error!(
+                    "failed to open ticker-state persist at {}: {e}",
+                    ticker_state_path.display()
+                );
+                panic!(
+                    "ticker-state persist open failed at {}: {e}",
+                    ticker_state_path.display()
+                );
+            }
+        };
 
         // Hydrate the tickers map from redb v2 blobs.
         let mut tickers = ticker_persist.all_states();
@@ -920,7 +917,9 @@ impl MidasApp {
                         let sym_key = crate::annotation_store::SymbolKey::new(symbol);
                         // Find the first OrderBracket annotation for this symbol.
                         let bracket_info = annotations.iter().find_map(|ann| {
-                            if let midas_chart::widget::AnnotationKind::OrderBracket(ref b) = ann.kind {
+                            if let midas_chart::widget::AnnotationKind::OrderBracket(ref b) =
+                                ann.kind
+                            {
                                 Some((ann.id, b.as_ref().clone()))
                             } else {
                                 None
@@ -957,9 +956,9 @@ impl MidasApp {
             // has no levels yet.
             for (ticker, stored_levels) in level_store.all_levels() {
                 let sym_key = crate::annotation_store::SymbolKey::new(ticker);
-                let ts = tickers.entry(sym_key.clone()).or_insert_with(|| {
-                    crate::ticker_state::TickerState::new(sym_key.clone())
-                });
+                let ts = tickers
+                    .entry(sym_key.clone())
+                    .or_insert_with(|| crate::ticker_state::TickerState::new(sym_key.clone()));
                 if ts.levels().is_empty() && !stored_levels.is_empty() {
                     ts.inject_levels(stored_levels.to_vec());
                     tracing::debug!(
@@ -2132,8 +2131,6 @@ impl MidasApp {
         });
     }
 
-
-
     /// Sync a panel edit to the ticker state machine.
     ///
     /// Called from the panel-action handler after any edit that sets
@@ -2168,11 +2165,7 @@ impl MidasApp {
     /// Called from the `ChartDragBracketLeg` handler after the
     /// annotation has been mutated in-place by the drag. Marks the
     /// ticker state as dirty for persistence.
-    fn sync_drag_to_intent(
-        &mut self,
-        symbol_at_drag_start: String,
-        _annotation_id: AnnotationId,
-    ) {
+    fn sync_drag_to_intent(&mut self, symbol_at_drag_start: String, _annotation_id: AnnotationId) {
         let key = crate::annotation_store::SymbolKey::new(&symbol_at_drag_start);
         // Mark ticker state dirty for persistence after drag.
         if let Some(ts) = self.tickers.get(&key) {
@@ -2253,7 +2246,6 @@ impl MidasApp {
             }
         }
     }
-
 }
 
 // Config persistence (build_config, mark_config_dirty, maybe_save_config,
@@ -3866,8 +3858,7 @@ impl MidasApp {
                         self.market_cache.remove(&symbol_upper);
                         // Evict ticker state for this symbol from both
                         // the in-memory map and the persistence store.
-                        let sym_key =
-                            crate::annotation_store::SymbolKey::new(&symbol_upper);
+                        let sym_key = crate::annotation_store::SymbolKey::new(&symbol_upper);
                         self.tickers.remove(&sym_key);
                         self.ticker_persist.forget(&sym_key);
                     }
@@ -4243,12 +4234,15 @@ impl MidasApp {
                     .map(|ts| ts.live_bracket().is_none())
                     .unwrap_or(true);
                 if no_bracket {
-                    let targets: Vec<(crate::order_panel::OrderSide, midas_chart::widget::order_bracket::EntryType)> =
-                        self.order_panels
-                            .values()
-                            .filter(|p| p.state.symbol.eq_ignore_ascii_case(&symbol_upper))
-                            .map(|p| (p.state.side, p.state.entry_type))
-                            .collect();
+                    let targets: Vec<(
+                        crate::order_panel::OrderSide,
+                        midas_chart::widget::order_bracket::EntryType,
+                    )> = self
+                        .order_panels
+                        .values()
+                        .filter(|p| p.state.symbol.eq_ignore_ascii_case(&symbol_upper))
+                        .map(|p| (p.state.side, p.state.entry_type))
+                        .collect();
                     for (panel_side, panel_entry_type) in targets {
                         let _ = self.update(Message::Ticker(
                             key.clone(),
@@ -4630,9 +4624,7 @@ impl MidasApp {
                             });
                         if let Some(order_id) = order_id {
                             if let Err(e) = bridge.modify_bracket_leg(order_id, new_price) {
-                                tracing::error!(
-                                    "Failed to send ModifyBracketLeg to broker: {e}"
-                                );
+                                tracing::error!("Failed to send ModifyBracketLeg to broker: {e}");
                             }
                         }
                     }
@@ -5213,25 +5205,19 @@ impl MidasApp {
                     // Route status change through TickerState.
                     use midas_chart::widget::order_bracket::BracketStatus;
                     let ticker_msg = match status {
-                        BracketStatus::Active => {
-                            crate::ticker_state::TickerMsg::OrderFilled {
-                                filled_qty: link.quantity,
-                                avg_price: entry_fill_price.unwrap_or(0.0),
-                            }
-                        }
+                        BracketStatus::Active => crate::ticker_state::TickerMsg::OrderFilled {
+                            filled_qty: link.quantity,
+                            avg_price: entry_fill_price.unwrap_or(0.0),
+                        },
                         BracketStatus::PartialFill => {
                             crate::ticker_state::TickerMsg::OrderPartialFill {
                                 filled_qty: link.quantity,
                             }
                         }
-                        BracketStatus::Cancelled => {
-                            crate::ticker_state::TickerMsg::OrderCancelled
-                        }
-                        BracketStatus::Pending => {
-                            crate::ticker_state::TickerMsg::OrderPending {
-                                order_id: parent_id,
-                            }
-                        }
+                        BracketStatus::Cancelled => crate::ticker_state::TickerMsg::OrderCancelled,
+                        BracketStatus::Pending => crate::ticker_state::TickerMsg::OrderPending {
+                            order_id: parent_id,
+                        },
                         _ => {
                             // Closed, Draft — handled as OrderCancelled for now.
                             crate::ticker_state::TickerMsg::OrderCancelled
@@ -5239,9 +5225,7 @@ impl MidasApp {
                     };
                     let _ = self.update(Message::Ticker(sym_key, ticker_msg));
 
-                    tracing::info!(
-                        "Bracket status -> {status:?} (parent={parent_id})"
-                    );
+                    tracing::info!("Bracket status -> {status:?} (parent={parent_id})");
 
                     // Remove link when engine confirms cancellation (S9).
                     if status == BracketStatus::Cancelled {
@@ -5291,9 +5275,7 @@ impl MidasApp {
             Message::Tick => {
                 // Auto-dismiss toast after TOAST_TTL_SECS seconds.
                 if let Some(ref state) = self.toast {
-                    if state.created_at.elapsed()
-                        > std::time::Duration::from_secs(TOAST_TTL_SECS)
-                    {
+                    if state.created_at.elapsed() > std::time::Duration::from_secs(TOAST_TTL_SECS) {
                         self.toast = None;
                     }
                 }
@@ -5301,10 +5283,7 @@ impl MidasApp {
             }
 
             Message::Ticker(sym, msg) => {
-                assert!(
-                    !self.ticker_dispatch_active,
-                    "re-entrant ticker dispatch"
-                );
+                assert!(!self.ticker_dispatch_active, "re-entrant ticker dispatch");
                 self.ticker_dispatch_active = true;
                 let state = self
                     .tickers
@@ -5314,8 +5293,8 @@ impl MidasApp {
                 for effect in effects {
                     match effect {
                         crate::ticker_state::TickerEffect::ProjectBracket(ref bracket) => {
-                            let ann_id_opt = self.tickers.get(&sym)
-                                .and_then(|s| s.live_annotation_id());
+                            let ann_id_opt =
+                                self.tickers.get(&sym).and_then(|s| s.live_annotation_id());
                             // Check if the annotation actually exists in the store.
                             // IDs are session-local; a stale ID from a prior session
                             // (loaded from redb) would silently fail the update.
@@ -5329,16 +5308,12 @@ impl MidasApp {
                                 .unwrap_or(false);
                             if let (Some(ann_id), true) = (ann_id_opt, ann_exists) {
                                 // Update existing annotation.
-                                self.annotation_store.update(
-                                    sym.as_str(),
-                                    ann_id,
-                                    |ann| {
-                                        ann.kind = midas_chart::widget::AnnotationKind::OrderBracket(
-                                            Box::new(bracket.clone()),
-                                        );
-                                        ann.presence = midas_chart::widget::Presence::Active;
-                                    },
-                                );
+                                self.annotation_store.update(sym.as_str(), ann_id, |ann| {
+                                    ann.kind = midas_chart::widget::AnnotationKind::OrderBracket(
+                                        Box::new(bracket.clone()),
+                                    );
+                                    ann.presence = midas_chart::widget::Presence::Active;
+                                });
                             } else {
                                 // Stale or missing ID — clear and create fresh.
                                 if let Some(s) = self.tickers.get_mut(&sym) {
@@ -5347,9 +5322,9 @@ impl MidasApp {
                                 // Add new annotation.
                                 let new_id = self.annotation_store.add(
                                     sym.as_str(),
-                                    midas_chart::widget::AnnotationKind::OrderBracket(
-                                        Box::new(bracket.clone()),
-                                    ),
+                                    midas_chart::widget::AnnotationKind::OrderBracket(Box::new(
+                                        bracket.clone(),
+                                    )),
                                 );
                                 if let Some(s) = self.tickers.get_mut(&sym) {
                                     s.set_live_annotation_id(Some(new_id));
@@ -5409,33 +5384,28 @@ impl MidasApp {
                                     }
                                 };
                                 let quantity = bracket.quantity.unwrap_or(0.0);
-                                let (entry_kind, entry_price, entry_stop_price) =
-                                    match bracket.entry_type {
-                                        midas_chart::widget::order_bracket::EntryType::Market => {
-                                            (midas_core::broker::EntryKind::Market, None, None)
-                                        }
-                                        midas_chart::widget::order_bracket::EntryType::Limit => {
-                                            (
-                                                midas_core::broker::EntryKind::Limit,
-                                                Some(bracket.entry.line.price),
-                                                None,
-                                            )
-                                        }
-                                        midas_chart::widget::order_bracket::EntryType::Stop => {
-                                            (
-                                                midas_core::broker::EntryKind::Stop,
-                                                None,
-                                                Some(bracket.entry.line.price),
-                                            )
-                                        }
-                                        midas_chart::widget::order_bracket::EntryType::StopLimit => {
-                                            (
-                                                midas_core::broker::EntryKind::StopLimit,
-                                                Some(bracket.entry.line.price),
-                                                bracket.entry_stop_price,
-                                            )
-                                        }
-                                    };
+                                let (entry_kind, entry_price, entry_stop_price) = match bracket
+                                    .entry_type
+                                {
+                                    midas_chart::widget::order_bracket::EntryType::Market => {
+                                        (midas_core::broker::EntryKind::Market, None, None)
+                                    }
+                                    midas_chart::widget::order_bracket::EntryType::Limit => (
+                                        midas_core::broker::EntryKind::Limit,
+                                        Some(bracket.entry.line.price),
+                                        None,
+                                    ),
+                                    midas_chart::widget::order_bracket::EntryType::Stop => (
+                                        midas_core::broker::EntryKind::Stop,
+                                        None,
+                                        Some(bracket.entry.line.price),
+                                    ),
+                                    midas_chart::widget::order_bracket::EntryType::StopLimit => (
+                                        midas_core::broker::EntryKind::StopLimit,
+                                        Some(bracket.entry.line.price),
+                                        bracket.entry_stop_price,
+                                    ),
+                                };
                                 let broker_params = midas_core::broker::BracketParams {
                                     symbol: sym.as_str().to_owned(),
                                     con_id: None,

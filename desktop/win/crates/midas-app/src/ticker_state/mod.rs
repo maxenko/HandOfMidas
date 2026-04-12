@@ -196,7 +196,6 @@ pub struct TickerState {
     version: u32,
 
     // ── Order entry memory (from TickerOrderIntent) ──────────────
-
     /// Which side the user most recently used for this symbol.
     #[serde(default = "default_side")]
     last_side: OrderSide,
@@ -215,7 +214,6 @@ pub struct TickerState {
     pinned: bool,
 
     // ── Live bracket (projected to AnnotationStore via effects) ──
-
     /// The owned live bracket for this symbol. Projected to
     /// `AnnotationStore` via `TickerEffect::ProjectBracket`.
     #[serde(default)]
@@ -225,7 +223,6 @@ pub struct TickerState {
     live_annotation_id: Option<AnnotationId>,
 
     // ── Levels (from LevelStore) ─────────────────────────────────
-
     /// Price levels for this symbol. Not serialized because
     /// `StoredLevel` does not implement `Serialize`/`Deserialize`;
     /// levels are migrated from TOML config in Slice 4.
@@ -233,7 +230,6 @@ pub struct TickerState {
     levels: Vec<StoredLevel>,
 
     // ── Market data (ephemeral, not persisted) ───────────────────
-
     /// Last known price from the market data feed.
     #[serde(skip)]
     last_price: Option<f64>,
@@ -242,7 +238,6 @@ pub struct TickerState {
     gatr_abs: Option<f64>,
 
     // ── Editing focus lock ───────────────────────────────────────
-
     /// Which field the user is currently editing, if any.
     #[serde(skip)]
     editing_field: Option<EditingField>,
@@ -251,14 +246,12 @@ pub struct TickerState {
     editing_value: Option<String>,
 
     // ── Undo ─────────────────────────────────────────────────────
-
     /// Pre-snap state for GATR undo. Contains the bracket and state
     /// snapshot before the last snap, plus the instant it was taken.
     #[serde(skip)]
     pre_snap: Option<(Box<PreSnapState>, std::time::Instant)>,
 
     // ── Metadata ─────────────────────────────────────────────────
-
     /// When this state was last written.
     #[serde(default = "default_updated_at")]
     updated_at: DateTime<Utc>,

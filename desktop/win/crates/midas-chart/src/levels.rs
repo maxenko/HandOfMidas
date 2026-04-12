@@ -559,11 +559,7 @@ mod tests {
         // Without label, icon, or lock, group 1 is omitted.
         let level = make_level(2, 100.0);
         let groups = level.to_decorators(false);
-        assert_eq!(
-            groups.len(),
-            1,
-            "no label, icon, or lock: only group 0"
-        );
+        assert_eq!(groups.len(), 1, "no label, icon, or lock: only group 0");
     }
 
     #[test]

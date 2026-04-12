@@ -468,9 +468,14 @@ fn emit_bracket_leg_line(
     let mut color = line.stroke.color;
     color[3] *= alpha;
 
-    output
-        .lines
-        .extend(segmented_line(0.0, vp_width, y, width, color, &line.stroke.style));
+    output.lines.extend(segmented_line(
+        0.0,
+        vp_width,
+        y,
+        width,
+        color,
+        &line.stroke.style,
+    ));
 
     if draw_hit_zone {
         output.hit_zones.push(HitZone {

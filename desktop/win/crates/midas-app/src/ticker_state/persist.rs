@@ -300,11 +300,9 @@ impl TickerStatePersistHandle {
 
 /// Load all rows from the v2 table into the cache.
 fn hydrate_v2(db: &Database, cache: &StateCache) -> Result<(), PersistError> {
-    let txn = db
-        .begin_read()
-        .map_err(|e| PersistError::Read {
-            reason: e.to_string(),
-        })?;
+    let txn = db.begin_read().map_err(|e| PersistError::Read {
+        reason: e.to_string(),
+    })?;
 
     // The table might not exist yet (fresh database).
     let table = match txn.open_table(TABLE_V2) {
@@ -343,11 +341,9 @@ fn hydrate_v2(db: &Database, cache: &StateCache) -> Result<(), PersistError> {
 /// Only seeds rows that are NOT already in the cache (v2 takes
 /// priority for last-write-wins).
 fn migrate_v1_to_v2(db: &Database, cache: &StateCache) -> Result<(), PersistError> {
-    let txn = db
-        .begin_read()
-        .map_err(|e| PersistError::Read {
-            reason: e.to_string(),
-        })?;
+    let txn = db.begin_read().map_err(|e| PersistError::Read {
+        reason: e.to_string(),
+    })?;
 
     let table = match txn.open_table(TABLE_V1) {
         Ok(t) => t,
@@ -424,11 +420,9 @@ fn write_batch_to_v2(
     if batch.is_empty() {
         return Ok(());
     }
-    let mut txn = db
-        .begin_write()
-        .map_err(|e| PersistError::Write {
-            reason: e.to_string(),
-        })?;
+    let mut txn = db.begin_write().map_err(|e| PersistError::Write {
+        reason: e.to_string(),
+    })?;
     txn.set_durability(Durability::Immediate);
     {
         let mut table = txn.open_table(TABLE_V2).map_err(|e| PersistError::Write {

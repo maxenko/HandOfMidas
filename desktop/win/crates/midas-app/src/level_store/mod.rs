@@ -122,9 +122,7 @@ impl LevelStore {
     /// Used by the v1→v2 migration (Slice 4) to import TOML levels
     /// into `TickerState`.
     pub fn all_levels(&self) -> impl Iterator<Item = (&str, &[StoredLevel])> {
-        self.levels
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_slice()))
+        self.levels.iter().map(|(k, v)| (k.as_str(), v.as_slice()))
     }
 
     // ── Mutations ─────────────────────────────────────────────────

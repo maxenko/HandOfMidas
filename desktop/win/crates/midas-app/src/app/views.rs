@@ -96,26 +96,22 @@ impl MidasApp {
         // which also dismisses the toast.
         let body: Element<'_, Message> = match state.action {
             Some(ref action) => {
-                let action_btn = button(
-                    text(action.label.clone()).size(12).color(Color::WHITE),
-                )
-                .padding([3, 10])
-                .style(|_, status| button::Style {
-                    background: Some(iced::Background::Color(match status {
-                        button::Status::Hovered => {
-                            Color::from_rgba(0.35, 0.50, 0.72, 1.0)
-                        }
-                        _ => Color::from_rgba(0.25, 0.40, 0.62, 1.0),
-                    })),
-                    text_color: Color::WHITE,
-                    border: iced::Border {
-                        color: Color::from_rgba(0.55, 0.70, 0.90, 0.9),
-                        width: 1.0,
-                        radius: 3.0.into(),
-                    },
-                    ..Default::default()
-                })
-                .on_press(Message::ToastActionClicked);
+                let action_btn = button(text(action.label.clone()).size(12).color(Color::WHITE))
+                    .padding([3, 10])
+                    .style(|_, status| button::Style {
+                        background: Some(iced::Background::Color(match status {
+                            button::Status::Hovered => Color::from_rgba(0.35, 0.50, 0.72, 1.0),
+                            _ => Color::from_rgba(0.25, 0.40, 0.62, 1.0),
+                        })),
+                        text_color: Color::WHITE,
+                        border: iced::Border {
+                            color: Color::from_rgba(0.55, 0.70, 0.90, 0.9),
+                            width: 1.0,
+                            radius: 3.0.into(),
+                        },
+                        ..Default::default()
+                    })
+                    .on_press(Message::ToastActionClicked);
                 row![
                     msg_text,
                     Space::new().width(Length::Fixed(12.0)),

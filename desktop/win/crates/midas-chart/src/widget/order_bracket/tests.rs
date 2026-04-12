@@ -1283,7 +1283,10 @@ fn entry_decorator_group_limit_long_has_three_segments() {
         badge.segments[0].action,
         Some(DecoratorAction::CycleEntryType)
     );
-    assert_eq!(badge.segments[1].action, Some(DecoratorAction::EditQuantity));
+    assert_eq!(
+        badge.segments[1].action,
+        Some(DecoratorAction::EditQuantity)
+    );
     assert_eq!(badge.segments[2].action, Some(DecoratorAction::EditPrice));
 }
 
@@ -1655,7 +1658,10 @@ fn stoplimit_draft_renders_two_distinct_lines() {
     // they must land at different Y positions.
     let entry_y = camera.price_to_y(103.0);
     let stop_y = camera.price_to_y(102.0);
-    assert!((entry_y - stop_y).abs() > 1.0, "entry and stop y must differ");
+    assert!(
+        (entry_y - stop_y).abs() > 1.0,
+        "entry and stop y must differ"
+    );
 
     // A draft StopLimit must emit a draggable hit zone for the stop
     // trigger so the user can grab it independently.

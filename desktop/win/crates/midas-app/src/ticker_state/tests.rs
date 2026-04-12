@@ -188,12 +188,9 @@ fn factory_new_with_defaults_populates_all_compound_keys() {
             EntryType::Stop,
             EntryType::StopLimit,
         ] {
-            let mem = state
-                .entries()
-                .get(&(side, entry_type))
-                .unwrap_or_else(|| {
-                    panic!("missing entry for ({side:?}, {entry_type:?})");
-                });
+            let mem = state.entries().get(&(side, entry_type)).unwrap_or_else(|| {
+                panic!("missing entry for ({side:?}, {entry_type:?})");
+            });
             assert!(
                 mem.entry_price_or_offset.is_some(),
                 "entry price should be set for ({side:?}, {entry_type:?})"
@@ -291,7 +288,8 @@ fn test_level(id: u64, price: f64) -> crate::level_store::StoredLevel {
 /// Build a state with a stale anchor suitable for snap testing.
 /// The `updated_at` is set far in the past so the recency guard passes.
 fn state_with_stale_anchor(anchor_price: f64, gatr: f64) -> TickerState {
-    let mut state = TickerState::new_with_defaults(SymbolKey::new("SNAP"), anchor_price, Some(gatr));
+    let mut state =
+        TickerState::new_with_defaults(SymbolKey::new("SNAP"), anchor_price, Some(gatr));
     // Create a bracket so snap has something to reposition.
     state.apply(TickerMsg::EnsureDraftBracket {
         side: OrderSide::Buy,
@@ -320,7 +318,9 @@ fn gatr_snap_stale_anchor_drift_triggers_reposition() {
 
     // Should have ProjectBracket + Toast (with Undo action) + PersistDirty.
     assert!(
-        effects.iter().any(|e| matches!(e, TickerEffect::ProjectBracket(_))),
+        effects
+            .iter()
+            .any(|e| matches!(e, TickerEffect::ProjectBracket(_))),
         "snap should project the repositioned bracket"
     );
     assert!(
@@ -332,7 +332,9 @@ fn gatr_snap_stale_anchor_drift_triggers_reposition() {
         "snap should emit a toast with Undo action"
     );
     assert!(
-        effects.iter().any(|e| matches!(e, TickerEffect::PersistDirty)),
+        effects
+            .iter()
+            .any(|e| matches!(e, TickerEffect::PersistDirty)),
         "snap should persist"
     );
 
@@ -364,11 +366,15 @@ fn pin_toggle_flips_and_persists() {
 
     let effects = state.apply(TickerMsg::TogglePin);
     assert!(state.pinned());
-    assert!(effects.iter().any(|e| matches!(e, TickerEffect::PersistDirty)));
+    assert!(effects
+        .iter()
+        .any(|e| matches!(e, TickerEffect::PersistDirty)));
 
     let effects = state.apply(TickerMsg::TogglePin);
     assert!(!state.pinned());
-    assert!(effects.iter().any(|e| matches!(e, TickerEffect::PersistDirty)));
+    assert!(effects
+        .iter()
+        .any(|e| matches!(e, TickerEffect::PersistDirty)));
 }
 
 #[test]
@@ -390,7 +396,9 @@ fn undo_snap_within_ttl_restores_state() {
     // Undo within TTL.
     let effects = state.apply(TickerMsg::UndoSnap);
     assert!(
-        effects.iter().any(|e| matches!(e, TickerEffect::ProjectBracket(_))),
+        effects
+            .iter()
+            .any(|e| matches!(e, TickerEffect::ProjectBracket(_))),
         "undo should project the restored bracket"
     );
     let restored_entry = state.live_bracket().expect("bracket").entry.line.price;
@@ -429,29 +437,44 @@ fn submit_pending_filled_lifecycle() {
         entry_type: EntryType::Market,
     });
     state.apply(TickerMsg::SetQuantity(100.0));
-    assert_eq!(state.live_bracket().expect("b").status, BracketStatus::Draft);
+    assert_eq!(
+        state.live_bracket().expect("b").status,
+        BracketStatus::Draft
+    );
 
     // Submit.
     let effects = state.apply(TickerMsg::SubmitOrder);
-    assert_eq!(state.live_bracket().expect("b").status, BracketStatus::Pending);
+    assert_eq!(
+        state.live_bracket().expect("b").status,
+        BracketStatus::Pending
+    );
     assert!(
-        effects.iter().any(|e| matches!(e, TickerEffect::SubmitToBroker { .. })),
+        effects
+            .iter()
+            .any(|e| matches!(e, TickerEffect::SubmitToBroker { .. })),
         "submit should emit SubmitToBroker"
     );
-    assert!(effects.iter().any(|e| matches!(e, TickerEffect::ProjectBracket(_))));
+    assert!(effects
+        .iter()
+        .any(|e| matches!(e, TickerEffect::ProjectBracket(_))));
 
     // Pending acknowledgement.
     let effects = state.apply(TickerMsg::OrderPending {
         order_id: uuid::Uuid::now_v7(),
     });
-    assert!(effects.iter().any(|e| matches!(e, TickerEffect::ProjectBracket(_))));
+    assert!(effects
+        .iter()
+        .any(|e| matches!(e, TickerEffect::ProjectBracket(_))));
 
     // Filled.
     let effects = state.apply(TickerMsg::OrderFilled {
         filled_qty: 100.0,
         avg_price: 150.50,
     });
-    assert_eq!(state.live_bracket().expect("b").status, BracketStatus::Active);
+    assert_eq!(
+        state.live_bracket().expect("b").status,
+        BracketStatus::Active
+    );
     assert!(
         (state.live_bracket().expect("b").entry.line.price - 150.50).abs() < f64::EPSILON,
         "fill should update entry to avg_price"
@@ -476,12 +499,18 @@ fn order_rejected_reverts_to_draft() {
         entry_type: EntryType::Limit,
     });
     state.apply(TickerMsg::SubmitOrder);
-    assert_eq!(state.live_bracket().expect("b").status, BracketStatus::Pending);
+    assert_eq!(
+        state.live_bracket().expect("b").status,
+        BracketStatus::Pending
+    );
 
     let effects = state.apply(TickerMsg::OrderRejected {
         reason: "Insufficient margin".to_string(),
     });
-    assert_eq!(state.live_bracket().expect("b").status, BracketStatus::Draft);
+    assert_eq!(
+        state.live_bracket().expect("b").status,
+        BracketStatus::Draft
+    );
     assert!(effects.iter().any(|e| matches!(
         e,
         TickerEffect::Toast { ref message, .. } if message.contains("Insufficient margin")
@@ -500,9 +529,14 @@ fn order_partial_fill_updates_qty() {
     state.apply(TickerMsg::SubmitOrder);
 
     let effects = state.apply(TickerMsg::OrderPartialFill { filled_qty: 50.0 });
-    assert_eq!(state.live_bracket().expect("b").status, BracketStatus::PartialFill);
+    assert_eq!(
+        state.live_bracket().expect("b").status,
+        BracketStatus::PartialFill
+    );
     assert_eq!(state.live_bracket().expect("b").filled_qty, Some(50.0));
-    assert!(effects.iter().any(|e| matches!(e, TickerEffect::ProjectBracket(_))));
+    assert!(effects
+        .iter()
+        .any(|e| matches!(e, TickerEffect::ProjectBracket(_))));
 }
 
 #[test]
@@ -515,10 +549,16 @@ fn order_cancelled_reverts_to_draft() {
         entry_type: EntryType::Market,
     });
     state.apply(TickerMsg::SubmitOrder);
-    assert_eq!(state.live_bracket().expect("b").status, BracketStatus::Pending);
+    assert_eq!(
+        state.live_bracket().expect("b").status,
+        BracketStatus::Pending
+    );
 
     let effects = state.apply(TickerMsg::OrderCancelled);
-    assert_eq!(state.live_bracket().expect("b").status, BracketStatus::Draft);
+    assert_eq!(
+        state.live_bracket().expect("b").status,
+        BracketStatus::Draft
+    );
     assert!(effects.iter().any(|e| matches!(
         e,
         TickerEffect::Toast { ref message, .. } if message.contains("cancelled")
@@ -536,8 +576,12 @@ fn add_level_pushes_and_projects() {
     let effects = state.apply(TickerMsg::AddLevel(level.clone()));
     assert_eq!(state.levels().len(), 1);
     assert!((state.levels()[0].line.price - 150.0).abs() < f64::EPSILON);
-    assert!(effects.iter().any(|e| matches!(e, TickerEffect::ProjectLevel { index: 0, .. })));
-    assert!(effects.iter().any(|e| matches!(e, TickerEffect::PersistDirty)));
+    assert!(effects
+        .iter()
+        .any(|e| matches!(e, TickerEffect::ProjectLevel { index: 0, .. })));
+    assert!(effects
+        .iter()
+        .any(|e| matches!(e, TickerEffect::PersistDirty)));
 }
 
 #[test]
@@ -550,7 +594,9 @@ fn remove_level_shrinks_vec() {
     let effects = state.apply(TickerMsg::RemoveLevel(0));
     assert_eq!(state.levels().len(), 1);
     assert!((state.levels()[0].line.price - 200.0).abs() < f64::EPSILON);
-    assert!(effects.iter().any(|e| matches!(e, TickerEffect::PersistDirty)));
+    assert!(effects
+        .iter()
+        .any(|e| matches!(e, TickerEffect::PersistDirty)));
 }
 
 #[test]
@@ -571,8 +617,12 @@ fn update_level_replaces_at_index() {
         level: new_level,
     });
     assert!((state.levels()[0].line.price - 200.0).abs() < f64::EPSILON);
-    assert!(effects.iter().any(|e| matches!(e, TickerEffect::ProjectLevel { index: 0, .. })));
-    assert!(effects.iter().any(|e| matches!(e, TickerEffect::PersistDirty)));
+    assert!(effects
+        .iter()
+        .any(|e| matches!(e, TickerEffect::ProjectLevel { index: 0, .. })));
+    assert!(effects
+        .iter()
+        .any(|e| matches!(e, TickerEffect::PersistDirty)));
 }
 
 #[test]
@@ -583,7 +633,9 @@ fn toggle_level_lock_flips() {
 
     let effects = state.apply(TickerMsg::ToggleLevelLock(0));
     assert!(state.levels()[0].locked);
-    assert!(effects.iter().any(|e| matches!(e, TickerEffect::PersistDirty)));
+    assert!(effects
+        .iter()
+        .any(|e| matches!(e, TickerEffect::PersistDirty)));
 
     state.apply(TickerMsg::ToggleLevelLock(0));
     assert!(!state.levels()[0].locked);
@@ -605,7 +657,9 @@ fn update_market_data_triggers_auto_snap_when_stale() {
     assert_eq!(state.last_price(), Some(103.0));
     assert_eq!(state.gatr_abs(), Some(2.0));
     assert!(
-        effects.iter().any(|e| matches!(e, TickerEffect::ProjectBracket(_))),
+        effects
+            .iter()
+            .any(|e| matches!(e, TickerEffect::ProjectBracket(_))),
         "market data update should trigger auto-snap"
     );
 
@@ -630,7 +684,9 @@ fn update_market_data_skips_snap_while_editing() {
     assert_eq!(state.last_price(), Some(105.0));
     // But no snap effects should fire.
     assert!(
-        !effects.iter().any(|e| matches!(e, TickerEffect::ProjectBracket(_))),
+        !effects
+            .iter()
+            .any(|e| matches!(e, TickerEffect::ProjectBracket(_))),
         "editing lock should suppress auto-snap"
     );
 }
@@ -645,8 +701,12 @@ fn apply_ensure_draft_bracket_creates_live_bracket() {
         entry_type: EntryType::Market,
     });
     assert!(state.live_bracket().is_some());
-    assert!(effects.iter().any(|e| matches!(e, TickerEffect::ProjectBracket(_))));
-    assert!(effects.iter().any(|e| matches!(e, TickerEffect::PersistDirty)));
+    assert!(effects
+        .iter()
+        .any(|e| matches!(e, TickerEffect::ProjectBracket(_))));
+    assert!(effects
+        .iter()
+        .any(|e| matches!(e, TickerEffect::PersistDirty)));
 }
 
 #[test]
@@ -664,7 +724,9 @@ fn apply_cancel_bracket_saved_hides() {
 
     let effects = state.apply(TickerMsg::CancelBracket);
     assert!(state.live_bracket().is_none());
-    assert!(effects.iter().any(|e| matches!(e, TickerEffect::RemoveBracket(_))));
+    assert!(effects
+        .iter()
+        .any(|e| matches!(e, TickerEffect::RemoveBracket(_))));
 }
 
 #[test]
@@ -679,7 +741,9 @@ fn apply_cancel_bracket_unsaved_deletes() {
 
     let effects = state.apply(TickerMsg::CancelBracket);
     assert!(state.live_bracket().is_none());
-    assert!(effects.iter().any(|e| matches!(e, TickerEffect::RemoveBracket(_))));
+    assert!(effects
+        .iter()
+        .any(|e| matches!(e, TickerEffect::RemoveBracket(_))));
 }
 
 #[test]
@@ -694,7 +758,9 @@ fn apply_set_leg_price_updates_entry() {
         price: 145.0,
     });
     assert!((state.live_bracket().unwrap().entry.line.price - 145.0).abs() < f64::EPSILON);
-    assert!(effects.iter().any(|e| matches!(e, TickerEffect::ProjectBracket(_))));
+    assert!(effects
+        .iter()
+        .any(|e| matches!(e, TickerEffect::ProjectBracket(_))));
 }
 
 #[test]
@@ -711,7 +777,9 @@ fn apply_set_tp_enabled_creates_default_tp() {
     // Enable TP.
     let effects = state.apply(TickerMsg::SetTpEnabled(true));
     assert!(state.live_bracket().unwrap().take_profit.is_some());
-    assert!(effects.iter().any(|e| matches!(e, TickerEffect::ProjectBracket(_))));
+    assert!(effects
+        .iter()
+        .any(|e| matches!(e, TickerEffect::ProjectBracket(_))));
 }
 
 #[test]
@@ -728,7 +796,9 @@ fn apply_drag_leg_updates_price_and_pnl() {
         new_price: 105.0,
     });
     assert!((state.live_bracket().unwrap().entry.line.price - 105.0).abs() < f64::EPSILON);
-    assert!(effects.iter().any(|e| matches!(e, TickerEffect::ProjectBracket(_))));
+    assert!(effects
+        .iter()
+        .any(|e| matches!(e, TickerEffect::ProjectBracket(_))));
 }
 
 #[test]
@@ -793,17 +863,21 @@ fn apply_set_entry_type_adjusts_prices() {
 fn apply_no_panic_when_no_live_bracket() {
     let mut state = TickerState::new(SymbolKey::new("EMPTY"));
     // All field mutations on empty state should return empty effects, not panic.
-    assert!(state.apply(TickerMsg::SetLegPrice {
-        role: midas_chart::widget::order_bracket::LegRole::Entry,
-        price: 100.0,
-    }).is_empty());
+    assert!(state
+        .apply(TickerMsg::SetLegPrice {
+            role: midas_chart::widget::order_bracket::LegRole::Entry,
+            price: 100.0,
+        })
+        .is_empty());
     assert!(state.apply(TickerMsg::SetTpEnabled(true)).is_empty());
     assert!(state.apply(TickerMsg::SetSlEnabled(true)).is_empty());
     assert!(state.apply(TickerMsg::SetQuantity(50.0)).is_empty());
-    assert!(state.apply(TickerMsg::DragLeg {
-        role: midas_chart::widget::order_bracket::LegRole::Entry,
-        new_price: 100.0,
-    }).is_empty());
+    assert!(state
+        .apply(TickerMsg::DragLeg {
+            role: midas_chart::widget::order_bracket::LegRole::Entry,
+            new_price: 100.0,
+        })
+        .is_empty());
     assert!(state.apply(TickerMsg::CancelBracket).is_empty());
     assert!(state.apply(TickerMsg::SaveBracket).is_empty());
 }
@@ -877,9 +951,14 @@ fn bind_creates_ticker_state_and_bracket() {
         entry_type: EntryType::Market,
     });
 
-    assert!(ts.live_bracket().is_some(), "bracket should exist after bind");
     assert!(
-        effects.iter().any(|e| matches!(e, TickerEffect::ProjectBracket(_))),
+        ts.live_bracket().is_some(),
+        "bracket should exist after bind"
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, TickerEffect::ProjectBracket(_))),
         "should project bracket on creation"
     );
 }
@@ -1009,7 +1088,11 @@ fn symbol_link_propagation_targets_matching_panels() {
     );
     assert_eq!(
         targets,
-        vec![OrderPanelId::new(1), OrderPanelId::new(3), OrderPanelId::new(5)],
+        vec![
+            OrderPanelId::new(1),
+            OrderPanelId::new(3),
+            OrderPanelId::new(5)
+        ],
     );
 }
 

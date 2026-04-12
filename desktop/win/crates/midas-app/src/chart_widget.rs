@@ -1534,9 +1534,7 @@ fn action_to_message(
                 DecoratorAction::Submit => {
                     Some(Message::ChartBracketSubmit(chart_id, *annotation_id))
                 }
-                DecoratorAction::Save => {
-                    Some(Message::ChartBracketSave(chart_id, *annotation_id))
-                }
+                DecoratorAction::Save => Some(Message::ChartBracketSave(chart_id, *annotation_id)),
                 // TODO: wire remaining decorator actions (TP quick-create,
                 // inline editors, toggle-locked, custom) once their
                 // app-layer handlers land.

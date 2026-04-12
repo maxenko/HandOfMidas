@@ -2366,14 +2366,7 @@ fn hit_test_picks_entry_when_entry_and_sl_overlap_in_price() {
 fn hit_test_picks_entry_when_all_four_legs_collapse() {
     use crate::widget::order_bracket::EntryType;
     let state = test_state();
-    let bracket = overlap_draft_bracket(
-        10,
-        150.0,
-        150.0,
-        150.0,
-        EntryType::StopLimit,
-        Some(150.0),
-    );
+    let bracket = overlap_draft_bracket(10, 150.0, 150.0, 150.0, EntryType::StopLimit, Some(150.0));
     let y = state.camera.price_to_y(150.0);
     let result = hit_test_annotation(&[bracket], y, &state.camera);
     let (_, kind, _, _) = result.expect("should hit one leg");
@@ -2386,14 +2379,7 @@ fn hit_test_picks_stop_trigger_over_take_profit_when_they_overlap() {
     use crate::widget::order_bracket::EntryType;
     let state = test_state();
     // Entry far away at 130, stop trigger == TP == 170, SL at 120.
-    let bracket = overlap_draft_bracket(
-        10,
-        130.0,
-        170.0,
-        120.0,
-        EntryType::StopLimit,
-        Some(170.0),
-    );
+    let bracket = overlap_draft_bracket(10, 130.0, 170.0, 120.0, EntryType::StopLimit, Some(170.0));
     let y = state.camera.price_to_y(170.0);
     let result = hit_test_annotation(&[bracket], y, &state.camera);
     let (_, kind, _, _) = result.expect("should hit one leg");

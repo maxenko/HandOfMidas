@@ -44,7 +44,6 @@ const SNAP_UNDO_TTL: Duration = Duration::from_secs(30);
 #[derive(Debug, Clone)]
 pub enum TickerMsg {
     // ── Bracket lifecycle ────────────────────────────────────────
-
     /// Ensure a draft bracket exists for the given side and entry type.
     /// Creates one if none exists; recalls the saved one if it does.
     EnsureDraftBracket {
@@ -63,7 +62,6 @@ pub enum TickerMsg {
     RecallBracket,
 
     // ── Bracket field mutations ──────────────────────────────────
-
     /// Set the price of a specific bracket leg.
     SetLegPrice {
         /// Which leg to modify.
@@ -90,7 +88,6 @@ pub enum TickerMsg {
     },
 
     // ── Text editing focus lock ─────────────────────────────────
-
     /// Focus entered a text field. Sets the editing lock and clears
     /// the in-progress value.
     BeginEdit(EditingField),
@@ -108,7 +105,6 @@ pub enum TickerMsg {
     CancelEdit,
 
     // ── GATR ─────────────────────────────────────────────────────
-
     /// Evaluate the GATR snap rule for the current price.
     MaybeSnap {
         /// Current market price.
@@ -122,7 +118,6 @@ pub enum TickerMsg {
     UndoSnap,
 
     // ── Market data ──────────────────────────────────────────────
-
     /// Update cached market data for this symbol.
     UpdateMarketData {
         /// Latest price.
@@ -132,7 +127,6 @@ pub enum TickerMsg {
     },
 
     // ── Levels ───────────────────────────────────────────────────
-
     /// Add a new price level.
     AddLevel(StoredLevel),
     /// Remove a price level by index.
@@ -148,7 +142,6 @@ pub enum TickerMsg {
     ToggleLevelLock(usize),
 
     // ── Broker events ────────────────────────────────────────────
-
     /// Submit the live bracket to the broker.
     SubmitOrder,
     /// Broker acknowledged the order submission.
@@ -178,7 +171,6 @@ pub enum TickerMsg {
     OrderCancelled,
 
     // ── Persistence ──────────────────────────────────────────────
-
     /// A persisted state was loaded from disk. Replaces the current
     /// in-memory state wholesale.
     Hydrated(Box<TickerState>),
@@ -265,7 +257,6 @@ impl TickerState {
     pub fn apply(&mut self, msg: TickerMsg) -> Vec<TickerEffect> {
         match msg {
             // ── Bracket lifecycle ────────────────────────────────
-
             TickerMsg::EnsureDraftBracket { side, entry_type } => {
                 self.last_side = side;
                 self.last_entry_type = entry_type;
@@ -293,9 +284,8 @@ impl TickerState {
                         // Reset ALL fields to a clean Draft state — the old
                         // bracket might have been Pending/Active/saved from a
                         // prior session and those flags make it non-interactive.
-                        let prices = default_initial_prices(
-                            side, entry_type, current_price, self.gatr_abs,
-                        );
+                        let prices =
+                            default_initial_prices(side, entry_type, current_price, self.gatr_abs);
                         b.entry = make_leg(prices.entry, LegRole::Entry);
                         b.take_profit = Some(make_leg(prices.take_profit, LegRole::TakeProfit));
                         b.stop_loss = Some(make_leg(prices.stop_loss, LegRole::StopLoss));
@@ -435,7 +425,6 @@ impl TickerState {
             }
 
             // ── Bracket field mutations ──────────────────────────
-
             TickerMsg::SetLegPrice { role, price } => {
                 if let Some(ref mut b) = self.live_bracket {
                     self.generation += 1;
@@ -593,17 +582,12 @@ impl TickerState {
                             if let Some(ref mut tp) = b.take_profit {
                                 tp.line.price = new_price;
                                 if b.status == BracketStatus::Active {
-                                    tp.projected_pnl =
-                                        Some(sign * (new_price - entry_price) * qty);
-                                    tp.projected_pnl_pct =
-                                        if entry_price.abs() > f64::EPSILON {
-                                            Some(
-                                                sign * (new_price - entry_price) / entry_price
-                                                    * 100.0,
-                                            )
-                                        } else {
-                                            None
-                                        };
+                                    tp.projected_pnl = Some(sign * (new_price - entry_price) * qty);
+                                    tp.projected_pnl_pct = if entry_price.abs() > f64::EPSILON {
+                                        Some(sign * (new_price - entry_price) / entry_price * 100.0)
+                                    } else {
+                                        None
+                                    };
                                 }
                             }
                         }
@@ -611,17 +595,12 @@ impl TickerState {
                             if let Some(ref mut sl) = b.stop_loss {
                                 sl.line.price = new_price;
                                 if b.status == BracketStatus::Active {
-                                    sl.projected_pnl =
-                                        Some(sign * (new_price - entry_price) * qty);
-                                    sl.projected_pnl_pct =
-                                        if entry_price.abs() > f64::EPSILON {
-                                            Some(
-                                                sign * (new_price - entry_price) / entry_price
-                                                    * 100.0,
-                                            )
-                                        } else {
-                                            None
-                                        };
+                                    sl.projected_pnl = Some(sign * (new_price - entry_price) * qty);
+                                    sl.projected_pnl_pct = if entry_price.abs() > f64::EPSILON {
+                                        Some(sign * (new_price - entry_price) / entry_price * 100.0)
+                                    } else {
+                                        None
+                                    };
                                 }
                             }
                         }
@@ -636,7 +615,6 @@ impl TickerState {
             }
 
             // ── Text editing focus lock ──────────────────────────
-
             TickerMsg::BeginEdit(field) => {
                 self.generation += 1;
                 // Auto-commit the current field if switching to a different one.
@@ -675,7 +653,6 @@ impl TickerState {
             }
 
             // ── GATR ─────────────────────────────────────────────
-
             TickerMsg::MaybeSnap {
                 current_price,
                 gatr_abs,
@@ -699,7 +676,8 @@ impl TickerState {
                             self.pre_snap = None;
                             return vec![
                                 TickerEffect::ProjectBracket(
-                                    self.live_bracket.as_ref()
+                                    self.live_bracket
+                                        .as_ref()
                                         .expect("just set live_bracket")
                                         .clone(),
                                 ),
@@ -731,7 +709,6 @@ impl TickerState {
             }
 
             // ── Levels ───────────────────────────────────────────
-
             TickerMsg::AddLevel(level) => {
                 self.generation += 1;
                 self.levels.push(level.clone());
@@ -776,7 +753,6 @@ impl TickerState {
             }
 
             // ── Broker events ────────────────────────────────────
-
             TickerMsg::SubmitOrder => {
                 if let Some(ref mut b) = self.live_bracket {
                     self.generation += 1;
@@ -825,32 +801,20 @@ impl TickerState {
                     };
                     let qty = b.quantity.unwrap_or(filled_qty);
                     if let Some(ref mut tp) = b.take_profit {
-                        tp.projected_pnl =
-                            Some(sign * (tp.line.price - avg_price) * qty);
-                        tp.projected_pnl_pct =
-                            if avg_price.abs() > f64::EPSILON {
-                                Some(
-                                    sign * (tp.line.price - avg_price)
-                                        / avg_price
-                                        * 100.0,
-                                )
-                            } else {
-                                None
-                            };
+                        tp.projected_pnl = Some(sign * (tp.line.price - avg_price) * qty);
+                        tp.projected_pnl_pct = if avg_price.abs() > f64::EPSILON {
+                            Some(sign * (tp.line.price - avg_price) / avg_price * 100.0)
+                        } else {
+                            None
+                        };
                     }
                     if let Some(ref mut sl) = b.stop_loss {
-                        sl.projected_pnl =
-                            Some(sign * (sl.line.price - avg_price) * qty);
-                        sl.projected_pnl_pct =
-                            if avg_price.abs() > f64::EPSILON {
-                                Some(
-                                    sign * (sl.line.price - avg_price)
-                                        / avg_price
-                                        * 100.0,
-                                )
-                            } else {
-                                None
-                            };
+                        sl.projected_pnl = Some(sign * (sl.line.price - avg_price) * qty);
+                        sl.projected_pnl_pct = if avg_price.abs() > f64::EPSILON {
+                            Some(sign * (sl.line.price - avg_price) / avg_price * 100.0)
+                        } else {
+                            None
+                        };
                     }
 
                     vec![
@@ -906,10 +870,7 @@ impl TickerState {
                     vec![
                         TickerEffect::ProjectBracket(b.clone()),
                         TickerEffect::Toast {
-                            message: format!(
-                                "{} bracket cancelled",
-                                self.symbol.as_str()
-                            ),
+                            message: format!("{} bracket cancelled", self.symbol.as_str()),
                             action: None,
                         },
                         TickerEffect::PersistDirty,
@@ -929,11 +890,7 @@ impl TickerState {
     ///
     /// Reuses the guard logic from the old `gatr_snap` module
     /// and the repositioning helpers from [`crate::order_panel`].
-    fn apply_maybe_snap(
-        &mut self,
-        current_price: f64,
-        gatr_abs: Option<f64>,
-    ) -> Vec<TickerEffect> {
+    fn apply_maybe_snap(&mut self, current_price: f64, gatr_abs: Option<f64>) -> Vec<TickerEffect> {
         // Guard 1: pin.
         if self.pinned {
             return vec![];

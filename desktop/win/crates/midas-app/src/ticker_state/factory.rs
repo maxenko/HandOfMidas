@@ -68,11 +68,7 @@ impl TickerState {
     /// `(OrderSide, EntryType)` bucket with prices derived from
     /// `current_price` and `gatr_abs`.
     #[allow(dead_code)] // used by tests and future slices
-    pub fn new_with_defaults(
-        symbol: SymbolKey,
-        current_price: f64,
-        gatr_abs: Option<f64>,
-    ) -> Self {
+    pub fn new_with_defaults(symbol: SymbolKey, current_price: f64, gatr_abs: Option<f64>) -> Self {
         let mut entries = HashMap::new();
 
         for (side, entry_type) in ALL_COMPOUND_KEYS {

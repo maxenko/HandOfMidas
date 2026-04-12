@@ -58,14 +58,12 @@ pub fn default_initial_prices(
         (OrderSide::Sell, EntryType::Limit) => (current_price + step, None),
         (OrderSide::Buy, EntryType::Stop) => (current_price + step, None),
         (OrderSide::Sell, EntryType::Stop) => (current_price - step, None),
-        (OrderSide::Buy, EntryType::StopLimit) => (
-            current_price + 1.5 * step,
-            Some(current_price + step),
-        ),
-        (OrderSide::Sell, EntryType::StopLimit) => (
-            current_price - 1.5 * step,
-            Some(current_price - step),
-        ),
+        (OrderSide::Buy, EntryType::StopLimit) => {
+            (current_price + 1.5 * step, Some(current_price + step))
+        }
+        (OrderSide::Sell, EntryType::StopLimit) => {
+            (current_price - 1.5 * step, Some(current_price - step))
+        }
     };
 
     // TP / SL derived from the chosen entry so the 1:2 R:R shape holds.
