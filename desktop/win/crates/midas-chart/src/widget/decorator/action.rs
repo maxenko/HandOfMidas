@@ -35,6 +35,12 @@ pub enum DecoratorAction {
     Submit,
     /// Persist a draft bracket or level.
     Save,
+    /// Toggle the `pinned` state on the parent symbol's
+    /// `TickerOrderIntent`. Wired in Slice 4 to drive the
+    /// `PinToggle` bracket decorator. A pinned intent is exempt from
+    /// the GATR snap rule — see `plan/ticker-order-state/README.md`
+    /// section D4.
+    TogglePin,
     /// App-defined action keyed by an opaque `u32`.
     Custom(u32),
 }

@@ -41,6 +41,7 @@ use crate::ticker_order_intent::{
 
 use super::{
     apply_cancel_live_bracket, apply_remove_live_bracket, apply_update_from_surface,
+    UpdateSurfaceOutcome,
 };
 
 // ── Mock `TickerIntentAccess` ───────────────────────────────────────
@@ -244,6 +245,8 @@ fn drag_update_lands_in_annotation_and_panel() {
         SymbolKey::new("AAPL"),
         snapshot,
         IntentSource::Chart,
+        None,
+        None,
     );
 
     // Annotation moved.
@@ -305,6 +308,8 @@ fn panel_update_updates_annotation_and_returns_noop_task() {
         SymbolKey::new("AAPL"),
         snapshot,
         IntentSource::Panel,
+        None,
+        None,
     );
 
     // Annotation moved.
@@ -522,6 +527,8 @@ fn mid_drag_ticker_switch_drops_message() {
         SymbolKey::new("AAPL"),
         snapshot,
         IntentSource::Chart,
+        None,
+        None,
     );
 
     // Dropped: annotation still at 100.
@@ -569,6 +576,8 @@ fn noop_suppression_on_identical_second_update() {
         SymbolKey::new("AAPL"),
         snapshot,
         IntentSource::Panel,
+        None,
+        None,
     );
 
     assert_eq!(handle.upsert_count(), 0);
@@ -612,6 +621,8 @@ fn panel_edit_without_live_bracket_does_not_create_phantom() {
         SymbolKey::new("AAPL"),
         snapshot,
         IntentSource::Panel,
+        None,
+        None,
     );
 
     // No annotations exist for AAPL — nothing was created.
@@ -670,6 +681,8 @@ fn compound_key_write_isolation() {
         SymbolKey::new("AAPL"),
         snapshot,
         IntentSource::Panel,
+        None,
+        None,
     );
 
     let intent = handle.snapshot(&SymbolKey::new("AAPL")).unwrap();
@@ -726,6 +739,8 @@ fn sl_off_persists_per_compound() {
             None,
         ),
         IntentSource::Panel,
+        None,
+        None,
     );
 
     // Turn SL off in (Sell, Stop).
@@ -746,6 +761,8 @@ fn sl_off_persists_per_compound() {
             None,
         ),
         IntentSource::Panel,
+        None,
+        None,
     );
 
     let intent = handle.snapshot(&SymbolKey::new("AAPL")).unwrap();
@@ -768,4 +785,263 @@ fn sl_off_persists_per_compound() {
     assert!(!intent
         .entries
         .contains_key(&(OrderSide::Sell, EntryType::Limit)));
+}
+
+// ── Slice 4: anchor lifecycle + discoverability-toast tests ──────────
+
+/// The anchor-seeding rule — `Upsert { source: Bootstrap }` leaves
+/// `anchor_price == None`, and the very first subsequent
+/// `Upsert { source: Panel }` (with a valid `current_price`) sets it.
+#[test]
+fn anchor_lifecycle_bootstrap_then_panel_seeds_anchor() {
+    let mut store = AnnotationStore::new();
+    let ann_id = store.add(
+        "AAPL",
+        AnnotationKind::OrderBracket(Box::new(make_bracket(100.0, Some(102.0), Some(98.0)))),
+    );
+    let handle = MockHandle::new();
+    // Seed as if a Bootstrap pass ran: entries populated, but
+    // gatr_anchor is the default None/None pair.
+    handle.seed(
+        SymbolKey::new("AAPL"),
+        make_intent(
+            "AAPL",
+            OrderSide::Buy,
+            EntryType::Limit,
+            vec![(
+                (OrderSide::Buy, EntryType::Limit),
+                make_memory(100.0, Some(102.0), Some(98.0), true),
+            )],
+            Some(ann_id),
+        ),
+    );
+    assert!(handle
+        .snapshot(&SymbolKey::new("AAPL"))
+        .unwrap()
+        .gatr_anchor
+        .anchor_price
+        .is_none());
+
+    let mut panels = panels_map(vec![make_panel(1, "AAPL", Some(ann_id))]);
+    let snapshot = make_intent(
+        "AAPL",
+        OrderSide::Buy,
+        EntryType::Limit,
+        vec![(
+            (OrderSide::Buy, EntryType::Limit),
+            make_memory(101.0, Some(103.0), Some(99.0), true),
+        )],
+        Some(ann_id),
+    );
+    let outcome = apply_update_from_surface(
+        &mut store,
+        &handle,
+        &mut panels,
+        None,
+        SymbolKey::new("AAPL"),
+        snapshot,
+        IntentSource::Panel,
+        Some(150.0),
+        Some(2.5),
+    );
+    assert_eq!(outcome, UpdateSurfaceOutcome::AppliedAnchorSeeded);
+    let intent = handle.snapshot(&SymbolKey::new("AAPL")).unwrap();
+    assert_eq!(intent.gatr_anchor.anchor_price, Some(150.0));
+    assert_eq!(intent.gatr_anchor.anchor_gatr, Some(2.5));
+}
+
+/// After an anchor is seeded, a subsequent `Panel`-sourced upsert
+/// bumps `updated_at` but does **not** overwrite the anchor. The
+/// outcome should be `Applied`, not `AppliedAnchorSeeded`.
+#[test]
+fn anchor_lifecycle_second_panel_upsert_keeps_anchor() {
+    let mut store = AnnotationStore::new();
+    let ann_id = store.add(
+        "AAPL",
+        AnnotationKind::OrderBracket(Box::new(make_bracket(100.0, Some(102.0), Some(98.0)))),
+    );
+    let handle = MockHandle::new();
+    let mut initial = make_intent(
+        "AAPL",
+        OrderSide::Buy,
+        EntryType::Limit,
+        vec![(
+            (OrderSide::Buy, EntryType::Limit),
+            make_memory(100.0, Some(102.0), Some(98.0), true),
+        )],
+        Some(ann_id),
+    );
+    initial.gatr_anchor = GatrAnchor {
+        anchor_price: Some(150.0),
+        anchor_gatr: Some(2.5),
+    };
+    handle.seed(SymbolKey::new("AAPL"), initial);
+
+    let mut panels = panels_map(vec![make_panel(1, "AAPL", Some(ann_id))]);
+    let snapshot = make_intent(
+        "AAPL",
+        OrderSide::Buy,
+        EntryType::Limit,
+        vec![(
+            (OrderSide::Buy, EntryType::Limit),
+            make_memory(105.0, Some(107.0), Some(103.0), true),
+        )],
+        Some(ann_id),
+    );
+    let outcome = apply_update_from_surface(
+        &mut store,
+        &handle,
+        &mut panels,
+        None,
+        SymbolKey::new("AAPL"),
+        snapshot,
+        IntentSource::Panel,
+        Some(200.0),
+        Some(3.0),
+    );
+    assert_eq!(outcome, UpdateSurfaceOutcome::Applied);
+    let intent = handle.snapshot(&SymbolKey::new("AAPL")).unwrap();
+    // Anchor unchanged.
+    assert_eq!(intent.gatr_anchor.anchor_price, Some(150.0));
+    assert_eq!(intent.gatr_anchor.anchor_gatr, Some(2.5));
+}
+
+/// A `Bootstrap`-sourced upsert never seeds the anchor, even when a
+/// valid `current_price` is available.
+#[test]
+fn anchor_lifecycle_bootstrap_source_never_seeds() {
+    let mut store = AnnotationStore::new();
+    let ann_id = store.add(
+        "AAPL",
+        AnnotationKind::OrderBracket(Box::new(make_bracket(100.0, Some(102.0), Some(98.0)))),
+    );
+    let handle = MockHandle::new();
+    let mut panels = panels_map(vec![make_panel(1, "AAPL", Some(ann_id))]);
+    let snapshot = make_intent(
+        "AAPL",
+        OrderSide::Buy,
+        EntryType::Limit,
+        vec![(
+            (OrderSide::Buy, EntryType::Limit),
+            make_memory(100.0, Some(102.0), Some(98.0), true),
+        )],
+        Some(ann_id),
+    );
+    let outcome = apply_update_from_surface(
+        &mut store,
+        &handle,
+        &mut panels,
+        None,
+        SymbolKey::new("AAPL"),
+        snapshot,
+        IntentSource::Bootstrap,
+        Some(150.0),
+        Some(2.5),
+    );
+    // The upsert landed, but the anchor is still None.
+    assert_eq!(outcome, UpdateSurfaceOutcome::Applied);
+    let intent = handle.snapshot(&SymbolKey::new("AAPL")).unwrap();
+    assert!(intent.gatr_anchor.anchor_price.is_none());
+    assert!(intent.gatr_anchor.anchor_gatr.is_none());
+}
+
+/// A `Chart`-sourced upsert also seeds the anchor (same rule as Panel).
+#[test]
+fn anchor_lifecycle_chart_source_seeds_anchor() {
+    let mut store = AnnotationStore::new();
+    let ann_id = store.add(
+        "AAPL",
+        AnnotationKind::OrderBracket(Box::new(make_bracket(100.0, Some(102.0), Some(98.0)))),
+    );
+    let handle = MockHandle::new();
+    handle.seed(
+        SymbolKey::new("AAPL"),
+        make_intent(
+            "AAPL",
+            OrderSide::Buy,
+            EntryType::Limit,
+            vec![(
+                (OrderSide::Buy, EntryType::Limit),
+                make_memory(100.0, Some(102.0), Some(98.0), true),
+            )],
+            Some(ann_id),
+        ),
+    );
+    let mut panels = panels_map(vec![make_panel(1, "AAPL", Some(ann_id))]);
+    let snapshot = make_intent(
+        "AAPL",
+        OrderSide::Buy,
+        EntryType::Limit,
+        vec![(
+            (OrderSide::Buy, EntryType::Limit),
+            make_memory(105.0, Some(107.0), Some(103.0), true),
+        )],
+        Some(ann_id),
+    );
+    let active = SymbolKey::new("AAPL");
+    let outcome = apply_update_from_surface(
+        &mut store,
+        &handle,
+        &mut panels,
+        Some(&active),
+        SymbolKey::new("AAPL"),
+        snapshot,
+        IntentSource::Chart,
+        Some(120.0),
+        Some(1.5),
+    );
+    assert_eq!(outcome, UpdateSurfaceOutcome::AppliedAnchorSeeded);
+    let intent = handle.snapshot(&SymbolKey::new("AAPL")).unwrap();
+    assert_eq!(intent.gatr_anchor.anchor_price, Some(120.0));
+    assert_eq!(intent.gatr_anchor.anchor_gatr, Some(1.5));
+}
+
+/// With no `current_price` available, anchor-seeding is skipped.
+/// The upsert still lands, but outcome is plain `Applied`.
+#[test]
+fn anchor_lifecycle_missing_price_does_not_seed() {
+    let mut store = AnnotationStore::new();
+    let ann_id = store.add(
+        "AAPL",
+        AnnotationKind::OrderBracket(Box::new(make_bracket(100.0, Some(102.0), Some(98.0)))),
+    );
+    let handle = MockHandle::new();
+    handle.seed(
+        SymbolKey::new("AAPL"),
+        make_intent(
+            "AAPL",
+            OrderSide::Buy,
+            EntryType::Limit,
+            vec![(
+                (OrderSide::Buy, EntryType::Limit),
+                make_memory(100.0, Some(102.0), Some(98.0), true),
+            )],
+            Some(ann_id),
+        ),
+    );
+    let mut panels = panels_map(vec![make_panel(1, "AAPL", Some(ann_id))]);
+    let snapshot = make_intent(
+        "AAPL",
+        OrderSide::Buy,
+        EntryType::Limit,
+        vec![(
+            (OrderSide::Buy, EntryType::Limit),
+            make_memory(105.0, Some(107.0), Some(103.0), true),
+        )],
+        Some(ann_id),
+    );
+    let outcome = apply_update_from_surface(
+        &mut store,
+        &handle,
+        &mut panels,
+        None,
+        SymbolKey::new("AAPL"),
+        snapshot,
+        IntentSource::Panel,
+        None,
+        None,
+    );
+    assert_eq!(outcome, UpdateSurfaceOutcome::Applied);
+    let intent = handle.snapshot(&SymbolKey::new("AAPL")).unwrap();
+    assert!(intent.gatr_anchor.anchor_price.is_none());
 }

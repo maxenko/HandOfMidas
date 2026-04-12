@@ -32,6 +32,45 @@ use crate::link::{LinkDimension, PickerTarget};
 use crate::order_panel::OrderSide;
 use crate::watchlist::WatchlistPanel;
 
+// ── Toast state ───────────────────────────────────────────────────────
+
+/// Floating toast notification state.
+///
+/// Owned by [`MidasApp::toast`]. Shown by
+/// `app/views.rs::view_toast_overlay`, auto-dismissed by the `Tick`
+/// handler after `TOAST_TTL_SECS` seconds, and manually dismissed on
+/// click or when the action button is pressed.
+#[derive(Clone, Debug)]
+pub struct ToastState {
+    /// The human-readable message rendered in the toast body.
+    pub message: String,
+    /// When the toast appeared. Compared against `Instant::now()` in
+    /// the `Tick` handler to fire the auto-dismiss path.
+    pub created_at: Instant,
+    /// Optional action button. When set, the toast renders an extra
+    /// clickable region that emits the embedded message before
+    /// dismissing. Used by the GATR-snap toast for its `Undo` hook.
+    pub action: Option<ToastAction>,
+}
+
+/// An action button embedded inside a [`ToastState`].
+///
+/// The `on_click` field is boxed so the action can own any `Message`
+/// variant (including ones that carry allocations like `OrderIntent`)
+/// without enlarging the outer enum.
+#[derive(Clone, Debug)]
+pub struct ToastAction {
+    /// Button label. Example: `"Undo"`.
+    pub label: String,
+    /// Message emitted when the button is clicked. Delivered verbatim
+    /// by the [`Message::ToastActionClicked`] handler, which also
+    /// clears the toast.
+    pub on_click: Box<Message>,
+}
+
+/// Seconds a toast remains visible before auto-dismiss.
+pub const TOAST_TTL_SECS: u64 = 4;
+
 // ── Load state ────────────────────────────────────────────────────────
 
 /// Tracks the data loading lifecycle for a chart panel.
@@ -148,10 +187,13 @@ pub struct MidasApp {
     /// Links between chart bracket annotations and broker orders,
     /// keyed by the parent (entry) order UUID for O(1) lookup.
     pub order_annotation_links: HashMap<uuid::Uuid, crate::order_panel::OrderAnnotationLink>,
-    /// Toast notification message (shown briefly, then auto-dismissed).
-    pub toast_message: Option<String>,
-    /// When the current toast was created. Used for auto-dismiss timing.
-    pub toast_created_at: Option<Instant>,
+    /// Floating toast notification state. `None` when no toast is
+    /// currently visible. Replaces the previous
+    /// `(toast_message, toast_created_at)` pair — the message, the TTL
+    /// marker and the optional Undo-style action button all live in
+    /// one struct so every site that sets a toast picks up the action
+    /// hook by default.
+    pub toast: Option<ToastState>,
     /// Bracket context menu state: (chart_id, annotation_id, leg_role, screen_x, screen_y).
     pub bracket_context_menu: Option<(
         ChartId,
@@ -171,6 +213,29 @@ pub struct MidasApp {
     /// Per-ticker order intent store handle. Owns the `redb`-backed
     /// `TickerOrderIntent` cache + the background flush thread.
     pub order_intent_handle: crate::ticker_order_intent::TickerOrderIntentHandle,
+    /// Symbols for which the GATR snap rule has already been evaluated
+    /// once in the current session. Populated by the
+    /// `MaybeSnapToGatr` path (startup + chart-activation hook) to
+    /// avoid a second snap firing when the user tab-cycles back to a
+    /// ticker they already looked at. Deliberately not persisted — a
+    /// crash-and-relaunch resets it.
+    pub snapped_this_session: std::collections::HashSet<crate::annotation_store::SymbolKey>,
+    /// Discoverability-toast guard: symbols for which the one-shot
+    /// "bracket location recorded" toast has already been emitted this
+    /// session. Prevents the toast from re-firing on every subsequent
+    /// panel edit for the same anchor seed.
+    pub anchor_seed_toasts_shown:
+        std::collections::HashSet<crate::annotation_store::SymbolKey>,
+    /// Pre-snap undo slot, populated when the GATR snap rule fires
+    /// and drained when the user clicks the `Undo` action button on
+    /// the snap toast. 30-second session-bounded TTL enforced at
+    /// drain time — stale entries are silently discarded. Keyed by
+    /// symbol so a second snap on the same ticker replaces the prior
+    /// undo slot instead of stacking.
+    pub gatr_undo_slots: std::collections::HashMap<
+        crate::annotation_store::SymbolKey,
+        crate::ticker_order_intent::reducer::PreSnapState,
+    >,
 }
 
 /// Pending drag: press started but hold threshold not yet reached.
@@ -437,6 +502,10 @@ pub enum Message {
     ChartBracketCancel(ChartId, AnnotationId),
     /// Cancel SL from chart button.
     ChartBracketCancelSL(ChartId, AnnotationId),
+    /// Toggle the pin state on the symbol whose bracket this chart
+    /// annotation belongs to. Added in Slice 4 to wire the PinToggle
+    /// decorator click into `OrderIntentAppMsg::TogglePin`.
+    ChartBracketTogglePin(ChartId, AnnotationId),
 
     // -- Bracket context menu --
     /// Right-click on a bracket leg — show context menu.
@@ -480,9 +549,24 @@ pub enum Message {
 
     // -- Toast notifications --
     /// Show a toast notification.
-    ShowToast(String),
+    ///
+    /// Struct variant so an optional action button can be attached
+    /// without every call site having to construct a wrapping enum.
+    /// Every legacy call site migrates to `ShowToast { message: ...,
+    /// action: None }`; the GATR-snap handler is the first caller to
+    /// set `action = Some(...)` for its `Undo` hook.
+    ShowToast {
+        /// Text to display.
+        message: String,
+        /// Optional action button. `None` means a plain text toast.
+        action: Option<ToastAction>,
+    },
     /// Dismiss the current toast (auto or manual).
     DismissToast,
+    /// The action button on the current toast was clicked. Fires the
+    /// stored `on_click` message and then clears the toast. Safe to
+    /// emit even when no toast is visible (the handler is idempotent).
+    ToastActionClicked,
 
     // -- Market data cache --
     /// Market data snapshot loaded for a watchlist symbol (D1 candles).
@@ -812,14 +896,16 @@ impl MidasApp {
             resizing_column: None,
             order_panels: restored_order_panels,
             order_annotation_links: HashMap::new(),
-            toast_message: None,
-            toast_created_at: None,
+            toast: None,
             bracket_context_menu: None,
             annotation_store: AnnotationStore::new(),
             market_cache: crate::market_cache::MarketDataCache::default(),
             broker_bridge: broker_bridge.clone(),
             broker_connection_display: "Disconnected".to_string(),
             order_intent_handle,
+            snapped_this_session: std::collections::HashSet::new(),
+            anchor_seed_toasts_shown: std::collections::HashSet::new(),
+            gatr_undo_slots: std::collections::HashMap::new(),
         };
 
         // Register broker bridge in provider registry.
@@ -2420,6 +2506,48 @@ impl MidasApp {
         }
     }
 
+    /// Mark the currently-focused chart's symbol as "session-active"
+    /// and return a [`Task`] that fires the GATR snap evaluator if
+    /// this is the first activation this session. This is the
+    /// second of the two plan-mandated entry points for the snap
+    /// rule — the first is `MarketSnapshotLoaded`, which catches
+    /// symbols that were not yet loaded; this catches symbols that
+    /// were already loaded from a previous activation but have since
+    /// drifted.
+    ///
+    /// Returns `Task::none()` when no chart is focused or the active
+    /// symbol has already been evaluated this session.
+    fn maybe_emit_snap_for_active_chart(&mut self) -> Task<Message> {
+        let Some(sym) = self.active_chart_symbol() else {
+            return Task::none();
+        };
+        let key = crate::annotation_store::SymbolKey::new(&sym);
+        if self.snapped_this_session.contains(&key) {
+            return Task::none();
+        }
+        self.snapped_this_session.insert(key.clone());
+        Task::done(Message::OrderIntent(
+            crate::ticker_order_intent::OrderIntentAppMsg::MaybeSnapToGatr { symbol: key },
+        ))
+    }
+
+    /// Set a plain (no-action) toast, replacing any existing one.
+    ///
+    /// This is the single mutation point for the toast state used by
+    /// the legacy call sites that were migrated from the previous
+    /// `toast_message: Option<String>` shape. Callers that need an
+    /// action button should set `self.toast` directly with a fully
+    /// populated [`ToastState`], or emit
+    /// `Message::ShowToast { message, action: Some(..) }`.
+    pub(crate) fn show_toast<S: Into<String>>(&mut self, message: S) {
+        self.toast = Some(ToastState {
+            message: message.into(),
+            created_at: Instant::now(),
+            action: None,
+        });
+    }
+
+
     /// One-time startup bootstrap: for every symbol that has at least
     /// one live `OrderBracket` annotation but no ticker-intent row,
     /// seed a fresh intent from the first such bracket.
@@ -2512,15 +2640,33 @@ impl MidasApp {
             updated_at: chrono::Utc::now(),
         };
 
-        apply_update_from_surface(
+        let (current_price, gatr_abs) = self
+            .market_cache
+            .get(key.as_str())
+            .map(|s| (s.last_price, s.gatr_abs))
+            .unwrap_or((None, None));
+        let outcome = apply_update_from_surface(
             &mut self.annotation_store,
             &self.order_intent_handle,
             &mut self.order_panels,
             None, // panel source — active chart symbol is irrelevant
-            key,
+            key.clone(),
             snapshot,
             IntentSource::Panel,
+            current_price,
+            gatr_abs,
         );
+        if outcome
+            == crate::ticker_order_intent::reducer::UpdateSurfaceOutcome::AppliedAnchorSeeded
+            && !self.anchor_seed_toasts_shown.contains(&key)
+        {
+            self.anchor_seed_toasts_shown.insert(key.clone());
+            self.show_toast(format!(
+                "{}: bracket location recorded. \
+                 Pin to lock against drift snap.",
+                key.as_str()
+            ));
+        }
     }
 
     /// Build a [`crate::ticker_order_intent::TickerOrderIntent`] snapshot
@@ -2618,7 +2764,12 @@ impl MidasApp {
         };
 
         let active = self.active_chart_symbol().map(|s| SymbolKey::new(&s));
-        apply_update_from_surface(
+        let (current_price, gatr_abs) = self
+            .market_cache
+            .get(key.as_str())
+            .map(|s| (s.last_price, s.gatr_abs))
+            .unwrap_or((None, None));
+        let _ = apply_update_from_surface(
             &mut self.annotation_store,
             &self.order_intent_handle,
             &mut self.order_panels,
@@ -2626,6 +2777,8 @@ impl MidasApp {
             key,
             snapshot,
             IntentSource::Chart,
+            current_price,
+            gatr_abs,
         );
     }
 
@@ -2902,7 +3055,7 @@ impl MidasApp {
 
             Message::PaneFocused(pane) => {
                 self.workspace.set_focus(pane);
-                Task::none()
+                self.maybe_emit_snap_for_active_chart()
             }
 
             Message::PaneResized(pane_grid::ResizeEvent { split, ratio }) => {
@@ -3738,8 +3891,7 @@ impl MidasApp {
                             }
                             Err(e) => {
                                 tracing::error!("Failed to send bracket to broker: {e}");
-                                self.toast_message = Some(format!("Broker error: {e}"));
-                                self.toast_created_at = Some(Instant::now());
+                                self.show_toast(format!("Broker error: {e}"));
                             }
                         }
                     } else {
@@ -4495,6 +4647,22 @@ impl MidasApp {
                     }
                 }
 
+                // Slice 4: first time we see fresh market data for a
+                // symbol in this session, evaluate the GATR snap rule.
+                // The reducer's guards drop the vast majority of calls
+                // so this is cheap. This is the path that fixes the
+                // "$112 stop on a $14 chart" bug — a stale bracket is
+                // repositioned to the current price the moment its
+                // market data lands.
+                let key = crate::annotation_store::SymbolKey::new(&symbol_upper);
+                if !self.snapped_this_session.contains(&key) {
+                    self.snapped_this_session.insert(key.clone());
+                    return Task::done(Message::OrderIntent(
+                        crate::ticker_order_intent::OrderIntentAppMsg::MaybeSnapToGatr {
+                            symbol: key,
+                        },
+                    ));
+                }
                 Task::none()
             }
             Message::MarketSnapshotLoaded(_symbol, Err(e)) => {
@@ -5110,6 +5278,24 @@ impl MidasApp {
                 Task::none()
             }
 
+            Message::ChartBracketTogglePin(chart_id, _ann_id) => {
+                // Resolve the chart's symbol and route through the
+                // ticker-intent reducer — the intent is the single
+                // source of truth for `pinned`.
+                let symbol = self
+                    .charts
+                    .get(&chart_id)
+                    .map(|c| c.symbol.clone())
+                    .unwrap_or_default();
+                if symbol.is_empty() {
+                    return Task::none();
+                }
+                let key = crate::annotation_store::SymbolKey::new(&symbol);
+                Task::done(Message::OrderIntent(
+                    crate::ticker_order_intent::OrderIntentAppMsg::TogglePin { symbol: key },
+                ))
+            }
+
             Message::ChartBracketSave(_chart_id, ann_id) => {
                 // Find the symbol from whichever panel owns this bracket.
                 let panel_info = self
@@ -5397,8 +5583,7 @@ impl MidasApp {
                         self.order_annotation_links.remove(&parent_id);
                     }
                 }
-                self.toast_message = Some("Bracket cancelled".to_string());
-                self.toast_created_at = Some(Instant::now());
+                self.show_toast("Bracket cancelled");
                 Task::none()
             }
             Message::BracketContextDismiss => {
@@ -5563,13 +5748,11 @@ impl MidasApp {
                                 .map(|c| format!(" (comm ${c:.2})"))
                                 .unwrap_or_default()
                         );
-                        self.toast_message = Some(msg);
-                        self.toast_created_at = Some(Instant::now());
+                        self.show_toast(msg);
                     }
                     BrokerEvent::OrderRejected { order_id, reason } => {
                         tracing::warn!("Order rejected: {order_id}: {reason}");
-                        self.toast_message = Some(format!("Order rejected: {reason}"));
-                        self.toast_created_at = Some(Instant::now());
+                        self.show_toast(format!("Order rejected: {reason}"));
                     }
                     BrokerEvent::OrderCancelled { order_id, reason } => {
                         tracing::info!("Order cancelled: {order_id}: {reason}");
@@ -5584,8 +5767,7 @@ impl MidasApp {
                     }
                     BrokerEvent::OrderValidationFailed { message, code } => {
                         tracing::warn!("Order validation failed [{code}]: {message}");
-                        self.toast_message = Some(format!("Validation: {message}"));
-                        self.toast_created_at = Some(Instant::now());
+                        self.show_toast(format!("Validation: {message}"));
                     }
                     other => {
                         tracing::trace!("Unhandled broker event: {other:?}");
@@ -5669,8 +5851,7 @@ impl MidasApp {
                             _ => None,
                         };
                         if let Some(msg) = toast {
-                            self.toast_message = Some(msg);
-                            self.toast_created_at = Some(Instant::now());
+                            self.show_toast(msg);
                         }
 
                         // Remove link when engine confirms cancellation (S9).
@@ -5700,24 +5881,38 @@ impl MidasApp {
             }
 
             // -- Toast notifications --
-            Message::ShowToast(msg) => {
-                self.toast_message = Some(msg);
-                self.toast_created_at = Some(Instant::now());
+            Message::ShowToast { message, action } => {
+                self.toast = Some(ToastState {
+                    message,
+                    created_at: Instant::now(),
+                    action,
+                });
                 Task::none()
             }
             Message::DismissToast => {
-                self.toast_message = None;
-                self.toast_created_at = None;
+                self.toast = None;
+                Task::none()
+            }
+            Message::ToastActionClicked => {
+                // Pull the action out and fire its embedded message.
+                // Dismissing first mirrors the "single click" UX —
+                // the user should not see the toast after they
+                // engaged its action.
+                if let Some(state) = self.toast.take() {
+                    if let Some(action) = state.action {
+                        return self.update(*action.on_click);
+                    }
+                }
                 Task::none()
             }
 
             Message::Tick => {
-                // Auto-dismiss toast after 4 seconds.
-                if let (Some(_toast), Some(created)) = (&self.toast_message, self.toast_created_at)
-                {
-                    if created.elapsed() > std::time::Duration::from_secs(4) {
-                        self.toast_message = None;
-                        self.toast_created_at = None;
+                // Auto-dismiss toast after TOAST_TTL_SECS seconds.
+                if let Some(ref state) = self.toast {
+                    if state.created_at.elapsed()
+                        > std::time::Duration::from_secs(TOAST_TTL_SECS)
+                    {
+                        self.toast = None;
                     }
                 }
                 self.maybe_save_config()
@@ -5760,8 +5955,7 @@ impl MidasApp {
                 self.level_placing = false;
                 self.placing_preview = None;
                 self.bracket_context_menu = None;
-                self.toast_message = None;
-                self.toast_created_at = None;
+                self.toast = None;
                 self.pending_drag = None;
                 if self.dragging_ticker.is_some() {
                     self.dragging_ticker = None;

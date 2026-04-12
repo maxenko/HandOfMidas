@@ -38,6 +38,8 @@ impl MidasApp {
         let content = self.view_content();
         let status_bar = self.view_status_bar();
 
+        let toast_overlay = self.view_toast_overlay();
+
         // Drag overlay: floating label near cursor when dragging a ticker.
         if let Some(ref drag) = self.dragging_ticker {
             let label = container(text(drag.symbol.clone()).size(13).color(Color::WHITE))
@@ -62,10 +64,99 @@ impl MidasApp {
                 .padding(iced::Padding::ZERO.top(pos.y + 16.0).left(pos.x + 12.0));
 
             let base = column![toolbar, content, status_bar];
-            return stack![base, drag_preview].into();
+            return match toast_overlay {
+                Some(toast) => stack![base, drag_preview, toast].into(),
+                None => stack![base, drag_preview].into(),
+            };
         }
 
-        column![toolbar, content, status_bar].into()
+        let base = column![toolbar, content, status_bar];
+        match toast_overlay {
+            Some(toast) => stack![base, toast].into(),
+            None => base.into(),
+        }
+    }
+
+    /// Build the floating toast overlay, anchored bottom-right of the
+    /// main window. Returns `None` when no toast is visible.
+    ///
+    /// Slice 4 ships the full toast view layer from scratch: the
+    /// `toast` state field exists today but was never rendered — this
+    /// is what makes the GATR-snap undo affordance reach the user.
+    /// Style mirrors the existing bracket-decorator badge palette for
+    /// visual consistency: a darker translucent background with a
+    /// subtle rounded border.
+    fn view_toast_overlay(&self) -> Option<Element<'_, Message>> {
+        let state = self.toast.as_ref()?;
+        // Toast message: always present.
+        let msg_text = text(state.message.clone()).size(13).color(Color::WHITE);
+
+        // Action button, when present. Clicking the button fires the
+        // embedded message through `Message::ToastActionClicked`,
+        // which also dismisses the toast.
+        let body: Element<'_, Message> = match state.action {
+            Some(ref action) => {
+                let action_btn = button(
+                    text(action.label.clone()).size(12).color(Color::WHITE),
+                )
+                .padding([3, 10])
+                .style(|_, status| button::Style {
+                    background: Some(iced::Background::Color(match status {
+                        button::Status::Hovered => {
+                            Color::from_rgba(0.35, 0.50, 0.72, 1.0)
+                        }
+                        _ => Color::from_rgba(0.25, 0.40, 0.62, 1.0),
+                    })),
+                    text_color: Color::WHITE,
+                    border: iced::Border {
+                        color: Color::from_rgba(0.55, 0.70, 0.90, 0.9),
+                        width: 1.0,
+                        radius: 3.0.into(),
+                    },
+                    ..Default::default()
+                })
+                .on_press(Message::ToastActionClicked);
+                row![
+                    msg_text,
+                    Space::new().width(Length::Fixed(12.0)),
+                    action_btn,
+                ]
+                .align_y(iced::Alignment::Center)
+                .into()
+            }
+            None => msg_text.into(),
+        };
+
+        // The toast container — styled to match the existing badge
+        // palette. Clicking anywhere on it dismisses the toast via
+        // `Message::DismissToast`; the inner button handles its own
+        // press so its event does not reach the outer dismiss handler.
+        let toast_container = container(body)
+            .padding([8, 14])
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(Color::from_rgba(
+                    0.12, 0.14, 0.18, 0.94,
+                ))),
+                text_color: Some(Color::WHITE),
+                border: iced::Border {
+                    color: Color::from_rgba(0.30, 0.35, 0.45, 0.95),
+                    width: 1.0,
+                    radius: 4.0.into(),
+                },
+                ..Default::default()
+            });
+
+        // Anchor bottom-right: use a full-size container with max
+        // padding and Shrink sizing so the toast sits in the corner
+        // while leaving the rest of the overlay transparent and
+        // click-through.
+        let positioned = container(toast_container)
+            .width(Fill)
+            .height(Fill)
+            .align_x(iced::alignment::Horizontal::Right)
+            .align_y(iced::alignment::Vertical::Bottom)
+            .padding(16);
+        Some(positioned.into())
     }
 
     /// Build the view for a floating (pop-out) chart window.

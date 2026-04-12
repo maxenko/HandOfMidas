@@ -53,6 +53,7 @@ use crate::order_panel::{OrderSide, PriceInputMode, StopLossType};
 
 pub mod actor;
 pub(crate) mod bootstrap;
+pub mod gatr_snap;
 pub mod handle;
 pub mod reducer;
 pub mod store;

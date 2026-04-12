@@ -35,20 +35,47 @@
 //! and the reducer early-returns with `Task::none()`.
 
 use std::collections::HashMap;
+use std::time::Instant;
 
 use iced::Task;
 use midas_chart::widget::order_bracket::{BracketSide, OrderBracket};
 use midas_chart::widget::{AnnotationId, AnnotationKind};
 
 use crate::annotation_store::{AnnotationStore, SymbolKey};
-use crate::app::{MidasApp, Message};
+use crate::app::{Message, MidasApp, ToastAction};
 use crate::order_panel::{OrderPanel, OrderSide};
 use midas_core::OrderPanelId;
 
+use super::gatr_snap::{maybe_snap, SnapPlan};
 use super::handle::TickerIntentAccess;
 use super::{
-    EntryMemory, IntentSource, OrderIntentMsg, TickerOrderIntent, UpsertOutcome,
+    EntryMemory, GatrAnchor, IntentSource, OrderIntentMsg, TickerOrderIntent, UpsertOutcome,
 };
+
+/// Snapshot of a bracket captured immediately before a GATR snap
+/// fires, so the user can undo the repositioning within the TTL
+/// window.
+///
+/// Only the minimum required for rollback is stored: the cloned
+/// bracket (all four leg prices live inside it) plus a timestamp.
+/// The 30-second session-bounded TTL is enforced by
+/// [`take_pre_snap`] at drain time.
+#[derive(Clone, Debug)]
+pub struct PreSnapState {
+    /// The annotation id the snap moved.
+    pub annotation_id: AnnotationId,
+    /// A clone of the bracket before the snap was applied.
+    pub bracket: Box<OrderBracket>,
+    /// The `gatr_anchor` the intent carried before the snap. Undo
+    /// restores this verbatim so the recency guard behaves as if the
+    /// snap never happened.
+    pub prev_anchor: GatrAnchor,
+    /// When the snap fired. Compared against [`UNDO_TTL`] on drain.
+    pub stashed_at: Instant,
+}
+
+/// Session-bounded TTL for the GATR snap undo slot.
+pub const UNDO_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Top-level reducer message for ticker-intent updates. Wrapped by
 /// `Message::OrderIntent` in [`crate::app::Message`] and routed into
@@ -134,15 +161,37 @@ pub fn apply_order_intent_msg(app: &mut MidasApp, msg: OrderIntentAppMsg) -> Tas
             let active_symbol = app
                 .active_chart_symbol()
                 .map(|s| SymbolKey::new(&s));
-            apply_update_from_surface(
+            let (current_price, gatr_abs) = app
+                .market_cache
+                .get(symbol.as_str())
+                .map(|s| (s.last_price, s.gatr_abs))
+                .unwrap_or((None, None));
+            let outcome = apply_update_from_surface(
                 &mut app.annotation_store,
                 &app.order_intent_handle,
                 &mut app.order_panels,
                 active_symbol.as_ref(),
-                symbol,
+                symbol.clone(),
                 *snapshot,
                 source,
+                current_price,
+                gatr_abs,
             );
+            // Discoverability toast: one-shot per (symbol, session) on
+            // the very first write that seeds an anchor.
+            if outcome == UpdateSurfaceOutcome::AppliedAnchorSeeded
+                && !app.anchor_seed_toasts_shown.contains(&symbol)
+            {
+                app.anchor_seed_toasts_shown.insert(symbol.clone());
+                let display = symbol.as_str().to_string();
+                return Task::done(Message::ShowToast {
+                    message: format!(
+                        "{display}: bracket location recorded. \
+                         Pin to lock against drift snap."
+                    ),
+                    action: None,
+                });
+            }
             Task::none()
         }
         OrderIntentAppMsg::CancelLiveBracket { symbol } => {
@@ -166,17 +215,34 @@ pub fn apply_order_intent_msg(app: &mut MidasApp, msg: OrderIntentAppMsg) -> Tas
             );
             Task::none()
         }
-        // Slice 4 fills in the GATR / pin / undo handler bodies.
-        OrderIntentAppMsg::MaybeSnapToGatr { .. } => Task::none(),
-        OrderIntentAppMsg::TogglePin { .. } => Task::none(),
-        OrderIntentAppMsg::UndoSnap { .. } => Task::none(),
+        OrderIntentAppMsg::MaybeSnapToGatr { symbol } => apply_maybe_snap(app, symbol),
+        OrderIntentAppMsg::TogglePin { symbol } => apply_toggle_pin(app, symbol),
+        OrderIntentAppMsg::UndoSnap { symbol } => apply_undo_snap(app, symbol),
     }
+}
+
+/// Outcome returned by [`apply_update_from_surface`] so the outer
+/// dispatcher can decide whether to emit the Slice 4 discoverability
+/// toast. None of these variants is an error — the `NoOp` / `Rejected`
+/// paths are still valid "nothing further to do".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpdateSurfaceOutcome {
+    /// The write did not land (NoOp, rejected by the symbol-consistency
+    /// guard, etc.). No downstream side effects.
+    Noop,
+    /// The write landed but did not seed a fresh GATR anchor.
+    Applied,
+    /// The write landed **and** transitioned the intent's
+    /// `gatr_anchor.anchor_price` from `None` to `Some(_)`. The outer
+    /// dispatcher should emit the first-touch discoverability toast.
+    AppliedAnchorSeeded,
 }
 
 /// Apply an `UpdateFromPanel` / `UpdateFromBracketDrag` message against
 /// the given dependencies.
 ///
-/// Implements the Slice 3 reducer flow:
+/// Implements the Slice 3 reducer flow, extended in Slice 4 with the
+/// D4 anchor-seeding rule:
 ///
 /// 1. Symbol-consistency guard. A `Chart`-sourced drag message whose
 ///    `symbol` does not match the active chart's symbol is dropped with
@@ -188,13 +254,20 @@ pub fn apply_order_intent_msg(app: &mut MidasApp, msg: OrderIntentAppMsg) -> Tas
 ///    snapshot.last_entry_type)` from the snapshot and write the
 ///    matching `EntryMemory` bucket into the cached intent. All other
 ///    buckets are preserved — SL-off-per-compound is sticky.
-/// 4. Upsert through the `TickerIntentAccess` handle.
-/// 5. If `intent.live_annotation_id.is_some()`, propagate the new leg
+/// 4. **Slice 4 anchor-seeding rule**: if the cached intent had
+///    `gatr_anchor.anchor_price == None` *before* the upsert AND the
+///    inbound `source` is `Panel` or `Chart` (i.e. a real user touch),
+///    seed `gatr_anchor` at `(current_price, gatr_abs)` from the
+///    `current_price` / `gatr_abs` arguments the dispatcher resolved
+///    from the market cache. Return [`UpdateSurfaceOutcome::AppliedAnchorSeeded`].
+/// 5. Upsert through the `TickerIntentAccess` handle.
+/// 6. If `intent.live_annotation_id.is_some()`, propagate the new leg
 ///    prices into the annotation via `AnnotationStore::update`.
-/// 6. Refresh-skip-matching-source: on a `Chart` source, re-hydrate the
+/// 7. Refresh-skip-matching-source: on a `Chart` source, re-hydrate the
 ///    linked order panel; on a `Panel` source, the annotation is the
-///    refresh target and was already touched in step 5. This is the
+///    refresh target and was already touched in step 6. This is the
 ///    feedback-loop guard.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_update_from_surface(
     annotation_store: &mut AnnotationStore,
     handle: &impl TickerIntentAccess,
@@ -203,7 +276,9 @@ pub(crate) fn apply_update_from_surface(
     symbol: SymbolKey,
     snapshot: TickerOrderIntent,
     source: IntentSource,
-) {
+    current_price: Option<f64>,
+    gatr_abs: Option<f64>,
+) -> UpdateSurfaceOutcome {
     // ── (1) Symbol-consistency guard (Chart-sourced only). ────────────
     if source == IntentSource::Chart {
         match active_chart_symbol {
@@ -215,7 +290,7 @@ pub(crate) fn apply_update_from_surface(
                     symbol.as_str(),
                     other.map(|s| s.as_str())
                 );
-                return;
+                return UpdateSurfaceOutcome::Noop;
             }
         }
     }
@@ -224,9 +299,22 @@ pub(crate) fn apply_update_from_surface(
     let cached = handle.snapshot(&symbol);
     if let Some(ref existing) = cached {
         if **existing == snapshot {
-            return;
+            return UpdateSurfaceOutcome::Noop;
         }
     }
+
+    // Anchor-seed decision: only legal on a real user-initiated touch
+    // (Panel or Chart), and only when no anchor has ever been written.
+    // Any other source (Bootstrap / Hydration / GatrSnap) leaves the
+    // anchor alone — that is the D4 "first-touch-endorses" rule.
+    let is_user_touch = matches!(source, IntentSource::Panel | IntentSource::Chart);
+    let previously_unseeded = cached
+        .as_ref()
+        .map(|arc| arc.gatr_anchor.anchor_price.is_none())
+        .unwrap_or(true);
+    let will_seed_anchor = is_user_touch
+        && previously_unseeded
+        && current_price.map(|p| p.is_finite()).unwrap_or(false);
 
     // ── (3) Compound-key merge. ───────────────────────────────────────
     // Preserve every bucket from the cached intent; overwrite only the
@@ -250,17 +338,27 @@ pub(crate) fn apply_update_from_surface(
     merged.live_annotation_id = snapshot.live_annotation_id;
     merged.updated_at = snapshot.updated_at;
 
-    // ── (4) Upsert. ───────────────────────────────────────────────────
+    // ── (4) Anchor-seeding (Slice 4 / D4). ────────────────────────────
+    if will_seed_anchor {
+        if let Some(price) = current_price {
+            merged.gatr_anchor = GatrAnchor {
+                anchor_price: Some(price),
+                anchor_gatr: gatr_abs.filter(|g| g.is_finite() && *g > 0.0),
+            };
+        }
+    }
+
+    // ── (5) Upsert. ───────────────────────────────────────────────────
     let outcome = handle.upsert(OrderIntentMsg::Upsert {
         symbol: symbol.clone(),
         intent: Box::new(merged.clone()),
         source,
     });
     if matches!(outcome, UpsertOutcome::NoOp { .. }) {
-        return;
+        return UpdateSurfaceOutcome::Noop;
     }
 
-    // ── (5) Propagate into the linked annotation, if any. ─────────────
+    // ── (6) Propagate into the linked annotation, if any. ─────────────
     if let Some(ann_id) = merged.live_annotation_id {
         let leg_prices = extract_leg_prices(&snapshot, side, entry_type);
         annotation_store.update(symbol.as_str(), ann_id, |ann| {
@@ -270,9 +368,9 @@ pub(crate) fn apply_update_from_surface(
         });
     }
 
-    // ── (6) Refresh-skip-matching-source. ─────────────────────────────
+    // ── (7) Refresh-skip-matching-source. ─────────────────────────────
     // `Chart` source  → re-hydrate the linked panel (chart already current).
-    // `Panel` source  → annotation already updated in step 5; skip panel.
+    // `Panel` source  → annotation already updated in step 6; skip panel.
     // Other sources (Hydration / Bootstrap / GatrSnap) refresh the panel
     // as a conservative default so startup-seeded memory reaches the UI.
     if !matches!(source, IntentSource::Panel) {
@@ -281,6 +379,12 @@ pub(crate) fn apply_update_from_surface(
                 panel.state.hydrate_from_intent(&merged, panel.state.last_price);
             }
         }
+    }
+
+    if will_seed_anchor {
+        UpdateSurfaceOutcome::AppliedAnchorSeeded
+    } else {
+        UpdateSurfaceOutcome::Applied
     }
 }
 
@@ -416,6 +520,221 @@ fn apply_leg_prices(bracket: &mut OrderBracket, side: OrderSide, prices: &LegPri
     if let (Some(sl_price), Some(ref mut sl)) = (prices.sl, bracket.stop_loss.as_mut()) {
         sl.line.price = sl_price;
     }
+}
+
+// ── Slice 4: GATR snap / pin / undo handlers ─────────────────────────
+
+/// Apply a `MaybeSnapToGatr` message: reposition the bracket to the
+/// current price and write a fresh GATR anchor if all guards pass.
+///
+/// This is the canonical entry point for the "`$112` stop on a `$14`
+/// chart" bug. Every startup and every chart-activation boundary
+/// fires this message through the dispatcher; the
+/// [`super::gatr_snap::maybe_snap`] guards silently drop the vast
+/// majority of calls so the visible side effect only happens on
+/// genuinely stale brackets.
+///
+/// Flow:
+/// 1. Snapshot the intent. Early-return on missing intent / live id.
+/// 2. Resolve `current_price` + `gatr_abs` from `market_cache`.
+/// 3. Call `maybe_snap`. Early-return on `None`.
+/// 4. Stash the pre-snap bracket state into the per-symbol undo slot.
+/// 5. Apply `reposition_bracket` to the linked annotation.
+/// 6. Write the new `GatrAnchor` into the intent and upsert with
+///    `source = GatrSnap`.
+/// 7. Force a durable flush.
+/// 8. Emit the toast with the `Undo` action button.
+pub(crate) fn apply_maybe_snap(app: &mut MidasApp, symbol: SymbolKey) -> Task<Message> {
+    // Snapshot intent.
+    let intent = match app.order_intent_handle.snapshot(&symbol) {
+        Some(arc) => arc,
+        None => return Task::none(),
+    };
+
+    // Market-cache inputs. `last_price` may not yet be available on a
+    // freshly-loaded symbol; the guard in `maybe_snap` will drop the
+    // call if either is missing/non-finite.
+    let (current_price, gatr_abs) = match app.market_cache.get(symbol.as_str()) {
+        Some(snap) => (snap.last_price, snap.gatr_abs),
+        None => return Task::none(),
+    };
+    let current_price = match current_price {
+        Some(p) => p,
+        None => return Task::none(),
+    };
+
+    let SnapPlan {
+        delta,
+        new_anchor,
+        reason: _,
+    } = match maybe_snap(&intent, current_price, gatr_abs) {
+        Some(plan) => plan,
+        None => return Task::none(),
+    };
+
+    // Resolve the live annotation id — must be present per `maybe_snap`
+    // guard 5, but re-check defensively.
+    let ann_id = match intent.live_annotation_id {
+        Some(id) => id,
+        None => return Task::none(),
+    };
+
+    // Stash pre-snap state, then reposition the bracket. The pre-snap
+    // clone captures the annotation's current shape; a subsequent
+    // `Undo` restores it verbatim.
+    //
+    // `AnnotationKind::OrderBracket` stores a `Box<OrderBracket>`; we
+    // clone the box itself so the stashed copy does not share its
+    // heap allocation with the live annotation.
+    let mut stashed: Option<Box<OrderBracket>> = None;
+    app.annotation_store
+        .update(symbol.as_str(), ann_id, |ann| {
+            if let AnnotationKind::OrderBracket(ref mut bracket) = ann.kind {
+                stashed = Some(bracket.clone());
+                crate::order_panel::reposition_bracket(bracket.as_mut(), current_price);
+            }
+        });
+    let stashed = match stashed {
+        Some(b) => b,
+        // Annotation missing or not an OrderBracket — nothing moved,
+        // nothing to undo.
+        None => return Task::none(),
+    };
+
+    app.gatr_undo_slots.insert(
+        symbol.clone(),
+        PreSnapState {
+            annotation_id: ann_id,
+            bracket: stashed,
+            prev_anchor: intent.gatr_anchor,
+            stashed_at: Instant::now(),
+        },
+    );
+
+    // Refresh the linked panel and persist the new anchor on the intent.
+    let mut updated = (*intent).clone();
+    updated.gatr_anchor = new_anchor;
+    updated.updated_at = chrono::Utc::now();
+    let _ = app.order_intent_handle.upsert(OrderIntentMsg::Upsert {
+        symbol: symbol.clone(),
+        intent: Box::new(updated.clone()),
+        source: IntentSource::GatrSnap,
+    });
+
+    // Re-hydrate any linked panel so the UI reflects the new prices.
+    for panel in app.order_panels.values_mut() {
+        if panel.state.symbol.eq_ignore_ascii_case(symbol.as_str()) {
+            panel.state.hydrate_from_intent(&updated, panel.state.last_price);
+        }
+    }
+
+    // Force a durable flush so a crash between now and the next
+    // debounce window does not leave the anchor un-persisted. Run on
+    // the ambient tokio runtime — the flush is fire-and-forget from
+    // the reducer's point of view.
+    if let Ok(rt) = tokio::runtime::Handle::try_current() {
+        let handle = app.order_intent_handle.clone();
+        rt.spawn(async move {
+            handle.flush_now().await;
+        });
+    }
+
+    // Build the undo toast. The label + sign are handcrafted so the
+    // delta is readable ("+2.00" / "-3.15").
+    let sign = if delta >= 0.0 { "+" } else { "-" };
+    let drift_ratio = gatr_abs
+        .filter(|g| g.is_finite() && *g > 0.0)
+        .map(|g| delta.abs() / g)
+        .unwrap_or(0.0);
+    let message = format!(
+        "{sym}: bracket re-anchored {sign}{amt:.2} (price drifted {drift:.1}× GATR)",
+        sym = symbol.as_str(),
+        amt = delta.abs(),
+        drift = drift_ratio,
+    );
+    Task::done(Message::ShowToast {
+        message,
+        action: Some(ToastAction {
+            label: "Undo".to_string(),
+            on_click: Box::new(Message::OrderIntent(
+                crate::ticker_order_intent::OrderIntentAppMsg::UndoSnap { symbol },
+            )),
+        }),
+    })
+}
+
+/// Apply a `TogglePin` message. Flips `TickerOrderIntent.pinned` and
+/// writes the intent back through the handle. Subsequent
+/// `MaybeSnapToGatr` evaluations read the new value on their next
+/// guard-check pass.
+pub(crate) fn apply_toggle_pin(app: &mut MidasApp, symbol: SymbolKey) -> Task<Message> {
+    let intent = match app.order_intent_handle.snapshot(&symbol) {
+        Some(arc) => arc,
+        None => return Task::none(),
+    };
+    let mut updated = (*intent).clone();
+    updated.pinned = !updated.pinned;
+    updated.updated_at = chrono::Utc::now();
+    let _ = app.order_intent_handle.upsert(OrderIntentMsg::Upsert {
+        symbol: symbol.clone(),
+        intent: Box::new(updated),
+        source: IntentSource::Panel,
+    });
+    Task::none()
+}
+
+/// Apply an `UndoSnap` message. Restores the pre-snap bracket state
+/// from the undo slot if it is still within
+/// [`UNDO_TTL`], writes a fresh anchor at the undone price, and
+/// forces a durable flush.
+pub(crate) fn apply_undo_snap(app: &mut MidasApp, symbol: SymbolKey) -> Task<Message> {
+    let stash = match app.gatr_undo_slots.remove(&symbol) {
+        Some(s) => s,
+        None => return Task::none(),
+    };
+    if stash.stashed_at.elapsed() > UNDO_TTL {
+        return Task::none();
+    }
+
+    // Restore the annotation.
+    let restore_box = stash.bracket.clone();
+    app.annotation_store
+        .update(symbol.as_str(), stash.annotation_id, |ann| {
+            if let AnnotationKind::OrderBracket(ref mut bracket) = ann.kind {
+                *bracket = restore_box.clone();
+            }
+        });
+
+    // Write the previous anchor back onto the intent so the recency
+    // guard behaves as if the snap never happened.
+    let intent = match app.order_intent_handle.snapshot(&symbol) {
+        Some(arc) => arc,
+        None => return Task::none(),
+    };
+    let mut restored = (*intent).clone();
+    restored.gatr_anchor = stash.prev_anchor;
+    restored.updated_at = chrono::Utc::now();
+    let _ = app.order_intent_handle.upsert(OrderIntentMsg::Upsert {
+        symbol: symbol.clone(),
+        intent: Box::new(restored.clone()),
+        source: IntentSource::GatrSnap,
+    });
+
+    // Refresh any linked panels.
+    for panel in app.order_panels.values_mut() {
+        if panel.state.symbol.eq_ignore_ascii_case(symbol.as_str()) {
+            panel.state.hydrate_from_intent(&restored, panel.state.last_price);
+        }
+    }
+
+    if let Ok(rt) = tokio::runtime::Handle::try_current() {
+        let handle = app.order_intent_handle.clone();
+        rt.spawn(async move {
+            handle.flush_now().await;
+        });
+    }
+
+    Task::none()
 }
 
 #[cfg(test)]

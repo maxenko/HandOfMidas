@@ -1520,6 +1520,14 @@ fn action_to_message(
                 DecoratorAction::EditQuantity => None,
                 DecoratorAction::EditPrice => None,
                 DecoratorAction::ToggleLocked => None,
+                // Slice 4: pin-toggle decorator clicks route through a
+                // dedicated app-side message that resolves the symbol
+                // from the chart id — the chart crate does not know
+                // the active symbol and the intent handle lives in
+                // `MidasApp`.
+                DecoratorAction::TogglePin => {
+                    Some(Message::ChartBracketTogglePin(chart_id, *annotation_id))
+                }
                 DecoratorAction::Custom(_) => None,
             }
         }
