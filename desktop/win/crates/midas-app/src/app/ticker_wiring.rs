@@ -308,8 +308,7 @@ impl MidasApp {
             )
         };
         let (time_start, time_end, price_low, price_high) = cam_snapshot;
-        let at_live_edge =
-            latest > 0.0 && latest >= time_start && latest <= time_end;
+        let at_live_edge = latest > 0.0 && latest >= time_start && latest <= time_end;
         let _ = self.update(Message::Ticker(
             sym,
             crate::ticker_state::TickerMsg::SaveCameraState {

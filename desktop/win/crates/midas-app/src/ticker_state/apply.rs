@@ -346,7 +346,13 @@ impl TickerState {
                 price_low,
                 price_high,
                 was_at_live_edge,
-            } => self.apply_save_camera(time_start, time_end, price_low, price_high, was_at_live_edge),
+            } => self.apply_save_camera(
+                time_start,
+                time_end,
+                price_low,
+                price_high,
+                was_at_live_edge,
+            ),
 
             // ── Persistence (one-liner, left inline) ─────────────
             TickerMsg::Hydrated(_) => vec![],

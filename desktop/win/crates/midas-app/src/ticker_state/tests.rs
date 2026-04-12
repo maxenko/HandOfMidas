@@ -1495,7 +1495,9 @@ fn save_camera_state_persists() {
         was_at_live_edge: true,
     });
     assert!(
-        effects.iter().any(|e| matches!(e, TickerEffect::PersistDirty)),
+        effects
+            .iter()
+            .any(|e| matches!(e, TickerEffect::PersistDirty)),
         "SaveCameraState must produce PersistDirty"
     );
     let saved = state.saved_camera().expect("camera should be saved");
@@ -1532,7 +1534,9 @@ fn save_camera_serde_roundtrip() {
     });
     let json = serde_json::to_string(&state).expect("serialize");
     let restored: TickerState = serde_json::from_str(&json).expect("deserialize");
-    let saved = restored.saved_camera().expect("camera should survive roundtrip");
+    let saved = restored
+        .saved_camera()
+        .expect("camera should survive roundtrip");
     assert!((saved.time_start - 5000.0).abs() < f64::EPSILON);
     assert!((saved.time_end - 6000.0).abs() < f64::EPSILON);
     assert!((saved.price_low - 200.0).abs() < f64::EPSILON);

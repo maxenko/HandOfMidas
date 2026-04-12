@@ -133,6 +133,9 @@ pub struct ChartPanel {
     /// Cleared after `DataLoaded` re-evaluates the camera (live-edge shift
     /// or empty-history fallback), or on the first user pan gesture.
     pub camera_restored_pending: bool,
+    /// Generation counter incremented on every load request.
+    /// Used to discard stale `DataLoaded` messages from previously-requested tickers.
+    pub load_generation: u64,
 }
 
 impl ChartPanel {
@@ -328,10 +331,10 @@ pub enum Message {
 
     // -- Data loading --
     /// Async data load completed for a chart.
-    DataLoaded(ChartId, Result<Arc<CandleBuffer>, String>),
+    DataLoaded(ChartId, u64, Result<Arc<CandleBuffer>, String>),
 
     /// Data loaded during startup restore (does not reset camera).
-    DataRestoredFromStartup(ChartId, Result<Arc<CandleBuffer>, String>),
+    DataRestoredFromStartup(ChartId, u64, Result<Arc<CandleBuffer>, String>),
 
     // -- Provider selection --
     /// User selected a data provider from the toolbar dropdown.
@@ -1412,6 +1415,7 @@ impl MidasApp {
             timeframe_link: LinkMode::Unlinked,
             gatr_hover: false,
             camera_restored_pending: false,
+            load_generation: 0,
         }
     }
 
@@ -1611,6 +1615,7 @@ impl MidasApp {
             .unwrap_or(Timeframe::D1);
 
         if let Some(chart) = self.charts.get_mut(&chart_id) {
+            chart.load_generation = chart.load_generation.wrapping_add(1);
             chart.load_state = LoadState::Loading;
             chart.chart_state.dirty.mark_data();
         }
@@ -1834,17 +1839,28 @@ impl MidasApp {
         make_msg: F,
     ) -> Task<Message>
     where
-        F: FnOnce(ChartId, Result<Arc<CandleBuffer>, String>) -> Message + Send + 'static,
+        F: FnOnce(ChartId, u64, Result<Arc<CandleBuffer>, String>) -> Message + Send + 'static,
     {
         let provider = match self.providers.active_data_provider() {
             Some(p) => p,
             None => return Task::none(),
         };
+        let gen = self
+            .charts
+            .get(&chart_id)
+            .map(|c| c.load_generation)
+            .unwrap_or(0);
         let symbol = symbol.to_uppercase();
         let days = Self::days_for_timeframe(tf);
         Task::perform(
             async move { provider.get_candles(&symbol, tf, days).await },
-            move |result| make_msg(chart_id, result.map(Arc::new).map_err(|e| e.to_string())),
+            move |result| {
+                make_msg(
+                    chart_id,
+                    gen,
+                    result.map(Arc::new).map_err(|e| e.to_string()),
+                )
+            },
         )
     }
 
@@ -2109,7 +2125,17 @@ impl MidasApp {
                 Task::batch(tasks)
             }
 
-            Message::DataLoaded(chart_id, result) => {
+            Message::DataLoaded(chart_id, gen, result) => {
+                // Discard stale loads — chart may have switched tickers since this load started.
+                if let Some(chart) = self.charts.get(&chart_id) {
+                    if chart.load_generation != gen {
+                        tracing::debug!(
+                            "discarding stale DataLoaded (gen {gen} != {})",
+                            chart.load_generation
+                        );
+                        return Task::none();
+                    }
+                }
                 match result {
                     Ok(buffer) => {
                         let mut loaded_symbol: Option<String> = None;
@@ -2155,12 +2181,9 @@ impl MidasApp {
                         // back to latest candle (D5 graceful fallback).
                         if let Some(chart) = self.charts.get_mut(&chart_id) {
                             if chart.camera_restored_pending {
-                                let sym_key = chart
-                                    .bound_symbol
-                                    .clone()
-                                    .unwrap_or_else(|| {
-                                        crate::annotation_store::SymbolKey::new(&chart.symbol)
-                                    });
+                                let sym_key = chart.bound_symbol.clone().unwrap_or_else(|| {
+                                    crate::annotation_store::SymbolKey::new(&chart.symbol)
+                                });
                                 if let Some(ts) = self.tickers.get(&sym_key) {
                                     if let Some(saved) = ts.saved_camera() {
                                         let duration = saved.time_end - saved.time_start;
@@ -2175,8 +2198,7 @@ impl MidasApp {
                                         if needs_shift {
                                             if let Some(latest) = chart.latest_candle_time() {
                                                 let margin = duration * 0.02;
-                                                chart.chart_state.camera.time_end =
-                                                    latest + margin;
+                                                chart.chart_state.camera.time_end = latest + margin;
                                                 chart.chart_state.camera.time_start =
                                                     chart.chart_state.camera.time_end - duration;
                                                 chart.chart_state.dirty.mark_camera();
@@ -2214,7 +2236,17 @@ impl MidasApp {
                 Task::none()
             }
 
-            Message::DataRestoredFromStartup(chart_id, result) => {
+            Message::DataRestoredFromStartup(chart_id, gen, result) => {
+                // Discard stale loads — chart may have switched tickers since this load started.
+                if let Some(chart) = self.charts.get(&chart_id) {
+                    if chart.load_generation != gen {
+                        tracing::debug!(
+                            "discarding stale DataRestoredFromStartup (gen {gen} != {})",
+                            chart.load_generation
+                        );
+                        return Task::none();
+                    }
+                }
                 match result {
                     Ok(buffer) => {
                         if let Some(chart) = self.charts.get_mut(&chart_id) {
