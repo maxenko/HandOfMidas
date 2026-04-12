@@ -43,6 +43,11 @@ const SNAP_UNDO_TTL: Duration = Duration::from_secs(30);
 /// `TickerState::apply()` pattern-matches on it exhaustively.
 #[derive(Debug, Clone)]
 pub enum TickerMsg {
+    // ── Bracket mode (BUY / X / SELL toggle) ─────────────────────
+    /// Set the bracket mode. `Some(side)` activates brackets for the
+    /// given side; `None` deactivates brackets (X button).
+    SetBracketMode(Option<OrderSide>),
+
     // ── Bracket lifecycle ────────────────────────────────────────
     /// Ensure a draft bracket exists for the given side and entry type.
     /// Creates one if none exists; recalls the saved one if it does.
@@ -258,6 +263,9 @@ impl TickerState {
     /// Each category is dispatched to a private helper method.
     pub fn apply(&mut self, msg: TickerMsg) -> Vec<TickerEffect> {
         match msg {
+            // ── Bracket mode ────────────────────────────────────
+            TickerMsg::SetBracketMode(mode) => self.apply_set_bracket_mode(mode),
+
             // ── Bracket lifecycle ────────────────────────────────
             TickerMsg::EnsureDraftBracket { side, entry_type } => {
                 self.apply_ensure_draft(side, entry_type)
@@ -309,9 +317,7 @@ impl TickerState {
                 filled_qty,
                 avg_price,
             } => self.apply_order_filled(filled_qty, avg_price),
-            TickerMsg::OrderPartialFill { filled_qty } => {
-                self.apply_order_partial_fill(filled_qty)
-            }
+            TickerMsg::OrderPartialFill { filled_qty } => self.apply_order_partial_fill(filled_qty),
             TickerMsg::OrderRejected { reason } => self.apply_order_rejected(reason),
             TickerMsg::OrderCancelled => self.apply_order_cancelled(),
 
@@ -320,13 +326,50 @@ impl TickerState {
         }
     }
 
+    // ── Bracket mode ─────────────────────────────────────────────────
+
+    fn apply_set_bracket_mode(&mut self, mode: Option<OrderSide>) -> Vec<TickerEffect> {
+        self.generation += 1;
+        self.bracket_mode = mode;
+        match mode {
+            Some(side) => {
+                self.last_side = side;
+                // Delegate to ensure_draft to create/update the bracket.
+                // bracket_mode is now Some, so the guard passes.
+                let mut effects = self.apply_ensure_draft(side, self.last_entry_type);
+                // Always persist regardless of whether ensure_draft
+                // produced effects (it may have if bracket already existed).
+                if !effects
+                    .iter()
+                    .any(|e| matches!(e, TickerEffect::PersistDirty))
+                {
+                    effects.push(TickerEffect::PersistDirty);
+                }
+                effects
+            }
+            None => {
+                // Deactivate: cancel any existing bracket.
+                let mut effects = self.apply_cancel_bracket();
+                if !effects
+                    .iter()
+                    .any(|e| matches!(e, TickerEffect::PersistDirty))
+                {
+                    effects.push(TickerEffect::PersistDirty);
+                }
+                effects
+            }
+        }
+    }
+
     // ── Bracket lifecycle ───────────────────────────────────────────
 
-    fn apply_ensure_draft(
-        &mut self,
-        side: OrderSide,
-        entry_type: EntryType,
-    ) -> Vec<TickerEffect> {
+    fn apply_ensure_draft(&mut self, side: OrderSide, entry_type: EntryType) -> Vec<TickerEffect> {
+        // Respect the BUY/X/SELL toggle: if bracket_mode is None (X),
+        // no bracket should be created regardless of the trigger.
+        if self.bracket_mode.is_none() {
+            return vec![];
+        }
+
         self.last_side = side;
         self.last_entry_type = entry_type;
         self.generation += 1;
@@ -353,8 +396,7 @@ impl TickerState {
                 // Reset ALL fields to a clean Draft state — the old
                 // bracket might have been Pending/Active/saved from a
                 // prior session and those flags make it non-interactive.
-                let prices =
-                    default_initial_prices(side, entry_type, current_price, self.gatr_abs);
+                let prices = default_initial_prices(side, entry_type, current_price, self.gatr_abs);
                 b.entry = make_leg(prices.entry, LegRole::Entry);
                 b.take_profit = Some(make_leg(prices.take_profit, LegRole::TakeProfit));
                 b.stop_loss = Some(make_leg(prices.stop_loss, LegRole::StopLoss));
@@ -475,11 +517,7 @@ impl TickerState {
             // If somehow live_bracket is present, just project it.
             let last = self.last_price.unwrap_or(0.0);
             if last > 0.0
-                && crate::order_panel::should_reposition(
-                    b.entry.line.price,
-                    last,
-                    self.gatr_abs,
-                )
+                && crate::order_panel::should_reposition(b.entry.line.price, last, self.gatr_abs)
             {
                 crate::order_panel::reposition_bracket(b, last);
             }
@@ -762,11 +800,7 @@ impl TickerState {
 
     // ── Market data ─────────────────────────────────────────────────
 
-    fn apply_market_data(
-        &mut self,
-        last_price: f64,
-        gatr_abs: Option<f64>,
-    ) -> Vec<TickerEffect> {
+    fn apply_market_data(&mut self, last_price: f64, gatr_abs: Option<f64>) -> Vec<TickerEffect> {
         self.last_price = Some(last_price);
         self.gatr_abs = gatr_abs;
         // If the user is actively editing, skip auto-snap.

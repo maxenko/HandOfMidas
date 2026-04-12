@@ -1064,6 +1064,7 @@ impl MidasApp {
 
         // Link restored brackets to their order panels and sync state.
         // Saved brackets load Active (visible on chart immediately).
+        // Panel bracket_active is derived from TickerState.bracket_mode().
         {
             let mut dirty_symbols: Vec<String> = Vec::new();
             for panel in app.order_panels.values_mut() {
@@ -1071,6 +1072,17 @@ impl MidasApp {
                 if symbol.is_empty() {
                     continue;
                 }
+
+                // Derive bracket_active from TickerState (single source of truth).
+                let sym_key = crate::annotation_store::SymbolKey::new(&symbol);
+                let bracket_mode = app.tickers.get(&sym_key).and_then(|ts| ts.bracket_mode());
+                panel.state.bracket_active = bracket_mode;
+
+                // Only link to a restored annotation if bracket_mode is active.
+                if bracket_mode.is_none() {
+                    continue;
+                }
+
                 // Find the first active Draft bracket for this symbol.
                 let bracket_info = app
                     .annotation_store
@@ -1092,16 +1104,8 @@ impl MidasApp {
                         (a.id, side)
                     });
 
-                if let Some((ann_id, side)) = bracket_info {
+                if let Some((ann_id, _side)) = bracket_info {
                     panel.state.bracket_annotation_id = Some(ann_id);
-                    panel.state.bracket_active = Some(match side {
-                        midas_chart::widget::order_bracket::BracketSide::Long => {
-                            crate::order_panel::OrderSide::Buy
-                        }
-                        midas_chart::widget::order_bracket::BracketSide::Short => {
-                            crate::order_panel::OrderSide::Sell
-                        }
-                    });
                     // Sync all panel fields from bracket truth.
                     if let Some(bracket_data) = app
                         .annotation_store
@@ -3002,7 +3006,8 @@ impl MidasApp {
             Message::OrderPanelMsg(panel_id, action) => {
                 use crate::order_panel::OrderPanelAction;
 
-                // SetBracketMode routes through TickerState.
+                // SetBracketMode routes through TickerState as the
+                // single source of truth.
                 if let OrderPanelAction::SetBracketMode(mode) = action {
                     let symbol = self
                         .order_panels
@@ -3027,35 +3032,18 @@ impl MidasApp {
                         ts.set_gatr_abs(mc_gatr);
                     }
 
-                    match mode {
-                        Some(side) => {
-                            let entry_type = self
-                                .order_panels
-                                .get(&panel_id)
-                                .map(|p| p.state.entry_type)
-                                .unwrap_or_default();
-                            if let Some(p) = self.order_panels.get_mut(&panel_id) {
-                                p.state.side = side;
-                                p.state.bracket_active = Some(side);
-                            }
-                            return self.update(Message::Ticker(
-                                sym_key,
-                                crate::ticker_state::TickerMsg::EnsureDraftBracket {
-                                    side,
-                                    entry_type,
-                                },
-                            ));
-                        }
-                        None => {
-                            if let Some(p) = self.order_panels.get_mut(&panel_id) {
-                                p.state.bracket_active = None;
-                            }
-                            return self.update(Message::Ticker(
-                                sym_key,
-                                crate::ticker_state::TickerMsg::CancelBracket,
-                            ));
+                    // Update the panel side when activating so the
+                    // EnsureDraftBracket inside SetBracketMode uses it.
+                    if let Some(side) = mode {
+                        if let Some(p) = self.order_panels.get_mut(&panel_id) {
+                            p.state.side = side;
                         }
                     }
+
+                    return self.update(Message::Ticker(
+                        sym_key,
+                        crate::ticker_state::TickerMsg::SetBracketMode(mode),
+                    ));
                 }
 
                 // SetEntryType routes through TickerState.
@@ -3984,14 +3972,16 @@ impl MidasApp {
                     ));
                 }
                 // Walk every panel linked to this symbol. If TickerState
-                // has no live bracket yet, fire EnsureDraftBracket with
-                // the panel's current (side, entry_type).
-                let no_bracket = self
+                // has no live bracket yet AND bracket_mode is active,
+                // fire EnsureDraftBracket with the panel's current
+                // (side, entry_type). When bracket_mode is None (X),
+                // skip — no brackets should appear.
+                let ts_info = self
                     .tickers
                     .get(&key)
-                    .map(|ts| ts.live_bracket().is_none())
-                    .unwrap_or(true);
-                if no_bracket {
+                    .map(|ts| (ts.live_bracket().is_none(), ts.bracket_mode().is_some()));
+                let (no_bracket, mode_active) = ts_info.unwrap_or((true, false));
+                if no_bracket && mode_active {
                     let targets: Vec<(
                         crate::order_panel::OrderSide,
                         midas_chart::widget::order_bracket::EntryType,
@@ -4654,10 +4644,16 @@ impl MidasApp {
                     );
                 }
 
-                // Clear panel bracket ownership.
+                // Clear panel bracket ownership via TickerState.
+                {
+                    let sym_key = crate::annotation_store::SymbolKey::new(&symbol);
+                    let _ = self.update(Message::Ticker(
+                        sym_key,
+                        crate::ticker_state::TickerMsg::SetBracketMode(None),
+                    ));
+                }
                 if let Some(pid) = panel_id {
                     if let Some(p) = self.order_panels.get_mut(&pid) {
-                        p.state.bracket_active = None;
                         p.state.bracket_annotation_id = None;
                     }
                 }
@@ -4682,19 +4678,16 @@ impl MidasApp {
                     .find(|(_, p)| p.state.bracket_annotation_id == Some(ann_id))
                     .map(|(id, _)| *id);
 
-                // Route through the ticker state machine, which
-                // removes the bracket and clears `live_annotation_id`.
+                // Route through TickerState: SetBracketMode(None)
+                // cancels the bracket and resets bracket_mode.
                 let sym_key = crate::annotation_store::SymbolKey::new(&symbol);
                 let _ = self.update(Message::Ticker(
                     sym_key,
-                    crate::ticker_state::TickerMsg::CancelBracket,
+                    crate::ticker_state::TickerMsg::SetBracketMode(None),
                 ));
 
                 if let Some(pid) = panel_id {
-                    // Clear panel bracket ownership (`dirty` already
-                    // reset by the reducer above).
                     if let Some(p) = self.order_panels.get_mut(&pid) {
-                        p.state.bracket_active = None;
                         p.state.bracket_annotation_id = None;
                     }
                 }

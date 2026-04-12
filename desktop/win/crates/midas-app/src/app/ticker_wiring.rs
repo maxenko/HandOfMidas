@@ -36,11 +36,7 @@ impl MidasApp {
     ///
     /// Every user-facing path that changes a chart's symbol must route
     /// through this helper.
-    pub(crate) fn bind_chart_to_symbol(
-        &mut self,
-        chart_id: ChartId,
-        symbol: SymbolKey,
-    ) {
+    pub(crate) fn bind_chart_to_symbol(&mut self, chart_id: ChartId, symbol: SymbolKey) {
         // 1. Set bound_symbol + backward-compat fields.
         if let Some(chart) = self.charts.get_mut(&chart_id) {
             chart.bound_symbol = Some(symbol.clone());
@@ -83,12 +79,16 @@ impl MidasApp {
 
         // 5. NOW resolve linked panel display state and fire EnsureDraftBracket.
         //    Panels are already bound to the new symbol, so the lookup works.
-        let panel_info = self.panel_display_for_chart(chart_id);
-        if let Some((side, entry_type)) = panel_info {
-            let _ = self.update(Message::Ticker(
-                symbol.clone(),
-                crate::ticker_state::TickerMsg::EnsureDraftBracket { side, entry_type },
-            ));
+        //    Only create a bracket if bracket_mode is active (not X).
+        let bracket_mode = self.tickers.get(&symbol).and_then(|ts| ts.bracket_mode());
+        if bracket_mode.is_some() {
+            let panel_info = self.panel_display_for_chart(chart_id);
+            if let Some((side, entry_type)) = panel_info {
+                let _ = self.update(Message::Ticker(
+                    symbol.clone(),
+                    crate::ticker_state::TickerMsg::EnsureDraftBracket { side, entry_type },
+                ));
+            }
         }
     }
 
@@ -96,11 +96,7 @@ impl MidasApp {
     ///
     /// Sets `bound_symbol` and the backward-compat `state.symbol` field,
     /// then hydrates the panel from `TickerState` if one exists.
-    pub(crate) fn bind_panel_to_symbol(
-        &mut self,
-        panel_id: OrderPanelId,
-        symbol: SymbolKey,
-    ) {
+    pub(crate) fn bind_panel_to_symbol(&mut self, panel_id: OrderPanelId, symbol: SymbolKey) {
         if let Some(panel) = self.order_panels.get_mut(&panel_id) {
             panel.bound_symbol = Some(symbol.clone());
             panel.state.symbol = symbol.as_str().to_string();
@@ -108,6 +104,8 @@ impl MidasApp {
         // Hydrate panel from TickerState if available.
         if let Some(ts) = self.tickers.get(&symbol) {
             if let Some(panel) = self.order_panels.get_mut(&panel_id) {
+                // Sync bracket_mode → bracket_active (TickerState is truth).
+                panel.state.bracket_active = ts.bracket_mode();
                 // Sync the live bracket annotation ID.
                 panel.state.bracket_annotation_id = ts.live_annotation_id();
                 // Sync panel fields from bracket if present.
@@ -271,10 +269,7 @@ impl MidasApp {
     /// Lazy factory access to a per-symbol `TickerState`. Creates a
     /// fresh default state if the symbol is not yet in the map.
     #[allow(dead_code)] // used by Slices 1+
-    pub fn ticker_mut(
-        &mut self,
-        symbol: &SymbolKey,
-    ) -> &mut crate::ticker_state::TickerState {
+    pub fn ticker_mut(&mut self, symbol: &SymbolKey) -> &mut crate::ticker_state::TickerState {
         self.tickers
             .entry(symbol.clone())
             .or_insert_with(|| crate::ticker_state::TickerState::new(symbol.clone()))
@@ -295,8 +290,7 @@ impl MidasApp {
         for effect in effects {
             match effect {
                 crate::ticker_state::TickerEffect::ProjectBracket(ref bracket) => {
-                    let ann_id_opt =
-                        self.tickers.get(sym).and_then(|s| s.live_annotation_id());
+                    let ann_id_opt = self.tickers.get(sym).and_then(|s| s.live_annotation_id());
                     // Check if the annotation actually exists in the store.
                     // IDs are session-local; a stale ID from a prior session
                     // (loaded from redb) would silently fail the update.
@@ -311,9 +305,9 @@ impl MidasApp {
                     if let (Some(ann_id), true) = (ann_id_opt, ann_exists) {
                         // Update existing annotation.
                         self.annotation_store.update(sym.as_str(), ann_id, |ann| {
-                            ann.kind = midas_chart::widget::AnnotationKind::OrderBracket(
-                                Box::new(bracket.clone()),
-                            );
+                            ann.kind = midas_chart::widget::AnnotationKind::OrderBracket(Box::new(
+                                bracket.clone(),
+                            ));
                             ann.presence = midas_chart::widget::Presence::Active;
                         });
                     } else {
@@ -341,10 +335,7 @@ impl MidasApp {
                     // Sync panel inputs from the bracket.
                     for panel in self.order_panels.values_mut() {
                         if panel.state.symbol.eq_ignore_ascii_case(sym.as_str()) {
-                            crate::order_panel::sync_panel_from_bracket(
-                                &mut panel.state,
-                                bracket,
-                            );
+                            crate::order_panel::sync_panel_from_bracket(&mut panel.state, bracket);
                         }
                     }
                     self.mark_levels_dirty_for_ticker(sym.as_str());
@@ -357,7 +348,6 @@ impl MidasApp {
                             && panel.state.bracket_annotation_id == Some(id)
                         {
                             panel.state.bracket_annotation_id = None;
-                            panel.state.bracket_active = None;
                         }
                     }
                     self.mark_levels_dirty_for_ticker(sym.as_str());
@@ -386,9 +376,7 @@ impl MidasApp {
                             }
                         };
                         let quantity = bracket.quantity.unwrap_or(0.0);
-                        let (entry_kind, entry_price, entry_stop_price) = match bracket
-                            .entry_type
-                        {
+                        let (entry_kind, entry_price, entry_stop_price) = match bracket.entry_type {
                             midas_chart::widget::order_bracket::EntryType::Market => {
                                 (midas_core::broker::EntryKind::Market, None, None)
                             }
@@ -447,6 +435,18 @@ impl MidasApp {
                 }
                 crate::ticker_state::TickerEffect::RemoveLevel { .. } => {
                     self.mark_levels_dirty_for_ticker(sym.as_str());
+                }
+            }
+        }
+
+        // Sync bracket_mode from TickerState to all linked panels.
+        // TickerState is the single source of truth; panel.bracket_active
+        // is derived.
+        if let Some(ts) = self.tickers.get(sym) {
+            let mode = ts.bracket_mode();
+            for panel in self.order_panels.values_mut() {
+                if panel.state.symbol.eq_ignore_ascii_case(sym.as_str()) {
+                    panel.state.bracket_active = mode;
                 }
             }
         }

@@ -213,6 +213,13 @@ pub struct TickerState {
     #[serde(default)]
     pinned: bool,
 
+    // ── Bracket mode (BUY / X / SELL toggle) ─────────────────────
+    /// Whether brackets are active for this symbol.
+    /// `None` = X (no brackets), `Some(Buy)` = BUY active,
+    /// `Some(Sell)` = SELL active.  Default is `None` (X).
+    #[serde(default)]
+    bracket_mode: Option<OrderSide>,
+
     // ── Live bracket (projected to AnnotationStore via effects) ──
     /// The owned live bracket for this symbol. Projected to
     /// `AnnotationStore` via `TickerEffect::ProjectBracket`.
@@ -288,6 +295,12 @@ impl TickerState {
         self.entries
             .get(&(self.last_side, self.last_entry_type))
             .unwrap_or(&DEFAULT)
+    }
+
+    /// Whether brackets are active for this symbol.
+    /// `None` = X (inactive), `Some(Buy)` = BUY, `Some(Sell)` = SELL.
+    pub fn bracket_mode(&self) -> Option<OrderSide> {
+        self.bracket_mode
     }
 
     /// The live bracket for this symbol, if any.
@@ -393,6 +406,12 @@ impl TickerState {
     }
 
     // ── Test-only setters ──────────────────────────────────────────
+
+    /// Override `bracket_mode`. Test-only.
+    #[cfg(test)]
+    pub(crate) fn force_bracket_mode(&mut self, mode: Option<OrderSide>) {
+        self.bracket_mode = mode;
+    }
 
     /// Override the GATR anchor. Test-only.
     #[cfg(test)]
@@ -526,6 +545,7 @@ pub fn migrate_v1_v2(intent: &TickerOrderIntentV1) -> TickerState {
         entries: intent.entries.clone(),
         gatr_anchor: intent.gatr_anchor,
         pinned: intent.pinned,
+        bracket_mode: None,
         live_bracket: None,
         live_annotation_id: intent.live_annotation_id,
         levels: Vec::new(),

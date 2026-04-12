@@ -290,6 +290,8 @@ fn test_level(id: u64, price: f64) -> crate::level_store::StoredLevel {
 fn state_with_stale_anchor(anchor_price: f64, gatr: f64) -> TickerState {
     let mut state =
         TickerState::new_with_defaults(SymbolKey::new("SNAP"), anchor_price, Some(gatr));
+    // Activate bracket mode so EnsureDraftBracket can create a bracket.
+    state.force_bracket_mode(Some(OrderSide::Buy));
     // Create a bracket so snap has something to reposition.
     state.apply(TickerMsg::EnsureDraftBracket {
         side: OrderSide::Buy,
@@ -432,6 +434,7 @@ fn submit_pending_filled_lifecycle() {
     use midas_chart::widget::order_bracket::BracketStatus;
 
     let mut state = TickerState::new_with_defaults(SymbolKey::new("LIFE"), 150.0, Some(2.0));
+    state.force_bracket_mode(Some(OrderSide::Buy));
     state.apply(TickerMsg::EnsureDraftBracket {
         side: OrderSide::Buy,
         entry_type: EntryType::Market,
@@ -494,6 +497,7 @@ fn order_rejected_reverts_to_draft() {
     use midas_chart::widget::order_bracket::BracketStatus;
 
     let mut state = TickerState::new_with_defaults(SymbolKey::new("REJ"), 200.0, Some(3.0));
+    state.force_bracket_mode(Some(OrderSide::Sell));
     state.apply(TickerMsg::EnsureDraftBracket {
         side: OrderSide::Sell,
         entry_type: EntryType::Limit,
@@ -522,6 +526,7 @@ fn order_partial_fill_updates_qty() {
     use midas_chart::widget::order_bracket::BracketStatus;
 
     let mut state = TickerState::new_with_defaults(SymbolKey::new("PART"), 100.0, Some(1.0));
+    state.force_bracket_mode(Some(OrderSide::Buy));
     state.apply(TickerMsg::EnsureDraftBracket {
         side: OrderSide::Buy,
         entry_type: EntryType::Market,
@@ -544,6 +549,7 @@ fn order_cancelled_reverts_to_draft() {
     use midas_chart::widget::order_bracket::BracketStatus;
 
     let mut state = TickerState::new_with_defaults(SymbolKey::new("CANC"), 100.0, Some(1.0));
+    state.force_bracket_mode(Some(OrderSide::Buy));
     state.apply(TickerMsg::EnsureDraftBracket {
         side: OrderSide::Buy,
         entry_type: EntryType::Market,
@@ -696,6 +702,7 @@ fn update_market_data_skips_snap_while_editing() {
 #[test]
 fn apply_ensure_draft_bracket_creates_live_bracket() {
     let mut state = TickerState::new_with_defaults(SymbolKey::new("AAPL"), 150.0, Some(2.0));
+    state.force_bracket_mode(Some(OrderSide::Buy));
     let effects = state.apply(TickerMsg::EnsureDraftBracket {
         side: OrderSide::Buy,
         entry_type: EntryType::Market,
@@ -712,6 +719,7 @@ fn apply_ensure_draft_bracket_creates_live_bracket() {
 #[test]
 fn apply_cancel_bracket_saved_hides() {
     let mut state = TickerState::new_with_defaults(SymbolKey::new("AAPL"), 150.0, Some(2.0));
+    state.force_bracket_mode(Some(OrderSide::Buy));
     // Create + save.
     state.apply(TickerMsg::EnsureDraftBracket {
         side: OrderSide::Buy,
@@ -732,6 +740,7 @@ fn apply_cancel_bracket_saved_hides() {
 #[test]
 fn apply_cancel_bracket_unsaved_deletes() {
     let mut state = TickerState::new_with_defaults(SymbolKey::new("AAPL"), 150.0, Some(2.0));
+    state.force_bracket_mode(Some(OrderSide::Buy));
     state.apply(TickerMsg::EnsureDraftBracket {
         side: OrderSide::Buy,
         entry_type: EntryType::Market,
@@ -749,6 +758,7 @@ fn apply_cancel_bracket_unsaved_deletes() {
 #[test]
 fn apply_set_leg_price_updates_entry() {
     let mut state = TickerState::new_with_defaults(SymbolKey::new("AAPL"), 150.0, Some(2.0));
+    state.force_bracket_mode(Some(OrderSide::Buy));
     state.apply(TickerMsg::EnsureDraftBracket {
         side: OrderSide::Buy,
         entry_type: EntryType::Limit,
@@ -766,6 +776,7 @@ fn apply_set_leg_price_updates_entry() {
 #[test]
 fn apply_set_tp_enabled_creates_default_tp() {
     let mut state = TickerState::new_with_defaults(SymbolKey::new("AAPL"), 150.0, Some(2.0));
+    state.force_bracket_mode(Some(OrderSide::Buy));
     state.apply(TickerMsg::EnsureDraftBracket {
         side: OrderSide::Buy,
         entry_type: EntryType::Market,
@@ -785,6 +796,7 @@ fn apply_set_tp_enabled_creates_default_tp() {
 #[test]
 fn apply_drag_leg_updates_price_and_pnl() {
     let mut state = TickerState::new_with_defaults(SymbolKey::new("AAPL"), 100.0, Some(2.0));
+    state.force_bracket_mode(Some(OrderSide::Buy));
     state.apply(TickerMsg::EnsureDraftBracket {
         side: OrderSide::Buy,
         entry_type: EntryType::Market,
@@ -813,6 +825,7 @@ fn apply_begin_edit_sets_editing_field() {
 #[test]
 fn apply_begin_edit_auto_commits_previous() {
     let mut state = TickerState::new_with_defaults(SymbolKey::new("AAPL"), 150.0, Some(2.0));
+    state.force_bracket_mode(Some(OrderSide::Buy));
     state.apply(TickerMsg::EnsureDraftBracket {
         side: OrderSide::Buy,
         entry_type: EntryType::Limit,
@@ -830,6 +843,7 @@ fn apply_begin_edit_auto_commits_previous() {
 #[test]
 fn apply_commit_edit_clears_lock() {
     let mut state = TickerState::new_with_defaults(SymbolKey::new("AAPL"), 150.0, Some(2.0));
+    state.force_bracket_mode(Some(OrderSide::Buy));
     state.apply(TickerMsg::EnsureDraftBracket {
         side: OrderSide::Buy,
         entry_type: EntryType::Limit,
@@ -846,6 +860,7 @@ fn apply_commit_edit_clears_lock() {
 #[test]
 fn apply_set_entry_type_adjusts_prices() {
     let mut state = TickerState::new_with_defaults(SymbolKey::new("AAPL"), 150.0, Some(2.0));
+    state.force_bracket_mode(Some(OrderSide::Buy));
     state.apply(TickerMsg::EnsureDraftBracket {
         side: OrderSide::Buy,
         entry_type: EntryType::Limit,
@@ -940,10 +955,11 @@ fn bind_creates_ticker_state_and_bracket() {
         .or_insert_with(|| TickerState::new(sym.clone()));
     assert!(tickers.contains_key(&sym));
 
-    // Step 3: seed market data.
+    // Step 3: seed market data and activate bracket mode.
     let ts = tickers.get_mut(&sym).unwrap();
     ts.set_last_price(Some(150.0));
     ts.set_gatr_abs(Some(2.0));
+    ts.force_bracket_mode(Some(OrderSide::Buy));
 
     // Step 4: fire EnsureDraftBracket.
     let effects = ts.apply(TickerMsg::EnsureDraftBracket {
@@ -969,6 +985,7 @@ fn ensure_draft_bracket_produces_bracket_with_market_data() {
     let mut state = TickerState::new(sym);
     state.set_last_price(Some(200.0));
     state.set_gatr_abs(Some(3.0));
+    state.force_bracket_mode(Some(OrderSide::Buy));
 
     state.apply(TickerMsg::EnsureDraftBracket {
         side: OrderSide::Buy,
@@ -1143,6 +1160,139 @@ fn order_panel_to_config_persists_bound_symbol() {
     );
     let cfg = panel.to_config();
     assert_eq!(cfg.bound_symbol, Some("META".to_string()));
+}
+
+// ── Bracket mode (BUY / X / SELL toggle) ─────────────────────────────
+
+#[test]
+fn ensure_draft_skips_when_bracket_mode_is_none() {
+    let mut state = TickerState::new_with_defaults(SymbolKey::new("SKIP"), 100.0, Some(1.0));
+    // bracket_mode defaults to None (X).
+    assert!(state.bracket_mode().is_none());
+
+    let effects = state.apply(TickerMsg::EnsureDraftBracket {
+        side: OrderSide::Buy,
+        entry_type: EntryType::Market,
+    });
+
+    assert!(
+        effects.is_empty(),
+        "EnsureDraftBracket should be no-op when bracket_mode is None"
+    );
+    assert!(
+        state.live_bracket().is_none(),
+        "no bracket should be created when bracket_mode is None"
+    );
+}
+
+#[test]
+fn set_bracket_mode_buy_creates_bracket() {
+    let mut state = TickerState::new_with_defaults(SymbolKey::new("MODE"), 100.0, Some(1.0));
+    assert!(state.bracket_mode().is_none());
+    assert!(state.live_bracket().is_none());
+
+    let effects = state.apply(TickerMsg::SetBracketMode(Some(OrderSide::Buy)));
+
+    assert_eq!(state.bracket_mode(), Some(OrderSide::Buy));
+    assert!(state.live_bracket().is_some(), "bracket should be created");
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, TickerEffect::ProjectBracket(_))),
+        "should project bracket"
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, TickerEffect::PersistDirty)),
+        "should persist"
+    );
+}
+
+#[test]
+fn set_bracket_mode_none_cancels_bracket() {
+    let mut state = TickerState::new_with_defaults(SymbolKey::new("XOFF"), 100.0, Some(1.0));
+    // Activate bracket mode first.
+    state.apply(TickerMsg::SetBracketMode(Some(OrderSide::Buy)));
+    assert!(state.live_bracket().is_some());
+    state.set_live_annotation_id(Some(midas_chart::widget::AnnotationId(42)));
+
+    // Deactivate.
+    let effects = state.apply(TickerMsg::SetBracketMode(None));
+
+    assert!(
+        state.bracket_mode().is_none(),
+        "bracket_mode should be None"
+    );
+    assert!(state.live_bracket().is_none(), "bracket should be removed");
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, TickerEffect::RemoveBracket(_))),
+        "should emit RemoveBracket"
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, TickerEffect::PersistDirty)),
+        "should persist"
+    );
+}
+
+#[test]
+fn set_bracket_mode_persists() {
+    let mut state = TickerState::new_with_defaults(SymbolKey::new("PERS"), 100.0, Some(1.0));
+
+    let effects = state.apply(TickerMsg::SetBracketMode(Some(OrderSide::Sell)));
+
+    assert_eq!(state.bracket_mode(), Some(OrderSide::Sell));
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, TickerEffect::PersistDirty)),
+        "SetBracketMode should always emit PersistDirty"
+    );
+}
+
+#[test]
+fn bracket_mode_defaults_to_none() {
+    let state = TickerState::new(SymbolKey::new("FRESH"));
+    assert!(
+        state.bracket_mode().is_none(),
+        "fresh TickerState should default to bracket_mode = None (X)"
+    );
+}
+
+#[test]
+fn bracket_mode_serde_roundtrip() {
+    let mut state = TickerState::new(SymbolKey::new("SERDE"));
+    state.apply(TickerMsg::SetBracketMode(Some(OrderSide::Sell)));
+    assert_eq!(state.bracket_mode(), Some(OrderSide::Sell));
+
+    let json = serde_json::to_string(&state).expect("serialize");
+    let restored: TickerState = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(restored.bracket_mode(), Some(OrderSide::Sell));
+}
+
+#[test]
+fn bracket_mode_serde_missing_field_defaults_to_none() {
+    // Simulate a v2 blob that was persisted before bracket_mode existed.
+    let json = r#"{
+        "symbol": "OLD",
+        "version": 2,
+        "last_side": "Buy",
+        "last_entry_type": "Market",
+        "entries": [],
+        "gatr_anchor": {},
+        "pinned": false,
+        "updated_at": "2025-01-01T00:00:00Z",
+        "generation": 0
+    }"#;
+    let state: TickerState = serde_json::from_str(json).expect("deserialize");
+    assert!(
+        state.bracket_mode().is_none(),
+        "missing bracket_mode should default to None"
+    );
 }
 
 #[test]
