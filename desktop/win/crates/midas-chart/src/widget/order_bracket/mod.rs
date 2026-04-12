@@ -541,6 +541,9 @@ pub fn compute_bracket(
         stroke: entry_stroke.clone(),
     };
     let entry_y = ctx.camera.price_to_y(entry_line.price);
+    // Market entries track last price and aren't user-draggable.
+    // Limit / Stop / StopLimit entries are price-settable by the user.
+    let entry_draggable = bracket.entry_type != EntryType::Market;
     emit_bracket_leg_line(
         &mut output,
         &entry_line,
@@ -548,7 +551,7 @@ pub fn compute_bracket(
         ctx,
         alpha,
         HitZoneKind::BracketEntry,
-        /* draw_hit_zone */ false,
+        /* draw_hit_zone */ entry_draggable,
     );
     output.merge(compute_decorator_group(
         &entry_decorator_group(bracket),
