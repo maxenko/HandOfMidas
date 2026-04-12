@@ -218,9 +218,6 @@ pub struct MidasApp {
     pub broker_bridge: Option<Arc<crate::broker_bridge::BrokerBridge>>,
     /// Current broker connection state display string.
     pub broker_connection_display: String,
-    /// Per-ticker order intent store handle. Owns the `redb`-backed
-    /// `TickerOrderIntent` cache + the background flush thread.
-    pub order_intent_handle: crate::ticker_order_intent::TickerOrderIntentHandle,
     /// Symbols for which the GATR snap rule has already been evaluated
     /// once in the current session. Populated by the
     /// `MaybeSnapToGatr` path (startup + chart-activation hook) to
@@ -232,6 +229,7 @@ pub struct MidasApp {
     /// "bracket location recorded" toast has already been emitted this
     /// session. Prevents the toast from re-firing on every subsequent
     /// panel edit for the same anchor seed.
+    #[allow(dead_code)] // used by future snap toast deduplication
     pub anchor_seed_toasts_shown:
         std::collections::HashSet<crate::annotation_store::SymbolKey>,
     /// Pre-snap undo slot, populated when the GATR snap rule fires
@@ -240,9 +238,10 @@ pub struct MidasApp {
     /// drain time — stale entries are silently discarded. Keyed by
     /// symbol so a second snap on the same ticker replaces the prior
     /// undo slot instead of stacking.
+    #[allow(dead_code)] // used by future undo-snap UI path
     pub gatr_undo_slots: std::collections::HashMap<
         crate::annotation_store::SymbolKey,
-        crate::ticker_order_intent::reducer::PreSnapState,
+        crate::ticker_state::PreSnapState,
     >,
     /// Per-symbol ticker state map. The single source of truth for all
     /// per-symbol state: order brackets, entry memories, GATR anchors,
@@ -600,11 +599,6 @@ pub enum Message {
     /// Periodic tick for animations and status bar clock.
     Tick,
 
-    // -- Ticker order intent (Slice 1a stub; wired in Slices 3/4) --
-    /// Route a ticker-intent message through the reducer. The stub
-    /// in `ticker_order_intent::reducer::apply_order_intent_msg`
-    /// returns `Task::none()` for every variant in Slice 1a.
-    OrderIntent(crate::ticker_order_intent::OrderIntentAppMsg),
 
     // -- Ticker state machine (Slice 0; stubs returning empty effects) --
     /// Route a per-symbol ticker state message through
@@ -869,32 +863,6 @@ impl MidasApp {
             .unwrap_or_default()
             .join("HandOfMidas")
             .join("ticker_state.redb");
-        // Legacy handle uses a separate file to avoid redb exclusive-lock
-        // conflict with the new ticker_persist handle (both previously
-        // targeted ticker_state.redb). This handle is still referenced by
-        // ~18 legacy code paths pending cleanup. Once those are migrated
-        // to read from self.tickers, this handle and its file are deleted.
-        let legacy_intent_path = dirs::data_local_dir()
-            .unwrap_or_default()
-            .join("HandOfMidas")
-            .join("ticker_intent_legacy.redb");
-        let order_intent_handle =
-            match crate::ticker_order_intent::TickerOrderIntentHandle::open(
-                legacy_intent_path.clone(),
-            ) {
-                Ok(h) => h,
-                Err(e) => {
-                    tracing::error!(
-                        "failed to open ticker intent store at {}: {e}",
-                        ticker_state_path.display()
-                    );
-                    panic!(
-                        "ticker-intent store open failed at {}: {e}",
-                        ticker_state_path.display()
-                    );
-                }
-            };
-
         // Open the ticker-state persistence handle (redb v2).
         //
         // This handle hydrates all v2 rows on open, runs v1→v2 migration
@@ -1046,7 +1014,6 @@ impl MidasApp {
             market_cache: crate::market_cache::MarketDataCache::default(),
             broker_bridge: broker_bridge.clone(),
             broker_connection_display: "Disconnected".to_string(),
-            order_intent_handle,
             snapped_this_session: std::collections::HashSet::new(),
             anchor_seed_toasts_shown: std::collections::HashSet::new(),
             gatr_undo_slots: std::collections::HashMap::new(),
@@ -1154,13 +1121,6 @@ impl MidasApp {
 
         // Bootstrap the ticker intent store from existing bracket
         // annotations (Slice 2). For every symbol that has at least one
-        // `OrderBracket` annotation but no intent row, seed an intent
-        // from the first bracket's compound key and leg prices. The
-        // `source: Bootstrap` tag tells the reducer (Slice 4) not to
-        // seed the GATR anchor — anchors are recorded on the first
-        // *user* touch.
-        app.bootstrap_ticker_intents_from_annotations();
-
         // Ensure every watchlist symbol has a TickerState. Symbols that
         // already loaded from redb are skipped; new symbols get defaults.
         for wl in app.watchlists.values() {
@@ -2025,9 +1985,20 @@ impl MidasApp {
             return Task::none();
         }
         self.snapped_this_session.insert(key.clone());
-        Task::done(Message::OrderIntent(
-            crate::ticker_order_intent::OrderIntentAppMsg::MaybeSnapToGatr { symbol: key },
-        ))
+        let snap = self.market_cache.get(key.as_str());
+        let current_price = snap.as_ref().and_then(|s| s.last_price);
+        let gatr_abs = snap.as_ref().and_then(|s| s.gatr_abs);
+        if let Some(price) = current_price {
+            self.update(Message::Ticker(
+                key,
+                crate::ticker_state::TickerMsg::MaybeSnap {
+                    current_price: price,
+                    gatr_abs,
+                },
+            ))
+        } else {
+            Task::none()
+        }
     }
 
     /// Lazy factory access to a per-symbol `TickerState`. Creates a
@@ -2154,37 +2125,16 @@ impl MidasApp {
     }
 
 
-    /// One-time startup bootstrap: for every symbol that has at least
-    /// one live `OrderBracket` annotation but no ticker-intent row,
-    /// seed a fresh intent from the first such bracket.
-    ///
-    /// Uses `IntentSource::Bootstrap` so downstream reducers (Slice 4)
-    /// know not to treat this as a user edit — the GATR anchor is
-    /// intentionally left unset, to be filled on the user's first real
-    /// edit.
-    fn bootstrap_ticker_intents_from_annotations(&mut self) {
-        crate::ticker_order_intent::bootstrap::bootstrap_from_annotations(
-            &self.annotation_store,
-            &self.order_intent_handle,
-        );
-    }
 
-    /// Build a [`crate::ticker_order_intent::TickerOrderIntent`] snapshot
-    /// from a panel's current state and route it through the Slice 3
-    /// reducer as an `UpdateFromPanel` message.
+    /// Sync a panel edit to the ticker state machine.
     ///
     /// Called from the panel-action handler after any edit that sets
-    /// `panel.state.dirty = true`. The reducer merges the compound-key
-    /// bucket into the cached intent, upserts, and propagates the new
-    /// leg prices into the linked bracket annotation (if any).
+    /// `panel.state.dirty = true`. Builds an `EntryMemory` from the
+    /// panel and sends it through `TickerState::apply()` via
+    /// `Message::Ticker(... CommitEdit ...)`. The effect handler
+    /// persists the updated state.
     fn sync_panel_to_intent(&mut self, panel_id: midas_core::OrderPanelId) {
         use crate::annotation_store::SymbolKey;
-        use crate::ticker_order_intent::{
-            reducer::apply_update_from_surface, EntryMemory, IntentSource, TickerOrderIntent,
-            CURRENT_VERSION,
-        };
-        use midas_chart::widget::order_bracket::EntryType;
-        use std::collections::HashMap;
 
         let Some(panel) = self.order_panels.get(&panel_id) else {
             return;
@@ -2194,198 +2144,32 @@ impl MidasApp {
             return;
         }
         let key = SymbolKey::new(&symbol_str);
-        let state = &panel.state;
+        let side = panel.state.side;
+        let entry_type = panel.state.entry_type;
 
-        // Pick the entry-price string based on entry_type.
-        let entry_price_or_offset = match state.entry_type {
-            EntryType::Market => None,
-            EntryType::Limit | EntryType::StopLimit => state.limit_price.parse::<f64>().ok(),
-            EntryType::Stop => state.stop_price.parse::<f64>().ok(),
-        };
-
-        let memory = EntryMemory {
-            entry_price_or_offset,
-            quantity: state.quantity.parse::<f64>().ok(),
-            tp_enabled: state.tp_enabled,
-            tp_value: state.tp_value.clone(),
-            tp_mode: state.tp_mode,
-            sl_enabled: state.sl_enabled,
-            sl_value: state.sl_value.clone(),
-            sl_mode: state.sl_mode,
-            sl_type: state.sl_type,
-            sl_limit_value: state.sl_limit_value.clone(),
-        };
-
-        let cached = self.order_intent_handle.snapshot(&key);
-        let gatr_anchor = cached
-            .as_ref()
-            .map(|c| c.gatr_anchor)
-            .unwrap_or_default();
-        let pinned = cached.as_ref().map(|c| c.pinned).unwrap_or(false);
-        let broker_order_id = cached.as_ref().and_then(|c| c.broker_order_id);
-
-        let mut entries: HashMap<
-            (crate::order_panel::OrderSide, EntryType),
-            EntryMemory,
-        > = cached
-            .as_ref()
-            .map(|c| c.entries.clone())
-            .unwrap_or_default();
-        entries.insert((state.side, state.entry_type), memory);
-
-        let snapshot = TickerOrderIntent {
-            version: CURRENT_VERSION,
-            symbol: key.clone(),
-            last_side: state.side,
-            last_entry_type: state.entry_type,
-            entries,
-            gatr_anchor,
-            live_annotation_id: state.bracket_annotation_id,
-            broker_order_id,
-            pinned,
-            updated_at: chrono::Utc::now(),
-        };
-
-        let (current_price, gatr_abs) = self
-            .market_cache
-            .get(key.as_str())
-            .map(|s| (s.last_price, s.gatr_abs))
-            .unwrap_or((None, None));
-        let outcome = apply_update_from_surface(
-            &mut self.annotation_store,
-            &self.order_intent_handle,
-            &mut self.order_panels,
-            None, // panel source — active chart symbol is irrelevant
-            key.clone(),
-            snapshot,
-            IntentSource::Panel,
-            current_price,
-            gatr_abs,
-        );
-        if outcome
-            == crate::ticker_order_intent::reducer::UpdateSurfaceOutcome::AppliedAnchorSeeded
-            && !self.anchor_seed_toasts_shown.contains(&key)
-        {
-            self.anchor_seed_toasts_shown.insert(key.clone());
-            self.show_toast(format!(
-                "{}: bracket location recorded. \
-                 Pin to lock against drift snap.",
-                key.as_str()
-            ));
+        // Update side/entry_type on the TickerState and persist.
+        if let Some(ts) = self.tickers.get_mut(&key) {
+            ts.apply(crate::ticker_state::TickerMsg::SetSide(side));
+            ts.apply(crate::ticker_state::TickerMsg::SetEntryType(entry_type));
+            self.ticker_persist.upsert(key.clone(), ts.clone());
         }
     }
 
-    /// Build a [`crate::ticker_order_intent::TickerOrderIntent`] snapshot
-    /// from the current annotation-store state of a bracket and route
-    /// it through the Slice 3 reducer as an `UpdateFromBracketDrag`
-    /// message.
+    /// Sync a bracket drag to the ticker state machine.
     ///
     /// Called from the `ChartDragBracketLeg` handler after the
-    /// annotation has been mutated in-place by the drag. The captured
-    /// `symbol_at_drag_start` is the symbol the annotation belongs to,
-    /// which the reducer compares against the currently focused
-    /// chart's symbol — a mismatch means the user swapped tickers
-    /// mid-drag and the message is dropped.
+    /// annotation has been mutated in-place by the drag. Marks the
+    /// ticker state as dirty for persistence.
     fn sync_drag_to_intent(
         &mut self,
         symbol_at_drag_start: String,
-        annotation_id: AnnotationId,
+        _annotation_id: AnnotationId,
     ) {
-        use crate::annotation_store::SymbolKey;
-        use crate::ticker_order_intent::{
-            reducer::apply_update_from_surface, EntryMemory, IntentSource, TickerOrderIntent,
-            CURRENT_VERSION,
-        };
-        use midas_chart::widget::order_bracket::EntryType;
-        use std::collections::HashMap;
-
-        let key = SymbolKey::new(&symbol_at_drag_start);
-        let Some(bracket) = self
-            .annotation_store
-            .get_bracket(&symbol_at_drag_start, annotation_id)
-            .cloned()
-        else {
-            return;
-        };
-
-        let side = match bracket.side {
-            midas_chart::widget::order_bracket::BracketSide::Long => {
-                crate::order_panel::OrderSide::Buy
-            }
-            midas_chart::widget::order_bracket::BracketSide::Short => {
-                crate::order_panel::OrderSide::Sell
-            }
-        };
-        let entry_type = bracket.entry_type;
-
-        let memory = EntryMemory {
-            entry_price_or_offset: Some(bracket.entry.line.price),
-            quantity: bracket.quantity,
-            tp_enabled: bracket.take_profit.is_some(),
-            tp_value: bracket
-                .take_profit
-                .as_ref()
-                .map(|tp| format!("{:.2}", tp.line.price))
-                .unwrap_or_default(),
-            tp_mode: crate::order_panel::PriceInputMode::Absolute,
-            sl_enabled: bracket.stop_loss.is_some(),
-            sl_value: bracket
-                .stop_loss
-                .as_ref()
-                .map(|sl| format!("{:.2}", sl.line.price))
-                .unwrap_or_default(),
-            sl_mode: crate::order_panel::PriceInputMode::Absolute,
-            sl_type: crate::order_panel::StopLossType::Stop,
-            sl_limit_value: String::new(),
-        };
-
-        let cached = self.order_intent_handle.snapshot(&key);
-        let gatr_anchor = cached
-            .as_ref()
-            .map(|c| c.gatr_anchor)
-            .unwrap_or_default();
-        let pinned = cached.as_ref().map(|c| c.pinned).unwrap_or(false);
-        let broker_order_id = cached.as_ref().and_then(|c| c.broker_order_id);
-
-        let mut entries: HashMap<
-            (crate::order_panel::OrderSide, EntryType),
-            EntryMemory,
-        > = cached
-            .as_ref()
-            .map(|c| c.entries.clone())
-            .unwrap_or_default();
-        entries.insert((side, entry_type), memory);
-
-        let snapshot = TickerOrderIntent {
-            version: CURRENT_VERSION,
-            symbol: key.clone(),
-            last_side: side,
-            last_entry_type: entry_type,
-            entries,
-            gatr_anchor,
-            live_annotation_id: Some(annotation_id),
-            broker_order_id,
-            pinned,
-            updated_at: chrono::Utc::now(),
-        };
-
-        let active = self.active_chart_symbol().map(|s| SymbolKey::new(&s));
-        let (current_price, gatr_abs) = self
-            .market_cache
-            .get(key.as_str())
-            .map(|s| (s.last_price, s.gatr_abs))
-            .unwrap_or((None, None));
-        let _ = apply_update_from_surface(
-            &mut self.annotation_store,
-            &self.order_intent_handle,
-            &mut self.order_panels,
-            active.as_ref(),
-            key,
-            snapshot,
-            IntentSource::Chart,
-            current_price,
-            gatr_abs,
-        );
+        let key = crate::annotation_store::SymbolKey::new(&symbol_at_drag_start);
+        // Mark ticker state dirty for persistence after drag.
+        if let Some(ts) = self.tickers.get(&key) {
+            self.ticker_persist.upsert(key, ts.clone());
+        }
     }
 
     /// Look up the `(side, entry_type)` currently displayed by the
@@ -2444,7 +2228,7 @@ impl MidasApp {
             return;
         }
         let key = SymbolKey::new(&symbol);
-        let Some(intent) = self.order_intent_handle.snapshot(&key) else {
+        let Some(ticker_state) = self.tickers.get(&key) else {
             return;
         };
 
@@ -2454,9 +2238,10 @@ impl MidasApp {
             .and_then(|s| s.last_price);
 
         // Find panels whose `source_chart` links to this chart.
+        let ticker_state = ticker_state.clone();
         for panel in self.order_panels.values_mut() {
             if panel.state.source_chart == Some(chart_id) {
-                panel.state.hydrate_from_intent(&intent, last_price);
+                panel.state.hydrate_from_intent(&ticker_state, last_price);
             }
         }
     }
@@ -2737,10 +2522,18 @@ impl MidasApp {
                 // `maybe_emit_snap_for_active_chart` below still fires
                 // the one-shot-per-session toast path.
                 if let Some(sym) = self.active_chart_symbol() {
-                    let _ = crate::ticker_order_intent::reducer::apply_maybe_snap(
-                        self,
-                        crate::annotation_store::SymbolKey::new(&sym),
-                    );
+                    let key = crate::annotation_store::SymbolKey::new(&sym);
+                    let snap = self.market_cache.get(key.as_str());
+                    if let Some(price) = snap.as_ref().and_then(|s| s.last_price) {
+                        let gatr_abs = snap.as_ref().and_then(|s| s.gatr_abs);
+                        let _ = self.update(Message::Ticker(
+                            key,
+                            crate::ticker_state::TickerMsg::MaybeSnap {
+                                current_price: price,
+                                gatr_abs,
+                            },
+                        ));
+                    }
                 }
                 self.maybe_emit_snap_for_active_chart()
             }
@@ -3340,11 +3133,6 @@ impl MidasApp {
                 if let Some(ref bridge) = self.broker_bridge {
                     let _ = bridge.shutdown();
                 }
-                // Fire-and-forget durable shutdown of the ticker intent
-                // store. Signals the flush thread to perform a final
-                // `Immediate` commit and exit; the handle itself is
-                // dropped when `MidasApp` drops.
-                self.order_intent_handle.shutdown_blocking();
                 // Blocking shutdown of the ticker-state persistence
                 // layer. Signals the flush thread to perform a final
                 // `Immediate` commit and blocks until it exits.
@@ -3734,26 +3522,26 @@ impl MidasApp {
                 }
                 let mut structural_sync = StructuralSync::None;
 
-                // Snapshot the ticker intent up-front so SetSide can
+                // Snapshot the ticker state up-front so SetSide can
                 // soft-rehydrate the panel from the new compound-key
                 // bucket without re-borrowing `self`. Panels that are
-                // not linked to an intent row get `None` and fall back
+                // not linked to a ticker state get `None` and fall back
                 // to the existing mutation path.
-                let rehydrate_intent = self
+                let rehydrate_state = self
                     .order_panels
                     .get(&panel_id)
                     .map(|p| crate::annotation_store::SymbolKey::new(&p.state.symbol))
-                    .and_then(|key| self.order_intent_handle.snapshot(&key));
+                    .and_then(|key| self.tickers.get(&key).cloned());
 
                 if let Some(panel) = self.order_panels.get_mut(&panel_id) {
                     match action {
                         OrderPanelAction::SetSide(side) => {
-                            // Slice 2: rehydrate from the new compound
+                            // Rehydrate from the new compound
                             // bucket *without* bumping `dirty` — side
                             // toggles are soft reloads, not typed input.
-                            if let Some(ref intent) = rehydrate_intent {
+                            if let Some(ref ts) = rehydrate_state {
                                 panel.state.rehydrate_for_compound(
-                                    intent,
+                                    ts,
                                     side,
                                     panel.state.entry_type,
                                 );
@@ -3985,8 +3773,17 @@ impl MidasApp {
                 // corrected memory before the sync below persists it.
                 if let Some(sym) = side_change_symbol {
                     let key = crate::annotation_store::SymbolKey::new(&sym);
-                    let _ =
-                        crate::ticker_order_intent::reducer::apply_maybe_snap(self, key.clone());
+                    let snap = self.market_cache.get(key.as_str());
+                    if let Some(price) = snap.as_ref().and_then(|s| s.last_price) {
+                        let gatr_abs = snap.as_ref().and_then(|s| s.gatr_abs);
+                        let _ = self.update(Message::Ticker(
+                            key.clone(),
+                            crate::ticker_state::TickerMsg::MaybeSnap {
+                                current_price: price,
+                                gatr_abs,
+                            },
+                        ));
+                    }
 
                     // Reconcile the live bracket so a Buy→Sell (or vice
                     // versa) toggle replaces any stale opposite-side
@@ -3996,25 +3793,17 @@ impl MidasApp {
                         .get(&panel_id)
                         .map(|p| (p.state.side, p.state.entry_type))
                     {
-                        let (current_price, gatr_abs) = self
-                            .market_cache
-                            .get(key.as_str())
-                            .map(|s| (s.last_price, s.gatr_abs))
-                            .unwrap_or((None, None));
-                        let _ =
-                            crate::ticker_order_intent::reducer::apply_ensure_draft_bracket(
-                                &mut self.annotation_store,
-                                &self.order_intent_handle,
-                                &key,
-                                panel_side,
-                                panel_entry_type,
-                                current_price,
-                                gatr_abs,
-                            );
+                        let _ = self.update(Message::Ticker(
+                            key.clone(),
+                            crate::ticker_state::TickerMsg::EnsureDraftBracket {
+                                side: panel_side,
+                                entry_type: panel_entry_type,
+                            },
+                        ));
                         if let Some(new_ann_id) = self
-                            .order_intent_handle
-                            .snapshot(&key)
-                            .and_then(|i| i.live_annotation_id)
+                            .tickers
+                            .get(&key)
+                            .and_then(|ts| ts.live_annotation_id())
                         {
                             if let Some(p) = self.order_panels.get_mut(&panel_id) {
                                 p.state.bracket_annotation_id = Some(new_ann_id);
@@ -4067,20 +3856,12 @@ impl MidasApp {
                         .any(|wl| wl.has_ticker(&symbol_upper));
                     if !still_used {
                         self.market_cache.remove(&symbol_upper);
-                        // Slice 5a: evict any persisted ticker-intent for
-                        // this symbol. The handler fires and forgets
-                        // through the mailbox — the actor's
-                        // `ForgetSymbol` branch drops the cache entry
-                        // and deletes the `redb` row inline (see
-                        // `ticker_order_intent/actor.rs` handler).
-                        // Running after `market_cache.remove` mirrors
-                        // the "nothing references this symbol anymore"
-                        // precondition the store assumes.
-                        self.order_intent_handle.upsert(
-                            crate::ticker_order_intent::OrderIntentMsg::ForgetSymbol {
-                                symbol: crate::annotation_store::SymbolKey::new(&symbol_upper),
-                            },
-                        );
+                        // Evict ticker state for this symbol from both
+                        // the in-memory map and the persistence store.
+                        let sym_key =
+                            crate::annotation_store::SymbolKey::new(&symbol_upper);
+                        self.tickers.remove(&sym_key);
+                        self.ticker_persist.forget(&sym_key);
                     }
                     return self.flush_config();
                 }
@@ -4473,11 +4254,17 @@ impl MidasApp {
 
                 if !self.snapped_this_session.contains(&key) {
                     self.snapped_this_session.insert(key.clone());
-                    return Task::done(Message::OrderIntent(
-                        crate::ticker_order_intent::OrderIntentAppMsg::MaybeSnapToGatr {
-                            symbol: key,
-                        },
-                    ));
+                    let snap = self.market_cache.get(key.as_str());
+                    if let Some(price) = snap.as_ref().and_then(|s| s.last_price) {
+                        let gatr_abs = snap.as_ref().and_then(|s| s.gatr_abs);
+                        return self.update(Message::Ticker(
+                            key,
+                            crate::ticker_state::TickerMsg::MaybeSnap {
+                                current_price: price,
+                                gatr_abs,
+                            },
+                        ));
+                    }
                 }
                 Task::none()
             }
@@ -4909,8 +4696,9 @@ impl MidasApp {
                     return Task::none();
                 }
                 let key = crate::annotation_store::SymbolKey::new(&symbol);
-                Task::done(Message::OrderIntent(
-                    crate::ticker_order_intent::OrderIntentAppMsg::TogglePin { symbol: key },
+                self.update(Message::Ticker(
+                    key,
+                    crate::ticker_state::TickerMsg::TogglePin,
                 ))
             }
 
@@ -5136,16 +4924,13 @@ impl MidasApp {
                     .find(|(_, p)| p.state.bracket_annotation_id == Some(ann_id))
                     .map(|(id, _)| *id);
 
-                // Slice 3: route through the ticker-intent reducer
-                // which removes the annotation, clears
-                // `live_annotation_id`, preserves compound-key memory,
-                // and resets the linked panel's `dirty` flag.
-                crate::ticker_order_intent::reducer::apply_cancel_live_bracket(
-                    &mut self.annotation_store,
-                    &self.order_intent_handle,
-                    &mut self.order_panels,
-                    &crate::annotation_store::SymbolKey::new(&symbol),
-                );
+                // Route through the ticker state machine, which
+                // removes the bracket and clears `live_annotation_id`.
+                let sym_key = crate::annotation_store::SymbolKey::new(&symbol);
+                let _ = self.update(Message::Ticker(
+                    sym_key,
+                    crate::ticker_state::TickerMsg::CancelBracket,
+                ));
 
                 if let Some(pid) = panel_id {
                     // Clear panel bracket ownership (`dirty` already
@@ -5505,10 +5290,6 @@ impl MidasApp {
                     }
                 }
                 self.maybe_save_config()
-            }
-
-            Message::OrderIntent(msg) => {
-                crate::ticker_order_intent::apply_order_intent_msg(self, msg)
             }
 
             Message::Ticker(sym, msg) => {

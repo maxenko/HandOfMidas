@@ -1,3 +1,5 @@
+#![allow(dead_code)] // Public API surface for future slices; many items only used by tests.
+
 //! Per-symbol ticker state machine.
 //!
 //! `TickerState` is the single source of truth for all per-symbol state:
@@ -17,6 +19,7 @@
 mod apply;
 mod factory;
 pub mod persist;
+pub mod price_defaults;
 
 #[cfg(test)]
 mod tests;
@@ -30,8 +33,145 @@ use serde::{Deserialize, Serialize};
 
 use crate::annotation_store::SymbolKey;
 use crate::level_store::StoredLevel;
-use crate::order_panel::OrderSide;
-use crate::ticker_order_intent::{EntryMemory, GatrAnchor, TickerOrderIntent};
+use crate::order_panel::{OrderSide, PriceInputMode, StopLossType};
+
+// ── Types formerly in ticker_order_intent ──────────────────────────
+
+/// Panel memory for a single `(OrderSide, EntryType)` bucket.
+///
+/// All of these fields mirror the string-shaped inputs on
+/// [`crate::order_panel::OrderPanelState`]; they are stored as
+/// `Option<f64>` / `String` rather than parsed values because the
+/// user may be mid-typing when a snapshot is taken, and the panel
+/// wants to round-trip the exact textual input.
+///
+/// # Stop-Loss-on-by-default rule
+///
+/// [`EntryMemory::default`] sets `sl_enabled = true`. Each compound
+/// key tracks its own opt-out independently: toggling SL off in
+/// `(Buy, Stop)` does **not** turn it off in `(Buy, Limit)`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EntryMemory {
+    /// Most recent entry price (Limit / StopLimit / Stop) or offset
+    /// (future offset mode). `None` until the user has touched this
+    /// compound key at least once.
+    #[serde(default)]
+    pub entry_price_or_offset: Option<f64>,
+    /// Most recent quantity. `None` until touched.
+    #[serde(default)]
+    pub quantity: Option<f64>,
+    /// Whether TP was enabled the last time the user visited this
+    /// compound key.
+    #[serde(default)]
+    pub tp_enabled: bool,
+    /// Textual TP value as entered (preserves user's formatting).
+    #[serde(default)]
+    pub tp_value: String,
+    /// TP price input mode (Absolute / Offset / Percent).
+    #[serde(default = "default_price_input_mode")]
+    pub tp_mode: PriceInputMode,
+    /// Whether SL was enabled the last time the user visited this
+    /// compound key. **Defaults to `true`.**
+    #[serde(default = "default_true")]
+    pub sl_enabled: bool,
+    /// Textual SL value as entered.
+    #[serde(default)]
+    pub sl_value: String,
+    /// SL price input mode.
+    #[serde(default = "default_price_input_mode")]
+    pub sl_mode: PriceInputMode,
+    /// SL order type (Stop / StopLimit).
+    #[serde(default = "default_stop_loss_type")]
+    pub sl_type: StopLossType,
+    /// Textual SL limit price (only meaningful when
+    /// `sl_type == StopLossType::StopLimit`).
+    #[serde(default)]
+    pub sl_limit_value: String,
+}
+
+impl Default for EntryMemory {
+    fn default() -> Self {
+        Self {
+            entry_price_or_offset: None,
+            quantity: None,
+            tp_enabled: false,
+            tp_value: String::new(),
+            tp_mode: PriceInputMode::Absolute,
+            sl_enabled: true, // SL-on-by-default per D2.
+            sl_value: String::new(),
+            sl_mode: PriceInputMode::Absolute,
+            sl_type: StopLossType::Stop,
+            sl_limit_value: String::new(),
+        }
+    }
+}
+
+/// GATR snap anchor: the last-known price + GATR for a symbol.
+///
+/// Both fields are `Option` because the very first time an intent is
+/// bootstrapped, there is nothing to anchor against.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct GatrAnchor {
+    /// The price at the last user-initiated upsert. `None` means
+    /// "never touched" — the snap rule cannot fire.
+    #[serde(default)]
+    pub anchor_price: Option<f64>,
+    /// The absolute GATR at the last user-initiated upsert.
+    #[serde(default)]
+    pub anchor_gatr: Option<f64>,
+}
+
+fn default_price_input_mode() -> PriceInputMode {
+    PriceInputMode::Absolute
+}
+
+fn default_stop_loss_type() -> StopLossType {
+    StopLossType::Stop
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Serde helper for `entries`. Represents the map as an array of
+/// `[side, entry_type, memory]` triples so that JSON — which requires
+/// string keys on objects — can round-trip it losslessly.
+pub(crate) mod entries_serde {
+    use super::{EntryMemory, EntryType, HashMap, OrderSide};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Serialize, Deserialize)]
+    struct Triple {
+        side: OrderSide,
+        entry_type: EntryType,
+        memory: EntryMemory,
+    }
+
+    pub(crate) fn serialize<S: Serializer>(
+        map: &HashMap<(OrderSide, EntryType), EntryMemory>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        let vec: Vec<Triple> = map
+            .iter()
+            .map(|((side, entry_type), memory)| Triple {
+                side: *side,
+                entry_type: *entry_type,
+                memory: memory.clone(),
+            })
+            .collect();
+        vec.serialize(s)
+    }
+
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<HashMap<(OrderSide, EntryType), EntryMemory>, D::Error> {
+        let vec = Vec::<Triple>::deserialize(d)?;
+        Ok(vec
+            .into_iter()
+            .map(|t| ((t.side, t.entry_type), t.memory))
+            .collect())
+    }
+}
 
 pub use apply::{TickerEffect, TickerMsg};
 
@@ -65,7 +205,7 @@ pub struct TickerState {
     last_entry_type: EntryType,
     /// Per-compound-key panel memory. Eight possible buckets, one per
     /// `(OrderSide, EntryType)` combination.
-    #[serde(default, with = "crate::ticker_order_intent::entries_serde")]
+    #[serde(default, with = "entries_serde")]
     entries: HashMap<(OrderSide, EntryType), EntryMemory>,
     /// GATR snap anchor for this symbol.
     #[serde(default)]
@@ -326,12 +466,65 @@ pub struct PreSnapState {
 
 // ── v1 → v2 migration ──────────────────────────────────────────────
 
-/// Convert a v1 [`TickerOrderIntent`] into a v2 [`TickerState`].
+/// v1 on-disk shape (formerly `TickerOrderIntent`). Used only for
+/// deserialization during the v1→v2 migration path and tests.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct TickerOrderIntentV1 {
+    #[serde(default = "default_v1_version")]
+    pub version: u32,
+    #[serde(default = "default_symbol")]
+    pub symbol: SymbolKey,
+    #[serde(default = "default_side")]
+    pub last_side: OrderSide,
+    #[serde(default)]
+    pub last_entry_type: EntryType,
+    #[serde(default, with = "entries_serde")]
+    pub entries: HashMap<(OrderSide, EntryType), EntryMemory>,
+    #[serde(default)]
+    pub gatr_anchor: GatrAnchor,
+    #[serde(default)]
+    pub live_annotation_id: Option<AnnotationId>,
+    #[serde(default)]
+    pub broker_order_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default = "default_updated_at")]
+    pub updated_at: DateTime<Utc>,
+}
+
+impl TickerOrderIntentV1 {
+    /// Construct a fresh, empty v1 intent for a symbol.
+    #[cfg(test)]
+    pub(crate) fn new(symbol: SymbolKey) -> Self {
+        Self {
+            version: 1,
+            symbol,
+            last_side: OrderSide::Buy,
+            last_entry_type: EntryType::Market,
+            entries: HashMap::new(),
+            gatr_anchor: GatrAnchor::default(),
+            live_annotation_id: None,
+            broker_order_id: None,
+            pinned: false,
+            updated_at: Utc::now(),
+        }
+    }
+}
+
+fn default_v1_version() -> u32 {
+    1
+}
+
+fn default_symbol() -> SymbolKey {
+    SymbolKey::new("")
+}
+
+/// Convert a v1 [`TickerOrderIntentV1`] into a v2 [`TickerState`].
 ///
 /// Copies all fields from the intent. Fields that did not exist in v1
 /// (`live_bracket`, `levels`, `last_price`, `gatr_abs`, editing state,
 /// pre-snap) default to `None`/empty.
-pub fn migrate_v1_v2(intent: &TickerOrderIntent) -> TickerState {
+pub fn migrate_v1_v2(intent: &TickerOrderIntentV1) -> TickerState {
     TickerState {
         symbol: intent.symbol.clone(),
         version: CURRENT_VERSION,

@@ -1057,21 +1057,21 @@ fn reposition_bracket_shifts_all_legs() {
 }
 
 // ===========================================================================
-// Slice 2: hydration from TickerOrderIntent
+// Slice 2: hydration from TickerState
 // ===========================================================================
 
 mod hydration {
     use super::*;
     use crate::annotation_store::SymbolKey;
-    use crate::ticker_order_intent::{EntryMemory, GatrAnchor, TickerOrderIntent};
+    use crate::ticker_state::{EntryMemory, GatrAnchor, TickerOrderIntentV1, TickerState};
     use midas_chart::widget::order_bracket::EntryType;
     use std::collections::HashMap;
 
-    /// Build an intent with `(Buy, Stop)` populated with custom prices
+    /// Build a TickerState with `(Buy, Stop)` populated with custom prices
     /// and `sl_enabled = false`. Used as the common fixture so
     /// compound-key tests can pivot to the untouched `(Sell, Limit)`
     /// bucket and verify default fallbacks.
-    fn fixture_intent(symbol: &str) -> TickerOrderIntent {
+    fn fixture_state(symbol: &str) -> TickerState {
         let mut entries = HashMap::new();
         entries.insert(
             (OrderSide::Buy, EntryType::Stop),
@@ -1088,8 +1088,8 @@ mod hydration {
                 sl_limit_value: String::new(),
             },
         );
-        TickerOrderIntent {
-            version: crate::ticker_order_intent::CURRENT_VERSION,
+        let intent = TickerOrderIntentV1 {
+            version: 1,
             symbol: SymbolKey::new(symbol),
             last_side: OrderSide::Buy,
             last_entry_type: EntryType::Stop,
@@ -1099,15 +1099,16 @@ mod hydration {
             broker_order_id: None,
             pinned: false,
             updated_at: chrono::Utc::now(),
-        }
+        };
+        TickerState::from_legacy(intent, Vec::new(), None, None)
     }
 
     #[test]
     fn hydrate_populates_fields_for_last_compound_key() {
         let mut panel = OrderPanelState::default();
-        let intent = fixture_intent("AAPL");
+        let state = fixture_state("AAPL");
 
-        panel.hydrate_from_intent(&intent, Some(124.00));
+        panel.hydrate_from_intent(&state, Some(124.00));
 
         assert_eq!(panel.symbol, "AAPL");
         assert_eq!(panel.side, OrderSide::Buy);
@@ -1132,8 +1133,8 @@ mod hydration {
             ..Default::default()
         };
 
-        let intent = fixture_intent("AAPL");
-        panel.hydrate_from_intent(&intent, Some(124.00));
+        let state = fixture_state("AAPL");
+        panel.hydrate_from_intent(&state, Some(124.00));
 
         // Panel state was preserved — dirty guard fired.
         assert_eq!(panel.quantity, "999");
@@ -1149,8 +1150,8 @@ mod hydration {
             ..Default::default()
         };
 
-        let intent = fixture_intent("AAPL");
-        panel.hydrate_from_intent(&intent, Some(124.00));
+        let state = fixture_state("AAPL");
+        panel.hydrate_from_intent(&state, Some(124.00));
 
         // Cross-ticker hydration bypasses the dirty guard.
         assert_eq!(panel.symbol, "AAPL");
@@ -1173,14 +1174,14 @@ mod hydration {
     #[test]
     fn rehydrate_compound_key_falls_back_to_defaults_with_sl_on() {
         let mut panel = OrderPanelState::default();
-        let intent = fixture_intent("AAPL");
+        let state = fixture_state("AAPL");
         // First land on the populated compound.
-        panel.hydrate_from_intent(&intent, Some(124.00));
+        panel.hydrate_from_intent(&state, Some(124.00));
         assert!(!panel.sl_enabled);
 
         // Switch to an untouched bucket. The fallback `EntryMemory::default()`
         // has `sl_enabled = true` per the SL-on-by-default rule.
-        panel.rehydrate_for_compound(&intent, OrderSide::Sell, EntryType::Limit);
+        panel.rehydrate_for_compound(&state, OrderSide::Sell, EntryType::Limit);
 
         assert_eq!(panel.side, OrderSide::Sell);
         assert_eq!(panel.entry_type, EntryType::Limit);
@@ -1194,13 +1195,13 @@ mod hydration {
     #[test]
     fn rehydrate_compound_does_not_bump_dirty() {
         let mut panel = OrderPanelState::default();
-        let intent = fixture_intent("AAPL");
-        panel.hydrate_from_intent(&intent, Some(124.00));
+        let state = fixture_state("AAPL");
+        panel.hydrate_from_intent(&state, Some(124.00));
         assert!(!panel.dirty);
 
         // Pretend the user was mid-edit.
         panel.dirty = true;
-        panel.rehydrate_for_compound(&intent, OrderSide::Buy, EntryType::Limit);
+        panel.rehydrate_for_compound(&state, OrderSide::Buy, EntryType::Limit);
         // `dirty` is explicitly untouched by the soft rehydrate.
         assert!(panel.dirty);
     }
@@ -1219,8 +1220,8 @@ mod hydration {
             ..Default::default()
         };
 
-        let intent = fixture_intent("PLTR");
-        panel.hydrate_from_intent(&intent, Some(14.45));
+        let state = fixture_state("PLTR");
+        panel.hydrate_from_intent(&state, Some(14.45));
 
         assert_eq!(panel.symbol, "PLTR");
         assert!(!panel.dirty, "cross-ticker hydration clears dirty");
@@ -1232,9 +1233,24 @@ mod hydration {
     #[test]
     fn rehydrate_compound_within_same_side_lands_on_new_type_bucket() {
         let mut panel = OrderPanelState::default();
-        // Seed intent with (Buy, Stop) AND (Buy, Limit) distinct.
-        let mut intent = fixture_intent("AAPL");
-        intent.entries.insert(
+        // Seed state with (Buy, Stop) AND (Buy, Limit) distinct.
+        let mut entries = HashMap::new();
+        entries.insert(
+            (OrderSide::Buy, EntryType::Stop),
+            EntryMemory {
+                entry_price_or_offset: Some(123.45),
+                quantity: Some(50.0),
+                tp_enabled: true,
+                tp_value: "125.00".to_string(),
+                tp_mode: PriceInputMode::Absolute,
+                sl_enabled: false,
+                sl_value: "120.00".to_string(),
+                sl_mode: PriceInputMode::Absolute,
+                sl_type: StopLossType::Stop,
+                sl_limit_value: String::new(),
+            },
+        );
+        entries.insert(
             (OrderSide::Buy, EntryType::Limit),
             EntryMemory {
                 entry_price_or_offset: Some(200.00),
@@ -1249,15 +1265,28 @@ mod hydration {
                 sl_limit_value: String::new(),
             },
         );
+        let intent = TickerOrderIntentV1 {
+            version: 1,
+            symbol: SymbolKey::new("AAPL"),
+            last_side: OrderSide::Buy,
+            last_entry_type: EntryType::Stop,
+            entries,
+            gatr_anchor: GatrAnchor::default(),
+            live_annotation_id: None,
+            broker_order_id: None,
+            pinned: false,
+            updated_at: chrono::Utc::now(),
+        };
+        let state = TickerState::from_legacy(intent, Vec::new(), None, None);
 
-        panel.hydrate_from_intent(&intent, Some(124.00));
+        panel.hydrate_from_intent(&state, Some(124.00));
         // Land on (Buy, Stop) first.
         assert_eq!(panel.entry_type, EntryType::Stop);
         assert_eq!(panel.stop_price, "123.45");
 
         // User toggles entry type to Limit → rehydrate reads the
         // Limit bucket.
-        panel.rehydrate_for_compound(&intent, OrderSide::Buy, EntryType::Limit);
+        panel.rehydrate_for_compound(&state, OrderSide::Buy, EntryType::Limit);
         assert_eq!(panel.entry_type, EntryType::Limit);
         assert_eq!(panel.limit_price, "200.00");
         assert_eq!(panel.quantity, "75");
@@ -1268,8 +1297,7 @@ mod hydration {
 
 // Slice 4 panel-input snap tests previously lived here as
 // `mod snap_panel`. They have been moved to
-// `crate::ticker_order_intent::reducer::tests` as part of the
-// single-source-of-truth refactor: the snap policy is now a reducer
-// concern, not a panel-view concern. The panel is purely a view of
-// `TickerOrderIntent` — snapping its fields directly would create a
-// second source of truth.
+// `crate::ticker_state` as part of the single-source-of-truth refactor:
+// the snap policy is now a ticker-state concern, not a panel-view
+// concern. The panel is purely a view of `TickerState` — snapping its
+// fields directly would create a second source of truth.

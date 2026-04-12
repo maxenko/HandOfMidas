@@ -1,6 +1,6 @@
 //! Persistence for [`super::TickerState`] using `redb`.
 //!
-//! Mirrors the existing `ticker_order_intent::actor` pattern: a
+//! Mirrors the old `ticker_order_intent::actor` pattern: a
 //! dedicated background flush thread with 75ms debounce, condvar-driven
 //! wake, and `Durability::Eventual` / `Immediate` split.
 //!
@@ -40,7 +40,7 @@ const IDLE_THRESHOLD: Duration = Duration::from_millis(750);
 /// The v2 table. Value is `serde_json::to_vec_pretty(&state)`.
 const TABLE_V2: TableDefinition<'_, &str, &[u8]> = TableDefinition::new("ticker_state_v2");
 
-/// The v1 table (from `ticker_order_intent::actor`). Read-only during
+/// The v1 table (from the old `ticker_order_intent` actor). Read-only during
 /// migration; never written to by this module.
 const TABLE_V1: TableDefinition<'_, &str, &[u8]> = TableDefinition::new("ticker_intent_v1");
 
@@ -373,9 +373,7 @@ fn migrate_v1_to_v2(db: &Database, cache: &StateCache) -> Result<(), PersistErro
             continue;
         }
 
-        match serde_json::from_slice::<crate::ticker_order_intent::TickerOrderIntent>(
-            value.value(),
-        ) {
+        match serde_json::from_slice::<super::TickerOrderIntentV1>(value.value()) {
             Ok(intent) => {
                 let state = super::migrate_v1_v2(&intent);
                 cache.seed(symbol.clone(), state);

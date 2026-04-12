@@ -109,49 +109,49 @@ impl Default for OrderPanelState {
 }
 
 impl OrderPanelState {
-    /// Hydrate this panel from a per-ticker [`TickerOrderIntent`] snapshot.
+    /// Hydrate this panel from a per-ticker [`crate::ticker_state::TickerState`].
     ///
-    /// Uses `intent.last_side` and `intent.last_entry_type` as the
+    /// Uses `state.last_side()` and `state.last_entry_type()` as the
     /// compound key to look up the last-used
-    /// [`crate::ticker_order_intent::EntryMemory`] bucket and copies
+    /// [`crate::ticker_state::EntryMemory`] bucket and copies
     /// every field into the panel. If that compound key has never been
-    /// touched (no entry in `intent.entries`), falls back to
+    /// touched (no entry in `state.entries()`), falls back to
     /// `EntryMemory::default()` — which sets `sl_enabled = true` per
     /// the "SL on by default per compound" rule.
     ///
     /// # Dirty guard
     ///
     /// If the panel is currently marked `dirty` **and** the incoming
-    /// intent is for the *same* symbol the panel is editing, this is a
+    /// state is for the *same* symbol the panel is editing, this is a
     /// no-op — we do not clobber in-progress user edits. A hydration
     /// from a *different* ticker proceeds unconditionally and clears
     /// the dirty flag.
     pub fn hydrate_from_intent(
         &mut self,
-        intent: &crate::ticker_order_intent::TickerOrderIntent,
+        state: &crate::ticker_state::TickerState,
         last_price: Option<f64>,
     ) {
-        if self.dirty && self.symbol == intent.symbol.as_str() {
+        if self.dirty && self.symbol == state.symbol().as_str() {
             return;
         }
-        let memory = intent
-            .entries
-            .get(&(intent.last_side, intent.last_entry_type))
+        let memory = state
+            .entries()
+            .get(&(state.last_side(), state.last_entry_type()))
             .cloned()
             .unwrap_or_default();
-        self.symbol = intent.symbol.as_str().to_string();
-        self.side = intent.last_side;
-        self.entry_type = intent.last_entry_type;
+        self.symbol = state.symbol().as_str().to_string();
+        self.side = state.last_side();
+        self.entry_type = state.last_entry_type();
         self.apply_entry_memory(&memory);
         self.last_price = last_price;
-        self.bracket_annotation_id = intent.live_annotation_id;
+        self.bracket_annotation_id = state.live_annotation_id();
         self.dirty = false;
     }
 
     /// Soft re-hydrate the panel when the user toggles side or entry
     /// type *within* the same ticker.
     ///
-    /// Re-reads the bucket at `(new_side, new_type)` from `intent.entries`
+    /// Re-reads the bucket at `(new_side, new_type)` from `state.entries()`
     /// (or falls back to `EntryMemory::default()` — including the
     /// default-true `sl_enabled`). Unlike
     /// [`Self::hydrate_from_intent`], this does **not** bump or clear
@@ -160,12 +160,12 @@ impl OrderPanelState {
     /// panel in-progress.
     pub fn rehydrate_for_compound(
         &mut self,
-        intent: &crate::ticker_order_intent::TickerOrderIntent,
+        state: &crate::ticker_state::TickerState,
         new_side: OrderSide,
         new_type: EntryType,
     ) {
-        let memory = intent
-            .entries
+        let memory = state
+            .entries()
             .get(&(new_side, new_type))
             .cloned()
             .unwrap_or_default();
@@ -177,7 +177,7 @@ impl OrderPanelState {
     /// Copy every price / toggle field from an [`EntryMemory`] bucket
     /// into the panel. Shared by
     /// [`Self::hydrate_from_intent`] and [`Self::rehydrate_for_compound`].
-    fn apply_entry_memory(&mut self, memory: &crate::ticker_order_intent::EntryMemory) {
+    fn apply_entry_memory(&mut self, memory: &crate::ticker_state::EntryMemory) {
         self.quantity = memory
             .quantity
             .map(|q| format!("{}", q))

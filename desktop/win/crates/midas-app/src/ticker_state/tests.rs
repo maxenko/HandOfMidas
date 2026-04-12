@@ -9,10 +9,12 @@ use midas_chart::widget::order_bracket::EntryType;
 
 use crate::annotation_store::SymbolKey;
 use crate::order_panel::OrderSide;
-use crate::ticker_order_intent::{EntryMemory, GatrAnchor, TickerOrderIntent};
 
 use super::apply::{TickerEffect, TickerMsg};
-use super::{migrate_v1_v2, EditingField, TickerState, CURRENT_VERSION};
+use super::{
+    migrate_v1_v2, EditingField, EntryMemory, GatrAnchor, TickerOrderIntentV1, TickerState,
+    CURRENT_VERSION,
+};
 
 // ── Serde round-trip ────────────────────────────────────────────────
 
@@ -92,7 +94,7 @@ fn migrate_v1_v2_copies_all_fields() {
         },
     );
 
-    let intent = TickerOrderIntent {
+    let intent = TickerOrderIntentV1 {
         version: 1,
         symbol: SymbolKey::new("IBM"),
         last_side: OrderSide::Sell,
@@ -139,7 +141,7 @@ fn migrate_v1_v2_copies_all_fields() {
 
 #[test]
 fn migrate_v1_v2_preserves_annotation_id() {
-    let intent = TickerOrderIntent {
+    let intent = TickerOrderIntentV1 {
         version: 1,
         symbol: SymbolKey::new("TSLA"),
         last_side: OrderSide::Buy,
@@ -238,7 +240,7 @@ fn factory_from_legacy() {
         },
     );
 
-    let intent = TickerOrderIntent {
+    let intent = TickerOrderIntentV1 {
         version: 1,
         symbol: SymbolKey::new("NVDA"),
         last_side: OrderSide::Buy,
@@ -296,7 +298,7 @@ fn state_with_stale_anchor(anchor_price: f64, gatr: f64) -> TickerState {
         entry_type: EntryType::Market,
     });
     // Seed the GATR anchor.
-    state.force_gatr_anchor(crate::ticker_order_intent::GatrAnchor {
+    state.force_gatr_anchor(super::GatrAnchor {
         anchor_price: Some(anchor_price),
         anchor_gatr: Some(gatr),
     });
@@ -813,7 +815,7 @@ fn corrupt_partial_v1_blob_deserializes_to_defaults() {
     // A minimal JSON blob with only the symbol field — all other fields
     // should fall back to their serde defaults.
     let blob = br#"{"symbol":"CORRUPT"}"#;
-    let intent: TickerOrderIntent =
+    let intent: TickerOrderIntentV1 =
         serde_json::from_slice(blob).expect("partial v1 should deserialize");
     assert_eq!(intent.symbol.as_str(), "CORRUPT");
     assert_eq!(intent.last_side, OrderSide::Buy);
@@ -1114,7 +1116,7 @@ fn startup_migrates_v1_to_v2() {
         let v1_table: redb::TableDefinition<'_, &str, &[u8]> =
             redb::TableDefinition::new("ticker_intent_v1");
 
-        let intent = TickerOrderIntent::new(SymbolKey::new("TSLA"));
+        let intent = TickerOrderIntentV1::new(SymbolKey::new("TSLA"));
         let blob = serde_json::to_vec(&intent).unwrap();
 
         let txn = db.begin_write().unwrap();

@@ -20,8 +20,14 @@ use midas_chart::widget::AnnotationId;
 use crate::app::ToastAction;
 use crate::level_store::StoredLevel;
 use crate::order_panel::OrderSide;
-use crate::ticker_order_intent::gatr_snap::{MIN_GATR_ABS, RECENCY_GUARD_SECS};
-use crate::ticker_order_intent::price_defaults::default_initial_prices;
+
+use super::price_defaults::default_initial_prices;
+
+/// Minimum absolute GATR value before the snap rule is allowed to fire.
+pub(crate) const MIN_GATR_ABS: f64 = 1e-9;
+
+/// Minimum recency (in seconds) before the snap rule is allowed to fire.
+pub(crate) const RECENCY_GUARD_SECS: i64 = 60 * 60;
 
 use super::{EditingField, PreSnapState, TickerState};
 
@@ -148,6 +154,7 @@ pub enum TickerMsg {
     /// Broker acknowledged the order submission.
     OrderPending {
         /// Broker-assigned order identifier.
+        #[allow(dead_code)]
         order_id: uuid::Uuid,
     },
     /// Order fully filled.
@@ -883,7 +890,7 @@ impl TickerState {
     /// Internal helper: evaluate the GATR snap rule and apply it if
     /// the guards pass.
     ///
-    /// Reuses the guard logic from [`crate::ticker_order_intent::gatr_snap`]
+    /// Reuses the guard logic from the old `gatr_snap` module
     /// and the repositioning helpers from [`crate::order_panel`].
     fn apply_maybe_snap(
         &mut self,

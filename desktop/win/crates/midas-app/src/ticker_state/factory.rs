@@ -17,12 +17,12 @@ use midas_chart::widget::AnnotationId;
 use crate::annotation_store::SymbolKey;
 use crate::level_store::StoredLevel;
 use crate::order_panel::OrderSide;
-use crate::ticker_order_intent::price_defaults::default_initial_prices;
-use crate::ticker_order_intent::{EntryMemory, GatrAnchor, TickerOrderIntent};
 
-use super::{TickerState, CURRENT_VERSION};
+use super::price_defaults::default_initial_prices;
+use super::{EntryMemory, GatrAnchor, TickerOrderIntentV1, TickerState, CURRENT_VERSION};
 
 /// All `(OrderSide, EntryType)` compound keys.
+#[allow(dead_code)] // used by new_with_defaults which is used by tests
 const ALL_COMPOUND_KEYS: [(OrderSide, EntryType); 8] = [
     (OrderSide::Buy, EntryType::Market),
     (OrderSide::Buy, EntryType::Limit),
@@ -67,6 +67,7 @@ impl TickerState {
     /// Uses [`default_initial_prices`] to populate each
     /// `(OrderSide, EntryType)` bucket with prices derived from
     /// `current_price` and `gatr_abs`.
+    #[allow(dead_code)] // used by tests and future slices
     pub fn new_with_defaults(
         symbol: SymbolKey,
         current_price: f64,
@@ -111,12 +112,13 @@ impl TickerState {
 
     /// Construct a ticker state from legacy data sources.
     ///
-    /// Copies all fields from a `TickerOrderIntent`, then overlays
+    /// Copies all fields from a v1 `TickerOrderIntentV1`, then overlays
     /// levels, bracket, and annotation ID from `AnnotationStore` /
     /// `LevelStore`. Last-write-wins: redb data (the intent) takes
     /// priority for fields that exist in both sources.
+    #[allow(dead_code)] // used by tests and v1 migration
     pub fn from_legacy(
-        intent: TickerOrderIntent,
+        intent: TickerOrderIntentV1,
         levels: Vec<StoredLevel>,
         bracket: Option<OrderBracket>,
         annotation_id: Option<AnnotationId>,

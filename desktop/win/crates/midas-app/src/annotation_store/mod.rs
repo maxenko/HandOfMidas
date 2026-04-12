@@ -261,6 +261,7 @@ impl AnnotationStore {
     }
 
     /// Returns an iterator over all symbols that have annotations.
+    #[allow(dead_code)]
     pub fn symbols(&self) -> impl Iterator<Item = &str> {
         self.by_symbol.keys().map(|k| k.as_str())
     }
