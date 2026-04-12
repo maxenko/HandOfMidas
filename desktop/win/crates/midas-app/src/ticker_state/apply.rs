@@ -305,6 +305,14 @@ impl TickerState {
                         b.filled_qty = None;
                         b.wrong_side_warning = false;
                     }
+                    // Always reset to Draft — EnsureDraftBracket means
+                    // "ensure a DRAFT." A prior session might have left
+                    // the bracket as Pending/Active/Filled, which makes
+                    // the entry line non-interactive in the app-level
+                    // hit-test (chart_widget.rs only allows Draft entry
+                    // drags).
+                    b.status = BracketStatus::Draft;
+                    b.saved = false;
                     b.side = bracket_side;
                     b.entry_type = entry_type;
                     crate::order_panel::normalize_bracket(b);
