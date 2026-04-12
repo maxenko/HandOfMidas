@@ -1617,6 +1617,11 @@ impl MidasApp {
         if let Some(chart) = self.charts.get_mut(&chart_id) {
             chart.load_generation = chart.load_generation.wrapping_add(1);
             chart.load_state = LoadState::Loading;
+            // Clear the old data so the chart doesn't ghost the previous
+            // ticker's candles while the new ticker loads. The view guard
+            // (LoadState::Loaded + Some(data)) prevents rendering until
+            // the new data arrives.
+            chart.data = None;
             chart.chart_state.dirty.mark_data();
         }
 
@@ -2203,6 +2208,14 @@ impl MidasApp {
                                                     chart.chart_state.camera.time_end - duration;
                                                 chart.chart_state.dirty.mark_camera();
                                             }
+                                        } else {
+                                            // Historical view with data in range —
+                                            // restore the saved camera verbatim.
+                                            chart.chart_state.camera.time_start = saved.time_start;
+                                            chart.chart_state.camera.time_end = saved.time_end;
+                                            chart.chart_state.camera.price_low = saved.price_low;
+                                            chart.chart_state.camera.price_high = saved.price_high;
+                                            chart.chart_state.dirty.mark_camera();
                                         }
                                     }
                                 }
