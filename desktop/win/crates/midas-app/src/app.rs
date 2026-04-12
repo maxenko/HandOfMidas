@@ -869,9 +869,18 @@ impl MidasApp {
             .unwrap_or_default()
             .join("HandOfMidas")
             .join("ticker_state.redb");
+        // Legacy handle uses a separate file to avoid redb exclusive-lock
+        // conflict with the new ticker_persist handle (both previously
+        // targeted ticker_state.redb). This handle is still referenced by
+        // ~18 legacy code paths pending cleanup. Once those are migrated
+        // to read from self.tickers, this handle and its file are deleted.
+        let legacy_intent_path = dirs::data_local_dir()
+            .unwrap_or_default()
+            .join("HandOfMidas")
+            .join("ticker_intent_legacy.redb");
         let order_intent_handle =
             match crate::ticker_order_intent::TickerOrderIntentHandle::open(
-                ticker_state_path.clone(),
+                legacy_intent_path.clone(),
             ) {
                 Ok(h) => h,
                 Err(e) => {
