@@ -1067,3 +1067,182 @@ fn order_panel_empty_symbol_has_no_bound() {
     let panel = OrderPanel::new(midas_core::OrderPanelId::new(4), String::new());
     assert!(panel.bound_symbol.is_none());
 }
+
+// ── Slice 4: Persistence integration tests ────────────────────────
+
+#[test]
+fn startup_loads_ticker_states_from_redb() {
+    use super::persist::TickerStatePersistHandle;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("test_load.redb");
+
+    // Open, seed two symbols, shut down.
+    {
+        let handle = TickerStatePersistHandle::open(&db_path).unwrap();
+        let s1 = TickerState::new_with_defaults(SymbolKey::new("AAPL"), 185.0, Some(2.5));
+        let s2 = TickerState::new_with_defaults(SymbolKey::new("MSFT"), 400.0, Some(5.0));
+        handle.upsert(SymbolKey::new("AAPL"), s1);
+        handle.upsert(SymbolKey::new("MSFT"), s2);
+        handle.flush_now();
+        handle.shutdown_blocking();
+    }
+
+    // Re-open and verify.
+    {
+        let handle = TickerStatePersistHandle::open(&db_path).unwrap();
+        let all = handle.all_states();
+        assert_eq!(all.len(), 2, "should load 2 symbols from redb");
+        assert!(all.contains_key(&SymbolKey::new("AAPL")));
+        assert!(all.contains_key(&SymbolKey::new("MSFT")));
+        let aapl = &all[&SymbolKey::new("AAPL")];
+        assert_eq!(aapl.version(), CURRENT_VERSION);
+        handle.shutdown();
+    }
+}
+
+#[test]
+fn startup_migrates_v1_to_v2() {
+    use super::persist::TickerStatePersistHandle;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("test_migrate.redb");
+
+    // Seed a v1 row directly into redb (bypassing the handle).
+    {
+        let db = redb::Database::create(&db_path).unwrap();
+        let v1_table: redb::TableDefinition<'_, &str, &[u8]> =
+            redb::TableDefinition::new("ticker_intent_v1");
+
+        let intent = TickerOrderIntent::new(SymbolKey::new("TSLA"));
+        let blob = serde_json::to_vec(&intent).unwrap();
+
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(v1_table).unwrap();
+            table.insert("TSLA", blob.as_slice()).unwrap();
+        }
+        txn.commit().unwrap();
+    }
+
+    // Open the persist handle — it should auto-migrate v1→v2.
+    {
+        let handle = TickerStatePersistHandle::open(&db_path).unwrap();
+        let all = handle.all_states();
+        assert!(
+            all.contains_key(&SymbolKey::new("TSLA")),
+            "v1 row should be migrated to v2"
+        );
+        let tsla = &all[&SymbolKey::new("TSLA")];
+        assert_eq!(tsla.version(), CURRENT_VERSION);
+        assert_eq!(tsla.last_side(), OrderSide::Buy);
+        handle.shutdown();
+    }
+}
+
+#[test]
+fn shutdown_flushes_dirty_states() {
+    use super::persist::TickerStatePersistHandle;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("test_flush.redb");
+
+    // Create a state and modify it.
+    {
+        let handle = TickerStatePersistHandle::open(&db_path).unwrap();
+        let mut state = TickerState::new(SymbolKey::new("NVDA"));
+        // Modify via apply to make it dirty.
+        let _ = state.apply(TickerMsg::UpdateMarketData {
+            last_price: 900.0,
+            gatr_abs: Some(10.0),
+        });
+        handle.upsert(SymbolKey::new("NVDA"), state);
+        handle.flush_now();
+        handle.shutdown_blocking();
+    }
+
+    // Re-open and verify persistence.
+    {
+        let handle = TickerStatePersistHandle::open(&db_path).unwrap();
+        let all = handle.all_states();
+        assert!(
+            all.contains_key(&SymbolKey::new("NVDA")),
+            "dirty state should be flushed on shutdown"
+        );
+        handle.shutdown();
+    }
+}
+
+#[test]
+fn persist_handle_all_states_returns_all_seeded() {
+    use super::persist::TickerStatePersistHandle;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("test_all.redb");
+
+    let handle = TickerStatePersistHandle::open(&db_path).unwrap();
+    let s1 = TickerState::new(SymbolKey::new("A"));
+    let s2 = TickerState::new(SymbolKey::new("B"));
+    let s3 = TickerState::new(SymbolKey::new("C"));
+    handle.upsert(SymbolKey::new("A"), s1);
+    handle.upsert(SymbolKey::new("B"), s2);
+    handle.upsert(SymbolKey::new("C"), s3);
+
+    let all = handle.all_states();
+    assert_eq!(all.len(), 3);
+    handle.shutdown();
+}
+
+#[test]
+fn persist_forget_removes_from_cache() {
+    use super::persist::TickerStatePersistHandle;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("test_forget.redb");
+
+    let handle = TickerStatePersistHandle::open(&db_path).unwrap();
+    let state = TickerState::new(SymbolKey::new("GOOG"));
+    handle.upsert(SymbolKey::new("GOOG"), state);
+    assert!(handle.snapshot(&SymbolKey::new("GOOG")).is_some());
+
+    handle.forget(&SymbolKey::new("GOOG"));
+    assert!(
+        handle.snapshot(&SymbolKey::new("GOOG")).is_none(),
+        "forget should remove from cache"
+    );
+    assert_eq!(handle.all_states().len(), 0);
+    handle.shutdown();
+}
+
+#[test]
+fn inject_levels_populates_ticker_state() {
+    use crate::level_store::StoredLevel;
+    use midas_chart::widget::price_line::{LineExtent, LineStroke, PriceLine};
+    use midas_chart::widget::LineStyle;
+    use midas_chart::HorizontalLevel;
+
+    let mut state = TickerState::new(SymbolKey::new("TEST"));
+    assert!(state.levels().is_empty());
+
+    let levels = vec![StoredLevel {
+        level: HorizontalLevel {
+            id: 1,
+            line: PriceLine {
+                price: 100.0,
+                extent: LineExtent::default(),
+                stroke: LineStroke {
+                    color: [1.0, 0.0, 0.0, 1.0],
+                    width: 1.0,
+                    style: LineStyle::default(),
+                },
+            },
+            label: Some("Support".into()),
+            icon: midas_chart::levels::LevelIcon::None,
+        },
+        locked: false,
+    }];
+
+    state.inject_levels(levels);
+    assert_eq!(state.levels().len(), 1);
+    assert!((state.levels()[0].line.price - 100.0).abs() < f64::EPSILON);
+}

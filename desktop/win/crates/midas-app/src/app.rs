@@ -244,12 +244,16 @@ pub struct MidasApp {
         crate::annotation_store::SymbolKey,
         crate::ticker_order_intent::reducer::PreSnapState,
     >,
-    /// Per-symbol ticker state map (Slice 0 of the ticker state machine
-    /// plan). All per-symbol state will migrate here; currently inert.
+    /// Per-symbol ticker state map. The single source of truth for all
+    /// per-symbol state: order brackets, entry memories, GATR anchors,
+    /// price levels, and market data snapshots.
     pub tickers: std::collections::HashMap<
         crate::annotation_store::SymbolKey,
         crate::ticker_state::TickerState,
     >,
+    /// Persistence handle for TickerState (redb v2). Opened on startup,
+    /// flushed on shutdown. The `PersistDirty` effect routes through this.
+    pub ticker_persist: crate::ticker_state::persist::TickerStatePersistHandle,
     /// No-reentry guard for the `Message::Ticker` dispatch cycle.
     /// Set to `true` while processing effects; asserted `false` at
     /// entry to prevent feedback loops.
@@ -882,6 +886,111 @@ impl MidasApp {
                 }
             };
 
+        // Open the ticker-state persistence handle (redb v2).
+        //
+        // This handle hydrates all v2 rows on open, runs v1→v2 migration
+        // if needed, and spawns the background flush thread. On startup,
+        // we populate `self.tickers` from the cache. On shutdown,
+        // `flush_now()` + `shutdown()` ensures all dirty states are
+        // durably written.
+        let ticker_persist =
+            match crate::ticker_state::persist::TickerStatePersistHandle::open(
+                ticker_state_path.clone(),
+            ) {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::error!(
+                        "failed to open ticker-state persist at {}: {e}",
+                        ticker_state_path.display()
+                    );
+                    panic!(
+                        "ticker-state persist open failed at {}: {e}",
+                        ticker_state_path.display()
+                    );
+                }
+            };
+
+        // Hydrate the tickers map from redb v2 blobs.
+        let mut tickers = ticker_persist.all_states();
+        tracing::info!(
+            "ticker-state: loaded {} symbol(s) from redb v2",
+            tickers.len()
+        );
+
+        // v1→v2 migration: import bracket data from annotation JSON files.
+        //
+        // If a symbol has annotation JSON with OrderBracket data but no
+        // v2 redb entry (or an entry without a live_bracket), merge the
+        // bracket into the TickerState via from_legacy(). This is the
+        // one-way-door migration path: after this, bracket data lives in
+        // redb v2 blobs.
+        {
+            let data_dir = config_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."));
+            match crate::annotation_persistence::load_all(data_dir) {
+                Ok(files) => {
+                    let mut migrated_count = 0u32;
+                    for (symbol, annotations) in &files {
+                        let sym_key = crate::annotation_store::SymbolKey::new(symbol);
+                        // Find the first OrderBracket annotation for this symbol.
+                        let bracket_info = annotations.iter().find_map(|ann| {
+                            if let midas_chart::widget::AnnotationKind::OrderBracket(ref b) = ann.kind {
+                                Some((ann.id, b.as_ref().clone()))
+                            } else {
+                                None
+                            }
+                        });
+                        if let Some((ann_id, bracket)) = bracket_info {
+                            let ts = tickers.entry(sym_key.clone()).or_insert_with(|| {
+                                crate::ticker_state::TickerState::new(sym_key.clone())
+                            });
+                            // Only import if the TickerState doesn't already have a bracket.
+                            if ts.live_bracket().is_none() {
+                                ts.set_live_bracket(Some(bracket));
+                                ts.set_live_annotation_id(Some(ann_id));
+                                migrated_count += 1;
+                            }
+                        }
+                    }
+                    if migrated_count > 0 {
+                        tracing::info!(
+                            "ticker-state: imported {migrated_count} bracket(s) from annotation JSON"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("ticker-state migration: failed to load annotation JSON: {e}");
+                }
+            }
+
+            // v1→v2 migration: import levels from TOML config.
+            //
+            // For each symbol in LevelStore, inject its levels into the
+            // corresponding TickerState. Redb data (existing levels in
+            // TickerState) takes priority — only inject if TickerState
+            // has no levels yet.
+            for (ticker, stored_levels) in level_store.all_levels() {
+                let sym_key = crate::annotation_store::SymbolKey::new(ticker);
+                let ts = tickers.entry(sym_key.clone()).or_insert_with(|| {
+                    crate::ticker_state::TickerState::new(sym_key.clone())
+                });
+                if ts.levels().is_empty() && !stored_levels.is_empty() {
+                    ts.inject_levels(stored_levels.to_vec());
+                    tracing::debug!(
+                        "ticker-state: imported {} level(s) for {ticker} from TOML config",
+                        stored_levels.len()
+                    );
+                }
+            }
+
+            // Flush all migrated states to redb so subsequent startups
+            // skip migration.
+            for (sym, state) in &tickers {
+                ticker_persist.upsert(sym.clone(), state.clone());
+            }
+        }
+
         // Start the broker engine with TestBroker defaults.
         let broker_bridge = {
             let broker_config = midas_broker::BrokerConfig::default();
@@ -932,7 +1041,8 @@ impl MidasApp {
             snapped_this_session: std::collections::HashSet::new(),
             anchor_seed_toasts_shown: std::collections::HashSet::new(),
             gatr_undo_slots: std::collections::HashMap::new(),
-            tickers: std::collections::HashMap::new(),
+            tickers,
+            ticker_persist,
             ticker_dispatch_active: false,
         };
 
@@ -1041,6 +1151,17 @@ impl MidasApp {
         // seed the GATR anchor — anchors are recorded on the first
         // *user* touch.
         app.bootstrap_ticker_intents_from_annotations();
+
+        // Ensure every watchlist symbol has a TickerState. Symbols that
+        // already loaded from redb are skipped; new symbols get defaults.
+        for wl in app.watchlists.values() {
+            for ticker in &wl.tickers {
+                let sym_key = crate::annotation_store::SymbolKey::new(&ticker.symbol);
+                app.tickers
+                    .entry(sym_key.clone())
+                    .or_insert_with(|| crate::ticker_state::TickerState::new(sym_key));
+            }
+        }
 
         // Async-load data for all restored charts that have a symbol.
         let mut load_tasks: Vec<Task<Message>> = Vec::new();
@@ -3213,6 +3334,10 @@ impl MidasApp {
                 // `Immediate` commit and exit; the handle itself is
                 // dropped when `MidasApp` drops.
                 self.order_intent_handle.shutdown_blocking();
+                // Blocking shutdown of the ticker-state persistence
+                // layer. Signals the flush thread to perform a final
+                // `Immediate` commit and blocks until it exits.
+                self.ticker_persist.shutdown_blocking();
                 self.flush_config()
             }
 
@@ -5427,7 +5552,9 @@ impl MidasApp {
                             });
                         }
                         crate::ticker_state::TickerEffect::PersistDirty => {
-                            // TODO Slice 4: wire to persistence handle
+                            if let Some(state) = self.tickers.get(&sym) {
+                                self.ticker_persist.upsert(sym.clone(), state.clone());
+                            }
                         }
                         crate::ticker_state::TickerEffect::SubmitToBroker { ref bracket } => {
                             // Convert bracket to broker params and send.

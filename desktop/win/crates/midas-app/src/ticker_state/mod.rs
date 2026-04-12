@@ -253,6 +253,12 @@ impl TickerState {
         self.gatr_abs = gatr;
     }
 
+    /// Inject levels during v1→v2 migration. Called once at startup
+    /// when importing from TOML config.
+    pub fn inject_levels(&mut self, levels: Vec<StoredLevel>) {
+        self.levels = levels;
+    }
+
     // ── Test-only setters ──────────────────────────────────────────
 
     /// Override the GATR anchor. Test-only.

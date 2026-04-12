@@ -11,7 +11,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// On-disk format for a single symbol's annotations.
+///
+/// Used for deserialization during v1 migration and tests.
+/// Construction (serialization) is test-only since Slice 4.
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct AnnotationFile {
     /// Schema version for forward compatibility.
     pub version: u32,
@@ -23,6 +27,7 @@ pub struct AnnotationFile {
 
 impl AnnotationFile {
     /// Current schema version.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub const CURRENT_VERSION: u32 = 1;
 }
 
@@ -44,6 +49,11 @@ fn symbol_file_path(annotations_dir: &Path, symbol: &str) -> PathBuf {
 ///
 /// Writes to a `.tmp` file first, then renames. This prevents
 /// corruption if the process crashes mid-write.
+///
+/// **Deprecated in Slice 4**: bracket annotations are now persisted via
+/// `TickerStatePersistHandle` (redb v2). This function is retained
+/// only for tests.
+#[cfg(test)]
 pub fn save_symbol(
     annotations_dir: &Path,
     symbol: &str,
@@ -65,16 +75,6 @@ pub fn save_symbol(
         return Err(e.into());
     }
 
-    Ok(())
-}
-
-/// Save all symbols from an AnnotationStore to disk.
-pub fn save_all(store: &AnnotationStore, data_dir: &Path) -> anyhow::Result<()> {
-    let dir = annotations_dir(data_dir);
-    for symbol in store.symbols() {
-        let annotations = store.get(symbol);
-        save_symbol(&dir, symbol, annotations)?;
-    }
     Ok(())
 }
 

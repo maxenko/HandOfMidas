@@ -80,6 +80,9 @@ struct FlushCtl {
     /// When set, the flush thread does one final `Immediate` commit
     /// and exits.
     shutdown: bool,
+    /// Set by the flush thread right before it exits. The handle's
+    /// `shutdown_blocking()` waits on this via the condvar.
+    done: bool,
     /// Last time we received a wake.
     last_wake: Instant,
 }
@@ -89,6 +92,7 @@ impl Default for FlushCtl {
         Self {
             wake: false,
             shutdown: false,
+            done: false,
             last_wake: Instant::now(),
         }
     }
@@ -251,13 +255,43 @@ impl TickerStatePersistHandle {
         std::thread::sleep(Duration::from_millis(100));
     }
 
+    /// Return a snapshot of all cached ticker states.
+    ///
+    /// Used by `MidasApp::new()` to hydrate the `tickers` HashMap on
+    /// startup. The returned map is a clone of the in-memory cache,
+    /// which has already been hydrated from disk (v2 table) and
+    /// migrated from v1 if needed.
+    pub fn all_states(&self) -> HashMap<SymbolKey, TickerState> {
+        self.cache.cache.read().clone()
+    }
+
     /// Graceful shutdown: signal the flush thread to do one final
-    /// `Immediate` commit and exit.
+    /// `Immediate` commit and exit. Does not block.
     pub fn shutdown(&self) {
         let (lock, cvar) = &*self.ctl;
         if let Ok(mut guard) = lock.lock() {
             guard.shutdown = true;
             cvar.notify_all();
+        }
+    }
+
+    /// Blocking shutdown: signal the flush thread and wait for it to
+    /// finish its final commit and exit. Used by tests and app close.
+    pub fn shutdown_blocking(&self) {
+        let (lock, cvar) = &*self.ctl;
+        if let Ok(mut guard) = lock.lock() {
+            guard.shutdown = true;
+            cvar.notify_all();
+            // Wait for the flush thread to set `done = true`.
+            let timeout = Duration::from_secs(5);
+            let start = Instant::now();
+            while !guard.done && start.elapsed() < timeout {
+                let (g, _) = match cvar.wait_timeout(guard, Duration::from_millis(50)) {
+                    Ok(pair) => pair,
+                    Err(e) => e.into_inner(),
+                };
+                guard = g;
+            }
         }
     }
 }
@@ -474,6 +508,12 @@ fn flush_loop(db: Arc<Database>, cache: Arc<StateCache>, ctl: Arc<(StdMutex<Flus
         }
 
         if is_shutdown {
+            // Signal the handle that the flush thread is done.
+            let (lock, cvar) = &*ctl;
+            if let Ok(mut guard) = lock.lock() {
+                guard.done = true;
+                cvar.notify_all();
+            }
             break;
         }
     }

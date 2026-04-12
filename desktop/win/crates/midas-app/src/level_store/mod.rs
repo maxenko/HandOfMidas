@@ -117,6 +117,16 @@ impl LevelStore {
         self.generations.get(ticker).copied().unwrap_or(0)
     }
 
+    /// Returns an iterator over all (ticker, levels) pairs.
+    ///
+    /// Used by the v1→v2 migration (Slice 4) to import TOML levels
+    /// into `TickerState`.
+    pub fn all_levels(&self) -> impl Iterator<Item = (&str, &[StoredLevel])> {
+        self.levels
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_slice()))
+    }
+
     // ── Mutations ─────────────────────────────────────────────────
 
     /// Allocates a globally unique level ID.

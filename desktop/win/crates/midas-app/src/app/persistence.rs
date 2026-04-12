@@ -208,22 +208,13 @@ impl MidasApp {
 
     /// Unconditionally save the configuration right now.
     ///
-    /// Also persists bracket annotations alongside the config file.
+    /// Bracket annotations are now persisted via `TickerStatePersistHandle`
+    /// (redb v2), not JSON files. The JSON write path has been removed.
     pub(crate) fn flush_config(&mut self) -> Task<Message> {
         self.config_dirty = false;
         self.last_config_save = Instant::now();
         let config = self.build_config();
         let path = self.config_path.clone();
-
-        // Save annotations alongside config.
-        let data_dir = self
-            .config_path
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."))
-            .to_path_buf();
-        if let Err(e) = crate::annotation_persistence::save_all(&self.annotation_store, &data_dir) {
-            tracing::warn!("Failed to persist annotations: {e}");
-        }
 
         Task::perform(
             async move {
