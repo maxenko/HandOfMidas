@@ -611,11 +611,16 @@ pub(crate) fn apply_snap_to_intent(
         });
     }
 
-    // (4) Shift every absolute price in the active compound bucket.
+    // (4) Shift every absolute price in the active compound bucket,
+    // then apply the Fix 2 sanity fall-back so no field lands exactly
+    // on the current price (or collapses Stop and Limit together).
     let mut updated = (*intent).clone();
     let key = (updated.last_side, updated.last_entry_type);
+    let side = updated.last_side;
+    let entry_type = updated.last_entry_type;
     let memory = updated.entries.entry(key).or_default();
-    shift_entry_memory_prices(memory, updated.last_entry_type, delta);
+    shift_entry_memory_prices(memory, entry_type, delta);
+    sanitize_entry_memory_offsets(memory, side, entry_type, current_price, gatr_abs);
 
     // (5) Write the new anchor and upsert.
     updated.gatr_anchor = new_anchor;
@@ -627,10 +632,18 @@ pub(crate) fn apply_snap_to_intent(
     });
 
     // (6) Reposition the live annotation, if one exists.
+    //
+    // Use `apply_leg_prices` rather than `reposition_bracket` so the
+    // Fix 2 sanitize step that ran on `EntryMemory` above is mirrored
+    // onto the annotation, keeping both surfaces in lockstep. If we
+    // called `reposition_bracket(current_price)` the annotation's
+    // entry would land exactly on market while the panel's entry
+    // sat one step away, creating a visible divergence.
     if let Some(ann_id) = intent.live_annotation_id {
+        let leg_prices = extract_leg_prices(&updated, side, entry_type);
         annotation_store.update(symbol.as_str(), ann_id, |ann| {
             if let AnnotationKind::OrderBracket(ref mut bracket) = ann.kind {
-                crate::order_panel::reposition_bracket(bracket.as_mut(), current_price);
+                apply_leg_prices(bracket, side, &leg_prices);
             }
         });
     }
@@ -703,6 +716,264 @@ fn shift_entry_memory_prices(
             memory.sl_limit_value = format!("{:.2}", parsed + delta);
         }
     }
+}
+
+/// Guarantee that every absolute price in an [`EntryMemory`] bucket
+/// is visually distinct and not collapsed onto the current market
+/// price. Run after [`shift_entry_memory_prices`] as a fall-back.
+///
+/// This is the Fix 2 safety net: the delta-shift path can legitimately
+/// land a leg exactly on the current price (e.g. when the anchor was
+/// set at the same price), and a StopLimit's entry/stop can collapse
+/// onto each other. Replace any such field with the matching value
+/// from [`price_defaults::default_initial_prices`] so the user can
+/// still grab each line individually.
+///
+/// Fields left untouched:
+/// - TP / SL stored in Offset / Percent mode (their on-screen positions
+///   are derived from the entry, so they cannot collapse independently).
+/// - Un-parseable `tp_value` / `sl_value` strings (mid-typing state).
+fn sanitize_entry_memory_offsets(
+    memory: &mut EntryMemory,
+    side: OrderSide,
+    entry_type: midas_chart::widget::order_bracket::EntryType,
+    current_price: f64,
+    gatr_abs: Option<f64>,
+) {
+    use crate::order_panel::PriceInputMode;
+    use midas_chart::widget::order_bracket::EntryType;
+
+    use super::price_defaults::{default_initial_prices, resolve_step, too_close};
+
+    if !current_price.is_finite() {
+        return;
+    }
+    let step = resolve_step(current_price, gatr_abs);
+    let defaults = default_initial_prices(side, entry_type, current_price, gatr_abs);
+
+    // Entry — Limit / Stop / StopLimit only.
+    if !matches!(entry_type, EntryType::Market) {
+        if let Some(ref mut p) = memory.entry_price_or_offset {
+            if !p.is_finite() || *p < 0.001 || too_close(*p, current_price, step) {
+                *p = defaults.entry;
+            }
+        }
+    }
+
+    // TP — only when enabled and absolute. Anything collapsing onto
+    // the entry is pushed out to the default TP level.
+    if memory.tp_enabled && memory.tp_mode == PriceInputMode::Absolute {
+        if let Ok(parsed) = memory.tp_value.parse::<f64>() {
+            let entry_anchor = memory
+                .entry_price_or_offset
+                .unwrap_or(defaults.entry);
+            if too_close(parsed, entry_anchor, step) || too_close(parsed, current_price, step) {
+                memory.tp_value = format!("{:.2}", defaults.take_profit);
+            }
+        }
+    }
+
+    // SL — same treatment.
+    if memory.sl_enabled && memory.sl_mode == PriceInputMode::Absolute {
+        if let Ok(parsed) = memory.sl_value.parse::<f64>() {
+            let entry_anchor = memory
+                .entry_price_or_offset
+                .unwrap_or(defaults.entry);
+            if too_close(parsed, entry_anchor, step) || too_close(parsed, current_price, step) {
+                memory.sl_value = format!("{:.2}", defaults.stop_loss);
+            }
+        }
+    }
+}
+
+/// Outcome of [`apply_ensure_draft_bracket`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EnsureDraftOutcome {
+    /// A fresh Draft bracket annotation was created.
+    Created,
+    /// Skipped because the intent's entry type is Market.
+    SkippedMarket,
+    /// Skipped because a live bracket already exists in the store.
+    SkippedLiveExists,
+    /// Skipped because no intent exists for the symbol.
+    SkippedNoIntent,
+    /// Skipped because no reference price (stored or live) is available.
+    SkippedNoPrice,
+}
+
+/// Ensure a `Draft` bracket annotation exists for `symbol` that
+/// reflects the panel's current compound-key memory.
+///
+/// Fix 1: on `ActivateChart`, the user expects to see the bracket shape
+/// for their currently-selected `(side, entry_type)` without having to
+/// click Place Order. This function is the single authority for that
+/// creation — called from `app.rs` after `apply_maybe_snap` and before
+/// `hydrate_order_panel_for_chart`. The panel never creates annotations
+/// on its own.
+///
+/// # Early-exit rules
+///
+/// 1. No intent for the symbol → return.
+/// 2. `intent.last_entry_type == Market` → return. Market orders have
+///    no user-set price to preview.
+/// 3. `intent.live_annotation_id` already points to an annotation that
+///    still exists in the store → return. Leave the live bracket alone.
+///    (If the id is set but the annotation was removed externally, fall
+///    through and create a fresh one.)
+/// 4. The current compound's `entry_price_or_offset` is `None` AND the
+///    market cache has no `current_price` → return. We cannot place a
+///    draft without a reference price.
+///
+/// When none of the early exits fire, a fresh `BracketStatus::Draft`
+/// `OrderBracket` is built from the active [`EntryMemory`] (falling
+/// back to [`super::price_defaults::default_initial_prices`] for any
+/// missing fields), inserted into `annotation_store`, and
+/// `intent.live_annotation_id` is updated through the handle with
+/// `IntentSource::Bootstrap` so the D4 first-touch anchor-seed rule
+/// does not fire on a system-created bracket.
+pub(crate) fn apply_ensure_draft_bracket(
+    annotation_store: &mut AnnotationStore,
+    handle: &impl TickerIntentAccess,
+    symbol: &SymbolKey,
+    current_price: Option<f64>,
+    gatr_abs: Option<f64>,
+) -> EnsureDraftOutcome {
+    use midas_chart::widget::level::LineStyle;
+    use midas_chart::widget::order_bracket::{
+        BracketLeg, BracketStatus, EntryType, LegRole, OrderBracket,
+    };
+    use midas_chart::widget::{AnnotationKind, LineExtent, LineStroke, PriceLine};
+
+    use super::price_defaults::default_initial_prices;
+
+    // (1) Intent must exist.
+    let Some(intent_arc) = handle.snapshot(symbol) else {
+        return EnsureDraftOutcome::SkippedNoIntent;
+    };
+    let intent: TickerOrderIntent = (*intent_arc).clone();
+
+    // (2) Market orders never get a draft bracket.
+    if intent.last_entry_type == EntryType::Market {
+        return EnsureDraftOutcome::SkippedMarket;
+    }
+
+    // (3) Already have a live bracket that exists in the store.
+    if let Some(ann_id) = intent.live_annotation_id {
+        if annotation_store
+            .get_by_id(symbol.as_str(), ann_id)
+            .is_some()
+        {
+            return EnsureDraftOutcome::SkippedLiveExists;
+        }
+        // Stale back-link — the annotation was removed externally.
+        // Fall through and create a fresh draft.
+    }
+
+    let memory = intent
+        .entries
+        .get(&(intent.last_side, intent.last_entry_type))
+        .cloned()
+        .unwrap_or_default();
+
+    // (4) Need a reference price. Prefer stored entry, else market.
+    let reference_price = memory
+        .entry_price_or_offset
+        .filter(|p| p.is_finite() && *p > 0.0)
+        .or_else(|| current_price.filter(|p| p.is_finite() && *p > 0.0));
+    let Some(reference_price) = reference_price else {
+        return EnsureDraftOutcome::SkippedNoPrice;
+    };
+    let effective_current = current_price
+        .filter(|p| p.is_finite() && *p > 0.0)
+        .unwrap_or(reference_price);
+    let defaults = default_initial_prices(
+        intent.last_side,
+        intent.last_entry_type,
+        effective_current,
+        gatr_abs,
+    );
+
+    // Resolve each leg: stored memory wins, else defaults.
+    let entry_price = memory
+        .entry_price_or_offset
+        .filter(|p| p.is_finite() && *p > 0.0)
+        .unwrap_or(defaults.entry);
+
+    let stop_trigger = match intent.last_entry_type {
+        EntryType::StopLimit => defaults.stop_trigger,
+        _ => None,
+    };
+
+    let tp_price = if memory.tp_enabled {
+        memory
+            .tp_value
+            .parse::<f64>()
+            .ok()
+            .filter(|p| p.is_finite() && *p > 0.0)
+            .or(Some(defaults.take_profit))
+    } else {
+        None
+    };
+    let sl_price = if memory.sl_enabled {
+        memory
+            .sl_value
+            .parse::<f64>()
+            .ok()
+            .filter(|p| p.is_finite() && *p > 0.0)
+            .or(Some(defaults.stop_loss))
+    } else {
+        None
+    };
+
+    let make_leg = |price: f64, role: LegRole| BracketLeg {
+        line: PriceLine {
+            price,
+            extent: LineExtent::FullWidth,
+            stroke: LineStroke {
+                color: [0.0, 0.0, 0.0, 1.0],
+                width: 1.5,
+                style: LineStyle::Solid,
+            },
+        },
+        role,
+        projected_pnl: None,
+        projected_pnl_pct: None,
+    };
+
+    let bracket = OrderBracket {
+        entry: make_leg(entry_price, LegRole::Entry),
+        take_profit: tp_price.map(|p| make_leg(p, LegRole::TakeProfit)),
+        stop_loss: sl_price.map(|p| make_leg(p, LegRole::StopLoss)),
+        side: match intent.last_side {
+            OrderSide::Buy => BracketSide::Long,
+            OrderSide::Sell => BracketSide::Short,
+        },
+        status: BracketStatus::Draft,
+        quantity: memory.quantity,
+        saved: false,
+        filled_qty: None,
+        entry_type: intent.last_entry_type,
+        entry_stop_price: stop_trigger,
+        wrong_side_warning: false,
+    };
+
+    let ann_id = annotation_store.add(
+        symbol.as_str(),
+        AnnotationKind::OrderBracket(Box::new(bracket)),
+    );
+
+    // Record the new annotation id on the intent. Source = Bootstrap
+    // so the D4 first-touch rule does not treat this as a user touch.
+    let mut updated = intent;
+    updated.live_annotation_id = Some(ann_id);
+    updated.updated_at = chrono::Utc::now();
+    let _ = handle.upsert(OrderIntentMsg::Upsert {
+        symbol: symbol.clone(),
+        intent: Box::new(updated),
+        source: IntentSource::Bootstrap,
+    });
+
+    EnsureDraftOutcome::Created
 }
 
 /// Apply a `MaybeSnapToGatr` message: route into the pure

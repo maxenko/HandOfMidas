@@ -2288,3 +2288,134 @@ fn bracket_toggle_sl_click_routes_through_decorator_click() {
         &[ann],
     );
 }
+
+// ── Fix 3: hit-test priority for overlapping bracket legs ────────────
+
+/// Build a Draft Limit bracket where every leg can be positioned by
+/// argument. Used by the overlap tie-break tests.
+fn overlap_draft_bracket(
+    id: u64,
+    entry: f64,
+    tp: f64,
+    sl: f64,
+    entry_type: crate::widget::order_bracket::EntryType,
+    entry_stop_price: Option<f64>,
+) -> Annotation {
+    use crate::widget::order_bracket::{
+        BracketLeg, BracketSide, BracketStatus, LegRole, OrderBracket,
+    };
+
+    let make_leg = |price: f64, role: LegRole| BracketLeg {
+        line: PriceLine {
+            price,
+            extent: LineExtent::FullWidth,
+            stroke: LineStroke {
+                color: [1.0, 1.0, 1.0, 1.0],
+                width: 1.0,
+                style: LineStyle::Solid,
+            },
+        },
+        role,
+        projected_pnl: None,
+        projected_pnl_pct: None,
+    };
+
+    Annotation {
+        id: AnnotationId(id),
+        kind: AnnotationKind::OrderBracket(Box::new(OrderBracket {
+            entry: make_leg(entry, LegRole::Entry),
+            take_profit: Some(make_leg(tp, LegRole::TakeProfit)),
+            stop_loss: Some(make_leg(sl, LegRole::StopLoss)),
+            side: BracketSide::Long,
+            status: BracketStatus::Draft,
+            quantity: Some(100.0),
+            saved: false,
+            filled_qty: None,
+            entry_type,
+            entry_stop_price,
+            wrong_side_warning: false,
+        })),
+        presence: Presence::Active,
+        visible_timeframes: None,
+        locked: false,
+        created_at: 0,
+        modified_at: 0,
+    }
+}
+
+/// When Entry and SL collapse to the same price, the hit-test should
+/// pick the Entry leg (the higher-priority drag target).
+#[test]
+fn hit_test_picks_entry_when_entry_and_sl_overlap_in_price() {
+    use crate::widget::order_bracket::EntryType;
+    let state = test_state();
+    // Entry == SL == 150.0; TP separated above.
+    let bracket = overlap_draft_bracket(10, 150.0, 170.0, 150.0, EntryType::Limit, None);
+    let y = state.camera.price_to_y(150.0);
+    let result = hit_test_annotation(&[bracket], y, &state.camera);
+    let (_, kind, _, _) = result.expect("should hit one leg");
+    assert_eq!(
+        kind,
+        HitZoneKind::BracketEntry,
+        "Entry should win the tie-break against SL"
+    );
+}
+
+/// Degenerate case: all four legs at the same price. Entry wins.
+#[test]
+fn hit_test_picks_entry_when_all_four_legs_collapse() {
+    use crate::widget::order_bracket::EntryType;
+    let state = test_state();
+    let bracket = overlap_draft_bracket(
+        10,
+        150.0,
+        150.0,
+        150.0,
+        EntryType::StopLimit,
+        Some(150.0),
+    );
+    let y = state.camera.price_to_y(150.0);
+    let result = hit_test_annotation(&[bracket], y, &state.camera);
+    let (_, kind, _, _) = result.expect("should hit one leg");
+    assert_eq!(kind, HitZoneKind::BracketEntry);
+}
+
+/// Stop trigger and TP overlap → StopTrigger wins (priority 3 > 2).
+#[test]
+fn hit_test_picks_stop_trigger_over_take_profit_when_they_overlap() {
+    use crate::widget::order_bracket::EntryType;
+    let state = test_state();
+    // Entry far away at 130, stop trigger == TP == 170, SL at 120.
+    let bracket = overlap_draft_bracket(
+        10,
+        130.0,
+        170.0,
+        120.0,
+        EntryType::StopLimit,
+        Some(170.0),
+    );
+    let y = state.camera.price_to_y(170.0);
+    let result = hit_test_annotation(&[bracket], y, &state.camera);
+    let (_, kind, _, _) = result.expect("should hit one leg");
+    assert_eq!(kind, HitZoneKind::BracketStopTrigger);
+}
+
+/// When the cursor clicks in the shared region of two overlapping
+/// zones, the returned result must be a single deterministic leg.
+#[test]
+fn drag_start_with_two_overlapping_zones_picks_only_one() {
+    use crate::widget::order_bracket::EntryType;
+    let state = test_state();
+    // Entry and TP collapsed at 160. Entry wins (priority 4 > 2).
+    let bracket = overlap_draft_bracket(10, 160.0, 160.0, 130.0, EntryType::Limit, None);
+    let y = state.camera.price_to_y(160.0);
+    let result = hit_test_annotation(&[bracket], y, &state.camera);
+    assert!(result.is_some(), "shared click should still hit something");
+    let (id, kind, _, _) = result.unwrap();
+    assert_eq!(id, AnnotationId(10));
+    assert_eq!(
+        kind,
+        HitZoneKind::BracketEntry,
+        "tie must resolve deterministically to Entry"
+    );
+}

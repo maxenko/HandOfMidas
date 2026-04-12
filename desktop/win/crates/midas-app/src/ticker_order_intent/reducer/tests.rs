@@ -40,8 +40,8 @@ use crate::ticker_order_intent::{
 };
 
 use super::{
-    apply_cancel_live_bracket, apply_remove_live_bracket, apply_snap_to_intent,
-    apply_update_from_surface, UpdateSurfaceOutcome,
+    apply_cancel_live_bracket, apply_ensure_draft_bracket, apply_remove_live_bracket,
+    apply_snap_to_intent, apply_update_from_surface, EnsureDraftOutcome, UpdateSurfaceOutcome,
 };
 
 // ── Mock `TickerIntentAccess` ───────────────────────────────────────
@@ -1075,7 +1075,11 @@ fn snap_panel_only_pltr_regression() {
         .expect("snap should fire");
     assert!((applied.delta + 98.21).abs() < 1e-6, "delta = 14.45 - 112.66");
 
-    // Intent EntryMemory shifted.
+    // Intent EntryMemory shifted from the stale 112.66 into the
+    // neighborhood of the new market. Fix 2's sanitize step pushes
+    // Buy Limit one step below market so the entry line never lands
+    // exactly on the current price — here step = 0.40 so the final
+    // value is 14.05, not 14.45.
     let intent = handle.snapshot(&symbol).unwrap();
     let mem = intent
         .entries
@@ -1083,15 +1087,15 @@ fn snap_panel_only_pltr_regression() {
         .unwrap();
     let new_entry = mem.entry_price_or_offset.unwrap();
     assert!(
-        (new_entry - 14.45).abs() < 1e-6,
-        "EntryMemory.entry_price_or_offset shifted from 112.66 to ~14.45, got {new_entry}"
+        (new_entry - 14.05).abs() < 1e-6,
+        "Buy Limit should land at current - 1×step = 14.05, got {new_entry}"
     );
     // Anchor refreshed to current price.
     assert_eq!(intent.gatr_anchor.anchor_price, Some(14.45));
 
     // Hydrated panel shows the corrected value.
     let panel = panels.values().next().unwrap();
-    assert_eq!(panel.state.limit_price, "14.45");
+    assert_eq!(panel.state.limit_price, "14.05");
 }
 
 /// Both surfaces lockstep: an intent with a stale `(Buy, Limit)`
@@ -1127,21 +1131,24 @@ fn snap_lockstep_shifts_entry_memory_and_annotation() {
         .expect("snap should fire");
     let delta = applied.delta;
 
-    // Intent shifted.
+    // Intent shifted. Fix 2's sanitize step catches the Buy Limit
+    // that would have landed exactly on current price (14.45) and
+    // nudges it one step (0.40) below, to 14.05. Both surfaces
+    // (EntryMemory and the annotation) land at the same value.
     let intent = handle.snapshot(&symbol).unwrap();
     let mem = intent
         .entries
         .get(&(OrderSide::Buy, EntryType::Limit))
         .unwrap();
-    assert!((mem.entry_price_or_offset.unwrap() - (112.66 + delta)).abs() < 1e-6);
+    assert!((mem.entry_price_or_offset.unwrap() - 14.05).abs() < 1e-6);
     let new_tp: f64 = mem.tp_value.parse().unwrap();
-    assert!((new_tp - (115.0 + delta)).abs() < 1e-6);
+    assert!((new_tp - (115.0 + delta)).abs() < 1e-2);
     let new_sl: f64 = mem.sl_value.parse().unwrap();
-    assert!((new_sl - (110.0 + delta)).abs() < 1e-6);
+    assert!((new_sl - (110.0 + delta)).abs() < 1e-2);
 
-    // Chart bracket shifted by the same delta.
+    // Chart bracket lockstep-matches the sanitized memory entry price.
     let bracket = store.get_bracket("PLTR", ann_id).unwrap();
-    assert!((bracket.entry.line.price - (112.66 + delta)).abs() < 1e-6);
+    assert!((bracket.entry.line.price - 14.05).abs() < 1e-6);
 
     // Undo slot seeded with both the prev intent and the bracket clone.
     assert_eq!(applied.pre_snap.annotation_id, Some(ann_id));
@@ -1224,8 +1231,9 @@ fn snap_skips_offset_and_percent_mode_fields() {
         .entries
         .get(&(OrderSide::Buy, EntryType::Limit))
         .unwrap();
-    // Entry shifted.
-    assert!((mem.entry_price_or_offset.unwrap() - 14.45).abs() < 1e-6);
+    // Entry shifted, then nudged off market by Fix 2 sanitize
+    // (step = 0.40, so current - 1×step = 14.05).
+    assert!((mem.entry_price_or_offset.unwrap() - 14.05).abs() < 1e-6);
     // TP / SL untouched — the string values round-trip verbatim.
     assert_eq!(mem.tp_value, "1.00");
     assert_eq!(mem.sl_value, "2.5");
@@ -1429,4 +1437,315 @@ fn anchor_lifecycle_missing_price_does_not_seed() {
     assert_eq!(outcome, UpdateSurfaceOutcome::Applied);
     let intent = handle.snapshot(&SymbolKey::new("AAPL")).unwrap();
     assert!(intent.gatr_anchor.anchor_price.is_none());
+}
+
+// ── Fix 1: apply_ensure_draft_bracket ────────────────────────────────
+
+/// Buy Limit + no live bracket → a fresh Draft is created with the
+/// panel's stored entry price and matching compound key.
+#[test]
+fn apply_ensure_draft_bracket_creates_draft_for_buy_limit_with_no_existing_bracket() {
+    let mut store = AnnotationStore::new();
+    let handle = MockHandle::new();
+    handle.seed(
+        SymbolKey::new("AAPL"),
+        make_intent(
+            "AAPL",
+            OrderSide::Buy,
+            EntryType::Limit,
+            vec![(
+                (OrderSide::Buy, EntryType::Limit),
+                make_memory(149.50, Some(152.0), Some(148.0), true),
+            )],
+            None,
+        ),
+    );
+    let outcome = apply_ensure_draft_bracket(
+        &mut store,
+        &handle,
+        &SymbolKey::new("AAPL"),
+        Some(150.0),
+        Some(1.5),
+    );
+    assert_eq!(outcome, EnsureDraftOutcome::Created);
+
+    // The intent's live_annotation_id now points at the fresh bracket.
+    let intent = handle.snapshot(&SymbolKey::new("AAPL")).unwrap();
+    let ann_id = intent
+        .live_annotation_id
+        .expect("live_annotation_id should be set after Created");
+    let bracket = store.get_bracket("AAPL", ann_id).expect("bracket exists");
+    assert_eq!(bracket.status, BracketStatus::Draft);
+    assert_eq!(bracket.entry_type, EntryType::Limit);
+    assert_eq!(bracket.side, BracketSide::Long);
+    assert!((bracket.entry.line.price - 149.50).abs() < 1e-9);
+    assert!(bracket.take_profit.is_some());
+    assert!(bracket.stop_loss.is_some());
+}
+
+/// Market entry type never auto-creates a draft.
+#[test]
+fn apply_ensure_draft_bracket_skips_when_market_entry_type() {
+    let mut store = AnnotationStore::new();
+    let handle = MockHandle::new();
+    handle.seed(
+        SymbolKey::new("AAPL"),
+        make_intent(
+            "AAPL",
+            OrderSide::Buy,
+            EntryType::Market,
+            vec![],
+            None,
+        ),
+    );
+    let outcome = apply_ensure_draft_bracket(
+        &mut store,
+        &handle,
+        &SymbolKey::new("AAPL"),
+        Some(150.0),
+        Some(1.5),
+    );
+    assert_eq!(outcome, EnsureDraftOutcome::SkippedMarket);
+    assert!(store.get("AAPL").is_empty());
+}
+
+/// If `live_annotation_id` already points to an existing annotation,
+/// leave it alone — do not create a second bracket.
+#[test]
+fn apply_ensure_draft_bracket_skips_when_live_annotation_id_already_set_and_annotation_exists() {
+    let mut store = AnnotationStore::new();
+    let ann_id = store.add(
+        "AAPL",
+        AnnotationKind::OrderBracket(Box::new(make_bracket(140.0, None, None))),
+    );
+    let handle = MockHandle::new();
+    handle.seed(
+        SymbolKey::new("AAPL"),
+        make_intent(
+            "AAPL",
+            OrderSide::Buy,
+            EntryType::Limit,
+            vec![(
+                (OrderSide::Buy, EntryType::Limit),
+                make_memory(140.0, None, None, true),
+            )],
+            Some(ann_id),
+        ),
+    );
+    let outcome = apply_ensure_draft_bracket(
+        &mut store,
+        &handle,
+        &SymbolKey::new("AAPL"),
+        Some(150.0),
+        Some(1.5),
+    );
+    assert_eq!(outcome, EnsureDraftOutcome::SkippedLiveExists);
+    assert_eq!(store.get("AAPL").len(), 1, "no second bracket created");
+}
+
+/// If `live_annotation_id` is set but the annotation is gone (external
+/// removal), create a fresh draft and rewrite the id on the intent.
+#[test]
+fn apply_ensure_draft_bracket_creates_fresh_when_live_annotation_id_set_but_annotation_missing() {
+    let mut store = AnnotationStore::new();
+    let stale_id = AnnotationId(999);
+    let handle = MockHandle::new();
+    handle.seed(
+        SymbolKey::new("AAPL"),
+        make_intent(
+            "AAPL",
+            OrderSide::Sell,
+            EntryType::Stop,
+            vec![(
+                (OrderSide::Sell, EntryType::Stop),
+                make_memory(149.0, None, Some(151.0), true),
+            )],
+            Some(stale_id),
+        ),
+    );
+    let outcome = apply_ensure_draft_bracket(
+        &mut store,
+        &handle,
+        &SymbolKey::new("AAPL"),
+        Some(150.0),
+        Some(1.5),
+    );
+    assert_eq!(outcome, EnsureDraftOutcome::Created);
+    let intent = handle.snapshot(&SymbolKey::new("AAPL")).unwrap();
+    let new_id = intent.live_annotation_id.unwrap();
+    assert_ne!(new_id, stale_id, "should have minted a fresh annotation id");
+    let bracket = store.get_bracket("AAPL", new_id).unwrap();
+    assert_eq!(bracket.status, BracketStatus::Draft);
+    assert_eq!(bracket.side, BracketSide::Short);
+    assert_eq!(bracket.entry_type, EntryType::Stop);
+}
+
+/// The created bracket respects `intent.last_side` / `intent.last_entry_type`
+/// — not a default compound key.
+#[test]
+fn apply_ensure_draft_bracket_uses_panel_current_compound_key() {
+    let mut store = AnnotationStore::new();
+    let handle = MockHandle::new();
+    handle.seed(
+        SymbolKey::new("AAPL"),
+        make_intent(
+            "AAPL",
+            OrderSide::Sell,
+            EntryType::StopLimit,
+            vec![(
+                (OrderSide::Sell, EntryType::StopLimit),
+                make_memory(148.0, None, None, false),
+            )],
+            None,
+        ),
+    );
+    let outcome = apply_ensure_draft_bracket(
+        &mut store,
+        &handle,
+        &SymbolKey::new("AAPL"),
+        Some(150.0),
+        Some(1.0),
+    );
+    assert_eq!(outcome, EnsureDraftOutcome::Created);
+    let intent = handle.snapshot(&SymbolKey::new("AAPL")).unwrap();
+    let ann_id = intent.live_annotation_id.unwrap();
+    let bracket = store.get_bracket("AAPL", ann_id).unwrap();
+    assert_eq!(bracket.entry_type, EntryType::StopLimit);
+    assert_eq!(bracket.side, BracketSide::Short);
+    assert!(
+        bracket.entry_stop_price.is_some(),
+        "StopLimit must emit a stop trigger"
+    );
+}
+
+/// No intent for the symbol → nothing to do.
+#[test]
+fn apply_ensure_draft_bracket_skips_when_no_intent() {
+    let mut store = AnnotationStore::new();
+    let handle = MockHandle::new();
+    let outcome = apply_ensure_draft_bracket(
+        &mut store,
+        &handle,
+        &SymbolKey::new("AAPL"),
+        Some(150.0),
+        Some(1.5),
+    );
+    assert_eq!(outcome, EnsureDraftOutcome::SkippedNoIntent);
+}
+
+// ── Fix 2: sanitize_entry_memory_offsets via apply_snap_to_intent ────
+
+/// A snap that would land the entry exactly on current price replaces
+/// it with the `default_initial_prices` offset so the line is still
+/// grabbable.
+#[test]
+fn apply_snap_avoids_landing_on_current_price() {
+    // Stash updated_at 2h in the past so the snap recency guard passes.
+    let mut store = AnnotationStore::new();
+    let ann_id = store.add(
+        "AAPL",
+        AnnotationKind::OrderBracket(Box::new(make_bracket(100.0, None, None))),
+    );
+    let handle = MockHandle::new();
+    let mut intent = make_intent(
+        "AAPL",
+        OrderSide::Buy,
+        EntryType::Limit,
+        vec![(
+            (OrderSide::Buy, EntryType::Limit),
+            make_memory(100.0, None, None, false),
+        )],
+        Some(ann_id),
+    );
+    intent.updated_at = chrono::Utc::now() - chrono::Duration::hours(2);
+    // Anchor at 100.0, current price will be 108.0 (drift > 1×GATR of
+    // 2.0) → plan.delta = +8, shifted entry = 108.0, which equals
+    // current price. The sanitize pass should push it off.
+    intent.gatr_anchor = GatrAnchor {
+        anchor_price: Some(100.0),
+        anchor_gatr: Some(2.0),
+    };
+    handle.seed(SymbolKey::new("AAPL"), intent);
+
+    let mut panels: HashMap<OrderPanelId, OrderPanel> = HashMap::new();
+    let applied = apply_snap_to_intent(
+        &mut store,
+        &handle,
+        &mut panels,
+        &SymbolKey::new("AAPL"),
+        108.0,
+        Some(2.0),
+    );
+    assert!(applied.is_some(), "snap should fire (drift >= gatr)");
+
+    let intent = handle.snapshot(&SymbolKey::new("AAPL")).unwrap();
+    let mem = intent
+        .entries
+        .get(&(OrderSide::Buy, EntryType::Limit))
+        .unwrap();
+    let entry = mem.entry_price_or_offset.unwrap();
+    let step = 2.0;
+    assert!(
+        (entry - 108.0).abs() >= 0.1 * step,
+        "sanitize should push entry off market, got {}",
+        entry
+    );
+}
+
+/// A snap whose math would collapse the SL onto entry replaces the SL
+/// with the default offset so both legs remain distinct.
+#[test]
+fn apply_snap_avoids_collapsing_stop_and_limit() {
+    let mut store = AnnotationStore::new();
+    let ann_id = store.add(
+        "AAPL",
+        AnnotationKind::OrderBracket(Box::new(make_bracket(
+            100.0,
+            None,
+            Some(100.0),
+        ))),
+    );
+    let handle = MockHandle::new();
+    let mut intent = make_intent(
+        "AAPL",
+        OrderSide::Buy,
+        EntryType::Limit,
+        vec![(
+            (OrderSide::Buy, EntryType::Limit),
+            // Pathological input: SL equals entry. The snap delta
+            // will shift both by the same amount, so post-shift they
+            // are still stacked. Sanitize must push the SL off.
+            make_memory(100.0, None, Some(100.0), true),
+        )],
+        Some(ann_id),
+    );
+    intent.updated_at = chrono::Utc::now() - chrono::Duration::hours(2);
+    intent.gatr_anchor = GatrAnchor {
+        anchor_price: Some(100.0),
+        anchor_gatr: Some(2.0),
+    };
+    handle.seed(SymbolKey::new("AAPL"), intent);
+
+    let mut panels: HashMap<OrderPanelId, OrderPanel> = HashMap::new();
+    let _ = apply_snap_to_intent(
+        &mut store,
+        &handle,
+        &mut panels,
+        &SymbolKey::new("AAPL"),
+        108.0,
+        Some(2.0),
+    );
+    let intent = handle.snapshot(&SymbolKey::new("AAPL")).unwrap();
+    let mem = intent
+        .entries
+        .get(&(OrderSide::Buy, EntryType::Limit))
+        .unwrap();
+    let entry = mem.entry_price_or_offset.unwrap();
+    let sl: f64 = mem.sl_value.parse().unwrap();
+    assert!(
+        (entry - sl).abs() >= 0.1 * 2.0,
+        "sanitize should push SL off entry, got entry={} sl={}",
+        entry,
+        sl
+    );
 }

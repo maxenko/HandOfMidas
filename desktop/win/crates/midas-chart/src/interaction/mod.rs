@@ -262,6 +262,37 @@ pub struct BracketClampCtx {
 /// (`BracketTP`, `BracketSL`, `BracketEntry`, `BracketStopTrigger`).
 ///
 /// Replaces `hit_test_levels()` + `hit_test_bracket_legs()`.
+/// Disambiguation priority for bracket legs when two or more lines
+/// land at the same price (or within `BRACKET_TIE_EPSILON_PX` of each
+/// other on screen). Higher value = higher priority.
+///
+/// The user is overwhelmingly most likely to be targeting the entry
+/// line, so it wins on a tie; stop triggers come second (StopLimit
+/// only), followed by the TP and SL decorator-bearing legs.
+///
+/// Returning `-1` for [`HitZoneKind::LevelLine`] and other non-bracket
+/// zones means they are never treated as tied against bracket legs —
+/// their existing "strictly closer" semantics stay intact.
+fn leg_priority(kind: crate::widget::hit_test::HitZoneKind) -> i32 {
+    use crate::widget::hit_test::HitZoneKind;
+    match kind {
+        HitZoneKind::BracketEntry => 4,
+        HitZoneKind::BracketStopTrigger => 3,
+        HitZoneKind::BracketTP => 2,
+        HitZoneKind::BracketSL => 1,
+        _ => -1,
+    }
+}
+
+/// Screen-space tie-break window for overlapping bracket legs. Two
+/// legs within this many pixels of each other on Y are treated as
+/// collapsed; the higher-priority leg wins.
+///
+/// Set to 1.0 px so any pair of legs rounding to the same pixel row
+/// hits the priority rule — this is the Fix 3 safety net that
+/// complements Fix 2's offset defaults.
+const BRACKET_TIE_EPSILON_PX: f32 = 1.0;
+
 fn hit_test_annotation(
     annotations: &[crate::widget::Annotation],
     cursor_y: f32,
@@ -277,6 +308,33 @@ fn hit_test_annotation(
 
     let cursor_price = camera.y_to_price(cursor_y);
     let mut best: Option<(AnnotationId, HitZoneKind, f32, f64, Option<BracketClampCtx>)> = None;
+
+    // Fix 3: replace the cached-best with the candidate when either
+    // - the candidate is strictly closer than the cached best, or
+    // - the candidate is within `BRACKET_TIE_EPSILON_PX` of the cached
+    //   best AND has strictly higher `leg_priority`. This guarantees
+    //   that overlapping bracket legs resolve to a single
+    //   deterministic drag target.
+    fn takes_over(
+        current: &Option<(AnnotationId, HitZoneKind, f32, f64, Option<BracketClampCtx>)>,
+        cand_dist: f32,
+        cand_kind: HitZoneKind,
+    ) -> bool {
+        match current {
+            None => true,
+            Some((_, prev_kind, prev_dist, _, _)) => {
+                if cand_dist < *prev_dist - BRACKET_TIE_EPSILON_PX {
+                    return true;
+                }
+                if (cand_dist - *prev_dist).abs() <= BRACKET_TIE_EPSILON_PX
+                    && leg_priority(cand_kind) > leg_priority(*prev_kind)
+                {
+                    return true;
+                }
+                false
+            }
+        }
+    }
 
     for ann in annotations {
         if !ann.presence.is_interactive() || ann.locked {
@@ -298,30 +356,19 @@ fn hit_test_annotation(
                     side: bracket.side,
                 });
 
-                // TP leg.
-                if let Some(ref tp) = bracket.take_profit {
-                    let leg_y = camera.price_to_y(tp.line.price);
-                    let dist = (cursor_y - leg_y).abs();
-                    if dist <= LEVEL_HIT_TOLERANCE_PX && best.as_ref().is_none_or(|b| dist < b.2) {
-                        let offset = tp.line.price - cursor_price;
-                        best = Some((ann.id, HitZoneKind::BracketTP, dist, offset, clamp_ctx));
-                    }
-                }
-                // SL leg.
-                if let Some(ref sl) = bracket.stop_loss {
-                    let leg_y = camera.price_to_y(sl.line.price);
-                    let dist = (cursor_y - leg_y).abs();
-                    if dist <= LEVEL_HIT_TOLERANCE_PX && best.as_ref().is_none_or(|b| dist < b.2) {
-                        let offset = sl.line.price - cursor_price;
-                        best = Some((ann.id, HitZoneKind::BracketSL, dist, offset, clamp_ctx));
-                    }
-                }
+                // Evaluate in priority order (Entry → StopTrigger →
+                // TP → SL) so that on an exact tie the first write
+                // matches the final ordering and subsequent legs must
+                // strictly beat the window to displace it.
+                //
                 // Entry leg (non-Market Draft only).
                 if bracket.entry_type != EntryType::Market && bracket.status == BracketStatus::Draft
                 {
                     let leg_y = camera.price_to_y(bracket.entry.line.price);
                     let dist = (cursor_y - leg_y).abs();
-                    if dist <= LEVEL_HIT_TOLERANCE_PX && best.as_ref().is_none_or(|b| dist < b.2) {
+                    if dist <= LEVEL_HIT_TOLERANCE_PX
+                        && takes_over(&best, dist, HitZoneKind::BracketEntry)
+                    {
                         let offset = bracket.entry.line.price - cursor_price;
                         best = Some((ann.id, HitZoneKind::BracketEntry, dist, offset, clamp_ctx));
                     }
@@ -334,7 +381,7 @@ fn hit_test_annotation(
                         let leg_y = camera.price_to_y(stop_price);
                         let dist = (cursor_y - leg_y).abs();
                         if dist <= LEVEL_HIT_TOLERANCE_PX
-                            && best.as_ref().is_none_or(|b| dist < b.2)
+                            && takes_over(&best, dist, HitZoneKind::BracketStopTrigger)
                         {
                             let offset = stop_price - cursor_price;
                             best = Some((
@@ -345,6 +392,28 @@ fn hit_test_annotation(
                                 clamp_ctx,
                             ));
                         }
+                    }
+                }
+                // TP leg.
+                if let Some(ref tp) = bracket.take_profit {
+                    let leg_y = camera.price_to_y(tp.line.price);
+                    let dist = (cursor_y - leg_y).abs();
+                    if dist <= LEVEL_HIT_TOLERANCE_PX
+                        && takes_over(&best, dist, HitZoneKind::BracketTP)
+                    {
+                        let offset = tp.line.price - cursor_price;
+                        best = Some((ann.id, HitZoneKind::BracketTP, dist, offset, clamp_ctx));
+                    }
+                }
+                // SL leg.
+                if let Some(ref sl) = bracket.stop_loss {
+                    let leg_y = camera.price_to_y(sl.line.price);
+                    let dist = (cursor_y - leg_y).abs();
+                    if dist <= LEVEL_HIT_TOLERANCE_PX
+                        && takes_over(&best, dist, HitZoneKind::BracketSL)
+                    {
+                        let offset = sl.line.price - cursor_price;
+                        best = Some((ann.id, HitZoneKind::BracketSL, dist, offset, clamp_ctx));
                     }
                 }
             }

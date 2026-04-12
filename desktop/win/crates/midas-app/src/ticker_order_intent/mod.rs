@@ -55,6 +55,7 @@ pub mod actor;
 pub(crate) mod bootstrap;
 pub mod gatr_snap;
 pub mod handle;
+pub mod price_defaults;
 pub mod reducer;
 pub mod store;
 pub mod validate;

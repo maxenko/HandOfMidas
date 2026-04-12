@@ -3037,9 +3037,26 @@ impl MidasApp {
                 // still need to hydrate explicitly.
                 let sym = self.charts.get(&id).map(|c| c.symbol.clone());
                 if let Some(sym) = sym.as_ref().filter(|s| !s.is_empty()) {
+                    let key = crate::annotation_store::SymbolKey::new(sym);
                     let _ = crate::ticker_order_intent::reducer::apply_maybe_snap(
                         self,
-                        crate::annotation_store::SymbolKey::new(sym),
+                        key.clone(),
+                    );
+                    // Fix 1: ensure a Draft bracket exists on the chart
+                    // for the panel's current `(side, entry_type)` compound,
+                    // so the user sees their bracket shape immediately on
+                    // activation without having to click Place Order.
+                    let (current_price, gatr_abs) = self
+                        .market_cache
+                        .get(key.as_str())
+                        .map(|s| (s.last_price, s.gatr_abs))
+                        .unwrap_or((None, None));
+                    let _ = crate::ticker_order_intent::reducer::apply_ensure_draft_bracket(
+                        &mut self.annotation_store,
+                        &self.order_intent_handle,
+                        &key,
+                        current_price,
+                        gatr_abs,
                     );
                 }
                 // Slice 2 hydration — idempotent when the reducer
