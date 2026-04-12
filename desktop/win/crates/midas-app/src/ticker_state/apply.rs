@@ -274,8 +274,30 @@ impl TickerState {
                 let bracket_side = to_bracket_side(side);
                 let current_price = self.last_price.unwrap_or(0.0);
 
-                // If a live bracket already exists, flip side + entry type.
+                // If a live bracket already exists, validate it. If its
+                // prices are stale (0.0, NaN, or wildly off from current
+                // price), replace it with fresh defaults. Otherwise just
+                // flip side + entry type.
                 if let Some(ref mut b) = self.live_bracket {
+                    let entry_price = b.entry.line.price;
+                    let stale = !entry_price.is_finite()
+                        || entry_price <= 0.0
+                        || (current_price > 0.0
+                            && crate::order_panel::should_reposition(
+                                entry_price,
+                                current_price,
+                                self.gatr_abs,
+                            ));
+                    if stale && current_price > 0.0 {
+                        // Replace with fresh defaults at the current price.
+                        let prices = default_initial_prices(
+                            side, entry_type, current_price, self.gatr_abs,
+                        );
+                        b.entry = make_leg(prices.entry, LegRole::Entry);
+                        b.take_profit = Some(make_leg(prices.take_profit, LegRole::TakeProfit));
+                        b.stop_loss = Some(make_leg(prices.stop_loss, LegRole::StopLoss));
+                        b.entry_stop_price = prices.stop_trigger;
+                    }
                     b.side = bracket_side;
                     b.entry_type = entry_type;
                     crate::order_panel::normalize_bracket(b);

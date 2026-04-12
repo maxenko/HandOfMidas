@@ -889,6 +889,14 @@ impl MidasApp {
 
         // Hydrate the tickers map from redb v2 blobs.
         let mut tickers = ticker_persist.all_states();
+        // Annotation IDs are session-local (assigned by AnnotationStore::add
+        // which starts at 0 each launch). Stale IDs from a prior session
+        // would cause ProjectBracket to silently fail (tries to update an
+        // annotation that doesn't exist). Clear them so the first
+        // EnsureDraftBracket creates a fresh annotation.
+        for ts in tickers.values_mut() {
+            ts.set_live_annotation_id(None);
+        }
         tracing::info!(
             "ticker-state: loaded {} symbol(s) from redb v2",
             tickers.len()
@@ -5308,7 +5316,18 @@ impl MidasApp {
                         crate::ticker_state::TickerEffect::ProjectBracket(ref bracket) => {
                             let ann_id_opt = self.tickers.get(&sym)
                                 .and_then(|s| s.live_annotation_id());
-                            if let Some(ann_id) = ann_id_opt {
+                            // Check if the annotation actually exists in the store.
+                            // IDs are session-local; a stale ID from a prior session
+                            // (loaded from redb) would silently fail the update.
+                            let ann_exists = ann_id_opt
+                                .map(|id| {
+                                    self.annotation_store
+                                        .get(sym.as_str())
+                                        .iter()
+                                        .any(|a| a.id == id)
+                                })
+                                .unwrap_or(false);
+                            if let (Some(ann_id), true) = (ann_id_opt, ann_exists) {
                                 // Update existing annotation.
                                 self.annotation_store.update(
                                     sym.as_str(),
@@ -5321,6 +5340,10 @@ impl MidasApp {
                                     },
                                 );
                             } else {
+                                // Stale or missing ID — clear and create fresh.
+                                if let Some(s) = self.tickers.get_mut(&sym) {
+                                    s.set_live_annotation_id(None);
+                                }
                                 // Add new annotation.
                                 let new_id = self.annotation_store.add(
                                     sym.as_str(),
