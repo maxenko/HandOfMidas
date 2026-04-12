@@ -64,6 +64,19 @@ pub struct OrderPanelState {
     /// Annotation ID of the live Draft bracket in `AnnotationStore`.
     /// Links this panel to its bracket for mutations and re-linking.
     pub bracket_annotation_id: Option<AnnotationId>,
+    /// Whether the user has typed/clicked into this panel since the
+    /// last successful hydration, submit, or cancel.
+    ///
+    /// Set to `true` on any user edit (keyboard/mouse) that mutates a
+    /// price, side, entry type, quantity, or SL/TP toggle. Reset on
+    /// successful submit, explicit cancel, successful hydration from a
+    /// *different* ticker, or an explicit reset button.
+    ///
+    /// Consulted by [`OrderPanelState::hydrate_from_intent`]: when a
+    /// `ChartActivated` fires for the *same* symbol the user is
+    /// currently editing, the hydration is a no-op so we do not clobber
+    /// in-progress edits.
+    pub dirty: bool,
 }
 
 impl Default for OrderPanelState {
@@ -90,6 +103,116 @@ impl Default for OrderPanelState {
             showing_confirmation: false,
             bracket_active: None,
             bracket_annotation_id: None,
+            dirty: false,
+        }
+    }
+}
+
+impl OrderPanelState {
+    /// Hydrate this panel from a per-ticker [`TickerOrderIntent`] snapshot.
+    ///
+    /// Uses `intent.last_side` and `intent.last_entry_type` as the
+    /// compound key to look up the last-used
+    /// [`crate::ticker_order_intent::EntryMemory`] bucket and copies
+    /// every field into the panel. If that compound key has never been
+    /// touched (no entry in `intent.entries`), falls back to
+    /// `EntryMemory::default()` — which sets `sl_enabled = true` per
+    /// the "SL on by default per compound" rule.
+    ///
+    /// # Dirty guard
+    ///
+    /// If the panel is currently marked `dirty` **and** the incoming
+    /// intent is for the *same* symbol the panel is editing, this is a
+    /// no-op — we do not clobber in-progress user edits. A hydration
+    /// from a *different* ticker proceeds unconditionally and clears
+    /// the dirty flag.
+    pub fn hydrate_from_intent(
+        &mut self,
+        intent: &crate::ticker_order_intent::TickerOrderIntent,
+        last_price: Option<f64>,
+    ) {
+        if self.dirty && self.symbol == intent.symbol.as_str() {
+            return;
+        }
+        let memory = intent
+            .entries
+            .get(&(intent.last_side, intent.last_entry_type))
+            .cloned()
+            .unwrap_or_default();
+        self.symbol = intent.symbol.as_str().to_string();
+        self.side = intent.last_side;
+        self.entry_type = intent.last_entry_type;
+        self.apply_entry_memory(&memory);
+        self.last_price = last_price;
+        self.bracket_annotation_id = intent.live_annotation_id;
+        self.dirty = false;
+    }
+
+    /// Soft re-hydrate the panel when the user toggles side or entry
+    /// type *within* the same ticker.
+    ///
+    /// Re-reads the bucket at `(new_side, new_type)` from `intent.entries`
+    /// (or falls back to `EntryMemory::default()` — including the
+    /// default-true `sl_enabled`). Unlike
+    /// [`Self::hydrate_from_intent`], this does **not** bump or clear
+    /// the dirty flag: the side/type toggle is itself a user action,
+    /// not a typed value, so downstream code may still consider the
+    /// panel in-progress.
+    pub fn rehydrate_for_compound(
+        &mut self,
+        intent: &crate::ticker_order_intent::TickerOrderIntent,
+        new_side: OrderSide,
+        new_type: EntryType,
+    ) {
+        let memory = intent
+            .entries
+            .get(&(new_side, new_type))
+            .cloned()
+            .unwrap_or_default();
+        self.side = new_side;
+        self.entry_type = new_type;
+        self.apply_entry_memory(&memory);
+    }
+
+    /// Copy every price / toggle field from an [`EntryMemory`] bucket
+    /// into the panel. Shared by
+    /// [`Self::hydrate_from_intent`] and [`Self::rehydrate_for_compound`].
+    fn apply_entry_memory(&mut self, memory: &crate::ticker_order_intent::EntryMemory) {
+        self.quantity = memory
+            .quantity
+            .map(|q| format!("{}", q))
+            .unwrap_or_else(|| "100".to_string());
+        self.tp_enabled = memory.tp_enabled;
+        self.tp_mode = memory.tp_mode;
+        self.tp_value = memory.tp_value.clone();
+        self.sl_enabled = memory.sl_enabled;
+        self.sl_mode = memory.sl_mode;
+        self.sl_value = memory.sl_value.clone();
+        self.sl_type = memory.sl_type;
+        self.sl_limit_value = memory.sl_limit_value.clone();
+        // `entry_price_or_offset` lands in limit_price / stop_price
+        // depending on entry_type. For Market it is unused.
+        let entry_str = memory
+            .entry_price_or_offset
+            .map(|p| format!("{:.2}", p))
+            .unwrap_or_default();
+        // Clear both, then populate the relevant one.
+        self.limit_price.clear();
+        self.stop_price.clear();
+        match self.entry_type {
+            EntryType::Market => {}
+            EntryType::Limit => {
+                self.limit_price = entry_str;
+            }
+            EntryType::Stop => {
+                self.stop_price = entry_str;
+            }
+            EntryType::StopLimit => {
+                // With only a single stored price per compound we
+                // round-trip it into the limit field. The stop trigger
+                // will be re-entered by the user if needed.
+                self.limit_price = entry_str;
+            }
         }
     }
 }

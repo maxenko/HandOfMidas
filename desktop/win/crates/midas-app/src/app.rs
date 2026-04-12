@@ -168,6 +168,9 @@ pub struct MidasApp {
     pub broker_bridge: Option<Arc<crate::broker_bridge::BrokerBridge>>,
     /// Current broker connection state display string.
     pub broker_connection_display: String,
+    /// Per-ticker order intent store handle. Owns the `redb`-backed
+    /// `TickerOrderIntent` cache + the background flush thread.
+    pub order_intent_handle: crate::ticker_order_intent::TickerOrderIntentHandle,
 }
 
 /// Pending drag: press started but hold threshold not yet reached.
@@ -740,6 +743,35 @@ impl MidasApp {
             None
         };
 
+        // Open the per-ticker order intent store.
+        //
+        // Location mirrors the DuckDB config dir — AppData\Local\HandOfMidas
+        // on Windows. Failure here is fatal: without the intent store,
+        // panels cannot hydrate and Slice 2's bootstrap-from-annotations
+        // pass would silently lose data. Slice 1b will surface the
+        // `IntentError` variants more gracefully; for now we bail out
+        // with a clear panic matching the rest of `new`'s error style.
+        let ticker_state_path = dirs::data_local_dir()
+            .unwrap_or_default()
+            .join("HandOfMidas")
+            .join("ticker_state.redb");
+        let order_intent_handle =
+            match crate::ticker_order_intent::TickerOrderIntentHandle::open(
+                ticker_state_path.clone(),
+            ) {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::error!(
+                        "failed to open ticker intent store at {}: {e}",
+                        ticker_state_path.display()
+                    );
+                    panic!(
+                        "ticker-intent store open failed at {}: {e}",
+                        ticker_state_path.display()
+                    );
+                }
+            };
+
         // Start the broker engine with TestBroker defaults.
         let broker_bridge = {
             let broker_config = midas_broker::BrokerConfig::default();
@@ -787,6 +819,7 @@ impl MidasApp {
             market_cache: crate::market_cache::MarketDataCache::default(),
             broker_bridge: broker_bridge.clone(),
             broker_connection_display: "Disconnected".to_string(),
+            order_intent_handle,
         };
 
         // Register broker bridge in provider registry.
@@ -885,6 +918,15 @@ impl MidasApp {
                 app.mark_levels_dirty_for_ticker(symbol);
             }
         }
+
+        // Bootstrap the ticker intent store from existing bracket
+        // annotations (Slice 2). For every symbol that has at least one
+        // `OrderBracket` annotation but no intent row, seed an intent
+        // from the first bracket's compound key and leg prices. The
+        // `source: Bootstrap` tag tells the reducer (Slice 4) not to
+        // seed the GATR anchor — anchors are recorded on the first
+        // *user* touch.
+        app.bootstrap_ticker_intents_from_annotations();
 
         // Async-load data for all restored charts that have a symbol.
         let mut load_tasks: Vec<Task<Message>> = Vec::new();
@@ -1447,6 +1489,21 @@ impl MidasApp {
         // Update panel state.
         if let Some(p) = self.order_panels.get_mut(&panel_id) {
             p.state.entry_type = new_type;
+        }
+
+        // Slice 2: re-hydrate panel inputs from the ticker intent's
+        // `(side, new_type)` bucket. Soft rehydrate — does not bump
+        // `dirty`. Falls through silently when no intent exists.
+        let intent_snapshot = self
+            .order_panels
+            .get(&panel_id)
+            .map(|p| crate::annotation_store::SymbolKey::new(&p.state.symbol))
+            .and_then(|key| self.order_intent_handle.snapshot(&key));
+        if let Some(intent) = intent_snapshot {
+            if let Some(p) = self.order_panels.get_mut(&panel_id) {
+                let side = p.state.side;
+                p.state.rehydrate_for_compound(&intent, side, new_type);
+            }
         }
 
         // Update the bracket annotation.
@@ -2349,6 +2406,54 @@ impl MidasApp {
             self.workspace.set_focus(pane);
         }
     }
+
+    /// One-time startup bootstrap: for every symbol that has at least
+    /// one live `OrderBracket` annotation but no ticker-intent row,
+    /// seed a fresh intent from the first such bracket.
+    ///
+    /// Uses `IntentSource::Bootstrap` so downstream reducers (Slice 4)
+    /// know not to treat this as a user edit — the GATR anchor is
+    /// intentionally left unset, to be filled on the user's first real
+    /// edit.
+    fn bootstrap_ticker_intents_from_annotations(&mut self) {
+        crate::ticker_order_intent::bootstrap::bootstrap_from_annotations(
+            &self.annotation_store,
+            &self.order_intent_handle,
+        );
+    }
+
+    /// Hydrate the order panel linked to `chart_id` from the intent
+    /// store, if any. Called from `ActivateChart` so switching charts
+    /// lands the panel on the last-used side/type/prices for that
+    /// symbol. The `dirty` guard in [`crate::order_panel::OrderPanelState::hydrate_from_intent`]
+    /// prevents clobbering an in-progress edit on the *same* symbol.
+    fn hydrate_order_panel_for_chart(&mut self, chart_id: ChartId) {
+        use crate::annotation_store::SymbolKey;
+
+        let Some(chart) = self.charts.get(&chart_id) else {
+            return;
+        };
+        let symbol = chart.symbol.clone();
+        if symbol.is_empty() {
+            return;
+        }
+        let key = SymbolKey::new(&symbol);
+        let Some(intent) = self.order_intent_handle.snapshot(&key) else {
+            return;
+        };
+
+        let last_price = self
+            .market_cache
+            .get(&symbol.to_uppercase())
+            .and_then(|s| s.last_price);
+
+        // Find panels whose `source_chart` links to this chart.
+        for panel in self.order_panels.values_mut() {
+            if panel.state.source_chart == Some(chart_id) {
+                panel.state.hydrate_from_intent(&intent, last_price);
+            }
+        }
+    }
 }
 
 // Config persistence (build_config, mark_config_dirty, maybe_save_config,
@@ -2552,6 +2657,10 @@ impl MidasApp {
                 if let Some(pane) = self.workspace.find_pane(id) {
                     self.workspace.set_focus(pane);
                 }
+                // Slice 2: hydrate any order panel linked to this chart
+                // from the ticker intent store so switching charts
+                // restores the last-used inputs for that symbol.
+                self.hydrate_order_panel_for_chart(id);
                 Task::none()
             }
 
@@ -3184,6 +3293,11 @@ impl MidasApp {
                 if let Some(ref bridge) = self.broker_bridge {
                     let _ = bridge.shutdown();
                 }
+                // Fire-and-forget durable shutdown of the ticker intent
+                // store. Signals the flush thread to perform a final
+                // `Immediate` commit and exit; the handle itself is
+                // dropped when `MidasApp` drops.
+                self.order_intent_handle.shutdown_blocking();
                 self.flush_config()
             }
 
@@ -3471,10 +3585,32 @@ impl MidasApp {
                 }
                 let mut structural_sync = StructuralSync::None;
 
+                // Snapshot the ticker intent up-front so SetSide can
+                // soft-rehydrate the panel from the new compound-key
+                // bucket without re-borrowing `self`. Panels that are
+                // not linked to an intent row get `None` and fall back
+                // to the existing mutation path.
+                let rehydrate_intent = self
+                    .order_panels
+                    .get(&panel_id)
+                    .map(|p| crate::annotation_store::SymbolKey::new(&p.state.symbol))
+                    .and_then(|key| self.order_intent_handle.snapshot(&key));
+
                 if let Some(panel) = self.order_panels.get_mut(&panel_id) {
                     match action {
                         OrderPanelAction::SetSide(side) => {
-                            panel.state.side = side;
+                            // Slice 2: rehydrate from the new compound
+                            // bucket *without* bumping `dirty` — side
+                            // toggles are soft reloads, not typed input.
+                            if let Some(ref intent) = rehydrate_intent {
+                                panel.state.rehydrate_for_compound(
+                                    intent,
+                                    side,
+                                    panel.state.entry_type,
+                                );
+                            } else {
+                                panel.state.side = side;
+                            }
                             if let Some(ann_id) = panel.state.bracket_annotation_id {
                                 structural_sync =
                                     StructuralSync::Side(ann_id, panel.state.symbol.clone(), side);
@@ -3489,9 +3625,11 @@ impl MidasApp {
                                 );
                             }
                             panel.state.quantity = qty;
+                            panel.state.dirty = true;
                         }
                         OrderPanelAction::ToggleTp(enabled) => {
                             panel.state.tp_enabled = enabled;
+                            panel.state.dirty = true;
                             if let Some(ann_id) = panel.state.bracket_annotation_id {
                                 let last = panel.state.last_price.unwrap_or(0.0);
                                 structural_sync = StructuralSync::ToggleTp(
@@ -3502,7 +3640,10 @@ impl MidasApp {
                                 );
                             }
                         }
-                        OrderPanelAction::SetTpMode(mode) => panel.state.tp_mode = mode,
+                        OrderPanelAction::SetTpMode(mode) => {
+                            panel.state.tp_mode = mode;
+                            panel.state.dirty = true;
+                        }
                         OrderPanelAction::SetTpValue(val) => {
                             if let (Some(ann_id), Ok(price)) =
                                 (panel.state.bracket_annotation_id, val.parse::<f64>())
@@ -3511,9 +3652,11 @@ impl MidasApp {
                                     Some((ann_id, panel.state.symbol.clone(), "tp", price));
                             }
                             panel.state.tp_value = val;
+                            panel.state.dirty = true;
                         }
                         OrderPanelAction::ToggleSl(enabled) => {
                             panel.state.sl_enabled = enabled;
+                            panel.state.dirty = true;
                             if let Some(ann_id) = panel.state.bracket_annotation_id {
                                 let last = panel.state.last_price.unwrap_or(0.0);
                                 structural_sync = StructuralSync::ToggleSl(
@@ -3524,7 +3667,10 @@ impl MidasApp {
                                 );
                             }
                         }
-                        OrderPanelAction::SetSlMode(mode) => panel.state.sl_mode = mode,
+                        OrderPanelAction::SetSlMode(mode) => {
+                            panel.state.sl_mode = mode;
+                            panel.state.dirty = true;
+                        }
                         OrderPanelAction::SetSlValue(val) => {
                             if let (Some(ann_id), Ok(price)) =
                                 (panel.state.bracket_annotation_id, val.parse::<f64>())
@@ -3533,9 +3679,16 @@ impl MidasApp {
                                     Some((ann_id, panel.state.symbol.clone(), "sl", price));
                             }
                             panel.state.sl_value = val;
+                            panel.state.dirty = true;
                         }
-                        OrderPanelAction::SetSlType(sl_type) => panel.state.sl_type = sl_type,
-                        OrderPanelAction::SetSlLimit(val) => panel.state.sl_limit_value = val,
+                        OrderPanelAction::SetSlType(sl_type) => {
+                            panel.state.sl_type = sl_type;
+                            panel.state.dirty = true;
+                        }
+                        OrderPanelAction::SetSlLimit(val) => {
+                            panel.state.sl_limit_value = val;
+                            panel.state.dirty = true;
+                        }
                         OrderPanelAction::Submit => {
                             // Sync last_price from market_cache so validate_panel
                             // can check TP/SL direction against current price.
@@ -3548,13 +3701,19 @@ impl MidasApp {
                             panel.state.errors = errors;
                             if valid {
                                 panel.state.showing_confirmation = true;
+                                // Successful validate → treat as end of the
+                                // editing session; hydration from the same
+                                // ticker is allowed again.
+                                panel.state.dirty = false;
                             }
                         }
                         OrderPanelAction::ConfirmNo => {
                             panel.state.showing_confirmation = false;
+                            panel.state.dirty = false;
                         }
                         OrderPanelAction::Dismiss => {
                             panel.state.showing_confirmation = false;
+                            panel.state.dirty = false;
                         }
                         OrderPanelAction::SetLimitPrice(val) => {
                             if let (Some(ann_id), Ok(price)) =
@@ -3564,6 +3723,7 @@ impl MidasApp {
                                     Some((ann_id, panel.state.symbol.clone(), "limit", price));
                             }
                             panel.state.limit_price = val;
+                            panel.state.dirty = true;
                         }
                         OrderPanelAction::SetStopPrice(val) => {
                             if let (Some(ann_id), Ok(price)) =
@@ -3573,6 +3733,7 @@ impl MidasApp {
                                     Some((ann_id, panel.state.symbol.clone(), "stop", price));
                             }
                             panel.state.stop_price = val;
+                            panel.state.dirty = true;
                         }
                         OrderPanelAction::StepPrice { field, delta } => {
                             use crate::order_panel::PriceField;
@@ -3601,6 +3762,7 @@ impl MidasApp {
                                     PriceField::LimitPrice => panel.state.limit_price = new_str,
                                     PriceField::StopPrice => panel.state.stop_price = new_str,
                                 }
+                                panel.state.dirty = true;
                             }
                         }
                         OrderPanelAction::ConfirmYes

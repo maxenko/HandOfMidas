@@ -5,6 +5,14 @@
 //! writes are guarded by a short write-lock. There is deliberately no
 //! async here — iced's `update()` loop is sync, so the cache must be
 //! too.
+//!
+//! # Dead-code allowance
+//!
+//! Slice 1a froze the public surface of the store (`all_symbols`,
+//! `generation`, etc.) so Slices 3–5 can consume it without reopening
+//! the module. Suppress dead-code at the file level rather than
+//! sprinkling per-method attributes — this is intentional frozen API.
+#![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -150,6 +158,29 @@ impl TickerOrderIntentStore {
     /// seed the cache from disk without scheduling a pointless flush.
     pub(crate) fn seed(&self, symbol: SymbolKey, intent: TickerOrderIntent) {
         self.cache.write().insert(symbol, Arc::new(intent));
+    }
+
+    /// Re-mark a batch of symbols as dirty. Used by the flush loop on
+    /// disk-full failure so the un-persisted writes get another chance
+    /// on the next flush attempt. Symbols whose cache entries have been
+    /// evicted (e.g. forgotten) since the drain are silently skipped.
+    pub(crate) fn re_mark_dirty<I>(&self, symbols: I)
+    where
+        I: IntoIterator<Item = SymbolKey>,
+    {
+        let cache = self.cache.read();
+        let mut dirty = self.dirty.lock();
+        for s in symbols {
+            if cache.contains_key(&s) {
+                dirty.insert(s);
+            }
+        }
+    }
+
+    /// Number of symbols currently awaiting a flush. Exposed for tests
+    /// that assert a failed commit re-queued its batch.
+    pub(crate) fn dirty_len(&self) -> usize {
+        self.dirty.lock().len()
     }
 }
 

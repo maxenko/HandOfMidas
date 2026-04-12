@@ -41,12 +41,6 @@
 //! GATR / pin decorator affordances. Failure-mode hardening
 //! (multi-instance lock, corruption recovery, disk-full) is Slice 1b.
 
-// The handle is not yet wired into `MidasApp` (that is Slice 2), so
-// most of this module is currently only exercised by its own test
-// suite. Allow dead_code + unused_imports at the module root so
-// `-D warnings` stays green until Slice 2 lands.
-#![allow(dead_code, unused_imports)]
-
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
@@ -58,6 +52,7 @@ use crate::annotation_store::SymbolKey;
 use crate::order_panel::{OrderSide, PriceInputMode, StopLossType};
 
 pub mod actor;
+pub(crate) mod bootstrap;
 pub mod handle;
 pub mod reducer;
 pub mod store;
@@ -66,10 +61,19 @@ pub mod validate;
 #[cfg(test)]
 mod tests;
 
+// Frozen Slice 1a public API. A handful of items do not yet have a
+// call site in Slice 2 — those land in Slices 3–5 (`TickerIntentAccess`
+// for reducer tests, `validate` for Slice 3 intake, `UpsertOutcome`
+// for Slice 3 reducer branches, etc.). The re-exports stay as-is so
+// downstream slices do not have to re-open this module.
+#[allow(unused_imports)] // frozen API; some items consumed in Slices 3–5
 pub use actor::{IntentError, IntentSource, NoOpReason, OrderIntentMsg, OrderIntentReply};
+#[allow(unused_imports)] // frozen API; some items consumed in Slices 3–5
 pub use handle::{TickerIntentAccess, TickerOrderIntentHandle};
 pub use reducer::{apply_order_intent_msg, OrderIntentAppMsg};
+#[allow(unused_imports)] // frozen API; some items consumed in Slices 3–5
 pub use store::{TickerOrderIntentStore, UpsertOutcome};
+#[allow(unused_imports)] // frozen API; some items consumed in Slices 3–5
 pub use validate::{validate, IntentDefect};
 
 /// Current on-disk schema version for [`TickerOrderIntent`].
@@ -223,6 +227,7 @@ pub struct GatrAnchor {
 impl TickerOrderIntent {
     /// Construct a fresh, empty intent for a symbol. All fields are
     /// at their defaults; no buckets are populated.
+    #[allow(dead_code)] // used by Slice 3 reducer constructors
     pub fn new(symbol: SymbolKey) -> Self {
         Self {
             version: CURRENT_VERSION,
@@ -245,6 +250,7 @@ impl TickerOrderIntent {
 /// Slice 1a's migration is a no-op: the on-disk shape *is* v1. The
 /// function exists so that a future v2 landing can add a real migration
 /// without having to touch every call site.
+#[allow(dead_code)] // call site lands on v1 → v2 migration work
 pub fn migrate_v0_v1(blob: &[u8]) -> Result<TickerOrderIntent, IntentDefect> {
     serde_json::from_slice::<TickerOrderIntent>(blob).map_err(|e| IntentDefect::DecodeFailed {
         reason: e.to_string(),

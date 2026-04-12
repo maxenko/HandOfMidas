@@ -19,7 +19,7 @@ use midas_chart::widget::order_bracket::EntryType;
 use crate::annotation_store::SymbolKey;
 use crate::order_panel::{OrderSide, PriceInputMode, StopLossType};
 
-use super::actor::{open_and_hydrate, spawn_actor, IntentSource, OrderIntentMsg, OrderIntentReply};
+use super::actor::{open_and_hydrate, IntentSource, OrderIntentMsg, OrderIntentReply};
 use super::store::{TickerOrderIntentStore, UpsertOutcome};
 use super::validate::{validate, IntentDefect};
 use super::{EntryMemory, GatrAnchor, TickerOrderIntent, TickerOrderIntentHandle};
@@ -242,10 +242,10 @@ fn load_drops_invalid_row_with_warn() {
         txn.commit().unwrap();
     }
 
-    let (store, _db, _ctl) = open_and_hydrate(&path).expect("open should succeed");
-    assert!(store.snapshot(&SymbolKey::new("GOOD")).is_some());
+    let hydrated = open_and_hydrate(&path).expect("open should succeed");
+    assert!(hydrated.store.snapshot(&SymbolKey::new("GOOD")).is_some());
     assert!(
-        store.snapshot(&SymbolKey::new("BAD")).is_none(),
+        hydrated.store.snapshot(&SymbolKey::new("BAD")).is_none(),
         "invalid row should be dropped on load"
     );
 }
@@ -411,4 +411,298 @@ async fn handle_upsert_is_visible_to_next_snapshot_sync() {
     assert!(snap.is_some());
     let _: Arc<TickerOrderIntent> = snap.unwrap();
     handle.shutdown().await;
+}
+
+// ── Slice 1b: multi-instance detection ────────────────────────────────
+
+#[test]
+fn open_returns_already_open_when_locked() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("locked.redb");
+
+    // First open succeeds.
+    let _first = TickerOrderIntentHandle::open(path.clone()).expect("first open");
+
+    // Second open on the same path must surface AlreadyOpen — redb
+    // holds an exclusive file lock inside a single process too.
+    // We avoid `expect_err` because `TickerOrderIntentHandle: !Debug`.
+    match TickerOrderIntentHandle::open(path.clone()) {
+        Ok(_) => panic!("second open should have failed"),
+        Err(super::IntentError::AlreadyOpen { path: p }) => {
+            assert_eq!(p, path);
+        }
+        Err(other) => panic!("expected AlreadyOpen, got {other:?}"),
+    }
+    // The mailbox actor owns the `Database` on a separate thread, so
+    // dropping `_first` only releases our handle clone. The other tests
+    // exercise the full async shutdown sequence; here we only assert
+    // the typed-error variant on the second open.
+}
+
+// ── Slice 1b: whole-file corruption recovery ──────────────────────────
+
+#[test]
+fn open_recovers_from_corrupt_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("ticker_state.redb");
+
+    // Write junk bytes where redb expects a valid header.
+    std::fs::write(&path, b"this is not a valid redb file, not at all!").unwrap();
+
+    let handle = TickerOrderIntentHandle::open(path.clone())
+        .expect("corrupt file should be recovered into a fresh DB");
+
+    // The recovery toast must be queued.
+    let toasts = handle.take_pending_startup_toasts();
+    assert_eq!(toasts.len(), 1, "one recovery toast expected");
+    assert!(
+        toasts[0].contains("Order memory reset"),
+        "toast message should describe the reset: got {:?}",
+        toasts[0]
+    );
+    // A second drain is empty.
+    assert!(handle.take_pending_startup_toasts().is_empty());
+
+    // A fresh empty DB exists at the original path.
+    assert!(path.exists(), "fresh DB should exist at original path");
+
+    // The original (corrupt) file was renamed with a `.corrupt.<ts>`
+    // suffix in the same directory.
+    let entries: Vec<_> = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().into_string().unwrap_or_default())
+        .collect();
+    // Match without regex: "ticker_state.redb.corrupt." prefix + all
+    // remaining characters in [0-9.].
+    let aside_matches = |name: &str| {
+        let prefix = "ticker_state.redb.corrupt.";
+        if let Some(rest) = name.strip_prefix(prefix) {
+            !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+        } else {
+            false
+        }
+    };
+    assert!(
+        entries.iter().any(|name| aside_matches(name)),
+        "expected a .corrupt.<ts> sibling, got entries: {entries:?}"
+    );
+
+    // The recovered DB is actually usable.
+    let outcome = handle.upsert(OrderIntentMsg::Upsert {
+        symbol: SymbolKey::new("AAPL"),
+        intent: Box::new(sample_intent("AAPL")),
+        source: IntentSource::Panel,
+    });
+    assert!(matches!(outcome, UpsertOutcome::Applied { .. }));
+}
+
+// ── Slice 1b: disk-full backoff + force-shutdown bypass ───────────────
+
+mod disk_full {
+    use std::fmt;
+    use std::io;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    /// In-memory `redb::StorageBackend` whose `write` call can be
+    /// instructed to return `io::ErrorKind::StorageFull` after the
+    /// N-th invocation. Used to simulate a full disk without touching
+    /// the real filesystem.
+    pub(super) struct DiskFullBackend {
+        bytes: Mutex<Vec<u8>>,
+        writes_before_fail: AtomicUsize,
+        write_count: AtomicUsize,
+        /// When set, every `write` past `writes_before_fail` returns
+        /// `StorageFull`. Cleared to simulate "disk space freed".
+        fail_armed: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl DiskFullBackend {
+        pub(super) fn new(
+            writes_before_fail: usize,
+            fail_armed: Arc<std::sync::atomic::AtomicBool>,
+        ) -> Self {
+            Self {
+                bytes: Mutex::new(Vec::new()),
+                writes_before_fail: AtomicUsize::new(writes_before_fail),
+                write_count: AtomicUsize::new(0),
+                fail_armed,
+            }
+        }
+    }
+
+    impl fmt::Debug for DiskFullBackend {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("DiskFullBackend").finish()
+        }
+    }
+
+    impl redb::StorageBackend for DiskFullBackend {
+        fn len(&self) -> Result<u64, io::Error> {
+            Ok(self.bytes.lock().unwrap().len() as u64)
+        }
+
+        fn read(&self, offset: u64, len: usize) -> Result<Vec<u8>, io::Error> {
+            let buf = self.bytes.lock().unwrap();
+            let start = offset as usize;
+            let end = start.checked_add(len).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "overflow")
+            })?;
+            if end > buf.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!("read past end: {end} > {}", buf.len()),
+                ));
+            }
+            Ok(buf[start..end].to_vec())
+        }
+
+        fn set_len(&self, len: u64) -> Result<(), io::Error> {
+            let mut buf = self.bytes.lock().unwrap();
+            buf.resize(len as usize, 0);
+            Ok(())
+        }
+
+        fn sync_data(&self, _eventual: bool) -> Result<(), io::Error> {
+            Ok(())
+        }
+
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), io::Error> {
+            let n = self.write_count.fetch_add(1, Ordering::AcqRel) + 1;
+            let threshold = self.writes_before_fail.load(Ordering::Acquire);
+            if self.fail_armed.load(Ordering::Acquire) && n > threshold {
+                return Err(io::Error::new(
+                    io::ErrorKind::StorageFull,
+                    "simulated disk full",
+                ));
+            }
+            let mut buf = self.bytes.lock().unwrap();
+            let end = offset as usize + data.len();
+            if buf.len() < end {
+                buf.resize(end, 0);
+            }
+            buf[offset as usize..end].copy_from_slice(data);
+            Ok(())
+        }
+    }
+}
+
+#[test]
+fn flush_requeues_on_disk_full_and_shutdown_guard_fires() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // Start in the "disarmed" state so the initial open + table
+    // creation succeed, then arm the failure and force a flush.
+    let armed = Arc::new(AtomicBool::new(false));
+    let backend = disk_full::DiskFullBackend::new(0, armed.clone());
+
+    let hydrated = super::actor::open_and_hydrate_with_backend(backend)
+        .expect("open with in-memory backend should succeed");
+    let store = hydrated.store.clone();
+    let db = hydrated.db.clone();
+    let ctl = hydrated.ctl.clone();
+
+    // Seed a dirty write and assert it exists in the dirty set.
+    store.upsert(SymbolKey::new("AAPL"), sample_intent("AAPL"));
+    assert_eq!(store.dirty_len(), 1);
+
+    // Arm the failure so any subsequent write returns StorageFull.
+    armed.store(true, Ordering::Release);
+
+    let err = super::actor::flush_dirty(&db, &store, redb::Durability::Immediate)
+        .expect_err("flush should fail with disk full");
+    match err {
+        super::actor::FlushError::DiskFull(_) => {}
+        other => panic!("expected DiskFull, got {other:?}"),
+    }
+    // Dirty set preserved so the next flush attempt will retry.
+    assert_eq!(store.dirty_len(), 1, "failed flush must re-queue dirty set");
+
+    // Backoff-delay progression (1s → 2s → 5s → 10s → 30s, then
+    // capped at 30s on every subsequent failure).
+    assert_eq!(
+        super::actor::FlushCtl::backoff_delay(1),
+        std::time::Duration::from_secs(1)
+    );
+    assert_eq!(
+        super::actor::FlushCtl::backoff_delay(2),
+        std::time::Duration::from_secs(2)
+    );
+    assert_eq!(
+        super::actor::FlushCtl::backoff_delay(3),
+        std::time::Duration::from_secs(5)
+    );
+    assert_eq!(
+        super::actor::FlushCtl::backoff_delay(4),
+        std::time::Duration::from_secs(10)
+    );
+    assert_eq!(
+        super::actor::FlushCtl::backoff_delay(5),
+        std::time::Duration::from_secs(30)
+    );
+    assert_eq!(
+        super::actor::FlushCtl::backoff_delay(99),
+        std::time::Duration::from_secs(30),
+        "backoff caps at the last entry"
+    );
+
+    // A subsequent flush against the same poisoned `Database` keeps
+    // re-queuing dirty rows; redb's `StorageError::PreviousIo` latches
+    // the database into a read-only state until it is reopened, which
+    // is the exact behavior the disk-full modal expects: "free space
+    // and relaunch." Verify the dirty set still survives the second
+    // failure (Slice 1b's contract is preservation, not recovery).
+    armed.store(false, Ordering::Release);
+    let second_err = super::actor::flush_dirty(&db, &store, redb::Durability::Immediate)
+        .expect_err("redb stays poisoned after a write failure");
+    match second_err {
+        super::actor::FlushError::Other(_) | super::actor::FlushError::DiskFull(_) => {}
+    }
+    assert_eq!(
+        store.dirty_len(),
+        1,
+        "second failed flush must also re-queue the dirty set"
+    );
+
+    // Avoid leaking the flush thread the test did not spawn.
+    drop(ctl);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_refuses_when_disk_full_and_force_bypasses() {
+    // White-box test of the shutdown guard: we mutate
+    // `FlushCtl::disk_full_failures` through a crate-private test
+    // helper on the handle (the real `flush_loop` sets the same
+    // fields from the background thread), then assert the
+    // `Shutdown { force: false }` handler refuses and latches the
+    // modal, and `Shutdown { force: true }` bypasses the guard.
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("shutdown_disk_full.redb");
+    let handle = TickerOrderIntentHandle::open(path.clone()).expect("open");
+
+    handle.__test_force_disk_full_state();
+
+    // Plain shutdown must refuse and latch the modal message.
+    handle.shutdown_best_effort_non_forced().await;
+    let modal = handle
+        .pending_modal_message()
+        .expect("modal should be latched after refused shutdown");
+    assert!(
+        modal.contains("disk full"),
+        "modal text should describe disk-full: {modal:?}"
+    );
+
+    // Force-shutdown drops the actor anyway. After it returns the
+    // handle is inert; the test just asserts the call completes
+    // without hanging.
+    handle.shutdown_force().await;
+    // The modal message is not auto-cleared — Slice 2 drains it
+    // explicitly. Verify the drain accessor works.
+    let drained = handle.take_pending_modal_message();
+    assert!(drained.is_some(), "drain should return the latched modal");
+    assert!(
+        handle.take_pending_modal_message().is_none(),
+        "second drain should be empty"
+    );
 }

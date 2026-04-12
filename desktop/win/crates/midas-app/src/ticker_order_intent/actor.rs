@@ -21,6 +21,17 @@
 //! task would pull a runtime dependency for no benefit, and complicate
 //! shutdown ordering. The flush thread is driven by a condvar pair
 //! (`Mutex<FlushCtl> + Condvar`); shutdown wakes it synchronously.
+//!
+//! # Dead-code allowance
+//!
+//! This module defines the full Slice 1a + 1b message / reply surface
+//! even though Slice 2 only wires the synchronous `Upsert` and sync
+//! shutdown paths. Several enum variants, reply fields, and helper
+//! methods (`IntentSource::Panel`/`Chart`, `InvalidIntent`, reply
+//! payload fields, etc.) are consumed by Slices 3, 4, and 5. Suppress
+//! dead-code at the file level rather than sprinkling per-item
+//! attributes — this module is the frozen Slice 1a/1b API surface.
+#![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex as StdMutex};
@@ -28,7 +39,11 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use mailbox_processor::MailboxProcessor;
-use redb::{Database, Durability, ReadableTable, TableDefinition};
+use parking_lot::Mutex as PlMutex;
+use redb::{
+    CommitError, Database, DatabaseError, Durability, ReadableTable, StorageError,
+    TableDefinition, TransactionError,
+};
 use tokio::sync::mpsc::Sender;
 
 use crate::annotation_store::SymbolKey;
@@ -50,6 +65,29 @@ const IDLE_THRESHOLD: Duration = Duration::from_millis(750);
 /// `serde_json::to_vec_pretty(&intent)` so the file is grep-able.
 const TABLE: TableDefinition<'_, &str, &[u8]> = TableDefinition::new("ticker_intent_v1");
 
+/// Disk-full backoff schedule. Index = number of *prior* failures.
+/// Once we reach the last entry we stay at that value forever.
+const DISK_FULL_BACKOFF: [Duration; 5] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(5),
+    Duration::from_secs(10),
+    Duration::from_secs(30),
+];
+
+/// The modal message surfaced when a plain `Shutdown { force: false }`
+/// arrives while the flush loop is stuck on `StorageFull`. Also the
+/// exact string Slice 2 will pipe into `Message::ShowToast` once the
+/// handle is wired into `MidasApp`.
+pub const DISK_FULL_MODAL_MESSAGE: &str =
+    "Cannot save order memory — disk full. Free space to exit cleanly.";
+
+/// The startup toast surfaced by Slice 1b's corruption-recovery path.
+/// Slice 2 drains `TickerOrderIntentHandle::pending_startup_toasts`
+/// into `Message::ShowToast` when the handle is constructed.
+pub const CORRUPTION_RECOVERY_TOAST: &str =
+    "Order memory reset — previous file was corrupt";
+
 // ── Errors, messages, replies ─────────────────────────────────────────
 
 /// Errors the actor can return on open or flush.
@@ -62,6 +100,15 @@ pub enum IntentError {
         path: PathBuf,
         /// Underlying error message.
         reason: String,
+    },
+    /// Another instance of the app already holds the file lock on this
+    /// database. Slice 1b surfaces this as a graceful exit at app
+    /// startup; `MidasApp::new()` (Slice 2) will convert it to a
+    /// user-facing "Another Hand of Midas instance is running" dialog.
+    #[error("ticker-intent database at {path} is already open by another instance")]
+    AlreadyOpen {
+        /// Path that was attempted.
+        path: PathBuf,
     },
     /// A write transaction failed at commit time.
     #[error("redb write transaction failed: {reason}")]
@@ -175,6 +222,25 @@ pub(crate) struct FlushCtl {
     pub(crate) shutdown: bool,
     /// Last time we received a wake. Used for the idle heuristic.
     pub(crate) last_wake: Instant,
+    /// Number of *consecutive* disk-full commit failures. Zero when
+    /// the store is healthy. Used to index [`DISK_FULL_BACKOFF`].
+    pub(crate) disk_full_failures: u32,
+    /// When the flush loop is allowed to try again after a disk-full
+    /// hit. `None` while the store is healthy.
+    pub(crate) next_retry_at: Option<Instant>,
+}
+
+impl FlushCtl {
+    /// Whether the store is currently in the disk-full backoff state.
+    pub(crate) fn in_disk_full_backoff(&self) -> bool {
+        self.disk_full_failures > 0
+    }
+
+    /// The next backoff delay to use for the given failure count.
+    pub(crate) fn backoff_delay(failures: u32) -> Duration {
+        let idx = (failures.saturating_sub(1) as usize).min(DISK_FULL_BACKOFF.len() - 1);
+        DISK_FULL_BACKOFF[idx]
+    }
 }
 
 impl Default for FlushCtl {
@@ -183,7 +249,87 @@ impl Default for FlushCtl {
             wake: false,
             shutdown: false,
             last_wake: Instant::now(),
+            disk_full_failures: 0,
+            next_retry_at: None,
         }
+    }
+}
+
+/// Handles the handle needs to expose to Slice 2 so that any pending
+/// startup toast or modal message can be drained into the iced view
+/// layer after construction. Populated from inside
+/// [`open_and_hydrate`] (for corruption recovery) and from the flush
+/// loop (for disk-full shutdown guards).
+#[derive(Clone, Default)]
+pub(crate) struct HandleNotifications {
+    /// Toasts to fire `Message::ShowToast` with at app startup.
+    /// Currently only ever holds the corruption-recovery toast.
+    pub(crate) pending_startup_toasts: Arc<PlMutex<Vec<String>>>,
+    /// A modal message that blocks shutdown. Set by the flush loop
+    /// when `Shutdown { force: false }` arrives while disk-full
+    /// backoff is active. Slice 2 will render this as a modal dialog
+    /// and reissue `Shutdown { force: true }` when the user has freed
+    /// space (or accepted data loss).
+    pub(crate) pending_modal_message: Arc<PlMutex<Option<String>>>,
+}
+
+/// Classification of a [`flush_dirty`] failure. The flush loop needs
+/// to distinguish "disk full — retry later" from "something else went
+/// wrong" so the backoff schedule only kicks in for the former.
+#[derive(Debug)]
+pub(crate) enum FlushError {
+    /// The filesystem rejected the write with
+    /// `std::io::ErrorKind::StorageFull`. Dirty symbols have already
+    /// been re-marked so the next flush attempt will see them.
+    DiskFull(IntentError),
+    /// Any other [`IntentError`] (encode failures, lock poison,
+    /// transaction errors). Treated as a transient warning — the
+    /// dirty symbols are re-marked so a later user edit does not
+    /// silently drop state.
+    Other(IntentError),
+}
+
+impl std::fmt::Display for FlushError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FlushError::DiskFull(e) => write!(f, "disk full: {e}"),
+            FlushError::Other(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// Inspect a [`redb::DatabaseError`] and decide whether the underlying
+/// cause is `std::io::ErrorKind::StorageFull`.
+fn is_storage_full_database_error(e: &DatabaseError) -> bool {
+    match e {
+        DatabaseError::Storage(s) => is_storage_full_storage_error(s),
+        _ => false,
+    }
+}
+
+/// Inspect a [`redb::StorageError`] and decide whether the underlying
+/// cause is `std::io::ErrorKind::StorageFull`.
+fn is_storage_full_storage_error(e: &StorageError) -> bool {
+    matches!(e, StorageError::Io(io) if io.kind() == std::io::ErrorKind::StorageFull)
+}
+
+/// Inspect a [`redb::TransactionError`] (returned from
+/// `Database::begin_write`) and decide whether the underlying cause is
+/// `std::io::ErrorKind::StorageFull`.
+fn is_storage_full_transaction_error(e: &TransactionError) -> bool {
+    match e {
+        TransactionError::Storage(s) => is_storage_full_storage_error(s),
+        _ => false,
+    }
+}
+
+/// Inspect a [`redb::CommitError`] and decide whether the underlying
+/// cause is `std::io::ErrorKind::StorageFull`. `CommitError` is
+/// `#[non_exhaustive]`, so we add a wildcard arm.
+fn is_storage_full_commit_error(e: &CommitError) -> bool {
+    match e {
+        CommitError::Storage(s) => is_storage_full_storage_error(s),
+        _ => false,
     }
 }
 
@@ -192,12 +338,43 @@ impl Default for FlushCtl {
 /// Blocks on the condvar for up to `FLUSH_DEBOUNCE`. On wake, drains
 /// dirty entries into a single write transaction. Picks
 /// `Durability::Immediate` when idle, otherwise `Eventual`.
+///
+/// On `std::io::ErrorKind::StorageFull` during commit, the drained
+/// symbols are re-marked dirty and the loop schedules a retry per
+/// [`DISK_FULL_BACKOFF`]. While in that state, ordinary wakes are
+/// ignored until the retry deadline passes.
 pub(crate) fn flush_loop(
     db: Arc<Database>,
     store: Arc<TickerOrderIntentStore>,
     ctl: Arc<(StdMutex<FlushCtl>, Condvar)>,
 ) {
     loop {
+        // Compute the wait budget up front so the backoff deadline
+        // caps how long we sleep.
+        let (wait_budget, is_backoff_ready) = {
+            let guard = match ctl.0.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if guard.shutdown {
+                // Final drain happens below via the main match arm;
+                // fall through.
+                (Duration::ZERO, false)
+            } else {
+                match guard.next_retry_at {
+                    Some(deadline) => {
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        if remaining.is_zero() {
+                            (Duration::ZERO, true)
+                        } else {
+                            (remaining.min(FLUSH_DEBOUNCE), false)
+                        }
+                    }
+                    None => (FLUSH_DEBOUNCE, false),
+                }
+            }
+        };
+
         // Wait for a wake or the debounce period, whichever comes first.
         let (lock, cvar) = &*ctl;
         let mut guard = match lock.lock() {
@@ -208,39 +385,95 @@ pub(crate) fn flush_loop(
             if guard.shutdown {
                 break true;
             }
-            if guard.wake {
+            if is_backoff_ready {
+                break false;
+            }
+            // While in backoff, ignore ordinary wakes until the retry
+            // deadline elapses. The wait below still caps at
+            // `wait_budget` so the loop re-enters on the deadline.
+            let has_fired_deadline = guard.next_retry_at.is_some_and(|d| Instant::now() >= d);
+            if guard.in_disk_full_backoff() {
+                if has_fired_deadline {
+                    break false;
+                }
+                guard.wake = false;
+            } else if guard.wake {
+                break false;
+            }
+            if wait_budget.is_zero() {
                 break false;
             }
             // wait_timeout only fails on mutex poison; if that happens
             // we are in an unrecoverable state (the handler thread
             // panicked holding the flush lock). Propagate by panicking
             // the flush loop — the app will have already crashed.
-            let (next, _res) = match cvar.wait_timeout(guard, FLUSH_DEBOUNCE) {
+            let (next, _res) = match cvar.wait_timeout(guard, wait_budget) {
                 Ok(pair) => pair,
                 Err(_) => unreachable_poison(),
             };
             guard = next;
-            // After either a wake or a timeout, re-check flags. If
-            // neither `wake` nor `shutdown` is set, the debounce expired
-            // with nothing to do: go back to waiting.
-            if !guard.wake && !guard.shutdown {
+            if guard.shutdown {
+                break true;
+            }
+            let has_fired_deadline = guard.next_retry_at.is_some_and(|d| Instant::now() >= d);
+            if guard.in_disk_full_backoff() {
+                if has_fired_deadline {
+                    break false;
+                }
                 continue;
             }
+            if !guard.wake {
+                continue;
+            }
+            break false;
         };
 
         let last_wake = guard.last_wake;
         guard.wake = false;
         let is_shutdown = shutdown || guard.shutdown;
+        let in_backoff = guard.in_disk_full_backoff();
         drop(guard);
 
-        let durability = if is_shutdown || last_wake.elapsed() >= IDLE_THRESHOLD {
+        let durability = if is_shutdown || in_backoff || last_wake.elapsed() >= IDLE_THRESHOLD {
             Durability::Immediate
         } else {
             Durability::Eventual
         };
 
-        if let Err(e) = flush_dirty(&db, &store, durability) {
-            tracing::warn!("ticker-intent flush failed: {e}");
+        match flush_dirty(&db, &store, durability) {
+            Ok(()) => {
+                let mut guard = match ctl.0.lock() {
+                    Ok(g) => g,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                if guard.disk_full_failures > 0 {
+                    tracing::info!(
+                        "ticker-intent: disk-full recovered after {} failure(s)",
+                        guard.disk_full_failures
+                    );
+                }
+                guard.disk_full_failures = 0;
+                guard.next_retry_at = None;
+            }
+            Err(FlushError::DiskFull(e)) => {
+                let mut guard = match ctl.0.lock() {
+                    Ok(g) => g,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                guard.disk_full_failures = guard.disk_full_failures.saturating_add(1);
+                let delay = FlushCtl::backoff_delay(guard.disk_full_failures);
+                guard.next_retry_at = Some(Instant::now() + delay);
+                tracing::error!(
+                    "ticker-intent: disk full during commit (failure #{}): {e}. \
+                     Retrying in {:?}; {} dirty symbol(s) preserved.",
+                    guard.disk_full_failures,
+                    delay,
+                    store.dirty_len(),
+                );
+            }
+            Err(FlushError::Other(e)) => {
+                tracing::warn!("ticker-intent flush failed: {e}");
+            }
         }
 
         if is_shutdown {
@@ -258,56 +491,84 @@ fn unreachable_poison() -> ! {
 }
 
 /// Drain the dirty set into one write transaction.
+///
+/// On [`FlushError::DiskFull`] or [`FlushError::Other`], every symbol
+/// that was drained by this call is re-marked dirty so the next flush
+/// attempt will see it. This is what lets the disk-full backoff state
+/// keep the un-persisted set alive until the filesystem recovers.
 pub(crate) fn flush_dirty(
     db: &Database,
     store: &TickerOrderIntentStore,
     durability: Durability,
-) -> Result<(), IntentError> {
+) -> Result<(), FlushError> {
     let dirty = store.drain_dirty();
-    // Also collect symbols whose cache entry is missing — those are
-    // deletions (via `forget`). Build a lookup against the cache once.
-    let pending_deletes: Vec<SymbolKey> = {
-        let live: std::collections::HashSet<_> =
-            dirty.iter().map(|(s, _)| s.clone()).collect();
-        // Any symbol in the dirty set but not in the cache is a delete.
-        // `drain_dirty` already emits only rows that *are* still in the
-        // cache, so we need a second pass for forgotten symbols. To keep
-        // the API simple we re-read the dirty set via `store.forget` —
-        // except at this point dirty has been drained. We handle forgets
-        // inline in `handle_message` instead; `pending_deletes` stays
-        // empty here.
-        let _ = live;
-        Vec::new()
-    };
 
-    if dirty.is_empty() && pending_deletes.is_empty() {
+    if dirty.is_empty() {
         return Ok(());
     }
 
-    let mut txn = db
-        .begin_write()
-        .map_err(|e| IntentError::WriteFailed { reason: e.to_string() })?;
+    // Helper: re-insert the just-drained symbols so a failed commit
+    // does not silently drop the user's writes.
+    let requeue = |store: &TickerOrderIntentStore| {
+        store.re_mark_dirty(dirty.iter().map(|(s, _)| s.clone()));
+    };
+
+    let mut txn = match db.begin_write() {
+        Ok(t) => t,
+        Err(e) => {
+            let is_full = is_storage_full_transaction_error(&e);
+            requeue(store);
+            let err = IntentError::WriteFailed { reason: e.to_string() };
+            return Err(if is_full {
+                FlushError::DiskFull(err)
+            } else {
+                FlushError::Other(err)
+            });
+        }
+    };
     txn.set_durability(durability);
     {
-        let mut table = txn
-            .open_table(TABLE)
-            .map_err(|e| IntentError::WriteFailed { reason: e.to_string() })?;
+        let mut table = match txn.open_table(TABLE) {
+            Ok(t) => t,
+            Err(e) => {
+                requeue(store);
+                return Err(FlushError::Other(IntentError::WriteFailed {
+                    reason: e.to_string(),
+                }));
+            }
+        };
         for (symbol, intent) in &dirty {
-            let bytes = serde_json::to_vec_pretty(intent.as_ref()).map_err(|e| {
-                IntentError::WriteFailed { reason: format!("encode {symbol}: {e}") }
-            })?;
-            table
-                .insert(symbol.as_str(), bytes.as_slice())
-                .map_err(|e| IntentError::WriteFailed { reason: e.to_string() })?;
-        }
-        for symbol in &pending_deletes {
-            table
-                .remove(symbol.as_str())
-                .map_err(|e| IntentError::WriteFailed { reason: e.to_string() })?;
+            let bytes = match serde_json::to_vec_pretty(intent.as_ref()) {
+                Ok(b) => b,
+                Err(e) => {
+                    requeue(store);
+                    return Err(FlushError::Other(IntentError::WriteFailed {
+                        reason: format!("encode {symbol}: {e}"),
+                    }));
+                }
+            };
+            if let Err(e) = table.insert(symbol.as_str(), bytes.as_slice()) {
+                let is_full = is_storage_full_storage_error(&e);
+                requeue(store);
+                let err = IntentError::WriteFailed { reason: e.to_string() };
+                return Err(if is_full {
+                    FlushError::DiskFull(err)
+                } else {
+                    FlushError::Other(err)
+                });
+            }
         }
     }
-    txn.commit()
-        .map_err(|e| IntentError::WriteFailed { reason: e.to_string() })?;
+    if let Err(e) = txn.commit() {
+        let is_full = is_storage_full_commit_error(&e);
+        requeue(store);
+        let err = IntentError::WriteFailed { reason: e.to_string() };
+        return Err(if is_full {
+            FlushError::DiskFull(err)
+        } else {
+            FlushError::Other(err)
+        });
+    }
     Ok(())
 }
 
@@ -323,19 +584,99 @@ pub(crate) struct ActorState {
     pub(crate) store: Arc<TickerOrderIntentStore>,
     pub(crate) ctl: Arc<(StdMutex<FlushCtl>, Condvar)>,
     pub(crate) flush_handle: Option<JoinHandle<()>>,
+    pub(crate) notifications: HandleNotifications,
 }
 
-/// Triple of shared handles returned by [`open_and_hydrate`].
-pub(crate) type HydratedActor = (
-    Arc<TickerOrderIntentStore>,
-    Arc<Database>,
-    Arc<(StdMutex<FlushCtl>, Condvar)>,
-);
+/// Everything [`open_and_hydrate`] hands back to
+/// [`super::handle::TickerOrderIntentHandle::open`]. A struct rather
+/// than a tuple so Slice 1b could add `notifications` without rippling
+/// the signature through every test.
+pub(crate) struct HydratedActor {
+    /// The in-memory cache, seeded from disk.
+    pub(crate) store: Arc<TickerOrderIntentStore>,
+    /// The open `redb::Database`.
+    pub(crate) db: Arc<Database>,
+    /// The flush-thread control primitive.
+    pub(crate) ctl: Arc<(StdMutex<FlushCtl>, Condvar)>,
+    /// Pending startup toasts and modal messages the handle should
+    /// expose to the view layer. Slice 1b pre-populates the startup
+    /// toast from the corruption-recovery path.
+    pub(crate) notifications: HandleNotifications,
+}
+
+/// Try to open a `redb::Database` at `path`, classifying the error
+/// into (multi-instance lock | corruption | other-open-failure). Kept
+/// separate from [`open_and_hydrate`] so the corruption recovery path
+/// can call it twice without duplicating error classification.
+fn try_open_database(path: &Path) -> Result<Database, DatabaseError> {
+    Database::create(path)
+}
+
+/// Determine whether an `Err(DatabaseError)` should trigger the
+/// whole-file corruption recovery path: move-aside + fresh create.
+///
+/// `DatabaseError::Storage(StorageError::Corrupted(_))` is the
+/// first-class signal. We also recover on `UpgradeRequired` (the file
+/// is on an older format than this build understands — from the
+/// user's point of view indistinguishable from corruption), and on
+/// `Storage(StorageError::Io)` variants that do **not** look like
+/// disk-full (a ragged-header `read` returns `UnexpectedEof`, which
+/// is corruption, but `StorageFull` is a separate failure mode that
+/// must not be mistaken for a corrupt file).
+fn is_corruption_like(e: &DatabaseError) -> bool {
+    match e {
+        DatabaseError::Storage(StorageError::Corrupted(_)) => true,
+        DatabaseError::UpgradeRequired(_) => true,
+        DatabaseError::Storage(StorageError::Io(io)) => {
+            let kind = io.kind();
+            // A well-formed redb file that is too short to parse
+            // surfaces as `UnexpectedEof` or `InvalidData` — treat as
+            // corruption. `StorageFull` and `PermissionDenied` stay
+            // as hard open-failures.
+            !matches!(
+                kind,
+                std::io::ErrorKind::StorageFull
+                    | std::io::ErrorKind::PermissionDenied
+                    | std::io::ErrorKind::NotFound
+            )
+        }
+        _ => false,
+    }
+}
+
+/// Rename a corrupt file aside with a `.corrupt.<unix_ts>` suffix.
+/// On filesystem races (the aside-name already exists — extremely
+/// unlikely) we fall through to appending a nanosecond counter.
+fn move_aside_corrupt(path: &Path) -> std::io::Result<PathBuf> {
+    let ts = chrono::Utc::now().timestamp();
+    let filename = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "ticker_state.redb".to_string());
+    let mut aside = path.with_file_name(format!("{filename}.corrupt.{ts}"));
+    if aside.exists() {
+        let nanos = chrono::Utc::now().timestamp_subsec_nanos();
+        aside = path.with_file_name(format!("{filename}.corrupt.{ts}.{nanos}"));
+    }
+    std::fs::rename(path, &aside)?;
+    Ok(aside)
+}
 
 /// Open the `redb::Database` at `path` and hydrate the store from it.
 ///
-/// Returns the `(store, database, control)` triple the handle needs to
-/// spawn the mailbox. Parent directory is created if missing.
+/// Returns a [`HydratedActor`] the handle uses to spawn the mailbox.
+/// Parent directory is created if missing.
+///
+/// Slice 1b failure-mode behavior:
+/// - `DatabaseError::DatabaseAlreadyOpen` → [`IntentError::AlreadyOpen`]
+///   (the caller surfaces this as a graceful exit / dialog).
+/// - `DatabaseError::Storage(StorageError::Corrupted(_))`,
+///   `DatabaseError::UpgradeRequired(_)`, or a corruption-like IO
+///   error → rename the file to `<name>.corrupt.<unix_ts>`, log at
+///   `error!` level, open a fresh empty database at the original
+///   path, and push the recovery message onto
+///   `notifications.pending_startup_toasts` so Slice 2 can surface
+///   it with `Message::ShowToast`.
 pub(crate) fn open_and_hydrate(path: &Path) -> Result<HydratedActor, IntentError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| IntentError::OpenFailed {
@@ -343,10 +684,53 @@ pub(crate) fn open_and_hydrate(path: &Path) -> Result<HydratedActor, IntentError
             reason: e.to_string(),
         })?;
     }
-    let db = Database::create(path).map_err(|e| IntentError::OpenFailed {
-        path: path.to_path_buf(),
-        reason: e.to_string(),
-    })?;
+
+    let notifications = HandleNotifications::default();
+
+    let db = match try_open_database(path) {
+        Ok(db) => db,
+        Err(DatabaseError::DatabaseAlreadyOpen) => {
+            return Err(IntentError::AlreadyOpen {
+                path: path.to_path_buf(),
+            });
+        }
+        Err(e) if is_corruption_like(&e) => {
+            // Double-check this is not a disk-full misclassification.
+            if is_storage_full_database_error(&e) {
+                return Err(IntentError::OpenFailed {
+                    path: path.to_path_buf(),
+                    reason: e.to_string(),
+                });
+            }
+            tracing::error!(
+                "ticker-intent: database at {} is unreadable ({e}); \
+                 moving aside and starting fresh",
+                path.display()
+            );
+            let aside = move_aside_corrupt(path).map_err(|io_err| IntentError::OpenFailed {
+                path: path.to_path_buf(),
+                reason: format!("failed to rename corrupt file: {io_err}"),
+            })?;
+            tracing::error!(
+                "ticker-intent: renamed corrupt file to {}",
+                aside.display()
+            );
+            notifications
+                .pending_startup_toasts
+                .lock()
+                .push(CORRUPTION_RECOVERY_TOAST.to_string());
+            try_open_database(path).map_err(|e2| IntentError::OpenFailed {
+                path: path.to_path_buf(),
+                reason: format!("fresh create after corruption: {e2}"),
+            })?
+        }
+        Err(e) => {
+            return Err(IntentError::OpenFailed {
+                path: path.to_path_buf(),
+                reason: e.to_string(),
+            });
+        }
+    };
 
     // Ensure the table exists (redb creates tables on first open_table
     // inside a write transaction).
@@ -406,7 +790,54 @@ pub(crate) fn open_and_hydrate(path: &Path) -> Result<HydratedActor, IntentError
     let db = Arc::new(db);
     let ctl = Arc::new((StdMutex::new(FlushCtl::default()), Condvar::new()));
 
-    Ok((store, db, ctl))
+    Ok(HydratedActor {
+        store,
+        db,
+        ctl,
+        notifications,
+    })
+}
+
+/// Test-only variant of [`open_and_hydrate`] that opens the database
+/// with a caller-supplied [`redb::StorageBackend`]. Used by the
+/// disk-full backoff test to inject a backend that returns
+/// `std::io::ErrorKind::StorageFull` on demand.
+#[cfg(test)]
+pub(crate) fn open_and_hydrate_with_backend<B>(
+    backend: B,
+) -> Result<HydratedActor, IntentError>
+where
+    B: redb::StorageBackend,
+{
+    let db = redb::Builder::new()
+        .create_with_backend(backend)
+        .map_err(|e| IntentError::OpenFailed {
+            path: PathBuf::from("<in-memory>"),
+            reason: e.to_string(),
+        })?;
+
+    {
+        let txn = db
+            .begin_write()
+            .map_err(|e| IntentError::WriteFailed { reason: e.to_string() })?;
+        {
+            let _ = txn
+                .open_table(TABLE)
+                .map_err(|e| IntentError::WriteFailed { reason: e.to_string() })?;
+        }
+        txn.commit()
+            .map_err(|e| IntentError::WriteFailed { reason: e.to_string() })?;
+    }
+
+    let store = Arc::new(TickerOrderIntentStore::new());
+    let db = Arc::new(db);
+    let ctl = Arc::new((StdMutex::new(FlushCtl::default()), Condvar::new()));
+    Ok(HydratedActor {
+        store,
+        db,
+        ctl,
+        notifications: HandleNotifications::default(),
+    })
 }
 
 /// Spawn the mailbox actor thread and the flush loop thread.
@@ -417,6 +848,7 @@ pub(crate) fn spawn_actor(
     store: Arc<TickerOrderIntentStore>,
     db: Arc<Database>,
     ctl: Arc<(StdMutex<FlushCtl>, Condvar)>,
+    notifications: HandleNotifications,
 ) -> MailboxProcessor<OrderIntentMsg, OrderIntentReply> {
     // Spawn the flush loop.
     let flush_db = db.clone();
@@ -432,6 +864,7 @@ pub(crate) fn spawn_actor(
         store: store.clone(),
         ctl: ctl.clone(),
         flush_handle: Some(flush_handle),
+        notifications,
     };
     // Drop our local reference so the ActorState's `Option<Arc<Database>>`
     // can release the file lock on shutdown without a lingering clone.
@@ -497,16 +930,63 @@ fn handle_message(
         OrderIntentMsg::FlushNow => match state.db.as_ref() {
             Some(db) => match flush_dirty(db, &state.store, Durability::Immediate) {
                 Ok(()) => OrderIntentReply::Flushed,
-                Err(e) => OrderIntentReply::Error(e.to_string()),
+                Err(FlushError::DiskFull(e)) => {
+                    // Trip the backoff state so the shutdown guard sees it.
+                    let mut guard = match state.ctl.0.lock() {
+                        Ok(g) => g,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    if guard.disk_full_failures == 0 {
+                        guard.disk_full_failures = 1;
+                        guard.next_retry_at =
+                            Some(Instant::now() + FlushCtl::backoff_delay(1));
+                    }
+                    tracing::error!("ticker-intent: FlushNow hit disk full: {e}");
+                    OrderIntentReply::Error(e.to_string())
+                }
+                Err(FlushError::Other(e)) => OrderIntentReply::Error(e.to_string()),
             },
             None => OrderIntentReply::Error("database already closed".into()),
         },
-        OrderIntentMsg::Shutdown { force: _ } => {
+        OrderIntentMsg::Shutdown { force } => {
+            // (0) If we are in disk-full backoff and the caller did
+            //     not force, surface the modal message and refuse to
+            //     drop the actor. Slice 2 will render the modal and
+            //     re-issue `Shutdown { force: true }` if the user
+            //     accepts data loss.
+            let in_backoff = {
+                let guard = match state.ctl.0.lock() {
+                    Ok(g) => g,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                guard.in_disk_full_backoff()
+            };
+            if in_backoff && !force {
+                *state.notifications.pending_modal_message.lock() =
+                    Some(DISK_FULL_MODAL_MESSAGE.to_string());
+                tracing::warn!(
+                    "ticker-intent: refusing non-forced shutdown while disk full; \
+                     modal message latched"
+                );
+                reply_with(
+                    reply_channel,
+                    OrderIntentReply::Error(DISK_FULL_MODAL_MESSAGE.to_string()),
+                );
+                return;
+            }
+            if in_backoff && force {
+                tracing::error!(
+                    "ticker-intent: force-shutdown while disk full; {} symbol(s) \
+                     of un-persisted order memory will be dropped",
+                    state.store.dirty_len()
+                );
+            }
             // (1) Final flush with Immediate durability, if the DB is
-            //     still live.
+            //     still live. Swallow the error — shutdown is terminal.
             if let Some(db) = state.db.as_ref() {
-                if let Err(e) = flush_dirty(db, &state.store, Durability::Immediate) {
-                    tracing::warn!("ticker-intent: final flush failed: {e}");
+                match flush_dirty(db, &state.store, Durability::Immediate) {
+                    Ok(()) => {}
+                    Err(e) => tracing::warn!("ticker-intent: final flush failed: {e}"),
                 }
             }
             // (2) Tell the flush thread to exit and (3) wait for it.
@@ -566,5 +1046,19 @@ pub(crate) fn wake_flush(ctl: &(StdMutex<FlushCtl>, Condvar)) {
     };
     guard.wake = true;
     guard.last_wake = Instant::now();
+    cvar.notify_all();
+}
+
+/// Signal the flush thread to perform a final `Immediate` commit and
+/// exit. Used by [`super::handle::TickerOrderIntentHandle::shutdown_blocking`]
+/// so iced's sync `update()` path can trigger durable shutdown without
+/// awaiting the mailbox actor.
+pub(crate) fn signal_flush_shutdown(ctl: &(StdMutex<FlushCtl>, Condvar)) {
+    let (lock, cvar) = ctl;
+    let mut guard = match lock.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.shutdown = true;
     cvar.notify_all();
 }
