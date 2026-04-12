@@ -942,6 +942,7 @@ fn make_compute_ctx<'a>(
         hovered_decorator_groups: &[],
         selected_annotation: None,
         drag_ghost: None,
+        pinned: false,
     }
 }
 
@@ -1186,6 +1187,7 @@ fn compute_bracket_emits_decorator_hit_zones_for_draft_bracket() {
         hovered_decorator_groups: &hovered_groups,
         selected_annotation: None,
         drag_ghost: None,
+        pinned: false,
     };
 
     let out = compute_bracket(&b, aid, &ctx, 1.0);

@@ -109,6 +109,14 @@ pub struct ChartRenderSnapshot {
     /// G.ATR hover: intraday candle index ranges to keep bright.
     /// Empty when hover is inactive.
     pub gatr_bright_ranges: Vec<(usize, usize)>,
+    /// Whether this chart's symbol has its `TickerOrderIntent.pinned`
+    /// flag set. Threaded into [`midas_chart::input::ChartInput::pinned`]
+    /// and from there to `ComputeContext.pinned`, which drives the
+    /// bracket `pin_toggle_group()` decorator's active / outlined
+    /// visual. Populated by [`crate::app::MidasApp`] when building
+    /// this snapshot from
+    /// `order_intent_handle.snapshot(&chart.symbol).map(|i| i.pinned).unwrap_or(false)`.
+    pub pinned: bool,
 }
 
 // ── ChartProgram ─────────────────────────────────────────────────────
@@ -272,7 +280,7 @@ fn recompute_hit_zones_for_group(
     use midas_chart::widget::compute::{ComputeContext, Viewport};
     use midas_chart::widget::decorator::compute_decorator_group;
     use midas_chart::widget::order_bracket::decorators::{
-        entry_decorator_group, sl_decorator_group, tp_decorator_group,
+        entry_decorator_group, pin_toggle_group, sl_decorator_group, tp_decorator_group,
     };
     use midas_chart::widget::theme::Theme;
 
@@ -297,6 +305,10 @@ fn recompute_hit_zones_for_group(
         hovered_decorator_groups: hovered_groups,
         selected_annotation: None,
         drag_ghost: None,
+        // Hit-zone recompute fixture stays unpinned; the pin badge
+        // is visibility `Always`, so the outlined variant produces
+        // the same hit rectangle as the active variant.
+        pinned: false,
     };
 
     // Horizontal level path: check legacy LevelStore first.
@@ -335,6 +347,18 @@ fn recompute_hit_zones_for_group(
                                 .hit_zones;
                         }
                     }
+                }
+                3 => {
+                    // Pin-toggle is `Visibility::Always`, so the main
+                    // compute pass already emits its hit zone each
+                    // frame. The fallback recompute path still needs a
+                    // branch here so an expanded pin group (never
+                    // expected in practice — the pin has no hover
+                    // children) is re-resolved correctly instead of
+                    // silently returning an empty zone list.
+                    let group = pin_toggle_group(bracket, &ctx);
+                    return compute_decorator_group(&group, &bracket.entry.line, aid, &ctx, 1.0)
+                        .hit_zones;
                 }
                 _ => {}
             }
@@ -836,6 +860,7 @@ impl shader::Program<Message> for ChartProgram {
                 .unwrap_or(&[]),
             selected_annotation: state.chart_state.as_ref().and_then(|cs| cs.selected_level),
             drag_ghost,
+            pinned: snap.pinned,
         };
 
         let scene = compute_chart_scene(&input);

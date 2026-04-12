@@ -424,7 +424,9 @@ pub fn format_sl_label(leg: &BracketLeg, status: BracketStatus) -> String {
 
 // ── Phase 3: compute_bracket ────────────────────────────────────────
 
-use self::decorators::{entry_decorator_group, sl_decorator_group, tp_decorator_group};
+use self::decorators::{
+    entry_decorator_group, pin_toggle_group, sl_decorator_group, tp_decorator_group,
+};
 use super::compute::{ComputeContext, LabelAnchor, WidgetLabel, WidgetOutput};
 use super::decorator::compute_decorator_group;
 use super::hit_test::{CursorIcon, HitZone, HitZoneKind};
@@ -551,6 +553,29 @@ pub fn compute_bracket(
     output.merge(compute_decorator_group(
         &entry_decorator_group(bracket),
         &entry_line,
+        annotation_id,
+        ctx,
+        alpha,
+    ));
+
+    // Pin-toggle decorator: always-visible badge driven by
+    // `ctx.pinned`, anchored just above the entry line so it does not
+    // overlap the entry badge. We shift by `BADGE_STACK_GAP_PX * 1.2`
+    // in screen space (toward higher prices on an inverted-Y chart),
+    // then convert the target Y back to a synthetic price so the
+    // existing decorator compute pipeline handles positioning.
+    let pin_decorator_line = {
+        let base_y = ctx.camera.price_to_y(entry_line.price);
+        let target_y = base_y - BADGE_STACK_GAP_PX * 1.2;
+        PriceLine {
+            price: ctx.camera.y_to_price(target_y),
+            extent: entry_line.extent,
+            stroke: entry_line.stroke.clone(),
+        }
+    };
+    output.merge(compute_decorator_group(
+        &pin_toggle_group(bracket, ctx),
+        &pin_decorator_line,
         annotation_id,
         ctx,
         alpha,

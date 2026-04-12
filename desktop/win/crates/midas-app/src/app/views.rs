@@ -223,6 +223,11 @@ impl MidasApp {
                 } else {
                     Vec::new()
                 },
+                pinned: self
+                    .order_intent_handle
+                    .snapshot(&crate::annotation_store::SymbolKey::new(&chart.symbol))
+                    .map(|i| i.pinned)
+                    .unwrap_or(false),
             };
             // Use ChartId(0) for floating windows -- they don't participate
             // in the pane_grid's chart map.
@@ -904,6 +909,11 @@ impl MidasApp {
                 } else {
                     Vec::new()
                 },
+                pinned: self
+                    .order_intent_handle
+                    .snapshot(&crate::annotation_store::SymbolKey::new(&chart.symbol))
+                    .map(|i| i.pinned)
+                    .unwrap_or(false),
             };
             let program = crate::chart_widget::ChartProgram { chart_id, snapshot };
             let shader = crate::chart_widget::chart_shader(program);

@@ -1540,6 +1540,7 @@ fn hit_test_decorators(
             hovered_decorator_groups: &hovered_groups,
             selected_annotation: None,
             drag_ghost: None,
+            pinned: false,
         };
 
         let check_zone = |zones: Vec<crate::widget::hit_test::HitZone>| -> Option<ChartAction> {

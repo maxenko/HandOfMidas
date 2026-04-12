@@ -2178,6 +2178,7 @@ fn decorator_button_center(
         hovered_decorator_groups: &hovered_groups,
         selected_annotation: None,
         drag_ghost: None,
+        pinned: false,
     };
 
     let bracket = match &ann.kind {

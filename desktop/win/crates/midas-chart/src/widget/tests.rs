@@ -286,6 +286,7 @@ fn compute_level_hit_zones_include_line_plus_decorators() {
         hovered_decorator_groups: &[],
         selected_annotation: None,
         drag_ghost: None,
+        pinned: false,
     };
 
     let level = HorizontalLevel {
@@ -360,6 +361,7 @@ fn compute_level_visual_parity_with_pre_refactor() {
         hovered_decorator_groups: &[],
         selected_annotation: None,
         drag_ghost: None,
+        pinned: false,
     };
 
     // Bare level (no label, no icon, unlocked) → group 0 only.

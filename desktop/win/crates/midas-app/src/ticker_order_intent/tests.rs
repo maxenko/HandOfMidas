@@ -413,6 +413,63 @@ async fn handle_upsert_is_visible_to_next_snapshot_sync() {
     handle.shutdown().await;
 }
 
+// ── Slice 5a: watchlist hygiene (sync ForgetSymbol dispatch) ──────────
+
+/// Mirrors the Slice 5a call path used by the `Message::WatchlistRemoveTicker`
+/// handler: a sync `upsert(OrderIntentMsg::ForgetSymbol)` must evict the
+/// in-memory cache entry *and* delete the on-disk row, so the next reopen
+/// cannot resurrect the symbol. The sync path fires the mailbox message
+/// on a background task; shutting the handle down drains that task before
+/// we reopen.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn watchlist_remove_evicts_intent_and_persists_deletion() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("watchlist_hygiene.redb");
+
+    // Seed: open the handle, upsert an intent, confirm the cache has it.
+    let handle = TickerOrderIntentHandle::open(path.clone()).unwrap();
+    handle
+        .upsert_async(OrderIntentMsg::Upsert {
+            symbol: SymbolKey::new("AAPL"),
+            intent: Box::new(sample_intent("AAPL")),
+            source: IntentSource::Panel,
+        })
+        .await
+        .unwrap();
+    assert!(
+        handle.snapshot(&SymbolKey::new("AAPL")).is_some(),
+        "seed upsert must land in the cache"
+    );
+
+    // Simulate the watchlist-remove call site: a sync dispatch of
+    // `ForgetSymbol`. This is what `MidasApp::update()` invokes in
+    // `Message::WatchlistRemoveTicker` once the symbol is no longer
+    // referenced by any watchlist. The sync path on non-`Upsert`
+    // messages hands the work to the mailbox actor via a spawned
+    // `fire_and_forget` task; we drive the runtime forward until that
+    // spawn has definitely enqueued the message.
+    let _ = handle.upsert(OrderIntentMsg::ForgetSymbol {
+        symbol: SymbolKey::new("AAPL"),
+    });
+
+    // Graceful shutdown drains the mailbox in FIFO order, so the
+    // previously-enqueued `ForgetSymbol` is guaranteed to be processed
+    // before the `Shutdown` arm fires. A short sleep before shutdown
+    // lets the spawned fire-and-forget task land on the mailbox — the
+    // tokio multi-thread runtime can otherwise let `shutdown` beat the
+    // detached spawn to the queue under contention.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    handle.shutdown().await;
+
+    // Reopen: the row must not resurrect.
+    let reopened = TickerOrderIntentHandle::open(path).unwrap();
+    assert!(
+        reopened.snapshot(&SymbolKey::new("AAPL")).is_none(),
+        "forget must delete the on-disk row, not just the cache entry"
+    );
+    reopened.shutdown().await;
+}
+
 // ── Slice 1b: multi-instance detection ────────────────────────────────
 
 #[test]

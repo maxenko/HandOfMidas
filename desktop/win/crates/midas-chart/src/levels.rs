@@ -680,6 +680,7 @@ mod tests {
             hovered_decorator_groups: &[],
             selected_annotation: None,
             drag_ghost: None,
+            pinned: false,
         };
 
         let mut level = make_level(7, 150.0);

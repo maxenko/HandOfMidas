@@ -173,6 +173,7 @@ fn make_input<'a>(
         hovered_decorator_groups: &[],
         selected_annotation: None,
         drag_ghost: None,
+        pinned: false,
     }
 }
 
@@ -211,6 +212,7 @@ fn make_input_with_collapse<'a>(
         hovered_decorator_groups: &[],
         selected_annotation: None,
         drag_ghost: None,
+        pinned: false,
     }
 }
 

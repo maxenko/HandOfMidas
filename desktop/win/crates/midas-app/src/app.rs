@@ -4322,6 +4322,20 @@ impl MidasApp {
                         .any(|wl| wl.has_ticker(&symbol_upper));
                     if !still_used {
                         self.market_cache.remove(&symbol_upper);
+                        // Slice 5a: evict any persisted ticker-intent for
+                        // this symbol. The handler fires and forgets
+                        // through the mailbox — the actor's
+                        // `ForgetSymbol` branch drops the cache entry
+                        // and deletes the `redb` row inline (see
+                        // `ticker_order_intent/actor.rs` handler).
+                        // Running after `market_cache.remove` mirrors
+                        // the "nothing references this symbol anymore"
+                        // precondition the store assumes.
+                        self.order_intent_handle.upsert(
+                            crate::ticker_order_intent::OrderIntentMsg::ForgetSymbol {
+                                symbol: crate::annotation_store::SymbolKey::new(&symbol_upper),
+                            },
+                        );
                     }
                     return self.flush_config();
                 }

@@ -73,4 +73,11 @@ pub struct ChartInput<'a> {
     pub selected_annotation: Option<AnnotationId>,
     /// Drag ghost: annotation being dragged and its original (pre-drag) price.
     pub drag_ghost: Option<(AnnotationId, f64)>,
+    /// Whether this chart's symbol has `TickerOrderIntent.pinned` set.
+    /// Threaded through to [`crate::widget::compute::ComputeContext::pinned`]
+    /// so the bracket `pin_toggle_group()` decorator can render its
+    /// active vs outlined visual. The app populates this from its
+    /// `order_intent_handle.snapshot(symbol)`; sans-IO tests default to
+    /// `false`.
+    pub pinned: bool,
 }

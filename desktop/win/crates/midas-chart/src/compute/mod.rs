@@ -1106,6 +1106,7 @@ fn compute_widget_annotations(
         hovered_decorator_groups: input.hovered_decorator_groups,
         selected_annotation: input.selected_annotation,
         drag_ghost: input.drag_ghost,
+        pinned: input.pinned,
     };
 
     let mut merged = WidgetOutput::default();

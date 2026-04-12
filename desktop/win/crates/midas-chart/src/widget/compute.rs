@@ -52,6 +52,13 @@ pub struct ComputeContext<'a> {
     /// Drag ghost: annotation being dragged and its original price.
     /// The compute function emits a faint ghost line at this price.
     pub drag_ghost: Option<(AnnotationId, f64)>,
+    /// Whether the active symbol's `TickerOrderIntent.pinned` flag is
+    /// set. Read by `pin_toggle_group()` to choose between the active
+    /// and outlined pin badge variants. Populated by the app layer per
+    /// frame from `order_intent_handle.snapshot(&symbol)`; defaults to
+    /// `false` in test fixtures and whenever no intent exists. Chart
+    /// core stays sans-IO — the flag flows in through this field.
+    pub pinned: bool,
 }
 
 /// Viewport dimensions.

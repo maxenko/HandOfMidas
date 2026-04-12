@@ -66,3 +66,4 @@ cargo clippy --workspace -- -D warnings
 | Grid component design | `desktop/win/plan/grid-component/README.md` |
 | Widget system design | `plan/widget-system/00-index.md` |
 | Decorator system | `plan/archive/decorator-system/00-index.md` |
+| Ticker order state | `desktop/win/plan/ticker-order-state/README.md` |

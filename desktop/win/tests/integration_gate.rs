@@ -74,6 +74,7 @@ fn make_default_chart_input<'a>(
         hovered_decorator_groups: &[],
         selected_annotation: None,
         drag_ghost: None,
+        pinned: false,
     }
 }
 

@@ -270,6 +270,7 @@ fn make_ctx<'a>(
         hovered_decorator_groups: &[],
         selected_annotation: None,
         drag_ghost: None,
+        pinned: false,
     }
 }
 
@@ -299,6 +300,7 @@ fn make_ctx_with_hover<'a>(
         hovered_decorator_groups,
         selected_annotation: None,
         drag_ghost: None,
+        pinned: false,
     }
 }
 

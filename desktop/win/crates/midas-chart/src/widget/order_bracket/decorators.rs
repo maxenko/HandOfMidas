@@ -26,9 +26,10 @@ use super::{
     BRACKET_LONG_STOP_COLOR, BRACKET_LONG_STOP_LIMIT_COLOR, BRACKET_SHORT_ENTRY_COLOR,
     BRACKET_SHORT_STOP_COLOR, BRACKET_SHORT_STOP_LIMIT_COLOR, BRACKET_SL_COLOR, BRACKET_TP_COLOR,
 };
+use crate::widget::compute::ComputeContext;
 use crate::widget::decorator::{
-    Badge, BadgeSegment, BadgeShape, Button, DecoratorAction, DecoratorAnchor, DecoratorGroup,
-    DecoratorItem, FlexDirection, ItemContent, Visibility,
+    Badge, BadgeBorder, BadgeSegment, BadgeShape, Button, DecoratorAction, DecoratorAnchor,
+    DecoratorGroup, DecoratorItem, FlexDirection, ItemContent, Visibility,
 };
 use smallvec::smallvec;
 
@@ -465,3 +466,101 @@ pub fn sl_decorator_group(bracket: &OrderBracket) -> Option<DecoratorGroup> {
     })
 }
 
+// ── Pin-toggle decorator group ───────────────────────────────────────
+
+/// Top-level group id for the pin-toggle decorator.
+///
+/// Entry uses `0`, TP uses `1`, SL uses `2`; `3` is reserved for the
+/// always-visible pin button anchored on the entry leg's `PriceLine`.
+pub(crate) const PIN_TOGGLE_GROUP_ID: u16 = 3;
+
+/// Gold fill used for the active (pinned) pin badge. Matches the
+/// "active" convention the other decorator builders use for emphasis.
+const PIN_ACTIVE_FILL: [f32; 4] = [0.95, 0.78, 0.18, 1.0];
+
+/// Hover fill for the active pin button — a lighter gold.
+const PIN_ACTIVE_HOVER_FILL: [f32; 4] = [1.0, 0.87, 0.30, 1.0];
+
+/// Outline color used when the intent is not pinned. Renders as a
+/// thin-stroke badge with a near-transparent fill so the entry line
+/// underneath remains visible.
+const PIN_OUTLINE_COLOR: [f32; 4] = [0.78, 0.78, 0.85, 1.0];
+
+/// Background fill for the inactive (outlined) pin button. Kept very
+/// dark so the border dominates the silhouette on a light chart.
+const PIN_OUTLINE_FILL: [f32; 4] = [0.12, 0.12, 0.15, 0.85];
+
+/// Hover fill for the inactive pin button — slightly brighter than
+/// the resting fill.
+const PIN_OUTLINE_HOVER_FILL: [f32; 4] = [0.20, 0.20, 0.24, 0.95];
+
+/// Unicode "pushpin" glyph rendered inside the pin button.
+///
+/// Uses U+1F4CC ("ROUND PUSHPIN"). If the active font lacks this code
+/// point, downstream label rendering falls back to a tofu box — the
+/// cosmetic gap is noted in the Slice 4 visual-review checklist.
+const PIN_GLYPH: char = '\u{1F4CC}';
+
+/// Build the always-visible pin-toggle decorator group anchored on the
+/// entry leg's `PriceLine`.
+///
+/// Visual state is derived entirely from `ctx.pinned`:
+///
+/// - **Pinned (`ctx.pinned == true`)**: a small gold-filled button
+///   with a pushpin glyph. Signals that the GATR drift-snap rule is
+///   suppressed for this symbol.
+/// - **Unpinned (`ctx.pinned == false`)**: an outlined button in the
+///   same silhouette with a dim fill and a light border, inviting the
+///   user to click and lock the bracket in place.
+///
+/// A click on the button emits `DecoratorAction::TogglePin`, which the
+/// app layer routes to `Message::ChartBracketTogglePin(...)` and
+/// ultimately to `OrderIntentAppMsg::TogglePin`. Because the pin state
+/// lives on `TickerOrderIntent`, the next frame's
+/// `ComputeContext.pinned` reflects the flipped value and the badge
+/// swaps variants without any chart-local state.
+pub fn pin_toggle_group(bracket: &OrderBracket, ctx: &ComputeContext<'_>) -> DecoratorGroup {
+    let _ = bracket; // bracket kept in the signature for symmetry with
+                     // entry_/tp_/sl_decorator_group; future revisions
+                     // may tint the badge from the bracket side color.
+
+    let (fill, hover_fill, glyph_color, border) = if ctx.pinned {
+        (
+            PIN_ACTIVE_FILL,
+            Some(PIN_ACTIVE_HOVER_FILL),
+            [0.12, 0.10, 0.02, 1.0],
+            None,
+        )
+    } else {
+        (
+            PIN_OUTLINE_FILL,
+            Some(PIN_OUTLINE_HOVER_FILL),
+            PIN_OUTLINE_COLOR,
+            Some(BadgeBorder {
+                color: PIN_OUTLINE_COLOR,
+                thickness: 1.25,
+            }),
+        )
+    };
+
+    DecoratorGroup {
+        group_id: PIN_TOGGLE_GROUP_ID,
+        anchor: DecoratorAnchor::RightEdge,
+        direction: FlexDirection::Row,
+        gap: 3.0,
+        items: smallvec![DecoratorItem {
+            visibility: Visibility::Always,
+            action: Some(DecoratorAction::TogglePin),
+            content: ItemContent::Button(Button {
+                shape: BadgeShape::Rounded { radius: 3.0 },
+                fill,
+                hover_fill,
+                glyph: PIN_GLYPH,
+                glyph_color,
+                glyph_size: 11.0,
+                size: [18.0, 18.0],
+                border,
+            }),
+        }],
+    }
+}
