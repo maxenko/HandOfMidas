@@ -1907,6 +1907,168 @@ fn apply_snap_avoids_landing_on_current_price() {
     );
 }
 
+// ── Ticker-activation helper regressions ────────────────────────────
+//
+// These guard the `MidasApp::reconcile_ticker_activation` call sites
+// (watchlist row click, drag-drop, `PanelSymbolSubmitted`,
+// `ActivateChart`, `DataRestoredFromStartup`, group-link adoption)
+// by exercising `apply_ensure_draft_bracket` in the scenarios those
+// paths produce.
+
+/// Calling `apply_ensure_draft_bracket` twice in a row from different
+/// triggers (e.g. drop-to-chart immediately followed by an activate)
+/// must not create a duplicate bracket. Second call returns
+/// `SkippedLiveExists` and leaves the store with exactly one bracket
+/// for the symbol.
+#[test]
+fn apply_ensure_draft_bracket_is_idempotent_across_repeated_triggers() {
+    let mut store = AnnotationStore::new();
+    let handle = MockHandle::new();
+    handle.seed(
+        SymbolKey::new("AAPL"),
+        make_intent(
+            "AAPL",
+            OrderSide::Buy,
+            EntryType::Limit,
+            vec![(
+                (OrderSide::Buy, EntryType::Limit),
+                make_memory(149.50, Some(152.0), Some(148.0), true),
+            )],
+            None,
+        ),
+    );
+
+    // First trigger — e.g. drop-ticker-onto-chart.
+    let first = apply_ensure_draft_bracket(
+        &mut store,
+        &handle,
+        &SymbolKey::new("AAPL"),
+        OrderSide::Buy,
+        EntryType::Limit,
+        Some(150.0),
+        Some(1.5),
+    );
+    assert_eq!(first, EnsureDraftOutcome::Created);
+    assert_eq!(store.get("AAPL").len(), 1);
+
+    // Second trigger — e.g. the follow-up `ActivateChart` on the same
+    // chart. The panel display is unchanged, so the live bracket
+    // already matches and nothing new is created.
+    let second = apply_ensure_draft_bracket(
+        &mut store,
+        &handle,
+        &SymbolKey::new("AAPL"),
+        OrderSide::Buy,
+        EntryType::Limit,
+        Some(150.0),
+        Some(1.5),
+    );
+    assert_eq!(second, EnsureDraftOutcome::SkippedLiveExists);
+    assert_eq!(
+        store.get("AAPL").len(),
+        1,
+        "idempotent — no duplicate bracket from repeated triggers"
+    );
+}
+
+/// When a user clicks a watchlist row that loads MSFT into a chart
+/// whose linked panel previously displayed an AAPL Limit bracket, the
+/// new symbol key (MSFT) gets its own fresh bracket. The stale AAPL
+/// bracket is left untouched under its original symbol — live broker
+/// orders stored under the old symbol must never be silently
+/// rewritten by a ticker activation. This models the `WatchlistTickerSelected`
+/// → `load_symbol_for_chart` → `reconcile_ticker_activation` pipeline.
+#[test]
+fn apply_ensure_draft_bracket_on_symbol_switch_only_touches_new_symbol() {
+    let mut store = AnnotationStore::new();
+    // Seed a pre-existing AAPL bracket (the previous ticker on the
+    // same chart pane).
+    let aapl_bracket = make_bracket(149.0, Some(152.0), Some(147.0));
+    let aapl_id = store.add("AAPL", AnnotationKind::OrderBracket(Box::new(aapl_bracket)));
+
+    let handle = MockHandle::new();
+    handle.seed(
+        SymbolKey::new("AAPL"),
+        make_intent(
+            "AAPL",
+            OrderSide::Buy,
+            EntryType::Limit,
+            vec![(
+                (OrderSide::Buy, EntryType::Limit),
+                make_memory(149.0, Some(152.0), Some(147.0), true),
+            )],
+            Some(aapl_id),
+        ),
+    );
+
+    // User clicks MSFT in the watchlist. The helper is invoked for
+    // the MSFT symbol with the panel's current (Buy, Limit) display.
+    let outcome = apply_ensure_draft_bracket(
+        &mut store,
+        &handle,
+        &SymbolKey::new("MSFT"),
+        OrderSide::Buy,
+        EntryType::Limit,
+        Some(420.0),
+        Some(4.0),
+    );
+    assert_eq!(outcome, EnsureDraftOutcome::Created);
+
+    // Fresh bracket lives under MSFT.
+    let msft_intent = handle.snapshot(&SymbolKey::new("MSFT")).unwrap();
+    let msft_id = msft_intent.live_annotation_id.unwrap();
+    assert!(store.get_bracket("MSFT", msft_id).is_some());
+
+    // AAPL bracket is untouched — live broker orders from the
+    // previous symbol must never be collateral damage.
+    assert!(
+        store.get_bracket("AAPL", aapl_id).is_some(),
+        "AAPL bracket must survive the MSFT activation"
+    );
+    let aapl_intent = handle.snapshot(&SymbolKey::new("AAPL")).unwrap();
+    assert_eq!(aapl_intent.live_annotation_id, Some(aapl_id));
+}
+
+/// Simulates the `DataRestoredFromStartup` path: a chart is restored
+/// from a saved layout with symbol "AAPL" + linked Buy/Limit panel.
+/// No intent exists yet (fresh app session), so
+/// `apply_ensure_draft_bracket` must create both the intent row AND
+/// the draft bracket from the panel's display state + market price.
+#[test]
+fn apply_ensure_draft_bracket_startup_restore_creates_intent_and_bracket() {
+    let mut store = AnnotationStore::new();
+    // No seed — fresh session, MidasApp::new loaded layout then
+    // market data just landed for the restored chart.
+    let handle = MockHandle::new();
+
+    let outcome = apply_ensure_draft_bracket(
+        &mut store,
+        &handle,
+        &SymbolKey::new("AAPL"),
+        OrderSide::Buy,
+        EntryType::Limit,
+        Some(150.0),
+        Some(1.5),
+    );
+    assert_eq!(outcome, EnsureDraftOutcome::Created);
+
+    // Intent row now exists with the panel's compound key.
+    let intent = handle
+        .snapshot(&SymbolKey::new("AAPL"))
+        .expect("intent seeded by ensure_draft_bracket on first call");
+    assert_eq!(intent.last_side, OrderSide::Buy);
+    assert_eq!(intent.last_entry_type, EntryType::Limit);
+
+    // And the live annotation id points at a fresh Draft bracket.
+    let live_id = intent
+        .live_annotation_id
+        .expect("live_annotation_id set after Created");
+    let bracket = store.get_bracket("AAPL", live_id).expect("bracket exists");
+    assert_eq!(bracket.status, BracketStatus::Draft);
+    assert_eq!(bracket.entry_type, EntryType::Limit);
+    assert_eq!(bracket.side, BracketSide::Long);
+}
+
 /// A snap whose math would collapse the SL onto entry replaces the SL
 /// with the default offset so both legs remain distinct.
 #[test]

@@ -2144,6 +2144,13 @@ impl MidasApp {
 
     /// Set a chart's symbol and asynchronously load data for it.
     ///
+    /// This is the **single choke point** for loading a ticker into a
+    /// docked chart. Every user-facing path that changes a chart's
+    /// symbol (watchlist click, drag-drop, panel symbol submit, link
+    /// propagation, group adoption) must route through this function
+    /// so the ticker-intent reconciliation fires exactly once per
+    /// activation.
+    ///
     /// Returns a `Task` that will produce `Message::DataLoaded` when complete.
     fn load_symbol_for_chart(&mut self, chart_id: ChartId, symbol: &str) -> Task<Message> {
         let symbol = symbol.trim().to_uppercase();
@@ -2163,6 +2170,14 @@ impl MidasApp {
             chart.load_state = LoadState::Loading;
             chart.chart_state.dirty.mark_data();
         }
+
+        // Single-source-of-truth reconciliation: a fresh ticker was
+        // just loaded into this chart. If a linked order panel exists,
+        // rebuild the draft bracket against the panel's current
+        // `(side, entry_type)` — replacing any stale live bracket from
+        // the previous symbol. Idempotent / no-op when no panel links
+        // to this chart.
+        self.reconcile_ticker_activation(chart_id);
 
         self.load_chart_async(chart_id, &symbol, tf)
     }
@@ -2899,6 +2914,96 @@ impl MidasApp {
         }
     }
 
+    /// Run the full ticker-activation reconciliation pipeline for a
+    /// chart that just had its symbol set or changed.
+    ///
+    /// # Architecture rule
+    ///
+    /// This helper is the **single point of entry** for the "ticker
+    /// loaded into chart + linked panel exists → rebuild bracket"
+    /// rule. Every user-facing path that can change a docked chart's
+    /// symbol routes through [`Self::load_symbol_for_chart`], which
+    /// calls this helper, which forwards into the reducer. The panel
+    /// and watchlist gain zero direct-mutation paths over the intent
+    /// or annotation store — all bracket reconciliation flows through
+    /// [`crate::ticker_order_intent::reducer::apply_ensure_draft_bracket`].
+    ///
+    /// # Flow
+    ///
+    /// 1. Resolve the chart's symbol. No-op when empty (a freshly
+    ///    created empty pane has no symbol yet).
+    /// 2. Route the symbol through
+    ///    [`crate::ticker_order_intent::reducer::apply_maybe_snap`] so
+    ///    any stale GATR anchor is re-evaluated against the current
+    ///    price.
+    /// 3. Locate the linked panel via [`Self::panel_display_for_chart`]
+    ///    — source-chart link first, symbol-match fallback second.
+    ///    No-op when no panel is linked (the bracket only matters when
+    ///    there is a UI surface to mirror).
+    /// 4. Forward `(symbol, panel_side, panel_entry_type,
+    ///    current_price, gatr_abs)` into
+    ///    [`crate::ticker_order_intent::reducer::apply_ensure_draft_bracket`].
+    ///    The reducer reconciles intent compound key, replaces any
+    ///    stale live bracket whose `(side, entry_type)` disagrees, and
+    ///    creates a fresh Draft bracket when appropriate.
+    /// 5. Sync the new `live_annotation_id` back onto the panel's
+    ///    `bracket_annotation_id` so the panel's drag-edit path
+    ///    targets the fresh bracket.
+    ///
+    /// # Safety wrt recursion
+    ///
+    /// The reducer tags its upserts with [`crate::ticker_order_intent::IntentSource::Bootstrap`],
+    /// which the `apply_update_from_surface` recursion guard ignores.
+    /// Calling this helper from many triggers is safe.
+    fn reconcile_ticker_activation(&mut self, chart_id: ChartId) {
+        use crate::annotation_store::SymbolKey;
+
+        let symbol = match self.charts.get(&chart_id) {
+            Some(chart) if !chart.symbol.is_empty() => chart.symbol.clone(),
+            _ => return,
+        };
+        let key = SymbolKey::new(&symbol);
+
+        let _ = crate::ticker_order_intent::reducer::apply_maybe_snap(self, key.clone());
+
+        let Some((panel_side, panel_entry_type)) = self.panel_display_for_chart(chart_id)
+        else {
+            return;
+        };
+
+        let (current_price, gatr_abs) = self
+            .market_cache
+            .get(key.as_str())
+            .map(|s| (s.last_price, s.gatr_abs))
+            .unwrap_or((None, None));
+
+        let _ = crate::ticker_order_intent::reducer::apply_ensure_draft_bracket(
+            &mut self.annotation_store,
+            &self.order_intent_handle,
+            &key,
+            panel_side,
+            panel_entry_type,
+            current_price,
+            gatr_abs,
+        );
+
+        // Sync the panel's `bracket_annotation_id` to whatever the
+        // reducer just recorded — it may have replaced a stale bracket.
+        if let Some(new_ann_id) = self
+            .order_intent_handle
+            .snapshot(&key)
+            .and_then(|i| i.live_annotation_id)
+        {
+            for panel in self.order_panels.values_mut() {
+                let links_to_chart = panel.state.source_chart == Some(chart_id);
+                let matches_symbol = panel.state.symbol.eq_ignore_ascii_case(&symbol);
+                if links_to_chart || matches_symbol {
+                    panel.state.bracket_annotation_id = Some(new_ann_id);
+                }
+            }
+        }
+    }
+
 }
 
 // Config persistence (build_config, mark_config_dirty, maybe_save_config,
@@ -3029,6 +3134,13 @@ impl MidasApp {
                         if let Some(chart) = self.charts.get_mut(&chart_id) {
                             Self::apply_candle_data(chart, buffer, false);
                         }
+                        // A restored chart with a saved symbol was never
+                        // routed through `load_symbol_for_chart`, so the
+                        // reconciliation pipeline never fired. Run it now
+                        // that the candle data has landed — any linked
+                        // panel gets its bracket shape matching its
+                        // current `(side, entry_type)` display state.
+                        self.reconcile_ticker_activation(chart_id);
                     }
                     Err(e) => {
                         if let Some(chart) = self.charts.get_mut(&chart_id) {
@@ -3102,48 +3214,12 @@ impl MidasApp {
                 if let Some(pane) = self.workspace.find_pane(id) {
                     self.workspace.set_focus(pane);
                 }
-                // Single-source-of-truth refactor: route through the
-                // reducer's `MaybeSnapToGatr` handler BEFORE hydration
-                // so the intent is corrected first. The reducer then
-                // re-hydrates any linked panel as its last step, so
-                // the post-activation view already reflects the
-                // corrected memory. If the guards drop the snap, we
-                // still need to hydrate explicitly.
-                let sym = self.charts.get(&id).map(|c| c.symbol.clone());
-                if let Some(sym) = sym.as_ref().filter(|s| !s.is_empty()) {
-                    let key = crate::annotation_store::SymbolKey::new(sym);
-                    let _ = crate::ticker_order_intent::reducer::apply_maybe_snap(
-                        self,
-                        key.clone(),
-                    );
-                    // Fix 1: ensure a Draft bracket exists on the chart
-                    // for the panel's current `(side, entry_type)` compound,
-                    // so the user sees their bracket shape immediately on
-                    // activation without having to click Place Order.
-                    //
-                    // The panel's displayed `(side, entry_type)` is the
-                    // canonical truth — the reducer reconciles the intent
-                    // to match it and replaces any stale live bracket.
-                    if let Some((panel_side, panel_entry_type)) =
-                        self.panel_display_for_chart(id)
-                    {
-                        let (current_price, gatr_abs) = self
-                            .market_cache
-                            .get(key.as_str())
-                            .map(|s| (s.last_price, s.gatr_abs))
-                            .unwrap_or((None, None));
-                        let _ =
-                            crate::ticker_order_intent::reducer::apply_ensure_draft_bracket(
-                                &mut self.annotation_store,
-                                &self.order_intent_handle,
-                                &key,
-                                panel_side,
-                                panel_entry_type,
-                                current_price,
-                                gatr_abs,
-                            );
-                    }
-                }
+                // Single-source-of-truth reconciliation. The helper
+                // corrects the intent against the panel's currently
+                // displayed `(side, entry_type)` and replaces any
+                // stale live bracket. No-op when the chart has no
+                // symbol or no linked panel.
+                self.reconcile_ticker_activation(id);
                 // Slice 2 hydration — idempotent when the reducer
                 // already re-hydrated.
                 self.hydrate_order_panel_for_chart(id);
