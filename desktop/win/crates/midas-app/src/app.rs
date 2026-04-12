@@ -2124,12 +2124,14 @@ impl MidasApp {
                             let sym = chart.symbol.clone();
                             let count = buffer.len();
                             let tf = chart.timeframe;
-                            // When a saved camera was restored in
-                            // bind_chart_to_symbol, skip the default "last
-                            // 200 candles" camera reset. The pending flag
-                            // is cleared after the re-restore below.
-                            let reset_camera = !chart.camera_restored_pending;
-                            Self::apply_candle_data(chart, buffer, reset_camera);
+                            // Always reset camera to "last 200 candles" on
+                            // data load. The saved per-ticker camera (if any)
+                            // is applied immediately below in the same handler
+                            // — no visual flash. This avoids the bug where
+                            // skipping reset left the camera at the PREVIOUS
+                            // ticker's position while new data rendered,
+                            // causing candles to freeze at the wrong viewport.
+                            Self::apply_candle_data(chart, buffer, true);
                             self.status_message =
                                 format!("{}: {} candles at {}", sym, count, tf.display_name());
                             loaded_symbol = Some(sym);
