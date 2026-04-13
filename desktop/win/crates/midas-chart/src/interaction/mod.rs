@@ -242,6 +242,17 @@ const AXIS_LOCK_RATIO: f32 = 1.5;
 /// Sensitivity for middle-drag scaling (per pixel).
 const SCALE_SENSITIVITY: f64 = 0.005;
 
+/// Minimum data-space delta to emit a pan action during right-drag.
+const PAN_MIN_DX: f64 = 0.001;
+const PAN_MIN_DY: f64 = 0.0001;
+
+/// Minimum momentum velocity to start a flick-scroll.
+const MOMENTUM_MIN_VX: f64 = 1.0;
+const MOMENTUM_MIN_VY: f64 = 0.001;
+
+/// Fraction of visible time range moved per scroll-wheel notch.
+const SCROLL_PAN_FRACTION: f64 = 0.08;
+
 /// Bracket-specific context returned by [`hit_test_annotation()`].
 ///
 /// Carries the entry price and side needed for drag clamping.
@@ -547,10 +558,7 @@ fn handle_mouse_moved(
             | InteractionMode::DraggingTimelineBorder { .. }
             | InteractionMode::DraggingAnnotation { .. }
     );
-    let in_bounds = x >= 0.0
-        && y >= 0.0
-        && x <= state.camera.viewport_width as f32
-        && y <= state.camera.viewport_height as f32;
+    let in_bounds = state.camera.contains_point(x, y);
 
     let was_visible = state.crosshair.should_render();
     if !dragging_handle {
@@ -579,200 +587,50 @@ fn handle_mouse_moved(
         }
 
         InteractionMode::PendingDrag { start_x, start_y } => {
-            let ddx = x - start_x;
-            let ddy = y - start_y;
-            let dist = (ddx * ddx + ddy * ddy).sqrt();
-
-            if dist >= DRAG_THRESHOLD_PX {
-                // Exceeded threshold. Left-drag only initiates annotation
-                // drag, never panning (panning is right-mouse only).
-                if let Some((ann_id, kind, grab_offset, clamp_ctx)) =
-                    hit_test_annotation(annotations, start_y, &state.camera)
-                {
-                    use crate::widget::hit_test::HitZoneKind;
-
-                    match kind {
-                        HitZoneKind::LevelLine
-                        | HitZoneKind::BracketTP
-                        | HitZoneKind::BracketSL
-                        | HitZoneKind::BracketEntry
-                        | HitZoneKind::BracketStopTrigger => {
-                            state.interaction_mode = InteractionMode::DraggingAnnotation {
-                                annotation_id: ann_id,
-                                element: kind,
-                                grab_offset,
-                                clamp_ctx,
-                            };
-                            if kind == HitZoneKind::LevelLine {
-                                actions.push(ChartAction::SelectLevel { id: ann_id });
-                            }
-                        }
-                        _ => {
-                            state.interaction_mode = InteractionMode::Idle;
-                        }
-                    }
-                    state.crosshair.suppress();
-                    #[allow(deprecated)]
-                    {
-                        state.crosshair_pos = None;
-                    }
-                    actions.push(ChartAction::ClearCrosshair);
-                    state.drag_start = Some((x, y));
-                } else {
-                    // No annotation hit — return to Idle.
-                    state.interaction_mode = InteractionMode::Idle;
-                }
-            }
+            actions.extend(handle_move_pending_drag(
+                state,
+                x,
+                y,
+                start_x,
+                start_y,
+                annotations,
+            ));
         }
 
         InteractionMode::Panning => {
-            if let Some((prev_x, prev_y)) = state.drag_start {
-                let pixel_dx = x - prev_x;
-                let pixel_dy = y - prev_y;
-
-                // Convert pixel delta to data-space delta.
-                // Dragging right (positive pixel_dx) should move backward in
-                // time (negative dx) — natural "grab and drag" behavior.
-                // Positive dx = forward in time in the Pan convention.
-                let time_range = state.camera.time_end - state.camera.time_start;
-                let price_range = state.camera.price_high - state.camera.price_low;
-                let vw = state.camera.viewport_width as f64;
-                let vh = state.camera.viewport_height as f64;
-
-                let dx = if vw > 0.0 {
-                    -(pixel_dx as f64) * (time_range / vw)
-                } else {
-                    0.0
-                };
-                let dy = if vh > 0.0 {
-                    pixel_dy as f64 * (price_range / vh)
-                } else {
-                    0.0
-                };
-
-                if dx.abs() > f64::EPSILON || dy.abs() > f64::EPSILON {
-                    actions.push(ChartAction::Pan { dx, dy });
-                }
-
-                state.drag_start = Some((x, y));
-            }
+            actions.extend(handle_move_panning(state, x, y));
         }
 
         InteractionMode::PendingScale { start_x, start_y } => {
-            let ddx = (x - start_x).abs();
-            let ddy = (y - start_y).abs();
-            let dist = ddx.max(ddy); // Chebyshev distance
-
-            if dist >= SCALE_DEAD_ZONE_PX {
-                // Determine axis lock.
-                if ddx > ddy * AXIS_LOCK_RATIO {
-                    state.interaction_mode = InteractionMode::HorizontalScaling {
-                        anchor_x: start_x,
-                        last_x: x,
-                    };
-                } else if ddy > ddx * AXIS_LOCK_RATIO {
-                    state.interaction_mode = InteractionMode::VerticalScaling {
-                        anchor_y: start_y,
-                        last_y: y,
-                    };
-                } else if ddx >= ddy {
-                    // Dominant axis wins.
-                    state.interaction_mode = InteractionMode::HorizontalScaling {
-                        anchor_x: start_x,
-                        last_x: x,
-                    };
-                } else {
-                    state.interaction_mode = InteractionMode::VerticalScaling {
-                        anchor_y: start_y,
-                        last_y: y,
-                    };
-                }
-            }
+            handle_move_pending_scale(state, x, y, start_x, start_y);
         }
 
         InteractionMode::HorizontalScaling { anchor_x, last_x } => {
-            let pixel_dx = x - last_x;
-            if pixel_dx.abs() > 0.5 {
-                let factor = (SCALE_SENSITIVITY * pixel_dx as f64).exp();
-                actions.push(ChartAction::Zoom {
-                    center_x: anchor_x,
-                    factor,
-                });
-                state.interaction_mode = InteractionMode::HorizontalScaling {
-                    anchor_x,
-                    last_x: x,
-                };
-            }
+            actions.extend(handle_move_horizontal_scaling(state, x, anchor_x, last_x));
         }
 
         InteractionMode::VerticalScaling { anchor_y, last_y } => {
-            let dy = y - last_y;
-            if dy.abs() > 0.5 {
-                let factor = (SCALE_SENSITIVITY * (-dy) as f64).exp();
-                actions.push(ChartAction::ZoomY {
-                    center_y: anchor_y,
-                    factor,
-                });
-                state.interaction_mode = InteractionMode::VerticalScaling {
-                    anchor_y,
-                    last_y: y,
-                };
-            }
+            actions.extend(handle_move_vertical_scaling(state, y, anchor_y, last_y));
         }
 
         InteractionMode::RightPanning => {
-            if let Some((prev_x, prev_y)) = state.drag_start {
-                let pixel_dx = x - prev_x;
-                let pixel_dy = y - prev_y;
-                let time_range = state.camera.time_end - state.camera.time_start;
-                let price_range = state.camera.price_high - state.camera.price_low;
-                let vw = state.camera.viewport_width as f64;
-                let vh = state.camera.viewport_height as f64;
-
-                let dx = if vw > 0.0 {
-                    -(pixel_dx as f64) * (time_range / vw)
-                } else {
-                    0.0
-                };
-                let dy = if vh > 0.0 {
-                    pixel_dy as f64 * (price_range / vh)
-                } else {
-                    0.0
-                };
-
-                if dx.abs() > 0.001 || dy.abs() > 0.0001 {
-                    actions.push(ChartAction::Pan { dx, dy });
-                }
-                state.drag_start = Some((x, y));
-            }
+            actions.extend(handle_move_right_panning(state, x, y));
         }
 
         InteractionMode::DraggingTimelineBorder {
             anchor_y,
             start_ratio,
         } => {
-            let vh = state.camera.viewport_height as f32;
-            let dy = anchor_y - y;
-            let delta_ratio = dy / vh;
-            let new_ratio = (start_ratio + delta_ratio).clamp(
-                ChartState::TIMELINE_BORDER_MIN,
-                ChartState::TIMELINE_BORDER_MAX,
-            );
-            actions.push(ChartAction::SetTimelineBorderRatio {
-                ratio: new_ratio as f64,
-            });
+            actions.extend(handle_move_dragging_timeline_border(
+                state,
+                y,
+                anchor_y,
+                start_ratio,
+            ));
         }
 
         InteractionMode::DraggingVolumeScale { .. } => {
-            // Direct Y→scale mapping so the triangle tracks the cursor 1:1.
-            // Inverts volume_handle_y: scale = (1.0 - y/vh) / VOLUME_AREA_FRACTION
-            let vh = state.camera.viewport_height as f32;
-            let fraction = (1.0 - y / vh).clamp(0.0, 1.0);
-            let new_scale = (fraction / VOLUME_AREA_FRACTION)
-                .clamp(ChartState::VOLUME_SCALE_MIN, ChartState::VOLUME_SCALE_MAX);
-            actions.push(ChartAction::SetVolumeScale {
-                scale: new_scale as f64,
-            });
+            actions.extend(handle_move_dragging_volume_scale(state, y));
         }
 
         InteractionMode::DraggingAnnotation {
@@ -781,72 +639,306 @@ fn handle_mouse_moved(
             grab_offset,
             clamp_ctx,
         } => {
-            use crate::widget::hit_test::HitZoneKind;
-
-            let raw_price = state.camera.y_to_price(y) + grab_offset;
-
-            match element {
-                HitZoneKind::LevelLine => {
-                    // Level drag: OHLC snap, emit DragLevel.
-                    let snapped = if let Some(d) = data {
-                        state
-                            .level_tool
-                            .snap_to_ohlc(raw_price, x, &state.camera, d, is_collapsed)
-                    } else {
-                        raw_price
-                    };
-                    state.crosshair.suppress();
-                    #[allow(deprecated)]
-                    {
-                        state.crosshair_pos = None;
-                    }
-                    actions.push(ChartAction::DragLevel {
-                        id: annotation_id,
-                        new_price: snapped,
-                    });
-                    actions.push(ChartAction::ClearCrosshair);
-                }
-                HitZoneKind::BracketTP
-                | HitZoneKind::BracketSL
-                | HitZoneKind::BracketEntry
-                | HitZoneKind::BracketStopTrigger => {
-                    let leg = match element {
-                        HitZoneKind::BracketTP => crate::widget::order_bracket::LegRole::TakeProfit,
-                        HitZoneKind::BracketSL => crate::widget::order_bracket::LegRole::StopLoss,
-                        HitZoneKind::BracketEntry => crate::widget::order_bracket::LegRole::Entry,
-                        HitZoneKind::BracketStopTrigger => {
-                            crate::widget::order_bracket::LegRole::StopTrigger
-                        }
-                        _ => unreachable!(),
-                    };
-                    let ctx = clamp_ctx.unwrap_or(BracketClampCtx {
-                        entry_price: 0.0,
-                        side: crate::widget::order_bracket::BracketSide::Long,
-                    });
-                    // Clamp to correct side of entry based on trade direction.
-                    let clamped = clamp_bracket_leg_price(
-                        raw_price,
-                        ctx.entry_price,
-                        leg,
-                        ctx.side,
-                        &state.camera,
-                    );
-                    // Snap to valid tick increment.
-                    let snapped = snap_to_tick(clamped, DEFAULT_TICK_SIZE);
-
-                    actions.push(ChartAction::DragBracketLeg {
-                        annotation_id,
-                        leg,
-                        new_price: snapped,
-                    });
-                }
-                _ => {}
-            }
+            actions.extend(handle_move_dragging_annotation(
+                state,
+                x,
+                y,
+                annotation_id,
+                element,
+                grab_offset,
+                clamp_ctx,
+                data,
+                is_collapsed,
+            ));
         }
     }
 
     actions
 }
+
+// ── handle_mouse_moved helpers ──────────────────────────────────────────
+
+fn handle_move_pending_drag(
+    state: &mut ChartState,
+    x: f32,
+    y: f32,
+    start_x: f32,
+    start_y: f32,
+    annotations: &[crate::widget::Annotation],
+) -> Vec<ChartAction> {
+    let mut actions = Vec::new();
+
+    let ddx = x - start_x;
+    let ddy = y - start_y;
+    let dist = (ddx * ddx + ddy * ddy).sqrt();
+
+    if dist >= DRAG_THRESHOLD_PX {
+        // Exceeded threshold. Left-drag only initiates annotation
+        // drag, never panning (panning is right-mouse only).
+        if let Some((ann_id, kind, grab_offset, clamp_ctx)) =
+            hit_test_annotation(annotations, start_y, &state.camera)
+        {
+            use crate::widget::hit_test::HitZoneKind;
+
+            match kind {
+                HitZoneKind::LevelLine
+                | HitZoneKind::BracketTP
+                | HitZoneKind::BracketSL
+                | HitZoneKind::BracketEntry
+                | HitZoneKind::BracketStopTrigger => {
+                    state.interaction_mode = InteractionMode::DraggingAnnotation {
+                        annotation_id: ann_id,
+                        element: kind,
+                        grab_offset,
+                        clamp_ctx,
+                    };
+                    if kind == HitZoneKind::LevelLine {
+                        actions.push(ChartAction::SelectLevel { id: ann_id });
+                    }
+                }
+                _ => {
+                    state.interaction_mode = InteractionMode::Idle;
+                }
+            }
+            state.crosshair.suppress();
+            #[allow(deprecated)]
+            {
+                state.crosshair_pos = None;
+            }
+            actions.push(ChartAction::ClearCrosshair);
+            state.drag_start = Some((x, y));
+        } else {
+            // No annotation hit — return to Idle.
+            state.interaction_mode = InteractionMode::Idle;
+        }
+    }
+
+    actions
+}
+
+fn handle_move_panning(state: &mut ChartState, x: f32, y: f32) -> Vec<ChartAction> {
+    let mut actions = Vec::new();
+
+    if let Some((prev_x, prev_y)) = state.drag_start {
+        let pixel_dx = x - prev_x;
+        let pixel_dy = y - prev_y;
+
+        let (dx, dy) = state.camera.pixel_delta_to_data(pixel_dx, pixel_dy);
+
+        if dx.abs() > f64::EPSILON || dy.abs() > f64::EPSILON {
+            actions.push(ChartAction::Pan { dx, dy });
+        }
+
+        state.drag_start = Some((x, y));
+    }
+
+    actions
+}
+
+fn handle_move_pending_scale(state: &mut ChartState, x: f32, y: f32, start_x: f32, start_y: f32) {
+    let ddx = (x - start_x).abs();
+    let ddy = (y - start_y).abs();
+    let dist = ddx.max(ddy); // Chebyshev distance
+
+    if dist >= SCALE_DEAD_ZONE_PX {
+        // Determine axis lock.
+        if ddx > ddy * AXIS_LOCK_RATIO {
+            state.interaction_mode = InteractionMode::HorizontalScaling {
+                anchor_x: start_x,
+                last_x: x,
+            };
+        } else if ddy > ddx * AXIS_LOCK_RATIO {
+            state.interaction_mode = InteractionMode::VerticalScaling {
+                anchor_y: start_y,
+                last_y: y,
+            };
+        } else if ddx >= ddy {
+            // Dominant axis wins.
+            state.interaction_mode = InteractionMode::HorizontalScaling {
+                anchor_x: start_x,
+                last_x: x,
+            };
+        } else {
+            state.interaction_mode = InteractionMode::VerticalScaling {
+                anchor_y: start_y,
+                last_y: y,
+            };
+        }
+    }
+}
+
+fn handle_move_horizontal_scaling(
+    state: &mut ChartState,
+    x: f32,
+    anchor_x: f32,
+    last_x: f32,
+) -> Vec<ChartAction> {
+    let mut actions = Vec::new();
+
+    let pixel_dx = x - last_x;
+    if pixel_dx.abs() > 0.5 {
+        let factor = (SCALE_SENSITIVITY * pixel_dx as f64).exp();
+        actions.push(ChartAction::Zoom {
+            center_x: anchor_x,
+            factor,
+        });
+        state.interaction_mode = InteractionMode::HorizontalScaling {
+            anchor_x,
+            last_x: x,
+        };
+    }
+
+    actions
+}
+
+fn handle_move_vertical_scaling(
+    state: &mut ChartState,
+    y: f32,
+    anchor_y: f32,
+    last_y: f32,
+) -> Vec<ChartAction> {
+    let mut actions = Vec::new();
+
+    let dy = y - last_y;
+    if dy.abs() > 0.5 {
+        let factor = (SCALE_SENSITIVITY * (-dy) as f64).exp();
+        actions.push(ChartAction::ZoomY {
+            center_y: anchor_y,
+            factor,
+        });
+        state.interaction_mode = InteractionMode::VerticalScaling {
+            anchor_y,
+            last_y: y,
+        };
+    }
+
+    actions
+}
+
+fn handle_move_right_panning(state: &mut ChartState, x: f32, y: f32) -> Vec<ChartAction> {
+    let mut actions = Vec::new();
+
+    if let Some((prev_x, prev_y)) = state.drag_start {
+        let pixel_dx = x - prev_x;
+        let pixel_dy = y - prev_y;
+        let (dx, dy) = state.camera.pixel_delta_to_data(pixel_dx, pixel_dy);
+
+        if dx.abs() > PAN_MIN_DX || dy.abs() > PAN_MIN_DY {
+            actions.push(ChartAction::Pan { dx, dy });
+        }
+        state.drag_start = Some((x, y));
+    }
+
+    actions
+}
+
+fn handle_move_dragging_timeline_border(
+    state: &mut ChartState,
+    y: f32,
+    anchor_y: f32,
+    start_ratio: f32,
+) -> Vec<ChartAction> {
+    let vh = state.camera.viewport_height as f32;
+    let dy = anchor_y - y;
+    let delta_ratio = dy / vh;
+    let new_ratio = (start_ratio + delta_ratio).clamp(
+        ChartState::TIMELINE_BORDER_MIN,
+        ChartState::TIMELINE_BORDER_MAX,
+    );
+    vec![ChartAction::SetTimelineBorderRatio {
+        ratio: new_ratio as f64,
+    }]
+}
+
+fn handle_move_dragging_volume_scale(state: &mut ChartState, y: f32) -> Vec<ChartAction> {
+    // Direct Y→scale mapping so the triangle tracks the cursor 1:1.
+    // Inverts volume_handle_y: scale = (1.0 - y/vh) / VOLUME_AREA_FRACTION
+    let vh = state.camera.viewport_height as f32;
+    let fraction = (1.0 - y / vh).clamp(0.0, 1.0);
+    let new_scale = (fraction / VOLUME_AREA_FRACTION)
+        .clamp(ChartState::VOLUME_SCALE_MIN, ChartState::VOLUME_SCALE_MAX);
+    vec![ChartAction::SetVolumeScale {
+        scale: new_scale as f64,
+    }]
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors InteractionMode::DraggingAnnotation fields"
+)]
+fn handle_move_dragging_annotation(
+    state: &mut ChartState,
+    x: f32,
+    y: f32,
+    annotation_id: crate::widget::AnnotationId,
+    element: crate::widget::hit_test::HitZoneKind,
+    grab_offset: f64,
+    clamp_ctx: Option<BracketClampCtx>,
+    data: Option<&dyn CandleData>,
+    is_collapsed: bool,
+) -> Vec<ChartAction> {
+    use crate::widget::hit_test::HitZoneKind;
+
+    let mut actions = Vec::new();
+    let raw_price = state.camera.y_to_price(y) + grab_offset;
+
+    match element {
+        HitZoneKind::LevelLine => {
+            // Level drag: OHLC snap, emit DragLevel.
+            let snapped = if let Some(d) = data {
+                state
+                    .level_tool
+                    .snap_to_ohlc(raw_price, x, &state.camera, d, is_collapsed)
+            } else {
+                raw_price
+            };
+            state.crosshair.suppress();
+            #[allow(deprecated)]
+            {
+                state.crosshair_pos = None;
+            }
+            actions.push(ChartAction::DragLevel {
+                id: annotation_id,
+                new_price: snapped,
+            });
+            actions.push(ChartAction::ClearCrosshair);
+        }
+        HitZoneKind::BracketTP
+        | HitZoneKind::BracketSL
+        | HitZoneKind::BracketEntry
+        | HitZoneKind::BracketStopTrigger => {
+            let leg = match element {
+                HitZoneKind::BracketTP => crate::widget::order_bracket::LegRole::TakeProfit,
+                HitZoneKind::BracketSL => crate::widget::order_bracket::LegRole::StopLoss,
+                HitZoneKind::BracketEntry => crate::widget::order_bracket::LegRole::Entry,
+                HitZoneKind::BracketStopTrigger => {
+                    crate::widget::order_bracket::LegRole::StopTrigger
+                }
+                _ => unreachable!(),
+            };
+            let ctx = clamp_ctx.unwrap_or(BracketClampCtx {
+                entry_price: 0.0,
+                side: crate::widget::order_bracket::BracketSide::Long,
+            });
+            // Clamp to correct side of entry based on trade direction.
+            let clamped =
+                clamp_bracket_leg_price(raw_price, ctx.entry_price, leg, ctx.side, &state.camera);
+            // Snap to valid tick increment.
+            let snapped = snap_to_tick(clamped, DEFAULT_TICK_SIZE);
+
+            actions.push(ChartAction::DragBracketLeg {
+                annotation_id,
+                leg,
+                new_price: snapped,
+            });
+        }
+        _ => {}
+    }
+
+    actions
+}
+
+// ── handle_mouse_pressed ────────────────────────────────────────────────
 
 fn handle_mouse_pressed(
     state: &mut ChartState,
@@ -861,51 +953,7 @@ fn handle_mouse_pressed(
     // - Right-click: cancel bracket drawing
     // - Escape: cancel (handled in key press)
     if state.bracket_tool.is_active() {
-        match button {
-            MouseButton::Left => {
-                let price = state.camera.y_to_price(y);
-                if let Some(result) = state.bracket_tool.click(price) {
-                    use crate::widget::bracket_tool::BracketToolResult;
-                    match result {
-                        BracketToolResult::NeedMore => {
-                            // Still placing — stay in bracket tool mode.
-                            return Vec::new();
-                        }
-                        BracketToolResult::Complete {
-                            entry,
-                            tp,
-                            sl,
-                            side,
-                        } => {
-                            // Bracket complete — emit CreateBracket action.
-                            state.crosshair.force_hide();
-                            #[allow(deprecated)]
-                            {
-                                state.crosshair_pos = None;
-                            }
-                            return vec![
-                                ChartAction::CreateBracket {
-                                    entry,
-                                    tp,
-                                    sl,
-                                    side,
-                                },
-                                ChartAction::ClearCrosshair,
-                            ];
-                        }
-                    }
-                }
-                return Vec::new();
-            }
-            MouseButton::Right => {
-                // Cancel bracket drawing on right-click.
-                state.bracket_tool.cancel();
-                return Vec::new();
-            }
-            MouseButton::Middle => {
-                return Vec::new();
-            }
-        }
+        return handle_press_bracket_tool(state, y, button);
     }
 
     // In Placing mode (via LevelTool):
@@ -913,109 +961,116 @@ fn handle_mouse_pressed(
     // - Right-click / Middle-click: temporarily suspend placement for pan/scale
     //   (placement resumes when pan/scale ends via try_resume_placing)
     if state.level_tool.is_placing() {
-        match button {
-            MouseButton::Left => {
-                let price = state
-                    .level_tool
-                    .snapped_price
-                    .unwrap_or_else(|| state.camera.y_to_price(y));
-                state.level_tool.cancel();
-                state.crosshair.force_hide();
-                #[allow(deprecated)]
-                {
-                    state.crosshair_pos = None;
-                }
-                return vec![
-                    ChartAction::CreateLevel { price },
-                    ChartAction::CancelPlacing,
-                    ChartAction::ClearCrosshair,
-                ];
-            }
-            MouseButton::Right => {
-                // Temporarily suspend Placing for right-click panning.
-                state.level_tool.suspend_placing();
-                state.interaction_mode = InteractionMode::RightPanning;
-                state.drag_start = Some((x, y));
-                return Vec::new();
-            }
-            MouseButton::Middle => {
-                // Temporarily suspend Placing for middle-click scaling.
-                state.level_tool.suspend_placing();
-                state.interaction_mode = InteractionMode::PendingScale {
-                    start_x: x,
-                    start_y: y,
-                };
-                return Vec::new();
-            }
-        }
+        return handle_press_level_tool(state, x, y, button);
     }
 
+    handle_press_main(state, x, y, button, annotations)
+}
+
+// ── handle_mouse_pressed helpers ────────────────────────────────────────
+
+fn handle_press_bracket_tool(
+    state: &mut ChartState,
+    y: f32,
+    button: MouseButton,
+) -> Vec<ChartAction> {
     match button {
         MouseButton::Left => {
-            let mut actions = Vec::new();
-
-            // Check volume handle triangle first (right edge).
-            if is_over_volume_handle(
-                x,
-                y,
-                state.camera.viewport_width,
-                state.camera.viewport_height,
-                state.volume_scale,
-            ) {
-                state.interaction_mode = InteractionMode::DraggingVolumeScale {
-                    anchor_y: y,
-                    start_scale: state.volume_scale,
-                };
-                return actions;
+            let price = state.camera.y_to_price(y);
+            if let Some(result) = state.bracket_tool.click(price) {
+                use crate::widget::bracket_tool::BracketToolResult;
+                match result {
+                    BracketToolResult::NeedMore => {
+                        // Still placing — stay in bracket tool mode.
+                        return Vec::new();
+                    }
+                    BracketToolResult::Complete {
+                        entry,
+                        tp,
+                        sl,
+                        side,
+                    } => {
+                        // Bracket complete — emit CreateBracket action.
+                        state.crosshair.force_hide();
+                        #[allow(deprecated)]
+                        {
+                            state.crosshair_pos = None;
+                        }
+                        return vec![
+                            ChartAction::CreateBracket {
+                                entry,
+                                tp,
+                                sl,
+                                side,
+                            },
+                            ChartAction::ClearCrosshair,
+                        ];
+                    }
+                }
             }
+            Vec::new()
+        }
+        MouseButton::Right => {
+            // Cancel bracket drawing on right-click.
+            state.bracket_tool.cancel();
+            Vec::new()
+        }
+        MouseButton::Middle => Vec::new(),
+    }
+}
 
-            // Check timeline border line (full width).
-            if is_over_timeline_border(y, state.camera.viewport_height, state.timeline_border_ratio)
-            {
-                state.interaction_mode = InteractionMode::DraggingTimelineBorder {
-                    anchor_y: y,
-                    start_ratio: state.timeline_border_ratio,
-                };
-                return actions;
-            }
-
-            state.crosshair.on_left_press(x, y);
+fn handle_press_level_tool(
+    state: &mut ChartState,
+    x: f32,
+    y: f32,
+    button: MouseButton,
+) -> Vec<ChartAction> {
+    match button {
+        MouseButton::Left => {
+            let price = state
+                .level_tool
+                .snapped_price
+                .unwrap_or_else(|| state.camera.y_to_price(y));
+            state.level_tool.cancel();
+            state.crosshair.force_hide();
             #[allow(deprecated)]
             {
-                state.left_mouse_down = true;
+                state.crosshair_pos = None;
             }
-
-            // Don't show crosshair if pressing on a draggable annotation —
-            // the PendingDrag will resolve to a drag, not a crosshair.
-            let over_draggable = hit_test_annotation(annotations, y, &state.camera).is_some();
-            if over_draggable {
-                state.crosshair.suppress();
-                #[allow(deprecated)]
-                {
-                    state.crosshair_pos = None;
-                }
-            } else {
-                #[allow(deprecated)]
-                {
-                    state.crosshair_pos = state.crosshair.render_pos();
-                }
-                actions.push(ChartAction::SetCrosshair { x, y });
-            }
-
-            // Stop any active momentum.
-            if state.momentum.is_some() {
-                actions.push(ChartAction::StopMomentum);
-                state.momentum = None;
-            }
-
-            // Enter PendingDrag state.
-            state.interaction_mode = InteractionMode::PendingDrag {
+            vec![
+                ChartAction::CreateLevel { price },
+                ChartAction::CancelPlacing,
+                ChartAction::ClearCrosshair,
+            ]
+        }
+        MouseButton::Right => {
+            // Temporarily suspend Placing for right-click panning.
+            state.level_tool.suspend_placing();
+            state.interaction_mode = InteractionMode::RightPanning;
+            state.drag_start = Some((x, y));
+            Vec::new()
+        }
+        MouseButton::Middle => {
+            // Temporarily suspend Placing for middle-click scaling.
+            state.level_tool.suspend_placing();
+            state.interaction_mode = InteractionMode::PendingScale {
                 start_x: x,
                 start_y: y,
             };
-            state.drag_start = Some((x, y));
-            actions
+            Vec::new()
         }
+    }
+}
+
+fn handle_press_main(
+    state: &mut ChartState,
+    x: f32,
+    y: f32,
+    button: MouseButton,
+    annotations: &[crate::widget::Annotation],
+) -> Vec<ChartAction> {
+    match button {
+        MouseButton::Left => handle_press_left(state, x, y, annotations),
 
         MouseButton::Middle => {
             // Enter pending-scale dead zone; axis determined after 6px of movement.
@@ -1026,54 +1081,124 @@ fn handle_mouse_pressed(
             vec![]
         }
 
-        MouseButton::Right => {
-            use crate::widget::hit_test::HitZoneKind;
+        MouseButton::Right => handle_press_right(state, x, y, annotations),
+    }
+}
 
-            if let Some((ann_id, kind, _offset, _ctx)) =
-                hit_test_annotation(annotations, y, &state.camera)
-            {
-                match kind {
-                    HitZoneKind::LevelLine => {
-                        vec![ChartAction::RightClickLevel { id: ann_id, x, y }]
+fn handle_press_left(
+    state: &mut ChartState,
+    x: f32,
+    y: f32,
+    annotations: &[crate::widget::Annotation],
+) -> Vec<ChartAction> {
+    let mut actions = Vec::new();
+
+    // Check volume handle triangle first (right edge).
+    if is_over_volume_handle(
+        x,
+        y,
+        state.camera.viewport_width,
+        state.camera.viewport_height,
+        state.volume_scale,
+    ) {
+        state.interaction_mode = InteractionMode::DraggingVolumeScale {
+            anchor_y: y,
+            start_scale: state.volume_scale,
+        };
+        return actions;
+    }
+
+    // Check timeline border line (full width).
+    if is_over_timeline_border(y, state.camera.viewport_height, state.timeline_border_ratio) {
+        state.interaction_mode = InteractionMode::DraggingTimelineBorder {
+            anchor_y: y,
+            start_ratio: state.timeline_border_ratio,
+        };
+        return actions;
+    }
+
+    state.crosshair.on_left_press(x, y);
+    #[allow(deprecated)]
+    {
+        state.left_mouse_down = true;
+    }
+
+    // Don't show crosshair if pressing on a draggable annotation —
+    // the PendingDrag will resolve to a drag, not a crosshair.
+    let over_draggable = hit_test_annotation(annotations, y, &state.camera).is_some();
+    if over_draggable {
+        state.crosshair.suppress();
+        #[allow(deprecated)]
+        {
+            state.crosshair_pos = None;
+        }
+    } else {
+        #[allow(deprecated)]
+        {
+            state.crosshair_pos = state.crosshair.render_pos();
+        }
+        actions.push(ChartAction::SetCrosshair { x, y });
+    }
+
+    // Stop any active momentum.
+    if state.momentum.is_some() {
+        actions.push(ChartAction::StopMomentum);
+        state.momentum = None;
+    }
+
+    // Enter PendingDrag state.
+    state.interaction_mode = InteractionMode::PendingDrag {
+        start_x: x,
+        start_y: y,
+    };
+    state.drag_start = Some((x, y));
+    actions
+}
+
+fn handle_press_right(
+    state: &mut ChartState,
+    x: f32,
+    y: f32,
+    annotations: &[crate::widget::Annotation],
+) -> Vec<ChartAction> {
+    use crate::widget::hit_test::HitZoneKind;
+
+    if let Some((ann_id, kind, _offset, _ctx)) = hit_test_annotation(annotations, y, &state.camera)
+    {
+        match kind {
+            HitZoneKind::LevelLine => {
+                vec![ChartAction::RightClickLevel { id: ann_id, x, y }]
+            }
+            HitZoneKind::BracketTP
+            | HitZoneKind::BracketSL
+            | HitZoneKind::BracketEntry
+            | HitZoneKind::BracketStopTrigger => {
+                let leg = match kind {
+                    HitZoneKind::BracketTP => crate::widget::order_bracket::LegRole::TakeProfit,
+                    HitZoneKind::BracketSL => crate::widget::order_bracket::LegRole::StopLoss,
+                    HitZoneKind::BracketEntry => crate::widget::order_bracket::LegRole::Entry,
+                    HitZoneKind::BracketStopTrigger => {
+                        crate::widget::order_bracket::LegRole::StopTrigger
                     }
-                    HitZoneKind::BracketTP
-                    | HitZoneKind::BracketSL
-                    | HitZoneKind::BracketEntry
-                    | HitZoneKind::BracketStopTrigger => {
-                        let leg = match kind {
-                            HitZoneKind::BracketTP => {
-                                crate::widget::order_bracket::LegRole::TakeProfit
-                            }
-                            HitZoneKind::BracketSL => {
-                                crate::widget::order_bracket::LegRole::StopLoss
-                            }
-                            HitZoneKind::BracketEntry => {
-                                crate::widget::order_bracket::LegRole::Entry
-                            }
-                            HitZoneKind::BracketStopTrigger => {
-                                crate::widget::order_bracket::LegRole::StopTrigger
-                            }
-                            _ => unreachable!(),
-                        };
-                        vec![ChartAction::RightClickBracketLeg {
-                            annotation_id: ann_id,
-                            leg,
-                            x,
-                            y,
-                        }]
-                    }
-                    _ => {
-                        state.interaction_mode = InteractionMode::RightPanning;
-                        state.drag_start = Some((x, y));
-                        vec![]
-                    }
-                }
-            } else {
+                    _ => unreachable!(),
+                };
+                vec![ChartAction::RightClickBracketLeg {
+                    annotation_id: ann_id,
+                    leg,
+                    x,
+                    y,
+                }]
+            }
+            _ => {
                 state.interaction_mode = InteractionMode::RightPanning;
                 state.drag_start = Some((x, y));
                 vec![]
             }
         }
+    } else {
+        state.interaction_mode = InteractionMode::RightPanning;
+        state.drag_start = Some((x, y));
+        vec![]
     }
 }
 
@@ -1086,58 +1211,64 @@ fn handle_mouse_released(
 ) -> Vec<ChartAction> {
     // Handle middle button release — exit any scaling mode.
     if button == MouseButton::Middle {
-        if matches!(
-            state.interaction_mode,
-            InteractionMode::PendingScale { .. }
-                | InteractionMode::HorizontalScaling { .. }
-                | InteractionMode::VerticalScaling { .. }
-        ) {
-            state.interaction_mode = InteractionMode::Idle;
-        }
-        state.level_tool.try_resume_placing();
-        sync_crosshair_to_claim(state);
-        return vec![];
+        return handle_release_middle(state);
     }
 
     // Handle right button release — exit right-panning with momentum.
     if button == MouseButton::Right {
-        let mut actions = Vec::new();
-        if matches!(state.interaction_mode, InteractionMode::RightPanning) {
-            // Compute flick-to-scroll momentum from last drag delta.
-            if let Some((prev_x, prev_y)) = state.drag_start {
-                let pixel_dx = x - prev_x;
-                let pixel_dy = y - prev_y;
-                let time_range = state.camera.time_end - state.camera.time_start;
-                let price_range = state.camera.price_high - state.camera.price_low;
-                let vw = state.camera.viewport_width as f64;
-                let vh = state.camera.viewport_height as f64;
-                let fps = 60.0_f64;
-                let vx = if vw > 0.0 {
-                    -(pixel_dx as f64) * (time_range / vw) * fps
-                } else {
-                    0.0
-                };
-                let vy = if vh > 0.0 {
-                    pixel_dy as f64 * (price_range / vh) * fps
-                } else {
-                    0.0
-                };
-                if vx.abs() > 1.0 || vy.abs() > 0.001 {
-                    actions.push(ChartAction::StartMomentum { vx, vy });
-                }
-            }
-            state.interaction_mode = InteractionMode::Idle;
-            state.drag_start = None;
-        }
-        state.level_tool.try_resume_placing();
-        sync_crosshair_to_claim(state);
-        return actions;
+        return handle_release_right(state, x, y);
     }
 
     if button != MouseButton::Left {
         return vec![];
     }
 
+    handle_release_left(state, annotations)
+}
+
+// ── handle_mouse_released helpers ───────────────────────────────────────
+
+fn handle_release_middle(state: &mut ChartState) -> Vec<ChartAction> {
+    if matches!(
+        state.interaction_mode,
+        InteractionMode::PendingScale { .. }
+            | InteractionMode::HorizontalScaling { .. }
+            | InteractionMode::VerticalScaling { .. }
+    ) {
+        state.interaction_mode = InteractionMode::Idle;
+    }
+    state.level_tool.try_resume_placing();
+    sync_crosshair_to_claim(state);
+    vec![]
+}
+
+fn handle_release_right(state: &mut ChartState, x: f32, y: f32) -> Vec<ChartAction> {
+    let mut actions = Vec::new();
+    if matches!(state.interaction_mode, InteractionMode::RightPanning) {
+        // Compute flick-to-scroll momentum from last drag delta.
+        if let Some((prev_x, prev_y)) = state.drag_start {
+            let pixel_dx = x - prev_x;
+            let pixel_dy = y - prev_y;
+            let (dx, dy) = state.camera.pixel_delta_to_data(pixel_dx, pixel_dy);
+            const ASSUMED_FPS: f64 = 60.0;
+            let vx = dx * ASSUMED_FPS;
+            let vy = dy * ASSUMED_FPS;
+            if vx.abs() > MOMENTUM_MIN_VX || vy.abs() > MOMENTUM_MIN_VY {
+                actions.push(ChartAction::StartMomentum { vx, vy });
+            }
+        }
+        state.interaction_mode = InteractionMode::Idle;
+        state.drag_start = None;
+    }
+    state.level_tool.try_resume_placing();
+    sync_crosshair_to_claim(state);
+    actions
+}
+
+fn handle_release_left(
+    state: &mut ChartState,
+    annotations: &[crate::widget::Annotation],
+) -> Vec<ChartAction> {
     // Volume scale / timeline border drag ends without affecting crosshair state.
     if matches!(
         state.interaction_mode,
@@ -1186,22 +1317,7 @@ fn handle_mouse_released(
     match prev_mode {
         InteractionMode::PendingDrag { start_x, start_y } => {
             // Released without exceeding drag threshold -- this is a click.
-            // Decorator hit zones own every bracket/level interaction
-            // button; fall through to line-level hit-testing only when no
-            // decorator item was hit.
-            if let Some(dec_action) =
-                hit_test_decorators(annotations, start_x, start_y, &state.camera)
-            {
-                actions.push(dec_action);
-            } else if let Some((ann_id, kind, _, _)) =
-                hit_test_annotation(annotations, start_y, &state.camera)
-            {
-                if kind == crate::widget::hit_test::HitZoneKind::LevelLine {
-                    actions.push(ChartAction::SelectLevel { id: ann_id });
-                }
-            } else if state.selected_level.is_some() {
-                actions.push(ChartAction::DeselectLevel);
-            }
+            resolve_click(state, &mut actions, start_x, start_y, annotations);
         }
 
         InteractionMode::Panning => {
@@ -1234,6 +1350,29 @@ fn handle_mouse_released(
     actions
 }
 
+fn resolve_click(
+    state: &mut ChartState,
+    actions: &mut Vec<ChartAction>,
+    start_x: f32,
+    start_y: f32,
+    annotations: &[crate::widget::Annotation],
+) {
+    // Decorator hit zones own every bracket/level interaction
+    // button; fall through to line-level hit-testing only when no
+    // decorator item was hit.
+    if let Some(dec_action) = hit_test_decorators(annotations, start_x, start_y, &state.camera) {
+        actions.push(dec_action);
+    } else if let Some((ann_id, kind, _, _)) =
+        hit_test_annotation(annotations, start_y, &state.camera)
+    {
+        if kind == crate::widget::hit_test::HitZoneKind::LevelLine {
+            actions.push(ChartAction::SelectLevel { id: ann_id });
+        }
+    } else if state.selected_level.is_some() {
+        actions.push(ChartAction::DeselectLevel);
+    }
+}
+
 fn handle_mouse_wheel(state: &mut ChartState, delta: f32, _x: f32) -> Vec<ChartAction> {
     if delta.abs() < f32::EPSILON {
         return vec![];
@@ -1242,7 +1381,7 @@ fn handle_mouse_wheel(state: &mut ChartState, delta: f32, _x: f32) -> Vec<ChartA
     // Pan: each scroll notch moves ~8% of the visible time range.
     // Positive delta (scroll up) = move forward in time (positive dx).
     let time_range = state.camera.time_end - state.camera.time_start;
-    let pan_amount = time_range * 0.08 * delta as f64;
+    let pan_amount = time_range * SCROLL_PAN_FRACTION * delta as f64;
 
     // Horizontal clamping is enforced centrally in ChartState::apply_action
     // via clamp_pan_dx, so we just emit the raw pan delta here.
@@ -1334,11 +1473,7 @@ fn handle_suppressed_move(
     // Placing mode: compute preview price (with OHLC snap if available).
     // Crosshair stays hidden — preview line rendered via scene.level_preview_y.
     if state.level_tool.is_placing() {
-        let in_bounds = x >= 0.0
-            && y >= 0.0
-            && x <= state.camera.viewport_width as f32
-            && y <= state.camera.viewport_height as f32;
-        if in_bounds {
+        if state.camera.contains_point(x, y) {
             let raw_price = state.camera.y_to_price(y);
             let price = if let Some(d) = data {
                 state
@@ -1370,11 +1505,7 @@ fn handle_suppressed_move(
 
     // Bracket tool active: update preview price for the next leg.
     if state.bracket_tool.is_active() {
-        let in_bounds = x >= 0.0
-            && y >= 0.0
-            && x <= state.camera.viewport_width as f32
-            && y <= state.camera.viewport_height as f32;
-        if in_bounds {
+        if state.camera.contains_point(x, y) {
             let price = state.camera.y_to_price(y);
             state.bracket_tool.set_preview(price);
         } else {

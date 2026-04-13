@@ -140,6 +140,38 @@ impl Camera2D {
     pub fn snap_to_pixel(&self, value: f32) -> f32 {
         (value * self.dpi_scale).floor() / self.dpi_scale
     }
+
+    /// Returns `true` if the point `(x, y)` lies within the viewport.
+    #[inline]
+    pub fn contains_point(&self, x: f32, y: f32) -> bool {
+        x >= 0.0 && y >= 0.0 && x <= self.viewport_width as f32 && y <= self.viewport_height as f32
+    }
+
+    /// Convert a pixel-space drag delta to data-space (time, price).
+    ///
+    /// Positive `pixel_dx` (drag right) produces negative time delta
+    /// (scroll back in time) — natural "grab and drag" behavior.
+    /// Positive `pixel_dy` (drag down) produces positive price delta
+    /// (scroll toward higher prices, which are drawn at lower Y).
+    #[inline]
+    pub fn pixel_delta_to_data(&self, pixel_dx: f32, pixel_dy: f32) -> (f64, f64) {
+        let time_range = self.time_end - self.time_start;
+        let price_range = self.price_high - self.price_low;
+        let vw = self.viewport_width as f64;
+        let vh = self.viewport_height as f64;
+
+        let dx = if vw > 0.0 {
+            -(pixel_dx as f64) * (time_range / vw)
+        } else {
+            0.0
+        };
+        let dy = if vh > 0.0 {
+            pixel_dy as f64 * (price_range / vh)
+        } else {
+            0.0
+        };
+        (dx, dy)
+    }
 }
 
 #[cfg(test)]

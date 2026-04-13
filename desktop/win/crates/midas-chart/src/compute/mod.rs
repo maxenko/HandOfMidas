@@ -34,6 +34,35 @@ const SESSION_BOUNDARY_COLOR: [f32; 4] = [0.3, 0.3, 0.5, 0.30];
 /// if it exceeds this multiple of the expected candle duration.
 const SESSION_GAP_THRESHOLD: f64 = 1.5;
 
+/// Rendering configuration for candle instances (body/wick sizes, colors,
+/// bright-range highlighting). Grouped to keep `build_candle_instances`
+/// under Clippy's argument-count limit.
+struct CandleRenderParams<'a> {
+    body_width: f32,
+    wick_width: f32,
+    bull_color: [f32; 4],
+    bear_color: [f32; 4],
+    bright_ranges: &'a [(usize, usize)],
+}
+
+/// Rendering configuration for volume-bar instances (colors, scale,
+/// viewport height, bright-range highlighting). Grouped to keep
+/// `build_volume_instances` under Clippy's argument-count limit.
+struct VolumeRenderParams<'a> {
+    bull_color: [f32; 4],
+    bear_color: [f32; 4],
+    volume_scale: f32,
+    viewport_height: u32,
+    bright_ranges: &'a [(usize, usize)],
+}
+
+// ── Axis label colors ──────────────────────────────────────────────────
+const LABEL_BG: [f32; 4] = [0.15, 0.15, 0.15, 0.9];
+const LABEL_TEXT: [f32; 4] = [0.8, 0.8, 0.8, 1.0];
+const CROSSHAIR_BG: [f32; 4] = [0.2, 0.2, 0.2, 0.95];
+const CROSSHAIR_LINE: [f32; 4] = [0.7, 0.7, 0.7, 0.5];
+const CROSSHAIR_LABEL_TEXT: [f32; 4] = [0.1, 0.1, 0.1, 1.0];
+
 /// Pure function: chart input -> renderable scene.
 ///
 /// This function is unit-testable without any GPU context. You can assert
@@ -205,12 +234,14 @@ fn compute_normal_scene(
         camera,
         vis_start,
         vis_end,
-        body_width,
-        wick_width,
-        &input.bull_color,
-        &input.bear_color,
+        &CandleRenderParams {
+            body_width,
+            wick_width,
+            bull_color: input.bull_color,
+            bear_color: input.bear_color,
+            bright_ranges: input.gatr_bright_ranges,
+        },
         &x_from_ts,
-        input.gatr_bright_ranges,
     );
 
     let volumes = build_volume_instances(
@@ -219,18 +250,20 @@ fn compute_normal_scene(
         vis_start,
         vis_end,
         body_width,
-        input.viewport_height,
-        &input.volume_bull_color,
-        &input.volume_bear_color,
-        input.volume_scale,
+        &VolumeRenderParams {
+            bull_color: input.volume_bull_color,
+            bear_color: input.volume_bear_color,
+            volume_scale: input.volume_scale,
+            viewport_height: input.viewport_height,
+            bright_ranges: input.gatr_bright_ranges,
+        },
         &x_from_ts,
-        input.gatr_bright_ranges,
     );
     let volume_count = volumes.as_ref().map_or(0, |v| v.len());
 
     let price_grid_lines = compute_grid_lines(camera, &input.grid_color);
     let priceline_labels = compute_priceline_labels(camera);
-    let timeline_ticks = compute_timeline_ticks(camera, candle_duration);
+    let timeline_ticks = compute_timeline_ticks(camera);
     let widget_output = compute_widget_annotations(input.annotations, camera, input);
     let crosshair = compute_crosshair_impl(input.crosshair, data, camera, input.symbol, &|cx| {
         let cursor_time = camera.x_to_time(cx);
@@ -333,12 +366,14 @@ fn compute_collapsed_scene(
         camera,
         vis_start,
         vis_end,
-        body_width,
-        wick_width,
-        &input.bull_color,
-        &input.bear_color,
+        &CandleRenderParams {
+            body_width,
+            wick_width,
+            bull_color: input.bull_color,
+            bear_color: input.bear_color,
+            bright_ranges: input.gatr_bright_ranges,
+        },
         &x_from_idx,
-        input.gatr_bright_ranges,
     );
     let candle_count = visible_count;
 
@@ -348,12 +383,14 @@ fn compute_collapsed_scene(
         vis_start,
         vis_end,
         body_width,
-        input.viewport_height,
-        &input.volume_bull_color,
-        &input.volume_bear_color,
-        input.volume_scale,
+        &VolumeRenderParams {
+            bull_color: input.volume_bull_color,
+            bear_color: input.volume_bear_color,
+            volume_scale: input.volume_scale,
+            viewport_height: input.viewport_height,
+            bright_ranges: input.gatr_bright_ranges,
+        },
         &x_from_idx,
-        input.gatr_bright_ranges,
     );
     let volume_count = volumes.as_ref().map_or(0, |v| v.len());
 
@@ -506,29 +543,24 @@ pub fn estimate_candle_duration(data: &dyn CandleData) -> f64 {
 ///
 /// `x_for_candle(data_index)` returns the pixel X position for each candle.
 /// In normal mode this maps timestamps; in collapsed mode it maps indices.
-#[allow(clippy::too_many_arguments)]
 fn build_candle_instances(
     data: &dyn CandleData,
     camera: &Camera2D,
     vis_start: usize,
     vis_end: usize,
-    body_width: f32,
-    wick_width: f32,
-    bull_color: &[f32; 4],
-    bear_color: &[f32; 4],
+    params: &CandleRenderParams<'_>,
     x_for_candle: &dyn Fn(usize) -> f32,
-    bright_ranges: &[(usize, usize)],
 ) -> Option<Vec<CandleInstance>> {
     if vis_start >= vis_end {
         return None;
     }
 
     debug_assert!(
-        bright_ranges.windows(2).all(|w| w[0].1 < w[1].0),
+        params.bright_ranges.windows(2).all(|w| w[0].1 < w[1].0),
         "bright_ranges must be sorted and non-overlapping"
     );
 
-    let dimming_active = !bright_ranges.is_empty();
+    let dimming_active = !params.bright_ranges.is_empty();
     let mut range_idx = 0;
     let mut instances = Vec::with_capacity(vis_end - vis_start);
 
@@ -555,18 +587,22 @@ fn build_candle_instances(
         };
 
         let is_bull = close >= open;
-        let color = if is_bull { *bull_color } else { *bear_color };
+        let color = if is_bull {
+            params.bull_color
+        } else {
+            params.bear_color
+        };
 
         // Determine dim factor for G.ATR hover highlighting.
         let dim = if dimming_active {
             // Advance cursor past ranges that end before this candle.
-            while range_idx < bright_ranges.len() && bright_ranges[range_idx].1 < i {
+            while range_idx < params.bright_ranges.len() && params.bright_ranges[range_idx].1 < i {
                 range_idx += 1;
             }
             // Check if this candle falls within the current range.
-            if range_idx < bright_ranges.len()
-                && i >= bright_ranges[range_idx].0
-                && i <= bright_ranges[range_idx].1
+            if range_idx < params.bright_ranges.len()
+                && i >= params.bright_ranges[range_idx].0
+                && i <= params.bright_ranges[range_idx].1
             {
                 0.0 // bright
             } else {
@@ -582,8 +618,8 @@ fn build_candle_instances(
             body_bottom,
             wick_top,
             wick_bottom,
-            width: body_width,
-            wick_width,
+            width: params.body_width,
+            wick_width: params.wick_width,
             dim,
             color,
         });
@@ -596,19 +632,14 @@ fn build_candle_instances(
 ///
 /// `x_for_candle(data_index)` returns the pixel X position for each bar.
 /// Volume bars occupy the bottom `VOLUME_AREA_FRACTION` of the viewport.
-#[allow(clippy::too_many_arguments)]
 fn build_volume_instances(
     data: &dyn CandleData,
     camera: &Camera2D,
     vis_start: usize,
     vis_end: usize,
     bar_width: f32,
-    viewport_height: u32,
-    volume_bull_color: &[f32; 4],
-    volume_bear_color: &[f32; 4],
-    volume_scale: f32,
+    params: &VolumeRenderParams<'_>,
     x_for_candle: &dyn Fn(usize) -> f32,
-    bright_ranges: &[(usize, usize)],
 ) -> Option<Vec<VolumeInstance>> {
     if vis_start >= vis_end {
         return None;
@@ -624,37 +655,37 @@ fn build_volume_instances(
         return None;
     }
 
-    let vh = viewport_height as f32;
+    let vh = params.viewport_height as f32;
     let volume_area_top = vh * (1.0 - VOLUME_AREA_FRACTION);
     let volume_area_bottom = vh;
     let volume_area_height = volume_area_bottom - volume_area_top;
 
-    let dimming_active = !bright_ranges.is_empty();
+    let dimming_active = !params.bright_ranges.is_empty();
     let mut range_idx = 0;
     let mut instances = Vec::with_capacity(vis_end - vis_start);
 
     for i in vis_start..vis_end {
         let x = x_for_candle(i);
         let vol_fraction = data.volume(i) as f32 / max_volume as f32;
-        let bar_height = vol_fraction * volume_area_height * volume_scale;
+        let bar_height = vol_fraction * volume_area_height * params.volume_scale;
         let y_top = camera.snap_to_pixel(volume_area_bottom - bar_height);
         let y_bottom = volume_area_bottom;
 
         let is_bull = data.close(i) >= data.open(i);
         let mut color = if is_bull {
-            *volume_bull_color
+            params.bull_color
         } else {
-            *volume_bear_color
+            params.bear_color
         };
 
         // Dim volume bars outside bright ranges (matches candle 30% target).
         if dimming_active {
-            while range_idx < bright_ranges.len() && bright_ranges[range_idx].1 < i {
+            while range_idx < params.bright_ranges.len() && params.bright_ranges[range_idx].1 < i {
                 range_idx += 1;
             }
-            let in_range = range_idx < bright_ranges.len()
-                && i >= bright_ranges[range_idx].0
-                && i <= bright_ranges[range_idx].1;
+            let in_range = range_idx < params.bright_ranges.len()
+                && i >= params.bright_ranges[range_idx].0
+                && i <= params.bright_ranges[range_idx].1;
             if !in_range {
                 color[3] *= 0.3;
             }
@@ -780,8 +811,8 @@ fn compute_collapsed_timeline_ticks(
             text: format_time_ms(ts),
             screen_x: x,
             screen_y: camera.viewport_height as f32,
-            bg_color: [0.15, 0.15, 0.15, 0.9],
-            text_color: [0.8, 0.8, 0.8, 1.0],
+            bg_color: LABEL_BG,
+            text_color: LABEL_TEXT,
         });
         idx += step;
         count += 1;
@@ -841,7 +872,7 @@ fn build_crosshair_data(
         text: format_price(cursor_price),
         screen_x: camera.viewport_width as f32,
         screen_y: snap_y,
-        bg_color: [0.2, 0.2, 0.2, 0.95],
+        bg_color: CROSSHAIR_BG,
         text_color: [1.0, 1.0, 1.0, 1.0],
     };
 
@@ -850,7 +881,7 @@ fn build_crosshair_data(
         text: format_time_ms(snap_ts),
         screen_x: snap_x,
         screen_y: camera.viewport_height as f32,
-        bg_color: [0.2, 0.2, 0.2, 0.95],
+        bg_color: CROSSHAIR_BG,
         text_color: [1.0, 1.0, 1.0, 1.0],
     };
 
@@ -893,7 +924,7 @@ fn build_crosshair_data(
         horizontal_y: snap_y,
         priceline_lens,
         timeline_lens,
-        line_color: [0.7, 0.7, 0.7, 0.5],
+        line_color: CROSSHAIR_LINE,
         ohlcv_overlay,
     }
 }
@@ -956,8 +987,8 @@ pub fn compute_priceline_labels(camera: &Camera2D) -> Vec<AxisLabel> {
             text: format_price(price),
             screen_x: camera.viewport_width as f32,
             screen_y: y,
-            bg_color: [0.15, 0.15, 0.15, 0.9],
-            text_color: [0.8, 0.8, 0.8, 1.0],
+            bg_color: LABEL_BG,
+            text_color: LABEL_TEXT,
         });
         price += price_step;
         count += 1;
@@ -1007,7 +1038,7 @@ pub fn compute_crosshair_labels(
         screen_x: camera.viewport_width as f32,
         screen_y: snap_y,
         bg_color: [1.0, 1.0, 1.0, 0.95],
-        text_color: [0.1, 0.1, 0.1, 1.0],
+        text_color: CROSSHAIR_LABEL_TEXT,
     };
 
     // Timeline lens — snap to nearest candle, show detailed datetime.
@@ -1032,7 +1063,7 @@ pub fn compute_crosshair_labels(
         screen_x: snap_x,
         screen_y: camera.viewport_height as f32,
         bg_color: [1.0, 1.0, 1.0, 0.95],
-        text_color: [0.1, 0.1, 0.1, 1.0],
+        text_color: CROSSHAIR_LABEL_TEXT,
     };
 
     Some(CrosshairLabels {
@@ -1042,7 +1073,7 @@ pub fn compute_crosshair_labels(
 }
 
 /// Compute timeline tick labels.
-fn compute_timeline_ticks(camera: &Camera2D, candle_duration: f64) -> Vec<AxisLabel> {
+fn compute_timeline_ticks(camera: &Camera2D) -> Vec<AxisLabel> {
     let time_range = camera.time_end - camera.time_start;
     if time_range <= 0.0 {
         return Vec::new();
@@ -1051,8 +1082,6 @@ fn compute_timeline_ticks(camera: &Camera2D, candle_duration: f64) -> Vec<AxisLa
     if time_step <= 0.0 {
         return Vec::new();
     }
-
-    let _ = candle_duration;
 
     let mut labels = Vec::new();
     let first = (camera.time_start / time_step).ceil() * time_step;
@@ -1064,8 +1093,8 @@ fn compute_timeline_ticks(camera: &Camera2D, candle_duration: f64) -> Vec<AxisLa
             text: format_time_ms(t as i64),
             screen_x: x,
             screen_y: camera.viewport_height as f32,
-            bg_color: [0.15, 0.15, 0.15, 0.9],
-            text_color: [0.8, 0.8, 0.8, 1.0],
+            bg_color: LABEL_BG,
+            text_color: LABEL_TEXT,
         });
         t += time_step;
         count += 1;
@@ -1112,46 +1141,28 @@ fn compute_widget_annotations(
     let mut merged = WidgetOutput::default();
     let hovered_aid = input.hovered_annotation.map(|(aid, _)| aid);
 
-    // Pass 1: non-hovered annotations (render underneath).
-    for ann in annotations {
-        if !ann.presence.is_visible() {
-            continue;
-        }
-        if Some(ann.id) == hovered_aid {
-            continue;
-        }
+    let mut compute_annotation = |ann: &crate::widget::Annotation| {
         let alpha = ann.presence.alpha();
         match &ann.kind {
             crate::widget::AnnotationKind::Level(level) => {
-                let out = compute_level(level, ann.id, &ctx, alpha, ann.locked);
-                merged.merge(out);
+                merged.merge(compute_level(level, ann.id, &ctx, alpha, ann.locked));
             }
             crate::widget::AnnotationKind::OrderBracket(bracket) => {
-                let out = compute_bracket(bracket, ann.id, &ctx, alpha);
-                merged.merge(out);
+                merged.merge(compute_bracket(bracket, ann.id, &ctx, alpha));
             }
             _ => {}
+        }
+    };
+
+    // Two passes: non-hovered first (underneath), then hovered (on top).
+    for ann in annotations {
+        if ann.presence.is_visible() && Some(ann.id) != hovered_aid {
+            compute_annotation(ann);
         }
     }
-    // Pass 2: hovered annotation (render on top).
     for ann in annotations {
-        if !ann.presence.is_visible() {
-            continue;
-        }
-        if Some(ann.id) != hovered_aid {
-            continue;
-        }
-        let alpha = ann.presence.alpha();
-        match &ann.kind {
-            crate::widget::AnnotationKind::Level(level) => {
-                let out = compute_level(level, ann.id, &ctx, alpha, ann.locked);
-                merged.merge(out);
-            }
-            crate::widget::AnnotationKind::OrderBracket(bracket) => {
-                let out = compute_bracket(bracket, ann.id, &ctx, alpha);
-                merged.merge(out);
-            }
-            _ => {}
+        if ann.presence.is_visible() && Some(ann.id) == hovered_aid {
+            compute_annotation(ann);
         }
     }
 
