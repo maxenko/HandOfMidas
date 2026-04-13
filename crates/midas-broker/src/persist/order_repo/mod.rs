@@ -274,6 +274,24 @@ pub fn write_audit(
     Ok(())
 }
 
+/// Update order status and write an audit trail entry in one call.
+///
+/// Combines [`update_order_status`] and [`write_audit`] to ensure the
+/// audit trail is always written alongside the status change.
+pub fn update_status_and_audit(
+    conn: &Connection,
+    local_id: &str,
+    old_status: &str,
+    new_status: &str,
+    updated_at: &str,
+    details: Option<&str>,
+    source: &str,
+) -> Result<(), rusqlite::Error> {
+    update_order_status(conn, local_id, new_status, updated_at)?;
+    write_audit(conn, local_id, old_status, new_status, details, source)?;
+    Ok(())
+}
+
 /// Insert a fill. Uses `INSERT OR IGNORE` so that a duplicate `ib_exec_id`
 /// (UNIQUE constraint) is silently skipped, making the operation idempotent.
 pub fn insert_fill(conn: &Connection, fill: &FillRow) -> Result<(), rusqlite::Error> {

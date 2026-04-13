@@ -674,17 +674,12 @@ impl BrokerEngine {
                 let now = chrono::Utc::now().to_rfc3339();
 
                 if !["Filled", "Cancelled", "Rejected"].contains(&parent_row.status.as_str()) {
-                    let _ = crate::persist::order_repo::update_order_status(
-                        &conn,
-                        &parent_row.local_id,
-                        "Cancelled",
-                        &now,
-                    );
-                    let _ = crate::persist::order_repo::write_audit(
+                    let _ = crate::persist::order_repo::update_status_and_audit(
                         &conn,
                         &parent_row.local_id,
                         &parent_row.status,
                         "Cancelled",
+                        &now,
                         Some("bracket cancel"),
                         "engine",
                     );
@@ -696,17 +691,12 @@ impl BrokerEngine {
 
                 for child in &children {
                     if !["Filled", "Cancelled", "Rejected"].contains(&child.status.as_str()) {
-                        let _ = crate::persist::order_repo::update_order_status(
-                            &conn,
-                            &child.local_id,
-                            "Cancelled",
-                            &now,
-                        );
-                        let _ = crate::persist::order_repo::write_audit(
+                        let _ = crate::persist::order_repo::update_status_and_audit(
                             &conn,
                             &child.local_id,
                             &child.status,
                             "Cancelled",
+                            &now,
                             Some("bracket cancel"),
                             "engine",
                         );
@@ -966,17 +956,12 @@ impl BrokerEngine {
 
             // Update DB
             let now = chrono::Utc::now().to_rfc3339();
-            let _ = crate::persist::order_repo::update_order_status(
-                &conn,
-                &order_id.to_string(),
-                "PendingCancel",
-                &now,
-            );
-            let _ = crate::persist::order_repo::write_audit(
+            let _ = crate::persist::order_repo::update_status_and_audit(
                 &conn,
                 &order_id.to_string(),
                 &row.status,
                 "PendingCancel",
+                &now,
                 Some("user cancel"),
                 "engine",
             );
@@ -1146,109 +1131,13 @@ impl BrokerEngine {
                 remaining,
                 avg_fill_price,
             } => {
-                // Look up local UUID via ib_to_local map
-                let local_id = match self.ib_to_local.get(&ib_order_id) {
-                    Some(&id) => id,
-                    None => {
-                        tracing::warn!("Callback for unknown IB order ID {ib_order_id}");
-                        return;
-                    }
-                };
-
-                // Map IB status string to our canonical OrderStatus
-                let new_status = OrderStatus::from_ib_status(&status);
-
-                // Bracket info extracted from DB row before dropping the lock,
-                // so we can call check_bracket_status_change() afterwards.
-                let mut bracket_info: Option<(Option<String>, Option<String>)> = None;
-
-                // Update DB if store available
-                if let Some(ref store) = self.store {
-                    let conn = store.conn().lock().expect("db mutex poisoned");
-                    let now = chrono::Utc::now().to_rfc3339();
-
-                    // Get current order row for transition validation
-                    if let Ok(Some(row)) =
-                        crate::persist::order_repo::get_order(&conn, &local_id.to_string())
-                    {
-                        let old_status_str = row.status.clone();
-
-                        // W2: Idempotency guard — skip duplicate status updates
-                        if let Ok(old_status) = old_status_str.parse::<OrderStatus>() {
-                            if new_status == old_status {
-                                tracing::debug!(
-                                    "Ignoring duplicate status {new_status} for order {local_id}"
-                                );
-                                return;
-                            }
-
-                            // Validate transition (log warning but proceed — IB is authoritative)
-                            if let Err(e) = OrderStatus::validate_transition(old_status, new_status)
-                            {
-                                tracing::warn!(
-                                    "Invalid status transition for order {local_id}: {e}"
-                                );
-                            }
-                        }
-
-                        // Update status and audit in a transaction
-                        let id_str = local_id.to_string();
-                        let txn_result = (|| -> Result<(), rusqlite::Error> {
-                            conn.execute_batch("BEGIN")?;
-                            crate::persist::order_repo::update_order_status(
-                                &conn,
-                                &id_str,
-                                &new_status.to_string(),
-                                &now,
-                            )?;
-                            crate::persist::order_repo::write_audit(
-                                &conn,
-                                &id_str,
-                                &old_status_str,
-                                &new_status.to_string(),
-                                None,
-                                "ib_callback",
-                            )?;
-                            conn.execute_batch("COMMIT")?;
-                            Ok(())
-                        })();
-                        if let Err(e) = txn_result {
-                            tracing::error!(
-                                "Failed to persist status change for order {local_id}: {e}"
-                            );
-                            let _ = conn.execute_batch("ROLLBACK");
-                        }
-
-                        // Emit event
-                        let _ = self.order_event_tx.send(BrokerEvent::OrderStatusChanged {
-                            order_id: local_id,
-                            old_status: old_status_str,
-                            new_status: new_status.to_string(),
-                            filled_qty: filled,
-                            remaining_qty: remaining,
-                            avg_fill_price,
-                        });
-
-                        // Stash bracket info for post-lock bracket status check
-                        if row.bracket_role.is_some() {
-                            bracket_info = Some((row.bracket_role.clone(), row.parent_id.clone()));
-                        }
-                    }
-                    // MutexGuard (conn) drops here
-                }
-
-                // Note: We intentionally keep ib_to_local mappings for terminal orders
-                // because IB may send Execution callbacks after the terminal OrderStatus.
-                // Cleanup happens on engine shutdown or periodic sweep.
-
-                // Check bracket status after releasing the DB lock
-                if let Some((role, parent_id_str)) = bracket_info {
-                    self.check_bracket_status_change(
-                        local_id,
-                        role.as_deref(),
-                        parent_id_str.as_deref(),
-                    );
-                }
+                self.handle_order_status_callback(
+                    ib_order_id,
+                    status,
+                    filled,
+                    remaining,
+                    avg_fill_price,
+                );
             }
 
             BrokerCallback::Execution {
@@ -1259,104 +1148,28 @@ impl BrokerEngine {
                 commission,
                 side,
             } => {
-                let local_id = match self.ib_to_local.get(&ib_order_id) {
-                    Some(&id) => id,
-                    None => {
-                        tracing::warn!("Execution callback for unknown IB order ID {ib_order_id}");
-                        return;
-                    }
-                };
-
-                // Persist fill to DB
-                if let Some(ref store) = self.store {
-                    let conn = store.conn().lock().expect("db mutex poisoned");
-                    let now = chrono::Utc::now().to_rfc3339();
-                    let fill = crate::persist::order_repo::FillRow {
-                        order_local_id: local_id.to_string(),
-                        ib_exec_id: exec_id.clone(),
-                        timestamp: now,
-                        shares,
-                        price,
-                        commission: Some(commission),
-                        exchange: None,
-                        side: side.clone(),
-                    };
-                    if let Err(e) = crate::persist::order_repo::insert_fill(&conn, &fill) {
-                        tracing::error!("Failed to persist fill for order {local_id}: {e}");
-                    }
-                }
-
-                // Emit fill event
-                let _ = self.order_event_tx.send(BrokerEvent::OrderFilled {
-                    order_id: local_id,
-                    ib_exec_id: exec_id,
+                self.handle_execution_callback(
+                    ib_order_id,
+                    exec_id,
                     shares,
                     price,
-                    commission: Some(commission),
-                });
+                    commission,
+                    side,
+                );
             }
 
             BrokerCallback::OrderRejected {
                 ib_order_id,
                 reason,
             } => {
-                let local_id = match self.ib_to_local.get(&ib_order_id) {
-                    Some(&id) => id,
-                    None => {
-                        tracing::warn!("Rejection callback for unknown IB order ID {ib_order_id}");
-                        return;
-                    }
-                };
-
-                // Update DB status to Rejected
-                if let Some(ref store) = self.store {
-                    let conn = store.conn().lock().expect("db mutex poisoned");
-                    let now = chrono::Utc::now().to_rfc3339();
-
-                    if let Ok(Some(row)) =
-                        crate::persist::order_repo::get_order(&conn, &local_id.to_string())
-                    {
-                        let _ = crate::persist::order_repo::update_order_status(
-                            &conn,
-                            &local_id.to_string(),
-                            &OrderStatus::Rejected.to_string(),
-                            &now,
-                        );
-                        let _ = crate::persist::order_repo::write_audit(
-                            &conn,
-                            &local_id.to_string(),
-                            &row.status,
-                            &OrderStatus::Rejected.to_string(),
-                            Some(&reason),
-                            "ib_callback",
-                        );
-                    }
-                }
-
-                let _ = self.order_event_tx.send(BrokerEvent::OrderRejected {
-                    order_id: local_id,
-                    reason,
-                });
+                self.handle_rejection_callback(ib_order_id, reason);
             }
 
             BrokerCallback::ConnectionStatus {
                 connected,
                 server_version,
             } => {
-                tracing::info!(
-                    "Connection status changed: connected={connected}, server_version={server_version:?}"
-                );
-                if connected {
-                    if let Some(ver) = server_version {
-                        let _ = self.order_event_tx.send(BrokerEvent::Connected {
-                            server_version: ver,
-                        });
-                    }
-                } else {
-                    let _ = self.order_event_tx.send(BrokerEvent::Disconnected {
-                        reason: "broker connection lost".to_string(),
-                    });
-                }
+                self.handle_connection_callback(connected, server_version);
             }
 
             BrokerCallback::Tick {
@@ -1367,17 +1180,7 @@ impl BrokerEngine {
                 last,
                 volume,
             } => {
-                let _ = self.market_event_tx.send(BrokerEvent::Tick {
-                    symbol: midas_core::SymbolKey {
-                        contract_id: con_id,
-                        symbol,
-                    },
-                    bid,
-                    ask,
-                    last,
-                    volume,
-                    timestamp: chrono::Utc::now(),
-                });
+                self.handle_tick_callback(symbol, con_id, bid, ask, last, volume);
             }
 
             BrokerCallback::BarUpdated {
@@ -1389,18 +1192,7 @@ impl BrokerEngine {
                 close,
                 volume,
             } => {
-                let _ = self.market_event_tx.send(BrokerEvent::BarUpdated {
-                    symbol: midas_core::SymbolKey {
-                        contract_id: 0,
-                        symbol,
-                    },
-                    timestamp,
-                    open,
-                    high,
-                    low,
-                    close,
-                    volume,
-                });
+                self.handle_bar_updated_callback(symbol, timestamp, open, high, low, close, volume);
             }
 
             BrokerCallback::BarClosed {
@@ -1412,18 +1204,7 @@ impl BrokerEngine {
                 close,
                 volume,
             } => {
-                let _ = self.market_event_tx.send(BrokerEvent::BarClosed {
-                    symbol: midas_core::SymbolKey {
-                        contract_id: 0,
-                        symbol,
-                    },
-                    timestamp,
-                    open,
-                    high,
-                    low,
-                    close,
-                    volume,
-                });
+                self.handle_bar_closed_callback(symbol, timestamp, open, high, low, close, volume);
             }
 
             BrokerCallback::Position {
@@ -1431,13 +1212,7 @@ impl BrokerEngine {
                 quantity,
                 avg_cost,
             } => {
-                let _ = self.order_event_tx.send(BrokerEvent::PositionUpdate {
-                    account: String::new(),
-                    symbol,
-                    con_id: 0,
-                    quantity,
-                    avg_cost,
-                });
+                self.handle_position_callback(symbol, quantity, avg_cost);
             }
 
             BrokerCallback::Account {
@@ -1445,19 +1220,307 @@ impl BrokerEngine {
                 unrealized_pnl,
                 realized_pnl,
             } => {
-                let _ = self.order_event_tx.send(BrokerEvent::PnlUpdate {
-                    daily_pnl: 0.0,
-                    unrealized_pnl,
-                    realized_pnl,
-                });
-                let _ = self.order_event_tx.send(BrokerEvent::AccountValueUpdate {
-                    account: String::new(),
-                    key: "CashBalance".to_string(),
-                    value: format!("{cash_balance:.2}"),
-                    currency: "USD".to_string(),
-                });
+                self.handle_account_callback(cash_balance, unrealized_pnl, realized_pnl);
             }
         }
+    }
+
+    fn handle_order_status_callback(
+        &mut self,
+        ib_order_id: i32,
+        status: String,
+        filled: f64,
+        remaining: f64,
+        avg_fill_price: f64,
+    ) {
+        // Look up local UUID via ib_to_local map
+        let local_id = match self.ib_to_local.get(&ib_order_id) {
+            Some(&id) => id,
+            None => {
+                tracing::warn!("Callback for unknown IB order ID {ib_order_id}");
+                return;
+            }
+        };
+
+        // Map IB status string to our canonical OrderStatus
+        let new_status = OrderStatus::from_ib_status(&status);
+
+        // Bracket info extracted from DB row before dropping the lock,
+        // so we can call check_bracket_status_change() afterwards.
+        let mut bracket_info: Option<(Option<String>, Option<String>)> = None;
+
+        // Update DB if store available
+        if let Some(ref store) = self.store {
+            let conn = store.conn().lock().expect("db mutex poisoned");
+            let now = chrono::Utc::now().to_rfc3339();
+
+            // Get current order row for transition validation
+            if let Ok(Some(row)) =
+                crate::persist::order_repo::get_order(&conn, &local_id.to_string())
+            {
+                let old_status_str = row.status.clone();
+
+                // W2: Idempotency guard — skip duplicate status updates
+                if let Ok(old_status) = old_status_str.parse::<OrderStatus>() {
+                    if new_status == old_status {
+                        tracing::debug!(
+                            "Ignoring duplicate status {new_status} for order {local_id}"
+                        );
+                        return;
+                    }
+
+                    // Validate transition (log warning but proceed — IB is authoritative)
+                    if let Err(e) = OrderStatus::validate_transition(old_status, new_status) {
+                        tracing::warn!("Invalid status transition for order {local_id}: {e}");
+                    }
+                }
+
+                // Update status and audit in a transaction
+                let id_str = local_id.to_string();
+                let txn_result = (|| -> Result<(), rusqlite::Error> {
+                    conn.execute_batch("BEGIN")?;
+                    crate::persist::order_repo::update_status_and_audit(
+                        &conn,
+                        &id_str,
+                        &old_status_str,
+                        &new_status.to_string(),
+                        &now,
+                        None,
+                        "ib_callback",
+                    )?;
+                    conn.execute_batch("COMMIT")?;
+                    Ok(())
+                })();
+                if let Err(e) = txn_result {
+                    tracing::error!("Failed to persist status change for order {local_id}: {e}");
+                    let _ = conn.execute_batch("ROLLBACK");
+                }
+
+                // Emit event
+                let _ = self.order_event_tx.send(BrokerEvent::OrderStatusChanged {
+                    order_id: local_id,
+                    old_status: old_status_str,
+                    new_status: new_status.to_string(),
+                    filled_qty: filled,
+                    remaining_qty: remaining,
+                    avg_fill_price,
+                });
+
+                // Stash bracket info for post-lock bracket status check
+                if row.bracket_role.is_some() {
+                    bracket_info = Some((row.bracket_role.clone(), row.parent_id.clone()));
+                }
+            }
+            // MutexGuard (conn) drops here
+        }
+
+        // Note: We intentionally keep ib_to_local mappings for terminal orders
+        // because IB may send Execution callbacks after the terminal OrderStatus.
+        // Cleanup happens on engine shutdown or periodic sweep.
+
+        // Check bracket status after releasing the DB lock
+        if let Some((role, parent_id_str)) = bracket_info {
+            self.check_bracket_status_change(local_id, role.as_deref(), parent_id_str.as_deref());
+        }
+    }
+
+    fn handle_execution_callback(
+        &mut self,
+        ib_order_id: i32,
+        exec_id: String,
+        shares: f64,
+        price: f64,
+        commission: f64,
+        side: String,
+    ) {
+        let local_id = match self.ib_to_local.get(&ib_order_id) {
+            Some(&id) => id,
+            None => {
+                tracing::warn!("Execution callback for unknown IB order ID {ib_order_id}");
+                return;
+            }
+        };
+
+        // Persist fill to DB
+        if let Some(ref store) = self.store {
+            let conn = store.conn().lock().expect("db mutex poisoned");
+            let now = chrono::Utc::now().to_rfc3339();
+            let fill = crate::persist::order_repo::FillRow {
+                order_local_id: local_id.to_string(),
+                ib_exec_id: exec_id.clone(),
+                timestamp: now,
+                shares,
+                price,
+                commission: Some(commission),
+                exchange: None,
+                side: side.clone(),
+            };
+            if let Err(e) = crate::persist::order_repo::insert_fill(&conn, &fill) {
+                tracing::error!("Failed to persist fill for order {local_id}: {e}");
+            }
+        }
+
+        // Emit fill event
+        let _ = self.order_event_tx.send(BrokerEvent::OrderFilled {
+            order_id: local_id,
+            ib_exec_id: exec_id,
+            shares,
+            price,
+            commission: Some(commission),
+        });
+    }
+
+    fn handle_rejection_callback(&mut self, ib_order_id: i32, reason: String) {
+        let local_id = match self.ib_to_local.get(&ib_order_id) {
+            Some(&id) => id,
+            None => {
+                tracing::warn!("Rejection callback for unknown IB order ID {ib_order_id}");
+                return;
+            }
+        };
+
+        // Update DB status to Rejected
+        if let Some(ref store) = self.store {
+            let conn = store.conn().lock().expect("db mutex poisoned");
+            let now = chrono::Utc::now().to_rfc3339();
+
+            if let Ok(Some(row)) =
+                crate::persist::order_repo::get_order(&conn, &local_id.to_string())
+            {
+                let _ = crate::persist::order_repo::update_status_and_audit(
+                    &conn,
+                    &local_id.to_string(),
+                    &row.status,
+                    &OrderStatus::Rejected.to_string(),
+                    &now,
+                    Some(&reason),
+                    "ib_callback",
+                );
+            }
+        }
+
+        let _ = self.order_event_tx.send(BrokerEvent::OrderRejected {
+            order_id: local_id,
+            reason,
+        });
+    }
+
+    fn handle_connection_callback(&mut self, connected: bool, server_version: Option<i32>) {
+        tracing::info!(
+            "Connection status changed: connected={connected}, server_version={server_version:?}"
+        );
+        if connected {
+            if let Some(ver) = server_version {
+                let _ = self.order_event_tx.send(BrokerEvent::Connected {
+                    server_version: ver,
+                });
+            }
+        } else {
+            let _ = self.order_event_tx.send(BrokerEvent::Disconnected {
+                reason: "broker connection lost".to_string(),
+            });
+        }
+    }
+
+    fn handle_tick_callback(
+        &mut self,
+        symbol: String,
+        con_id: i32,
+        bid: Option<f64>,
+        ask: Option<f64>,
+        last: Option<f64>,
+        volume: Option<i64>,
+    ) {
+        let _ = self.market_event_tx.send(BrokerEvent::Tick {
+            symbol: midas_core::SymbolKey {
+                contract_id: con_id,
+                symbol,
+            },
+            bid,
+            ask,
+            last,
+            volume,
+            timestamp: chrono::Utc::now(),
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn handle_bar_updated_callback(
+        &mut self,
+        symbol: String,
+        timestamp: i64,
+        open: f64,
+        high: f64,
+        low: f64,
+        close: f64,
+        volume: i64,
+    ) {
+        let _ = self.market_event_tx.send(BrokerEvent::BarUpdated {
+            symbol: midas_core::SymbolKey {
+                contract_id: 0,
+                symbol,
+            },
+            timestamp,
+            open,
+            high,
+            low,
+            close,
+            volume,
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn handle_bar_closed_callback(
+        &mut self,
+        symbol: String,
+        timestamp: i64,
+        open: f64,
+        high: f64,
+        low: f64,
+        close: f64,
+        volume: i64,
+    ) {
+        let _ = self.market_event_tx.send(BrokerEvent::BarClosed {
+            symbol: midas_core::SymbolKey {
+                contract_id: 0,
+                symbol,
+            },
+            timestamp,
+            open,
+            high,
+            low,
+            close,
+            volume,
+        });
+    }
+
+    fn handle_position_callback(&mut self, symbol: String, quantity: f64, avg_cost: f64) {
+        let _ = self.order_event_tx.send(BrokerEvent::PositionUpdate {
+            account: String::new(),
+            symbol,
+            con_id: 0,
+            quantity,
+            avg_cost,
+        });
+    }
+
+    fn handle_account_callback(
+        &mut self,
+        cash_balance: f64,
+        unrealized_pnl: f64,
+        realized_pnl: f64,
+    ) {
+        let _ = self.order_event_tx.send(BrokerEvent::PnlUpdate {
+            daily_pnl: 0.0,
+            unrealized_pnl,
+            realized_pnl,
+        });
+        let _ = self.order_event_tx.send(BrokerEvent::AccountValueUpdate {
+            account: String::new(),
+            key: "CashBalance".to_string(),
+            value: format!("{cash_balance:.2}"),
+            currency: "USD".to_string(),
+        });
     }
 
     // ── Bracket Status Change Detection ───────────────────────────────
