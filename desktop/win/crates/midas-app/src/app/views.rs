@@ -162,7 +162,7 @@ impl MidasApp {
         chart: &'a ChartPanel,
     ) -> Element<'a, Message> {
         // If data is loaded, render via GPU Shader widget.
-        if let (LoadState::Loaded, Some(ref data)) = (&chart.load_state, &chart.data) {
+        if let Some(ref data) = chart.data {
             // Compute G.ATR early so bright_ranges can be included in the snapshot.
             let gerchik_atr = gatr_render_from_cache(&self.market_cache, &chart.symbol);
 
@@ -848,7 +848,7 @@ impl MidasApp {
             None => return self.view_empty_placeholder(),
         };
 
-        if let (LoadState::Loaded, Some(ref data)) = (&chart.load_state, &chart.data) {
+        if let Some(ref data) = chart.data {
             // Compute G.ATR early so bright_ranges can be included in the snapshot.
             let gerchik_atr = gatr_render_from_cache(&self.market_cache, &chart.symbol);
 

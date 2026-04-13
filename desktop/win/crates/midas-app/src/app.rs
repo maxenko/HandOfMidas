@@ -1619,11 +1619,6 @@ impl MidasApp {
         if let Some(chart) = self.charts.get_mut(&chart_id) {
             chart.load_generation = chart.load_generation.wrapping_add(1);
             chart.load_state = LoadState::Loading;
-            // Clear the old data so the chart doesn't ghost the previous
-            // ticker's candles while the new ticker loads. The view guard
-            // (LoadState::Loaded + Some(data)) prevents rendering until
-            // the new data arrives.
-            chart.data = None;
             chart.chart_state.dirty.mark_data();
         }
 
