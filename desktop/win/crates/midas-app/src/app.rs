@@ -330,11 +330,13 @@ pub enum Message {
     PanelSymbolSubmitted(ChartId),
 
     // -- Data loading --
-    /// Async data load completed for a chart.
-    DataLoaded(ChartId, u64, Result<Arc<CandleBuffer>, String>),
+    /// Async data load completed for a chart. Carries the requested
+    /// symbol so the handler can discard stale loads (user switched
+    /// tickers between request and response).
+    DataLoaded(ChartId, String, u64, Result<Arc<CandleBuffer>, String>),
 
     /// Data loaded during startup restore (does not reset camera).
-    DataRestoredFromStartup(ChartId, u64, Result<Arc<CandleBuffer>, String>),
+    DataRestoredFromStartup(ChartId, String, u64, Result<Arc<CandleBuffer>, String>),
 
     // -- Provider selection --
     /// User selected a data provider from the toolbar dropdown.
@@ -1844,7 +1846,9 @@ impl MidasApp {
         make_msg: F,
     ) -> Task<Message>
     where
-        F: FnOnce(ChartId, u64, Result<Arc<CandleBuffer>, String>) -> Message + Send + 'static,
+        F: FnOnce(ChartId, String, u64, Result<Arc<CandleBuffer>, String>) -> Message
+            + Send
+            + 'static,
     {
         let provider = match self.providers.active_data_provider() {
             Some(p) => p,
@@ -1856,12 +1860,14 @@ impl MidasApp {
             .map(|c| c.load_generation)
             .unwrap_or(0);
         let symbol = symbol.to_uppercase();
+        let requested_symbol = symbol.clone();
         let days = Self::days_for_timeframe(tf);
         Task::perform(
             async move { provider.get_candles(&symbol, tf, days).await },
             move |result| {
                 make_msg(
                     chart_id,
+                    requested_symbol,
                     gen,
                     result.map(Arc::new).map_err(|e| e.to_string()),
                 )
@@ -2130,12 +2136,16 @@ impl MidasApp {
                 Task::batch(tasks)
             }
 
-            Message::DataLoaded(chart_id, gen, result) => {
-                // Discard stale loads — chart may have switched tickers since this load started.
+            Message::DataLoaded(chart_id, requested_symbol, gen, result) => {
+                // Fool-proof stale-load guard: check BOTH the symbol name
+                // AND the generation counter. If the chart has switched to
+                // a different ticker since this load started, discard.
                 if let Some(chart) = self.charts.get(&chart_id) {
-                    if chart.load_generation != gen {
+                    let current = chart.symbol.to_uppercase();
+                    if current != requested_symbol || chart.load_generation != gen {
                         tracing::debug!(
-                            "discarding stale DataLoaded (gen {gen} != {})",
+                            "discarding stale DataLoaded for {requested_symbol} \
+                             (chart now on {current}, gen {gen} vs {})",
                             chart.load_generation
                         );
                         return Task::none();
@@ -2249,13 +2259,14 @@ impl MidasApp {
                 Task::none()
             }
 
-            Message::DataRestoredFromStartup(chart_id, gen, result) => {
-                // Discard stale loads — chart may have switched tickers since this load started.
+            Message::DataRestoredFromStartup(chart_id, requested_symbol, gen, result) => {
+                // Same fool-proof guard as DataLoaded.
                 if let Some(chart) = self.charts.get(&chart_id) {
-                    if chart.load_generation != gen {
+                    let current = chart.symbol.to_uppercase();
+                    if current != requested_symbol || chart.load_generation != gen {
                         tracing::debug!(
-                            "discarding stale DataRestoredFromStartup (gen {gen} != {})",
-                            chart.load_generation
+                            "discarding stale DataRestoredFromStartup for {requested_symbol} \
+                             (chart now on {current})"
                         );
                         return Task::none();
                     }
