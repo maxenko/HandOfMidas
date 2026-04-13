@@ -8,16 +8,21 @@ an iced 0.14 GUI shell. Target platform: Windows 11 (x86_64).
 
 ## Workspace structure
 
-This is a Cargo workspace with 6 crates under `crates/`:
+This is a Cargo workspace with 11 crates under `crates/`:
 
 | Crate | Type | Purpose | Internal deps |
 |---|---|---|---|
 | `midas-core` | lib | Shared types, IDs, events, config schema, `CandleData` trait | none (leaf) |
 | `midas-data` | lib | SoA candle buffers, binary format, mmap, LOD | midas-core |
-| `midas-chart` | lib | Sans-IO chart core: ChartState, ChartScene, Camera2D, interactions, dirty flags | midas-core, midas-data |
-| `midas-render` | lib | wgpu GPU rendering pipelines, reads ChartScene | midas-core, midas-data, midas-chart |
-| `midas-feed` | lib | CSV import, data provider trait, future streaming | midas-core, midas-data |
-| `midas-app` | bin | iced application shell, ties everything together | all above |
+| `midas-indicators` | lib | Streaming technical analysis (ATR, Gerchik ATR) | midas-core |
+| `midas-chart` | lib | Sans-IO chart core: ChartState, ChartScene, Camera2D, interactions, decorators, brackets | midas-core, midas-data |
+| `midas-render` | lib | wgpu GPU rendering pipelines (candles, lines, badges), reads ChartScene | midas-core, midas-data, midas-chart |
+| `midas-feed` | lib | CSV import, data provider trait | midas-core, midas-data |
+| `midas-ui` | lib | Custom iced widgets: buttons, labels, tooltips, button groups | midas-core |
+| `midas-grid` | lib | Headless grid/table widget for iced | none |
+| `midas-store` | lib | DuckDB persistence layer, actor-based async ops | midas-core, midas-data |
+| `midas-app` | bin | iced application shell, TickerState machine, ties everything together | all above |
+| `mailbox_processor` | lib | Async actor pattern with request-reply channels | none |
 
 Dependency flows strictly downward. No circular dependencies.
 
