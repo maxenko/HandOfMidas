@@ -1101,11 +1101,6 @@ impl shader::Primitive for ChartPrimitive {
         _bounds: &Rectangle,
         _viewport: &Viewport,
     ) {
-        let scene = match &self.scene {
-            Some(s) => s,
-            None => return,
-        };
-
         // Get or create per-chart GPU resources (each chart owns its own renderer).
         let format = pipeline.texture_format;
         let resources = pipeline
@@ -1113,14 +1108,33 @@ impl shader::Primitive for ChartPrimitive {
             .entry(self.chart_id)
             .or_insert_with(|| ChartGpuResources::new(device, format));
 
-        // Update cached instance data from the scene. ALWAYS replace —
-        // if candles/volumes are None (no data loaded), clear the GPU
-        // buffer so old candles from a previous ticker don't ghost.
-        // Previously, `if let Some` left the old buffer intact when
-        // scene.candles was None, causing frozen candles while the grid
-        // (unconditionally replaced below) responded to camera changes.
-        resources.candles = scene.candles.clone().unwrap_or_default();
-        resources.volumes = scene.volumes.clone().unwrap_or_default();
+        let scene = match &self.scene {
+            Some(s) => s,
+            None => {
+                // No scene (no data loaded / ticker switching). Clear
+                // the GPU candle+volume buffers so old instances from a
+                // previous ticker don't ghost on screen. The grid is
+                // already empty (no scene = no grid instances).
+                resources.candles.clear();
+                resources.volumes.clear();
+                return;
+            }
+        };
+
+        // Update cached instance data from the scene.
+        //
+        // scene.candles == Some(vec) → new instances computed (dirty flag was set)
+        // scene.candles == None     → no change, reuse cached GPU buffer
+        //
+        // This is a dirty-flag optimization: the compute pipeline only
+        // produces candle instances when the data or camera changed.
+        // Between changes, None means "reuse what's in GPU memory."
+        if let Some(ref candles) = scene.candles {
+            resources.candles = candles.clone();
+        }
+        if let Some(ref volumes) = scene.volumes {
+            resources.volumes = volumes.clone();
+        }
 
         // Grid instances are fully built in compute_chart_scene().
         let vw = self.viewport_width as f32;
