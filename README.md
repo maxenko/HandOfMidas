@@ -26,18 +26,18 @@ Hand of Midas is a native Windows desktop application written entirely in Rust. 
       |         |         |                     |
  midas-ui  midas-chart  midas-render      midas-render
  (widgets) (sans-IO)    (wgpu 27)         (wgpu 27)
+      |         |
+ midas-grid  midas-data      midas-indicators
+ (tables)  (SoA, mmap, LOD)  (ATR, Gerchik ATR)
                 |
-           midas-data
-        (SoA, mmap, LOD)
-                |
-           midas-feed ------> midas-broker
-        (CSV, providers)      (IB engine)
-                                   |
-                               ibapi 2.10
-                              (paper/live)
+           midas-feed         midas-store
+        (CSV, providers)      (DuckDB cache)
+
+                         midas-broker
+                      (IB engine, rusqlite)
 ```
 
-The chart core (`midas-chart`) is a pure state machine with zero GPU or framework dependencies. It produces a `ChartScene` that the GPU renderer consumes. This means all chart logic -- zoom, pan, interactions, auto-scale, widget hit-testing -- is fully unit-testable without a window or GPU context. 1,000+ tests run across both workspaces in under a second.
+The chart core (`midas-chart`) is a pure state machine with zero GPU or framework dependencies. It produces a `ChartScene` that the GPU renderer consumes. All chart logic -- zoom, pan, interactions, auto-scale, widget hit-testing, annotation decorators -- is fully unit-testable without a window or GPU context. 1,300+ tests run across both workspaces in under a second.
 
 ---
 
@@ -51,27 +51,36 @@ The chart core (`midas-chart`) is a pure state machine with zero GPU or framewor
 | Async | tokio 1 |
 | Broker | ibapi 2.10 (rust-ibapi) |
 | Order DB | rusqlite (WAL mode) |
-| Analytics DB | DuckDB 1.0 |
+| Analytics DB | DuckDB 1.0 (candle cache) |
+| Ticker state | redb 2 (per-ticker order intent) |
 | Candle storage | Custom binary format, SoA layout, memmap2 |
 | Math | glam 0.29 (SIMD) |
 
-Two Cargo workspaces, 12 crates total. Dependency flows strictly downward -- no cycles, no leaky abstractions. The broker's IB types never reach the UI layer.
+Two Cargo workspaces, 13 crates total. Dependency flows strictly downward -- no cycles, no leaky abstractions. The broker's IB types never reach the UI layer.
 
 ---
 
 ## Top Features
 
-**GPU-rendered charting** -- Custom wgpu pipelines render candlesticks, volume profiles, grid lines, and annotations. 20+ simultaneous charts at 60fps. Sub-frame input-to-pixel latency.
+**GPU-rendered charting** -- Custom wgpu pipelines render candlesticks, volume bars, grid lines, badges, and price-line annotations. 20+ simultaneous charts at 60fps. Sub-frame input-to-pixel latency.
 
 **Sans-IO chart architecture** -- All chart state, interactions, and computation live in a framework-agnostic core with zero GPU dependencies. The renderer is a pure consumer of computed scenes.
 
-**Order bracket engine** -- Market order brackets (entry + take-profit + stop-loss) with OCA cancellation, validated state machine transitions across 11 order states, and a full-simulation test broker for development without an IB connection.
+**Decorator annotation system** -- Composable widget pipeline built on `PriceLine` primitives. Badges, buttons, and hover zones attach to price levels and bracket legs. Domain types project into decorator trees at render time -- the domain model stays independent of visuals.
+
+**Interactive order brackets** -- Market, Limit, Stop, and Stop-Limit entry with a 3-click bracket tool (entry + TP + SL). Auto-directional constraint enforcement, drag-to-modify legs, bidirectional panel-chart sync, GATR-based default offsets.
+
+**TickerState machine** -- Per-ticker single source of truth. All bracket mutations, entry-type memory, GATR anchors, and price levels flow through `apply(TickerMsg) -> Vec<TickerEffect>`. Private fields, public getters, compiler-enforced invariants.
+
+**Order bracket engine** -- OCA cancellation, validated state machine transitions across 11 order states, and a full-simulation test broker for development without an IB connection.
 
 **Live-trading guard** -- Config refuses IB gateway port 4001 unless `allow_live = true`. You have to explicitly opt in to real money.
 
-**Multi-panel workspace** -- Resizable pane grid, pop-out chart windows, symbol linking across panels, watchlists with drag-to-chart ticker binding, dockable order entry.
+**Multi-panel workspace** -- Resizable pane grid, pop-out chart windows, color-coded symbol linking across panels, watchlists with drag-to-chart ticker binding, dockable order entry panel with per-ticker state persistence via redb.
 
-**Custom indicator: Gerchik ATR** -- A personal ATR variant tuned to how I read volatility. Hover highlighting, per-bar detail, integrated into the chart widget system.
+**Per-ticker camera** -- Zoom and scroll position saved per (symbol, timeframe) pair and restored on ticker switch. No more losing your place.
+
+**Custom indicator: Gerchik ATR** -- A personal ATR variant tuned to how I read volatility. Hover highlighting, per-bar detail, session-boundary re-anchoring, integrated into the chart widget system.
 
 ---
 
