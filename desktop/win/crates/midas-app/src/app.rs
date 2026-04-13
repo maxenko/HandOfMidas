@@ -151,20 +151,6 @@ impl ChartPanel {
             }
         })
     }
-
-    /// Whether any candle timestamp in the loaded data falls within
-    /// `[start, end]`.
-    ///
-    /// Used by the D5 graceful-fallback logic to detect an empty
-    /// historical viewport and shift to the latest available data.
-    pub fn has_candles_in_range(&self, start: f64, end: f64) -> bool {
-        let Some(buf) = self.data.as_ref() else {
-            return false;
-        };
-        buf.timestamps
-            .iter()
-            .any(|&ts| (ts as f64) >= start && (ts as f64) <= end)
-    }
 }
 
 // ── Application state ─────────────────────────────────────────────────
@@ -279,6 +265,9 @@ pub struct MidasApp {
         crate::annotation_store::SymbolKey,
         crate::ticker_state::PreSnapState,
     >,
+    /// Per-(symbol, timeframe) chart view settings. Single authority
+    /// for camera positioning on data load (zoom level, positioning).
+    pub chart_views: crate::chart_view::ChartViewStore,
     /// Per-symbol ticker state map. The single source of truth for all
     /// per-symbol state: order brackets, entry memories, GATR anchors,
     /// price levels, and market data snapshots.
@@ -1063,6 +1052,7 @@ impl MidasApp {
             snapped_this_session: std::collections::HashSet::new(),
             anchor_seed_toasts_shown: std::collections::HashSet::new(),
             gatr_undo_slots: std::collections::HashMap::new(),
+            chart_views: crate::chart_view::ChartViewStore::default(),
             tickers,
             ticker_persist,
             ticker_dispatch_active: false,
@@ -1616,9 +1606,29 @@ impl MidasApp {
             .map(|c| c.timeframe)
             .unwrap_or(Timeframe::D1);
 
+        // Capture outgoing view state BEFORE mutating the chart.
+        if let Some(chart) = self.charts.get(&chart_id) {
+            if let Some(ref buf) = chart.data {
+                if !chart.symbol.is_empty() && !buf.is_empty() {
+                    self.chart_views
+                        .get_or_default(&chart.symbol, chart.timeframe)
+                        .capture_from_camera(
+                            &chart.chart_state.camera,
+                            buf,
+                            chart.chart_state.collapse_gaps,
+                        );
+                }
+            }
+        }
+
         if let Some(chart) = self.charts.get_mut(&chart_id) {
             chart.load_generation = chart.load_generation.wrapping_add(1);
             chart.load_state = LoadState::Loading;
+            // Clear old data immediately so draw() produces scene: None
+            // during the loading window. This triggers the GPU buffer
+            // clear in prepare() and prevents ghost candles from the
+            // previous ticker persisting on screen.
+            chart.data = None;
             chart.chart_state.dirty.mark_data();
         }
 
@@ -1925,43 +1935,31 @@ impl MidasApp {
         }
     }
 
-    /// Apply loaded candle data to a chart panel, optionally resetting
-    /// the camera to show the last 200 candles.
-    fn apply_candle_data(chart: &mut ChartPanel, buffer: Arc<CandleBuffer>, reset_camera: bool) {
+    /// Apply loaded candle data to a chart panel.
+    ///
+    /// When `view_state` is `Some`, the camera is positioned using the
+    /// centralized [`ChartViewState`](crate::chart_view::ChartViewState)
+    /// — the single authority for zoom level and last-candle placement.
+    /// When `None`, only data and dirty flags are updated (camera untouched).
+    fn apply_candle_data(
+        chart: &mut ChartPanel,
+        buffer: Arc<CandleBuffer>,
+        view_state: Option<&crate::chart_view::ChartViewState>,
+    ) {
         chart.data = Some(Arc::clone(&buffer));
         chart.load_state = LoadState::Loaded;
         chart.chart_state.dirty.mark_data();
         if buffer.is_empty() {
             return;
         }
-        let len = buffer.len();
-        if chart.chart_state.collapse_gaps {
-            chart.chart_state.data_time_start = 0.0;
-            chart.chart_state.data_time_end = len as f64;
-        } else {
-            let first_ts = buffer.timestamps[0] as f64;
-            let last_ts = buffer.timestamps[len - 1] as f64;
-            chart.chart_state.data_time_start = first_ts;
-            chart.chart_state.data_time_end = last_ts;
-        }
-        if reset_camera {
-            let visible_count = 200.min(len);
-            if chart.chart_state.collapse_gaps {
-                let start_idx = (len - visible_count) as f64;
-                let end_idx = len as f64 + (visible_count as f64 * 0.05);
-                chart.chart_state.camera.time_start = start_idx;
-                chart.chart_state.camera.time_end = end_idx;
-            } else {
-                let last_ts = buffer.timestamps[len - 1] as f64;
-                let first_visible_ts = buffer.timestamps[len - visible_count] as f64;
-                chart.chart_state.camera.time_start = first_visible_ts;
-                chart.chart_state.camera.time_end = last_ts + (last_ts - first_visible_ts) * 0.05;
-            }
-            let range = (len - visible_count)..len;
-            let (low, high) = buffer.price_range(range);
-            let padding = (high - low) as f64 * 0.05;
-            chart.chart_state.camera.price_low = low as f64 - padding;
-            chart.chart_state.camera.price_high = high as f64 + padding;
+        if let Some(vs) = view_state {
+            vs.position_camera(
+                &mut chart.chart_state.camera,
+                &buffer,
+                chart.chart_state.collapse_gaps,
+                &mut chart.chart_state.data_time_start,
+                &mut chart.chart_state.data_time_end,
+            );
         }
         chart.chart_state.dirty.mark_camera();
     }
@@ -2156,75 +2154,36 @@ impl MidasApp {
                             Some(buffer.closes[buffer.len() - 1] as f64)
                         };
                         // Try docked charts first, then floating charts.
+                        // Look up the view state for this (symbol, timeframe)
+                        // BEFORE the mutable borrow on self.charts.
+                        let view_state = self
+                            .charts
+                            .get(&chart_id)
+                            .and_then(|c| {
+                                self.chart_views
+                                    .get(&c.symbol, c.timeframe)
+                                    .cloned()
+                            })
+                            .unwrap_or_default();
+
                         if let Some(chart) = self.charts.get_mut(&chart_id) {
                             let sym = chart.symbol.clone();
                             let count = buffer.len();
                             let tf = chart.timeframe;
-                            // Always reset camera to "last 200 candles" on
-                            // data load. The saved per-ticker camera (if any)
-                            // is applied immediately below in the same handler
-                            // — no visual flash. This avoids the bug where
-                            // skipping reset left the camera at the PREVIOUS
-                            // ticker's position while new data rendered,
-                            // causing candles to freeze at the wrong viewport.
-                            Self::apply_candle_data(chart, buffer, true);
+                            Self::apply_candle_data(chart, buffer, Some(&view_state));
                             self.status_message =
                                 format!("{}: {} candles at {}", sym, count, tf.display_name());
                             loaded_symbol = Some(sym);
                         } else if chart_id == ChartId::new(0) {
                             // Floating chart sentinel: apply to the first
                             // floating chart that is in Loading state.
+                            let default_view = crate::chart_view::ChartViewState::default();
                             for chart in self.floating_charts.values_mut() {
                                 if matches!(chart.load_state, LoadState::Loading) {
                                     loaded_symbol = Some(chart.symbol.clone());
-                                    Self::apply_candle_data(chart, buffer, true);
+                                    Self::apply_candle_data(chart, buffer, Some(&default_view));
                                     break;
                                 }
-                            }
-                        }
-
-                        // Re-evaluate the saved camera now that data has
-                        // loaded. For live-edge cameras the initial restore
-                        // in bind_chart_to_symbol used a stale fallback;
-                        // now shift to the real latest candle. For historical
-                        // cameras, check if any data overlaps — if not, fall
-                        // back to latest candle (D5 graceful fallback).
-                        if let Some(chart) = self.charts.get_mut(&chart_id) {
-                            if chart.camera_restored_pending {
-                                let sym_key = chart.bound_symbol.clone().unwrap_or_else(|| {
-                                    crate::annotation_store::SymbolKey::new(&chart.symbol)
-                                });
-                                if let Some(ts) = self.tickers.get(&sym_key) {
-                                    if let Some(saved) = ts.saved_camera() {
-                                        let duration = saved.time_end - saved.time_start;
-                                        let needs_shift = if saved.was_at_live_edge {
-                                            true
-                                        } else {
-                                            !chart.has_candles_in_range(
-                                                saved.time_start,
-                                                saved.time_end,
-                                            )
-                                        };
-                                        if needs_shift {
-                                            if let Some(latest) = chart.latest_candle_time() {
-                                                let margin = duration * 0.02;
-                                                chart.chart_state.camera.time_end = latest + margin;
-                                                chart.chart_state.camera.time_start =
-                                                    chart.chart_state.camera.time_end - duration;
-                                                chart.chart_state.dirty.mark_camera();
-                                            }
-                                        } else {
-                                            // Historical view with data in range —
-                                            // restore the saved camera verbatim.
-                                            chart.chart_state.camera.time_start = saved.time_start;
-                                            chart.chart_state.camera.time_end = saved.time_end;
-                                            chart.chart_state.camera.price_low = saved.price_low;
-                                            chart.chart_state.camera.price_high = saved.price_high;
-                                            chart.chart_state.dirty.mark_camera();
-                                        }
-                                    }
-                                }
-                                chart.camera_restored_pending = false;
                             }
                         }
 
@@ -2245,6 +2204,7 @@ impl MidasApp {
                     Err(e) => {
                         if let Some(chart) = self.charts.get_mut(&chart_id) {
                             chart.load_state = LoadState::Error(e.clone());
+                            chart.data = None;
                             chart.chart_state.dirty.mark_data();
                         }
                         tracing::warn!(chart = %chart_id, error = %e, "data load failed");
@@ -2269,7 +2229,9 @@ impl MidasApp {
                 match result {
                     Ok(buffer) => {
                         if let Some(chart) = self.charts.get_mut(&chart_id) {
-                            Self::apply_candle_data(chart, buffer, false);
+                            // Startup restore: load data without resetting camera
+                            // (config already has the saved camera from last session).
+                            Self::apply_candle_data(chart, buffer, None);
                         }
                         // Bind the chart through the single mutation
                         // point. This fires EnsureDraftBracket so any

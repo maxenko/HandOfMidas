@@ -8,6 +8,7 @@ mod annotation_persistence;
 mod annotation_store;
 mod app;
 mod broker_bridge;
+mod chart_view;
 mod chart_widget;
 mod layout;
 mod level_store;

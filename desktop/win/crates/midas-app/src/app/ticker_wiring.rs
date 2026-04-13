@@ -62,25 +62,11 @@ impl MidasApp {
             }
         }
 
-        // 4. Mark camera for deferred restore AFTER new data loads.
-        //
-        // Do NOT set the camera here — the chart still has the previous
-        // ticker's candle buffer. Setting camera bounds for AMD while
-        // NVDA candles are rendered causes a visual desync (NVDA candles
-        // frozen at AMD's price/time range, grid moves under them).
-        //
-        // The actual restore happens in the DataLoaded handler: it loads
-        // the new candle data first (apply_candle_data), THEN applies the
-        // saved camera. The pending flag also suppresses the default
-        // "last 200 candles" camera reset so it doesn't clobber the
-        // saved position.
-        if let Some(ts) = self.tickers.get(&symbol) {
-            if ts.saved_camera().is_some() {
-                if let Some(chart) = self.charts.get_mut(&chart_id) {
-                    chart.camera_restored_pending = true;
-                }
-            }
-        }
+        // 4. Camera: always use the default "last 200 candles" reset
+        // on interactive ticker switches. The saved camera is per-symbol
+        // (not per symbol+timeframe), so restoring it here would apply
+        // a D1 camera to a 5m chart and vice versa. Per-ticker camera
+        // persistence needs per-(symbol, timeframe) storage — future work.
 
         // 5. Bind linked order panels to the same symbol FIRST — so
         //    panel_display_for_chart can find them by the new symbol.
