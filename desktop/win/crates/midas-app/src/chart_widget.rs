@@ -1113,13 +1113,14 @@ impl shader::Primitive for ChartPrimitive {
             .entry(self.chart_id)
             .or_insert_with(|| ChartGpuResources::new(device, format));
 
-        // Update cached instance data from the scene.
-        if let Some(ref candles) = scene.candles {
-            resources.candles = candles.clone();
-        }
-        if let Some(ref volumes) = scene.volumes {
-            resources.volumes = volumes.clone();
-        }
+        // Update cached instance data from the scene. ALWAYS replace —
+        // if candles/volumes are None (no data loaded), clear the GPU
+        // buffer so old candles from a previous ticker don't ghost.
+        // Previously, `if let Some` left the old buffer intact when
+        // scene.candles was None, causing frozen candles while the grid
+        // (unconditionally replaced below) responded to camera changes.
+        resources.candles = scene.candles.clone().unwrap_or_default();
+        resources.volumes = scene.volumes.clone().unwrap_or_default();
 
         // Grid instances are fully built in compute_chart_scene().
         let vw = self.viewport_width as f32;
