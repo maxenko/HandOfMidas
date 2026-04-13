@@ -2159,11 +2159,7 @@ impl MidasApp {
                         let view_state = self
                             .charts
                             .get(&chart_id)
-                            .and_then(|c| {
-                                self.chart_views
-                                    .get(&c.symbol, c.timeframe)
-                                    .cloned()
-                            })
+                            .and_then(|c| self.chart_views.get(&c.symbol, c.timeframe).cloned())
                             .unwrap_or_default();
 
                         if let Some(chart) = self.charts.get_mut(&chart_id) {

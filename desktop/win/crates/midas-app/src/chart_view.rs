@@ -165,9 +165,7 @@ pub struct ChartViewStore {
 impl ChartViewStore {
     /// Get or create the view state for a (symbol, timeframe) pair.
     pub fn get_or_default(&mut self, symbol: &str, tf: Timeframe) -> &mut ChartViewState {
-        self.views
-            .entry((symbol.to_uppercase(), tf))
-            .or_default()
+        self.views.entry((symbol.to_uppercase(), tf)).or_default()
     }
 
     /// Get the view state if it exists (read-only).
