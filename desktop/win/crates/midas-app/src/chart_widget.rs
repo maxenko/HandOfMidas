@@ -1123,17 +1123,20 @@ impl shader::Primitive for ChartPrimitive {
 
         // Update cached instance data from the scene.
         //
-        // scene.candles == Some(vec) → new instances computed (dirty flag was set)
-        // scene.candles == None     → no change, reuse cached GPU buffer
+        // scene.candles == Some(vec) → visible candles were computed
+        // scene.candles == None     → no visible candles (empty range)
         //
-        // This is a dirty-flag optimization: the compute pipeline only
-        // produces candle instances when the data or camera changed.
-        // Between changes, None means "reuse what's in GPU memory."
+        // When None, we must clear the cache — otherwise stale instances
+        // from a previous ticker persist in the GPU buffer as ghost candles.
         if let Some(ref candles) = scene.candles {
             resources.candles = candles.clone();
+        } else {
+            resources.candles.clear();
         }
         if let Some(ref volumes) = scene.volumes {
             resources.volumes = volumes.clone();
+        } else {
+            resources.volumes.clear();
         }
 
         // Grid instances are fully built in compute_chart_scene().
