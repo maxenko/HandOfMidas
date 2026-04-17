@@ -248,8 +248,23 @@ impl MidasApp {
                 chart.chart_state.timeline_border_ratio,
             );
 
-            let priceline_overlay =
-                build_priceline_overlay(camera, chart.chart_state.timeline_border_ratio);
+            // Collect level Y positions so priceline axis labels that
+            // collide with a level's badge can be filtered out of the
+            // overlay (see `build_priceline_overlay`).
+            let level_ys: Vec<f32> = if chart.chart_state.show_levels {
+                self.level_store
+                    .levels_for(&chart.symbol)
+                    .iter()
+                    .map(|l| camera.price_to_y(l.line.price))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let priceline_overlay = build_priceline_overlay(
+                camera,
+                chart.chart_state.timeline_border_ratio,
+                &level_ys,
+            );
 
             // Build level-related overlays for floating window.
             let floating_chart_id = ChartId::new(0);
@@ -265,11 +280,14 @@ impl MidasApp {
             ));
 
             if chart.chart_state.show_levels {
-                let level_labels = compute_level_labels(
-                    self.level_store.levels_for(&chart.symbol),
-                    &chart.chart_state.camera,
-                );
+                let stored_levels = self.level_store.levels_for(&chart.symbol);
+                let level_labels =
+                    compute_level_labels(stored_levels, &chart.chart_state.camera);
                 chart_layers.push(build_widget_labels_overlay(&level_labels));
+                chart_layers.push(build_level_price_badges_overlay(
+                    stored_levels,
+                    &chart.chart_state.camera,
+                ));
             }
 
             // Crosshair axis labels for floating window.
@@ -930,8 +948,20 @@ impl MidasApp {
                 chart.chart_state.timeline_border_ratio,
             );
 
-            let priceline_overlay =
-                build_priceline_overlay(camera, chart.chart_state.timeline_border_ratio);
+            let level_ys: Vec<f32> = if chart.chart_state.show_levels {
+                self.level_store
+                    .levels_for(&chart.symbol)
+                    .iter()
+                    .map(|l| camera.price_to_y(l.line.price))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let priceline_overlay = build_priceline_overlay(
+                camera,
+                chart.chart_state.timeline_border_ratio,
+                &level_ys,
+            );
 
             // Build level-related overlays.
             let drawing_panel = build_drawing_panel(chart_id, self.level_placing);
@@ -946,11 +976,14 @@ impl MidasApp {
             ));
 
             if chart.chart_state.show_levels {
-                let level_labels = compute_level_labels(
-                    self.level_store.levels_for(&chart.symbol),
-                    &chart.chart_state.camera,
-                );
+                let stored_levels = self.level_store.levels_for(&chart.symbol);
+                let level_labels =
+                    compute_level_labels(stored_levels, &chart.chart_state.camera);
                 chart_layers.push(build_widget_labels_overlay(&level_labels));
+                chart_layers.push(build_level_price_badges_overlay(
+                    stored_levels,
+                    &chart.chart_state.camera,
+                ));
             }
 
             // Crosshair axis labels (white badges at arm endpoints).
@@ -2515,6 +2548,7 @@ fn build_timeline_overlay<'a>(
 fn build_priceline_overlay<'a>(
     camera: &midas_chart::camera::Camera2D,
     timeline_border_ratio: f32,
+    level_ys: &[f32],
 ) -> Element<'a, Message> {
     let label_font_size = 10.0;
     let label_height = label_font_size + 2.0;
@@ -2524,9 +2558,22 @@ fn build_priceline_overlay<'a>(
     let labels = midas_chart::compute_priceline_labels(camera);
 
     // Filter to labels within the price area and sort top-to-bottom.
+    // Also skip any label whose row collides with a horizontal level's
+    // y: the level's right-edge price badge is drawn by the GPU shader
+    // layer (which iced stacks below this overlay), so without the skip
+    // the axis number would render on top of the opaque badge.
+    //
+    // The badge is 18px tall; we clip labels within half that (9px) of
+    // each level's y, with a 1px margin for safety.
+    let level_clip_halfheight = 10.0_f32;
     let mut visible: Vec<_> = labels
         .iter()
         .filter(|l| l.screen_y >= label_height / 2.0 && l.screen_y < border_y - label_height / 2.0)
+        .filter(|l| {
+            !level_ys
+                .iter()
+                .any(|ly| (l.screen_y - ly).abs() < level_clip_halfheight)
+        })
         .collect();
     visible.sort_by(|a, b| {
         a.screen_y
@@ -2686,6 +2733,85 @@ fn compute_level_labels(
     }
 
     labels
+}
+
+/// Bold price label rendered on top of each level's right-edge
+/// decorator badge. Kept separate from `build_widget_labels_overlay`
+/// because the badge body is GPU-drawn via the SDF `PointLeft` shape
+/// and we need an iced overlay positioned precisely on top of it —
+/// wrapping the text in a fixed-width container with `align_x(Center)`
+/// bypasses the text-metric approximation that the generic label
+/// overlay relies on, and lets us apply a bold font without changing
+/// the shared `WidgetLabel` schema.
+fn build_level_price_badges_overlay<'a>(
+    levels: &[crate::level_store::StoredLevel],
+    camera: &midas_chart::Camera2D,
+) -> Element<'a, Message> {
+    fn contrast_text_color(bg: [f32; 4]) -> iced::Color {
+        let luma = 0.2126 * bg[0] + 0.7152 * bg[1] + 0.0722 * bg[2];
+        if luma > 0.5 {
+            iced::Color::from_rgb(0.0, 0.0, 0.0)
+        } else {
+            iced::Color::from_rgb(1.0, 1.0, 1.0)
+        }
+    }
+
+    let bold_font = iced::Font {
+        weight: iced::font::Weight::Bold,
+        ..iced::Font::default()
+    };
+
+    // Layout constants must mirror `levels::to_decorators` so the text
+    // lands centered inside the body of the `PointLeft` badge drawn by
+    // the GPU SDF pipeline. See `layout::measure_badge`. Group 0 uses
+    // `DecoratorAnchor::AtChartRightEdge { pointer_inset: point_width }`
+    // + forward packing, so the badge's left edge (the triangle tip)
+    // sits `point_width` pixels LEFT of the priceline, and the body
+    // (triangle base = body left edge) starts exactly on the priceline.
+    let font_size = 11.0_f32;
+    let badge_padding = 6.0_f32;
+    let point_width = 8.0_f32;
+    let badge_height = 18.0_f32;
+    let vp_w = camera.viewport_width as f32;
+    let priceline_x = vp_w - midas_chart::compute::PRICELINE_WIDTH;
+
+    let mut elements: Vec<Element<'a, Message>> = Vec::new();
+
+    for level in levels {
+        let y = camera.price_to_y(level.line.price);
+        let color = level.line.stroke.color;
+        let text_w = font_size * 0.6 * format!("{:.2}", level.line.price).chars().count() as f32;
+        let badge_width = 4.0 * badge_padding + text_w;
+        let body_width = badge_width - point_width;
+        let body_left = priceline_x;
+        let top = (y - badge_height * 0.5).max(0.0);
+        let price_text = format!("{:.2}", level.line.price);
+        let text_color = contrast_text_color([color[0], color[1], color[2], 1.0]);
+
+        let centered = container(
+            text(price_text)
+                .size(font_size)
+                .color(text_color)
+                .font(bold_font)
+                .align_x(iced::Alignment::Center),
+        )
+        .width(Length::Fixed(body_width))
+        .height(Length::Fixed(badge_height))
+        .align_x(iced::Alignment::Center)
+        .align_y(iced::Alignment::Center);
+
+        let positioned: Element<'a, Message> = container(centered)
+            .padding(iced::Padding::ZERO.top(top).left(body_left))
+            .width(Fill)
+            .height(Fill)
+            .into();
+        elements.push(positioned);
+    }
+
+    if elements.is_empty() {
+        return Space::new().width(0).height(0).into();
+    }
+    stack(elements).width(Fill).height(Fill).into()
 }
 
 fn build_widget_labels_overlay<'a>(
