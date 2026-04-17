@@ -183,6 +183,7 @@ impl MidasApp {
                 data_time_start: chart.chart_state.data_time_start,
                 data_time_end: chart.chart_state.data_time_end,
                 editing_level_id: chart.editing_level_id,
+                dragging_annotation_id: self.dragging_annotation.map(|aid| aid.0),
                 level_tool: chart.chart_state.level_tool.clone(),
                 level_placing: self.level_placing,
                 ghost_crosshair: compute_ghost_crosshair(
@@ -865,6 +866,7 @@ impl MidasApp {
                 data_time_start: chart.chart_state.data_time_start,
                 data_time_end: chart.chart_state.data_time_end,
                 editing_level_id: chart.editing_level_id,
+                dragging_annotation_id: self.dragging_annotation.map(|aid| aid.0),
                 level_tool: chart.chart_state.level_tool.clone(),
                 level_placing: self.level_placing,
                 ghost_crosshair: compute_ghost_crosshair(

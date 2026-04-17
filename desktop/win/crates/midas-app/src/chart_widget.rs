@@ -93,6 +93,12 @@ pub struct ChartRenderSnapshot {
     pub data_time_end: f64,
     /// ID of the level currently being edited (for highlight/selection).
     pub editing_level_id: Option<u64>,
+    /// ID of the annotation being dragged in some chart (possibly a
+    /// different one from `self`). Set app-wide so every chart
+    /// showing the same symbol promotes this level into its drag-pass
+    /// z-layer — without it, only the interacting chart would apply
+    /// per-element z-order and sibling charts' text would mix.
+    pub dragging_annotation_id: Option<u64>,
     /// Self-contained level tool state (placement, drag, OHLC snap).
     pub level_tool: LevelTool,
     /// Whether level placement mode is globally active (all charts).
@@ -677,11 +683,17 @@ impl shader::Program<Message> for ChartProgram {
                 if let midas_chart::ChartAction::DragLevel { id, new_price } = action {
                     state.drag_price_override = Some((id.0, *new_price));
                 }
-                // Clear drag override when drag ends.
+                // Clear drag override when drag ends, and notify the
+                // app so sibling charts drop this level from their
+                // drag-pass z-layer. Emitting on the rising edge (was
+                // Some, now None) makes it a single message per drag.
                 if !matches!(
                     chart_state.interaction_mode,
                     InteractionMode::DraggingAnnotation { .. }
                 ) {
+                    if state.drag_price_override.is_some() {
+                        messages.push(Message::ChartDragLevelEnd(self.chart_id));
+                    }
                     state.drag_price_override = None;
                 }
                 if let Some(msg) = action_to_message(self.chart_id, action, &chart_state.camera) {
@@ -814,12 +826,28 @@ impl shader::Program<Message> for ChartProgram {
             Vec::new()
         };
 
-        let drag_ghost = state.drag_price_override.and_then(|(drag_id, _)| {
-            snap.levels
-                .iter()
-                .find(|l| l.id == drag_id)
-                .map(|l| (midas_chart::widget::AnnotationId(l.id), l.line.price))
-        });
+        // Two-source drag resolution:
+        //   1. `state.drag_price_override` — set by the widget that's
+        //      receiving the mouse events. Authoritative for the live
+        //      drag on that chart.
+        //   2. `snap.dragging_annotation_id` — the app-wide drag flag,
+        //      populated from `MidasApp::dragging_annotation`. Lets
+        //      sibling charts showing the same symbol also mark the
+        //      level as dragged so their render pipeline promotes it
+        //      into the drag-pass z-layer.
+        //
+        // The two sources agree on the ACTIVE chart. The fallback
+        // matters on every OTHER chart showing the same level.
+        let drag_ghost = state
+            .drag_price_override
+            .map(|(id, _)| id)
+            .or(snap.dragging_annotation_id)
+            .and_then(|drag_id| {
+                snap.levels
+                    .iter()
+                    .find(|l| l.id == drag_id)
+                    .map(|l| (midas_chart::widget::AnnotationId(l.id), l.line.price))
+            });
 
         // Build the level tool for chart scene computation.
         // If this chart is NOT the source of the placing cursor, clear

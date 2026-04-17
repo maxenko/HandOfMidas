@@ -195,6 +195,12 @@ pub struct MidasApp {
     /// Used to ghost the preview line on sibling charts and to clear
     /// stale previews on non-source charts (cross-window jumps).
     pub placing_preview: Option<(ChartId, String, f64)>,
+    /// Annotation currently being dragged by the user, if any. Set
+    /// app-wide so every chart showing the same symbol promotes the
+    /// dragged level into its drag-pass z-layer — otherwise only the
+    /// chart receiving events would see the per-element z-order fix,
+    /// and the other charts' text would mix with neighbouring levels.
+    pub dragging_annotation: Option<midas_chart::widget::AnnotationId>,
     /// Cross-chart crosshair sync: (source chart, timestamp_ms, price, symbol).
     /// When set, sibling charts (same symbol, different chart) render
     /// ghost crosshair lines at the corresponding timestamp and price.
@@ -380,6 +386,12 @@ pub enum Message {
     ChartCreateLevel(ChartId, f64),
     /// Drag a level to a new price.
     ChartDragLevel(ChartId, u64, f64),
+    /// Emitted once when a chart widget exits its
+    /// `InteractionMode::DraggingAnnotation` — clears the app-level
+    /// `dragging_annotation` so sibling charts stop drawing the level
+    /// in their drag-pass z-layer. Paired with `ChartDragLevel`, which
+    /// sets the flag on every mouse-move during the drag.
+    ChartDragLevelEnd(ChartId),
     /// Select a level.
     ChartSelectLevel(ChartId, u64),
     /// Deselect any selected level.
@@ -1035,6 +1047,7 @@ impl MidasApp {
             level_store,
             level_placing: false,
             placing_preview: None,
+            dragging_annotation: None,
             crosshair_sync: None,
             providers: Self::build_provider_registry(&config),
             store,
@@ -2111,6 +2124,7 @@ impl MidasApp {
             | Message::ChartCrosshair(..)
             | Message::ChartCreateLevel(..)
             | Message::ChartDragLevel(..)
+            | Message::ChartDragLevelEnd(..)
             | Message::ChartSelectLevel(..)
             | Message::ChartDeselectLevel(..)
             | Message::ChartDeleteSelectedLevel(..)
