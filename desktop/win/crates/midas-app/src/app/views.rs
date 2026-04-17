@@ -248,23 +248,8 @@ impl MidasApp {
                 chart.chart_state.timeline_border_ratio,
             );
 
-            // Collect level Y positions so priceline axis labels that
-            // collide with a level's badge can be filtered out of the
-            // overlay (see `build_priceline_overlay`).
-            let level_ys: Vec<f32> = if chart.chart_state.show_levels {
-                self.level_store
-                    .levels_for(&chart.symbol)
-                    .iter()
-                    .map(|l| camera.price_to_y(l.line.price))
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            let priceline_overlay = build_priceline_overlay(
-                camera,
-                chart.chart_state.timeline_border_ratio,
-                &level_ys,
-            );
+            let priceline_overlay =
+                build_priceline_overlay(camera, chart.chart_state.timeline_border_ratio);
 
             // Build level-related overlays for floating window.
             let floating_chart_id = ChartId::new(0);
@@ -281,11 +266,22 @@ impl MidasApp {
 
             if chart.chart_state.show_levels {
                 let stored_levels = self.level_store.levels_for(&chart.symbol);
+                // Keep iced overlay z-order in sync with the GPU
+                // proximity + drag rules (see
+                // `midas_chart::compute::compute_widget_annotations`).
+                let cursor_y = chart.chart_state.crosshair.render_pos().map(|(_, y)| y);
+                let dragging_aid = dragging_annotation_id(&chart.chart_state);
+                let ordered = proximity_ordered_levels(
+                    stored_levels,
+                    cursor_y,
+                    &chart.chart_state.camera,
+                    dragging_aid,
+                );
                 let level_labels =
-                    compute_level_labels(stored_levels, &chart.chart_state.camera);
+                    compute_level_labels(&ordered, &chart.chart_state.camera);
                 chart_layers.push(build_widget_labels_overlay(&level_labels));
                 chart_layers.push(build_level_price_badges_overlay(
-                    stored_levels,
+                    &ordered,
                     &chart.chart_state.camera,
                 ));
             }
@@ -948,20 +944,8 @@ impl MidasApp {
                 chart.chart_state.timeline_border_ratio,
             );
 
-            let level_ys: Vec<f32> = if chart.chart_state.show_levels {
-                self.level_store
-                    .levels_for(&chart.symbol)
-                    .iter()
-                    .map(|l| camera.price_to_y(l.line.price))
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            let priceline_overlay = build_priceline_overlay(
-                camera,
-                chart.chart_state.timeline_border_ratio,
-                &level_ys,
-            );
+            let priceline_overlay =
+                build_priceline_overlay(camera, chart.chart_state.timeline_border_ratio);
 
             // Build level-related overlays.
             let drawing_panel = build_drawing_panel(chart_id, self.level_placing);
@@ -977,11 +961,19 @@ impl MidasApp {
 
             if chart.chart_state.show_levels {
                 let stored_levels = self.level_store.levels_for(&chart.symbol);
+                let cursor_y = chart.chart_state.crosshair.render_pos().map(|(_, y)| y);
+                let dragging_aid = dragging_annotation_id(&chart.chart_state);
+                let ordered = proximity_ordered_levels(
+                    stored_levels,
+                    cursor_y,
+                    &chart.chart_state.camera,
+                    dragging_aid,
+                );
                 let level_labels =
-                    compute_level_labels(stored_levels, &chart.chart_state.camera);
+                    compute_level_labels(&ordered, &chart.chart_state.camera);
                 chart_layers.push(build_widget_labels_overlay(&level_labels));
                 chart_layers.push(build_level_price_badges_overlay(
-                    stored_levels,
+                    &ordered,
                     &chart.chart_state.camera,
                 ));
             }
@@ -2548,7 +2540,6 @@ fn build_timeline_overlay<'a>(
 fn build_priceline_overlay<'a>(
     camera: &midas_chart::camera::Camera2D,
     timeline_border_ratio: f32,
-    level_ys: &[f32],
 ) -> Element<'a, Message> {
     let label_font_size = 10.0;
     let label_height = label_font_size + 2.0;
@@ -2558,22 +2549,15 @@ fn build_priceline_overlay<'a>(
     let labels = midas_chart::compute_priceline_labels(camera);
 
     // Filter to labels within the price area and sort top-to-bottom.
-    // Also skip any label whose row collides with a horizontal level's
-    // y: the level's right-edge price badge is drawn by the GPU shader
-    // layer (which iced stacks below this overlay), so without the skip
-    // the axis number would render on top of the opaque badge.
-    //
-    // The badge is 18px tall; we clip labels within half that (9px) of
-    // each level's y, with a 1px margin for safety.
-    let level_clip_halfheight = 10.0_f32;
+    // Axis labels are intentionally kept as a background layer — they
+    // sit beneath the level iced overlays in `chart_layers`, so where
+    // a level's opaque-bg badge physically overlaps an axis row the
+    // badge covers the number. Outside that overlap the axis number
+    // stays visible, which matches the "always present, never absent"
+    // convention of a price scale.
     let mut visible: Vec<_> = labels
         .iter()
         .filter(|l| l.screen_y >= label_height / 2.0 && l.screen_y < border_y - label_height / 2.0)
-        .filter(|l| {
-            !level_ys
-                .iter()
-                .any(|ly| (l.screen_y - ly).abs() < level_clip_halfheight)
-        })
         .collect();
     visible.sort_by(|a, b| {
         a.screen_y
@@ -2695,6 +2679,65 @@ fn build_drawing_panel<'a>(chart_id: ChartId, is_placing: bool) -> Element<'a, M
 
 // ── Widget labels overlay ──────────────────────────────────────────
 
+/// Reorder `levels` so they iterate in iced's desired bottom-up
+/// z-order, matching `compute_widget_annotations`'s four-pass rule:
+/// background → proximity-promoted → dragged. The dragged level wins
+/// unconditionally — during a drag the cursor may sit farther than
+/// `PROXIMITY_PROMOTION_PX` from the level's reported Y (because the
+/// grab preserves the user's click offset from the line), so
+/// proximity alone misses the target.
+fn proximity_ordered_levels(
+    levels: &[crate::level_store::StoredLevel],
+    cursor_y: Option<f32>,
+    camera: &midas_chart::Camera2D,
+    dragging_aid: Option<u64>,
+) -> Vec<crate::level_store::StoredLevel> {
+    let mut ordered = levels.to_vec();
+
+    // Proximity promotion: closest level within the threshold moves
+    // to the back. Skip the dragged level if any — it has its own
+    // unconditional pass below.
+    if let Some(cy) = cursor_y {
+        let winner = ordered
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| Some(l.id) != dragging_aid)
+            .filter_map(|(i, l)| {
+                let d = (cy - camera.price_to_y(l.line.price)).abs();
+                (d <= midas_chart::compute::PROXIMITY_PROMOTION_PX).then_some((i, d))
+            })
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, _)| i);
+        if let Some(i) = winner {
+            let promoted = ordered.remove(i);
+            ordered.push(promoted);
+        }
+    }
+
+    // Drag always wins. Guarantees the grabbed level stays pinned on
+    // top even on fast drags where proximity wouldn't catch it.
+    if let Some(drag_id) = dragging_aid {
+        if let Some(pos) = ordered.iter().position(|l| l.id == drag_id) {
+            let dragged = ordered.remove(pos);
+            ordered.push(dragged);
+        }
+    }
+
+    ordered
+}
+
+/// Extract the dragged annotation id (if any) from chart state.
+/// Returns `None` whenever the chart is not actively dragging an
+/// annotation, so callers can pass it unconditionally.
+fn dragging_annotation_id(chart_state: &midas_chart::ChartState) -> Option<u64> {
+    match chart_state.interaction_mode {
+        midas_chart::InteractionMode::DraggingAnnotation { annotation_id, .. } => {
+            Some(annotation_id.0)
+        }
+        _ => None,
+    }
+}
+
 /// Compute widget labels for horizontal levels from raw level data + camera.
 ///
 /// Called during the view phase (before the GPU scene is computed) to build
@@ -2720,12 +2763,21 @@ fn compute_level_labels(
             _ => None,
         };
         if let Some(text) = icon_label {
+            // Opaque level-color bg on the iced container gives us
+            // per-level z-order: when a promoted level is drawn last in
+            // iced's stack, its bg rect covers lower-z levels' labels
+            // entirely. Without this, text from every level lives on
+            // the same globally-topmost iced layer and pokes through
+            // overlapping GPU shapes. Bg alpha is forced to 1.0 even
+            // though the level stroke may carry its own alpha.
+            let badge_fill = [color[0], color[1], color[2], 1.0];
+            let text_color = midas_chart::color::contrast_text_color(badge_fill);
             labels.push(WidgetLabel {
                 text,
                 screen_x: 8.0,
                 screen_y: y,
-                bg_color: [color[0] * 0.3, color[1] * 0.3, color[2] * 0.3, 0.75],
-                text_color: [color[0], color[1], color[2], color[3].max(0.9)],
+                bg_color: badge_fill,
+                text_color,
                 font_size: 14.0,
                 anchor: LabelAnchor::Left,
             });
@@ -2747,15 +2799,6 @@ fn build_level_price_badges_overlay<'a>(
     levels: &[crate::level_store::StoredLevel],
     camera: &midas_chart::Camera2D,
 ) -> Element<'a, Message> {
-    fn contrast_text_color(bg: [f32; 4]) -> iced::Color {
-        let luma = 0.2126 * bg[0] + 0.7152 * bg[1] + 0.0722 * bg[2];
-        if luma > 0.5 {
-            iced::Color::from_rgb(0.0, 0.0, 0.0)
-        } else {
-            iced::Color::from_rgb(1.0, 1.0, 1.0)
-        }
-    }
-
     let bold_font = iced::Font {
         weight: iced::font::Weight::Bold,
         ..iced::Font::default()
@@ -2789,8 +2832,18 @@ fn build_level_price_badges_overlay<'a>(
         let body_left = priceline_x;
         let top = (y - badge_height * 0.5).max(0.0);
         let price_text = format!("{:.2}", level.line.price);
-        let text_color = contrast_text_color([color[0], color[1], color[2], 1.0]);
+        let [tr, tg, tb, _] =
+            midas_chart::color::contrast_text_color([color[0], color[1], color[2], 1.0]);
+        let text_color = iced::Color::from_rgb(tr, tg, tb);
 
+        // Opaque level-color background on the text container so the
+        // iced stack gives us per-level z-order: when a promoted level
+        // is drawn last, its body rect covers lower-z levels' text
+        // entirely. Without this, text from every level lives on the
+        // same (globally-topmost) iced layer and pokes through
+        // overlapping GPU shapes. Matches the GPU `PointLeft` fill so
+        // the two layers compose into one seamless badge.
+        let badge_bg = iced::Color::from_rgb(color[0], color[1], color[2]);
         let centered = container(
             text(price_text)
                 .size(font_size)
@@ -2801,7 +2854,11 @@ fn build_level_price_badges_overlay<'a>(
         .width(Length::Fixed(body_width))
         .height(Length::Fixed(badge_height))
         .align_x(iced::Alignment::Center)
-        .align_y(iced::Alignment::Center);
+        .align_y(iced::Alignment::Center)
+        .style(move |_theme: &iced::Theme| container::Style {
+            background: Some(iced::Background::Color(badge_bg)),
+            ..Default::default()
+        });
 
         let positioned: Element<'a, Message> = container(centered)
             .padding(iced::Padding::ZERO.top(top).left(body_left))
