@@ -2781,8 +2781,11 @@ fn build_level_price_badges_overlay<'a>(
         let y = camera.price_to_y(level.line.price);
         let color = level.line.stroke.color;
         let text_w = font_size * 0.6 * format!("{:.2}", level.line.price).chars().count() as f32;
-        let badge_width = 4.0 * badge_padding + text_w;
-        let body_width = badge_width - point_width;
+        // Match `levels::to_decorators` min_width rule: the body floors
+        // at `PRICELINE_WIDTH` so the badge is flush with the viewport
+        // right edge; longer prices overflow by the usual `text_w + 16`.
+        let body_width =
+            midas_chart::compute::PRICELINE_WIDTH.max(text_w + 4.0 * badge_padding - point_width);
         let body_left = priceline_x;
         let top = (y - badge_height * 0.5).max(0.0);
         let price_text = format!("{:.2}", level.line.price);

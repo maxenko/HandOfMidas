@@ -339,7 +339,15 @@ impl HorizontalLevel {
                         text: format!("{:.2}", self.line.price),
                         text_color: contrast_text_color(badge_fill),
                         font_size: 11.0,
-                        min_width: None,
+                        // Force the badge body (= badge_width - point_width) to
+                        // span from the priceline to the viewport right edge
+                        // — no gap on the right. With outer padding 6 on each
+                        // side and point_width 8:
+                        //   body_width = 2*6 + seg_w - 8 = seg_w + 4.
+                        // We want body_width >= PRICELINE_WIDTH (60), so
+                        //   seg_w >= 56. Longer prices grow past this
+                        //   naturally and overflow slightly past vp_w.
+                        min_width: Some(crate::compute::PRICELINE_WIDTH - 4.0),
                         fill_override: None,
                         shape_override: None,
                         action: None,
