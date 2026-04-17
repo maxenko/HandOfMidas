@@ -383,12 +383,16 @@ fn compute_level_visual_parity_with_pre_refactor() {
 
     // Baseline primitive counts for the "plain level" shape:
     //  - lines:    1 (single solid segment spanning the viewport).
-    //  - fills:    1 (right-edge price badge, emitted via Rect fill path).
+    //  - badges:   1 (right-edge price badge, emitted via the SDF
+    //                 `BadgeInstance` path — `PointLeft` is not a Rect).
+    //  - fills:    0 (no Rect badge; divider fills aren't emitted for
+    //                 a single-segment badge).
     //  - labels:   1 (price segment text).
     //  - hit_zones:1 (LevelLine — the decorator's `action: None` omits
     //                 a decorator hit zone, so only the line zone exists).
     assert_eq!(out.lines.len(), 1, "lines");
-    assert_eq!(out.fills.len(), 1, "fills (price badge)");
+    assert_eq!(out.badges.len(), 1, "badges (price badge)");
+    assert_eq!(out.fills.len(), 0, "fills (no Rect badge path)");
     assert_eq!(out.labels.len(), 1, "labels (price text)");
     assert_eq!(out.hit_zones.len(), 1, "hit_zones (LevelLine only)");
 }

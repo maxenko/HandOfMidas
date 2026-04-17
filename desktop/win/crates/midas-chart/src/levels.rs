@@ -111,6 +111,19 @@ impl LevelIcon {
     }
 }
 
+/// Pick black or white for maximum contrast against `bg`.
+///
+/// Uses the Rec. 709 relative-luminance formula on the sRGB channels.
+/// Alpha is ignored — the badge behind the text is drawn opaque.
+fn contrast_text_color(bg: [f32; 4]) -> [f32; 4] {
+    let luma = 0.2126 * bg[0] + 0.7152 * bg[1] + 0.0722 * bg[2];
+    if luma > 0.5 {
+        [0.0, 0.0, 0.0, 1.0]
+    } else {
+        [1.0, 1.0, 1.0, 1.0]
+    }
+}
+
 /// Compute a smart price step size based on the current price level.
 ///
 /// Returns `(coarse_step, fine_step)` where coarse is for arrow key clicks
@@ -295,27 +308,36 @@ impl HorizontalLevel {
         let mut groups: Vec<DecoratorGroup> = Vec::new();
         let line_color = self.line.stroke.color;
 
-        // Group 0: right-edge price badge.
+        // Group 0: chart-area right-edge price badge.
+        // Pointed-left flag in the level's own color, opaque, with the
+        // price text drawn in black/white — whichever has the higher
+        // contrast against the fill. `AtChartRightEdge` anchors the
+        // triangle tip on the vertical priceline border and lets the
+        // body extend rightward into the axis area.
         // `action: None` in Slice 7 — clicks fall through to the
         // existing `HitZoneKind::LevelLine` drag hit zone emitted by
         // `compute_price_line_geometry`.
+        let badge_fill = [line_color[0], line_color[1], line_color[2], 1.0];
         groups.push(DecoratorGroup {
             group_id: 0,
-            anchor: DecoratorAnchor::RightEdge,
+            // Shift the anchor left by the `PointLeft` point_width so
+            // the triangle base (body left edge) aligns with the
+            // priceline and the tip protrudes into the chart.
+            anchor: DecoratorAnchor::AtChartRightEdge { pointer_inset: 8.0 },
             direction: FlexDirection::Row,
             gap: 0.0,
             items: smallvec![DecoratorItem {
                 visibility: Visibility::Always,
                 action: None,
                 content: ItemContent::Badge(Box::new(Badge {
-                    shape: BadgeShape::Rect,
-                    fill: [0.12, 0.12, 0.15, 0.85],
+                    shape: BadgeShape::PointLeft { point_width: 8.0 },
+                    fill: badge_fill,
                     border: None,
                     height: 18.0,
                     padding: 6.0,
                     segments: smallvec![BadgeSegment {
                         text: format!("{:.2}", self.line.price),
-                        text_color: line_color,
+                        text_color: contrast_text_color(badge_fill),
                         font_size: 11.0,
                         min_width: None,
                         fill_override: None,
@@ -524,7 +546,10 @@ mod tests {
         assert!(!groups.is_empty(), "group 0 must always exist");
         let g0 = &groups[0];
         assert_eq!(g0.group_id, 0);
-        assert!(matches!(g0.anchor, DecoratorAnchor::RightEdge));
+        assert!(matches!(
+            g0.anchor,
+            DecoratorAnchor::AtChartRightEdge { .. }
+        ));
         let item = &g0.items[0];
         match &item.content {
             ItemContent::Badge(b) => {
