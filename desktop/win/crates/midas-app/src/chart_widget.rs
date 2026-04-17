@@ -1271,6 +1271,7 @@ impl shader::Primitive for ChartPrimitive {
             volume_profile: &resources.volume_profile_instances,
             badges: &resources.badges,
             labels: &resources.labels,
+            layer_ends: scene.layer_ends,
             viewport_width: scene.viewport_width,
             viewport_height: scene.viewport_height,
             dirty: &dirty,

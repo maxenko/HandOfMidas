@@ -185,14 +185,41 @@ impl BadgePipeline {
 
     /// Draw all badges in a single instanced draw call.
     pub fn draw<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
-        if self.instance_count == 0 {
+        self.draw_range(render_pass, 0..self.instance_count);
+    }
+
+    /// Draw a sub-range of the instance buffer.
+    ///
+    /// The renderer uses this to interleave badge draws with text
+    /// draws per z-layer (see `ChartRenderer::draw_pass`) so each
+    /// annotation's shape and text composite over lower-z layers'
+    /// shape and text as one unit.
+    pub fn draw_range<'a>(
+        &'a self,
+        render_pass: &mut wgpu::RenderPass<'a>,
+        instances: core::ops::Range<u32>,
+    ) {
+        if instances.is_empty() || instances.end > self.instance_count {
+            if instances.end > self.instance_count {
+                // Asked for more than we have — clamp silently. Better
+                // to render what we can than to panic on an off-by-one.
+                let clamped = instances.start..self.instance_count;
+                if clamped.is_empty() {
+                    return;
+                }
+                render_pass.set_pipeline(&self.render_pipeline);
+                render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+                render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+                render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+                render_pass.draw(0..6, clamped);
+            }
             return;
         }
         render_pass.set_pipeline(&self.render_pipeline);
         render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-        render_pass.draw(0..6, 0..self.instance_count);
+        render_pass.draw(0..6, instances);
     }
 
     /// Return the current number of instances.

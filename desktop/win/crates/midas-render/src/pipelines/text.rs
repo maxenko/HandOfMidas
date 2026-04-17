@@ -2,62 +2,57 @@
 //!
 //! Renders decorator labels (level price text, bracket segment text,
 //! etc.) directly on the GPU, in the same render pass as the SDF
-//! [`BadgePipeline`]. This is the architectural fix that replaces the
-//! former iced-text-overlay approach — labels can now be interleaved
-//! per z-layer with their owning shapes instead of always drawing on
-//! top of the whole GPU pass.
+//! [`BadgePipeline`]. Labels are split into `ANNOTATION_LAYER_COUNT`
+//! sub-groups matching the compute pipeline's z-layers (background /
+//! proximity-promoted / hovered / dragged); the renderer interleaves
+//! per-layer `BadgePipeline::draw_range` + `TextPipeline::draw_layer`
+//! calls so each layer's shapes and text composite over lower layers'
+//! shapes and text as one unit.
 //!
-//! ## Lifecycle
+//! ## Why one `TextRenderer` per layer
 //!
-//! - [`TextPipeline::new`] allocates the shared atlas + viewport +
-//!   one [`TextRenderer`].
-//! - [`TextPipeline::prepare`] shapes each [`WidgetLabel`] into a
-//!   cosmic-text [`Buffer`] and pushes a [`TextArea`] into the
-//!   renderer's vertex buffer. Buffers are re-shaped each frame —
-//!   simple and good enough for the small label counts a chart uses
-//!   (< 100 per frame).
-//! - [`TextPipeline::draw`] issues `TextRenderer::render` on the live
-//!   render pass.
+//! cryoglyph's `TextRenderer::prepare` overwrites its internal vertex
+//! buffer on every call. A single renderer therefore can only carry
+//! one batch of text at a time. To get N independent text batches in
+//! one frame we need N renderers — they share the heavy resources
+//! (font system, swash cache, texture atlas, viewport uniform).
 
 use cryoglyph::cosmic_text::Align;
 use cryoglyph::{
     Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
     TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
+use midas_chart::compute::{LayerEnd, ANNOTATION_LAYER_COUNT};
 use midas_chart::widget::compute::{LabelAnchor, WidgetLabel};
 use wgpu::{
     CommandEncoderDescriptor, Device, MultisampleState, Queue, RenderPass, TextureFormat,
 };
 
-/// Minimum line-height multiplier applied on top of `font_size` when
-/// constructing cosmic-text [`Metrics`]. 1.2× covers typical ascender
-/// / descender metrics for sans-serif fonts so labels don't clip.
+/// Line-height multiplier applied on top of `font_size` when building
+/// cosmic-text [`Metrics`]. 1.2× covers typical ascender/descender
+/// metrics for sans-serif fonts so labels don't clip vertically.
 const LINE_HEIGHT_FACTOR: f32 = 1.2;
 
 /// Pipeline that draws text via cryoglyph on the chart render pass.
-///
-/// Owns the persistent GPU resources (atlas, viewport, renderer) plus
-/// the CPU-side shaping caches (font DB, swash cache). All fields are
-/// per-chart — each [`ChartRenderer`](crate::ChartRenderer) owns one
-/// `TextPipeline`.
 pub struct TextPipeline {
     font_system: FontSystem,
     swash_cache: SwashCache,
     atlas: TextAtlas,
     viewport: Viewport,
-    renderer: TextRenderer,
-    /// Re-shaped each frame from the scene's labels. Held on the
+    /// One renderer per z-layer. See the module doc for why.
+    renderers: [TextRenderer; ANNOTATION_LAYER_COUNT],
+    /// Per-layer buffer cache — rebuilt each frame. Held on the
     /// pipeline so the borrows handed to `TextArea` outlive the
-    /// `prepare` call. Buffers are cheap to reallocate — cosmic-text
-    /// caches the expensive part (font shaping) inside `FontSystem`.
-    buffers: Vec<Buffer>,
-    /// Per-buffer placement + bounds. Index-parallel to `buffers` so
-    /// `prepare` can zip them into `TextArea`s without extra state.
-    placements: Vec<LabelPlacement>,
+    /// `prepare` call.
+    buffers: [Vec<Buffer>; ANNOTATION_LAYER_COUNT],
+    /// Index-parallel to `buffers`: resolved position + colour for
+    /// each label, used to build `TextArea`s at prepare time.
+    placements: [Vec<LabelPlacement>; ANNOTATION_LAYER_COUNT],
 }
 
-/// Resolved per-label layout — computed once in `prepare` and reused
-/// by `draw`-adjacent code that needs to know where a label lives.
+/// Resolved per-label layout — computed once in `prepare` from the
+/// label's anchor and measured text extent, stored so `TextArea`s
+/// can be rebuilt on demand without re-measuring.
 #[derive(Clone, Copy)]
 struct LabelPlacement {
     left: f32,
@@ -75,12 +70,17 @@ impl TextPipeline {
         let cache = Cache::new(device);
         let mut atlas = TextAtlas::new(device, queue, &cache, format);
         let viewport = Viewport::new(device, &cache);
-        let renderer =
-            TextRenderer::new(&mut atlas, device, MultisampleState::default(), None);
+
+        // Allocate N renderers up-front. Cheap — each wraps a vertex
+        // buffer + a staging belt; they all share the atlas's pipeline.
+        let renderers: [TextRenderer; ANNOTATION_LAYER_COUNT] =
+            std::array::from_fn(|_| {
+                TextRenderer::new(&mut atlas, device, MultisampleState::default(), None)
+            });
 
         // `FontSystem::new` populates the database with system fonts.
         // On Windows that picks up Segoe UI Variable / Segoe UI, which
-        // matches the default iced uses.
+        // matches what iced uses by default.
         let font_system = FontSystem::new();
         let swash_cache = SwashCache::new();
 
@@ -89,9 +89,9 @@ impl TextPipeline {
             swash_cache,
             atlas,
             viewport,
-            renderer,
-            buffers: Vec::new(),
-            placements: Vec::new(),
+            renderers,
+            buffers: std::array::from_fn(|_| Vec::new()),
+            placements: std::array::from_fn(|_| Vec::new()),
         }
     }
 
@@ -107,14 +107,13 @@ impl TextPipeline {
         );
     }
 
-    /// Shape each label and hand the resulting `TextArea` list to the
-    /// cryoglyph renderer. Rebuilds the per-frame buffer list from
-    /// scratch — fine for the small label counts a chart produces.
+    /// Shape each label, split by `layer_ends`, and hand the per-layer
+    /// `TextArea` lists to the matching `TextRenderer`.
     ///
-    /// cryoglyph requires a `CommandEncoder` for its staging-belt
-    /// copies. `prepare` creates and submits its own local encoder so
-    /// callers on iced's `Primitive::prepare` path (which doesn't
-    /// expose an encoder) can drive text upload without plumbing.
+    /// cryoglyph requires a `CommandEncoder`; `prepare` creates and
+    /// submits its own one-shot encoder so callers on iced's
+    /// `Primitive::prepare` path (which doesn't expose an encoder)
+    /// can drive text upload without extra plumbing.
     pub fn prepare(
         &mut self,
         device: &Device,
@@ -122,88 +121,117 @@ impl TextPipeline {
         viewport_width: u32,
         viewport_height: u32,
         labels: &[WidgetLabel],
+        layer_ends: [LayerEnd; ANNOTATION_LAYER_COUNT],
     ) {
         self.update_viewport(queue, viewport_width, viewport_height);
 
-        self.buffers.clear();
-        self.buffers.reserve(labels.len());
-        self.placements.clear();
-        self.placements.reserve(labels.len());
-
-        // First pass: shape each label into its own `Buffer`, then
-        // compute placement from the anchor and measured text width.
-        for label in labels {
-            let metrics = Metrics::new(label.font_size, label.font_size * LINE_HEIGHT_FACTOR);
-            let mut buffer = Buffer::new(&mut self.font_system, metrics);
-            let attrs = Attrs::new().family(Family::SansSerif);
-            buffer.set_text(
-                &mut self.font_system,
-                &label.text,
-                &attrs,
-                Shaping::Advanced,
-                None::<Align>,
-            );
-            buffer.shape_until_scroll(&mut self.font_system, false);
-
-            let (text_w, text_h) = measure_buffer(&buffer);
-            let (left, top) = resolve_anchor(label, text_w, text_h);
-            let color = rgba_to_color(label.text_color);
-
-            self.buffers.push(buffer);
-            self.placements.push(LabelPlacement { left, top, color });
+        // Rebuild per-layer buffer + placement caches from scratch.
+        for slot in &mut self.buffers {
+            slot.clear();
+        }
+        for slot in &mut self.placements {
+            slot.clear();
         }
 
-        // Second pass: zip buffers + placements into `TextArea`s for
-        // cryoglyph. A local encoder wraps the upload; submitting it
-        // immediately is the cheapest way to satisfy cryoglyph's API
-        // when we only have device/queue access.
+        // Walk the label slice layer-by-layer. Each layer owns
+        // `labels[prev..layer_ends[k].label_end]`. Labels outside any
+        // recorded span (shouldn't happen in normal flow) are silently
+        // dropped — the renderer only draws what the compute pass
+        // explicitly classified.
+        let mut cursor = 0_usize;
+        for (layer_idx, end) in layer_ends.iter().enumerate() {
+            let layer_slice = &labels[cursor..end.label_end.min(labels.len())];
+            for label in layer_slice {
+                let metrics =
+                    Metrics::new(label.font_size, label.font_size * LINE_HEIGHT_FACTOR);
+                let mut buffer = Buffer::new(&mut self.font_system, metrics);
+                let attrs = Attrs::new().family(Family::SansSerif);
+                buffer.set_text(
+                    &mut self.font_system,
+                    &label.text,
+                    &attrs,
+                    Shaping::Advanced,
+                    None::<Align>,
+                );
+                buffer.shape_until_scroll(&mut self.font_system, false);
+
+                let (text_w, text_h) = measure_buffer(&buffer);
+                let (left, top) = resolve_anchor(label, text_w, text_h);
+                let color = rgba_to_color(label.text_color);
+
+                self.buffers[layer_idx].push(buffer);
+                self.placements[layer_idx].push(LabelPlacement { left, top, color });
+            }
+            cursor = end.label_end.min(labels.len());
+        }
+
+        // One encoder covers every layer's upload. Cheaper than
+        // submitting per-layer — cryoglyph's staging belt is per
+        // renderer, so encoding is local but the submit is shared.
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some("text_pipeline_prepare"),
         });
 
         let vp_w = viewport_width.max(1) as i32;
         let vp_h = viewport_height.max(1) as i32;
-        let areas = self
-            .buffers
-            .iter()
-            .zip(self.placements.iter())
-            .map(|(buf, p)| TextArea {
-                buffer: buf,
-                left: p.left,
-                top: p.top,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: 0,
-                    top: 0,
-                    right: vp_w,
-                    bottom: vp_h,
-                },
-                default_color: p.color,
-            });
-
-        if let Err(err) = self.renderer.prepare(
-            device,
-            queue,
-            &mut encoder,
-            &mut self.font_system,
-            &mut self.atlas,
-            &self.viewport,
-            areas,
-            &mut self.swash_cache,
-        ) {
-            tracing::warn!(?err, "cryoglyph prepare failed — skipping text frame");
+        for layer_idx in 0..ANNOTATION_LAYER_COUNT {
+            // Indexing the two arrays separately avoids a compound
+            // `&mut self.renderers[..]` + `&self.buffers[..]` borrow.
+            let renderer = &mut self.renderers[layer_idx];
+            let areas = self.buffers[layer_idx]
+                .iter()
+                .zip(self.placements[layer_idx].iter())
+                .map(|(buf, p)| TextArea {
+                    buffer: buf,
+                    left: p.left,
+                    top: p.top,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: 0,
+                        top: 0,
+                        right: vp_w,
+                        bottom: vp_h,
+                    },
+                    default_color: p.color,
+                });
+            if let Err(err) = renderer.prepare(
+                device,
+                queue,
+                &mut encoder,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.viewport,
+                areas,
+                &mut self.swash_cache,
+            ) {
+                tracing::warn!(
+                    layer = layer_idx,
+                    ?err,
+                    "cryoglyph prepare failed — skipping layer",
+                );
+            }
         }
 
         queue.submit(Some(encoder.finish()));
     }
 
-    /// Issue the text draw call against the active render pass.
+    /// Render just the text for one z-layer. Call after that layer's
+    /// badges have been drawn so text composites on top of its own
+    /// shapes while still staying beneath the next layer's shapes.
+    pub fn draw_layer(&self, layer_idx: usize, render_pass: &mut RenderPass<'_>) {
+        if let Some(renderer) = self.renderers.get(layer_idx) {
+            if let Err(err) = renderer.render(&self.atlas, &self.viewport, render_pass) {
+                tracing::warn!(layer = layer_idx, ?err, "cryoglyph render failed");
+            }
+        }
+    }
+
+    /// Render every layer back-to-back. Used for the
+    /// non-interleaved draw path (e.g. `ChartRenderer::render`); the
+    /// interleaved `draw_pass` calls `draw_layer` per z-level.
     pub fn draw(&self, render_pass: &mut RenderPass<'_>) {
-        if let Err(err) = self
-            .renderer
-            .render(&self.atlas, &self.viewport, render_pass)
-        {
-            tracing::warn!(?err, "cryoglyph render failed");
+        for layer_idx in 0..ANNOTATION_LAYER_COUNT {
+            self.draw_layer(layer_idx, render_pass);
         }
     }
 }
@@ -224,8 +252,8 @@ fn measure_buffer(buffer: &Buffer) -> (f32, f32) {
     (max_w, total_h)
 }
 
-/// Resolve a `WidgetLabel`'s position into the `(left, top)` corner
-/// cryoglyph's `TextArea` expects.
+/// Resolve a [`WidgetLabel`]'s position into the `(left, top)` corner
+/// cryoglyph's [`TextArea`] expects.
 fn resolve_anchor(label: &WidgetLabel, text_w: f32, text_h: f32) -> (f32, f32) {
     match label.anchor {
         LabelAnchor::TopLeft => (label.screen_x, label.screen_y),
@@ -238,9 +266,9 @@ fn resolve_anchor(label: &WidgetLabel, text_w: f32, text_h: f32) -> (f32, f32) {
     }
 }
 
-/// Convert linear `[f32; 4]` RGBA (same format used across widget
-/// compute) to cryoglyph's packed `Color`. sRGB channels are stored
-/// straight — cryoglyph does its own gamma handling in-shader.
+/// Convert linear `[f32; 4]` RGBA (the widget-compute convention) to
+/// cryoglyph's packed [`Color`]. sRGB channels are stored straight —
+/// cryoglyph does its own gamma handling in-shader.
 fn rgba_to_color(rgba: [f32; 4]) -> Color {
     let to_u8 = |c: f32| (c.clamp(0.0, 1.0) * 255.0) as u8;
     Color::rgba(to_u8(rgba[0]), to_u8(rgba[1]), to_u8(rgba[2]), to_u8(rgba[3]))

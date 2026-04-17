@@ -4,6 +4,7 @@
 //! draw order for a single chart. It consumes a [`ChartScene`] and
 //! a [`DirtyTracker`] to minimize GPU uploads.
 
+use midas_chart::compute::{LayerEnd, ANNOTATION_LAYER_COUNT};
 use midas_chart::widget::compute::WidgetLabel;
 use midas_chart::{
     BadgeInstance, CandleInstance, DirtyFlags, DirtyTracker, GridLineInstance, VolumeInstance,
@@ -43,6 +44,10 @@ pub struct ChartScene<'a> {
     /// Rendered in the same render pass as `badges` via the cryoglyph
     /// text pipeline so per-element z-order can be preserved.
     pub labels: &'a [WidgetLabel],
+    /// End-exclusive indices into `badges` / `labels` for each z-layer
+    /// emitted by `compute_widget_annotations`. Drives the per-layer
+    /// interleaved draw order in [`ChartRenderer::draw_pass`].
+    pub layer_ends: [LayerEnd; ANNOTATION_LAYER_COUNT],
     /// Logical-pixel viewport size — cryoglyph's `Viewport` requires it.
     pub viewport_width: u32,
     pub viewport_height: u32,
@@ -66,6 +71,11 @@ pub struct ChartRenderer {
     /// same render pass as the badge pipeline so per-element z-order
     /// can be achieved by interleaving badge + text draws per layer.
     text_pipeline: TextPipeline,
+    /// Layer boundaries recorded at prepare time — drives the per-
+    /// layer interleave in `draw_pass`. Updated every frame; starts
+    /// zeroed so the renderer is safe to draw from even before its
+    /// first prepare.
+    layer_ends: [LayerEnd; ANNOTATION_LAYER_COUNT],
     /// Crosshair overlay pipeline (reuses the grid shader for thin lines).
     crosshair_pipeline: GridPipeline,
 }
@@ -87,6 +97,7 @@ impl ChartRenderer {
             volume_profile_pipeline: GridPipeline::new(device, format),
             badge_pipeline: BadgePipeline::new(device, format),
             text_pipeline: TextPipeline::new(device, queue, format),
+            layer_ends: [LayerEnd::default(); ANNOTATION_LAYER_COUNT],
             crosshair_pipeline: GridPipeline::new(device, format),
         }
     }
@@ -161,7 +172,10 @@ impl ChartRenderer {
             scene.viewport_width,
             scene.viewport_height,
             scene.labels,
+            scene.layer_ends,
         );
+        // Cache the boundaries for `draw_pass`'s interleave loop.
+        self.layer_ends = scene.layer_ends;
 
         // Crosshair lines update on every frame they are present (mouse moves).
         if tracker.needs_crosshair_update(scene.dirty) {
@@ -189,10 +203,16 @@ impl ChartRenderer {
         // Layer 4: Candle bodies (opaque, on top of wicks)
         self.candle_pipeline.draw_bodies(render_pass);
 
-        // Layer 4.5: Decorator badges (SDF, above candle bodies, below crosshair)
-        self.badge_pipeline.draw(render_pass);
-        // Layer 4.6: Decorator text (cryoglyph, above badges).
-        self.text_pipeline.draw(render_pass);
+        // Layer 4.5–4.6: decorator badges + text, interleaved per
+        // z-layer (see `draw_pass` for the canonical implementation).
+        let mut prev_badge: u32 = 0;
+        for (layer_idx, end) in scene.layer_ends.iter().enumerate() {
+            let end_u32 = end.badge_end as u32;
+            self.badge_pipeline
+                .draw_range(render_pass, prev_badge..end_u32);
+            self.text_pipeline.draw_layer(layer_idx, render_pass);
+            prev_badge = end_u32;
+        }
 
         // Layer 5: Crosshair overlay (semi-transparent, on top of everything)
         self.crosshair_pipeline.draw(render_pass);
@@ -256,7 +276,10 @@ impl ChartRenderer {
             scene.viewport_width,
             scene.viewport_height,
             scene.labels,
+            scene.layer_ends,
         );
+        // Cache the boundaries for `draw_pass`'s interleave loop.
+        self.layer_ends = scene.layer_ends;
 
         // Crosshair overlay always re-uploaded: the buffer is tiny
         // (~16 instances for the volume handle + 2 for crosshair lines)
@@ -286,12 +309,18 @@ impl ChartRenderer {
         self.volume_profile_pipeline.draw(render_pass);
         self.candle_pipeline.draw_wicks(render_pass);
         self.candle_pipeline.draw_bodies(render_pass);
-        // Layer 4.5: decorator badges, between candle bodies and crosshair.
-        self.badge_pipeline.draw(render_pass);
-        // Layer 4.6: decorator text, sits on top of badges — Phase 4
-        // will interleave badge + text draws per z-layer so text and
-        // shapes composite per-element.
-        self.text_pipeline.draw(render_pass);
+        // Layer 4.5–4.6: decorator badges + text, interleaved per
+        // z-layer. For each layer k we draw its badge instance range
+        // then its text batch, so an annotation's shape and label
+        // composite as one unit over lower-z layers' shape and label.
+        let mut prev_badge: u32 = 0;
+        for (layer_idx, end) in self.layer_ends.iter().enumerate() {
+            let end_u32 = end.badge_end as u32;
+            self.badge_pipeline
+                .draw_range(render_pass, prev_badge..end_u32);
+            self.text_pipeline.draw_layer(layer_idx, render_pass);
+            prev_badge = end_u32;
+        }
         self.crosshair_pipeline.draw(render_pass);
     }
 
