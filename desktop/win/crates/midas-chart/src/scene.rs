@@ -12,6 +12,7 @@ use crate::instances::{
     AxisLabel, BadgeInstance, CandleInstance, CrosshairRender, GridLineInstance, VolumeInstance,
 };
 use crate::timeline::TimelineLabel;
+use crate::widget::compute::WidgetLabel;
 use crate::widget::WidgetOutput;
 
 /// The output of chart logic -- a complete description of what to render.
@@ -75,6 +76,14 @@ pub struct ChartScene {
     /// uploads this vec once per frame and draws it between candle
     /// bodies and the crosshair overlay.
     pub badges: Vec<BadgeInstance>,
+
+    /// Flattened widget-layer text labels for this frame.
+    ///
+    /// Parallels `badges`: populated from [`WidgetOutput::labels`] so
+    /// the renderer's text pipeline can consume a plain slice. Order
+    /// matches the compute-time emission order — important for the
+    /// future per-layer interleaving pass.
+    pub labels: Vec<WidgetLabel>,
 
     /// Dirty generation counters -- renderer compares to decide what to upload.
     pub generations: SceneGenerations,

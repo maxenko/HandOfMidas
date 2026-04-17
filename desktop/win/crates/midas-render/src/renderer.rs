@@ -4,12 +4,14 @@
 //! draw order for a single chart. It consumes a [`ChartScene`] and
 //! a [`DirtyTracker`] to minimize GPU uploads.
 
+use midas_chart::widget::compute::WidgetLabel;
 use midas_chart::{
     BadgeInstance, CandleInstance, DirtyFlags, DirtyTracker, GridLineInstance, VolumeInstance,
 };
 
 use crate::pipelines::{
-    badge::BadgePipeline, candle::CandlePipeline, grid::GridPipeline, volume::VolumePipeline,
+    badge::BadgePipeline, candle::CandlePipeline, grid::GridPipeline, text::TextPipeline,
+    volume::VolumePipeline,
 };
 
 /// Scene data for a single chart frame.
@@ -37,6 +39,13 @@ pub struct ChartScene<'a> {
     /// SDF decorator badge instances (drawn between candle bodies and
     /// the crosshair overlay). Empty when no decorators are active.
     pub badges: &'a [BadgeInstance],
+    /// Widget text labels (price text inside decorator badges, etc.).
+    /// Rendered in the same render pass as `badges` via the cryoglyph
+    /// text pipeline so per-element z-order can be preserved.
+    pub labels: &'a [WidgetLabel],
+    /// Logical-pixel viewport size — cryoglyph's `Viewport` requires it.
+    pub viewport_width: u32,
+    pub viewport_height: u32,
     /// Current dirty flags snapshot.
     pub dirty: &'a DirtyFlags,
 }
@@ -53,19 +62,31 @@ pub struct ChartRenderer {
     volume_profile_pipeline: GridPipeline,
     /// SDF decorator badge pipeline (rendered above candles, below crosshair).
     badge_pipeline: BadgePipeline,
+    /// GPU text pipeline (cryoglyph). Draws decorator labels in the
+    /// same render pass as the badge pipeline so per-element z-order
+    /// can be achieved by interleaving badge + text draws per layer.
+    text_pipeline: TextPipeline,
     /// Crosshair overlay pipeline (reuses the grid shader for thin lines).
     crosshair_pipeline: GridPipeline,
 }
 
 impl ChartRenderer {
     /// Create a new chart renderer with all pipelines.
-    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+    ///
+    /// `queue` is required because the text pipeline (cryoglyph) queues
+    /// its initial atlas-texture upload during construction.
+    pub fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+    ) -> Self {
         Self {
             candle_pipeline: CandlePipeline::new(device, format),
             volume_pipeline: VolumePipeline::new(device, format),
             grid_pipeline: GridPipeline::new(device, format),
             volume_profile_pipeline: GridPipeline::new(device, format),
             badge_pipeline: BadgePipeline::new(device, format),
+            text_pipeline: TextPipeline::new(device, queue, format),
             crosshair_pipeline: GridPipeline::new(device, format),
         }
     }
@@ -131,6 +152,17 @@ impl ChartRenderer {
         self.badge_pipeline
             .update_instances(device, queue, scene.badges);
 
+        // Text labels shape + upload (cryoglyph). Parallels the badge
+        // upload above; `draw` below issues the text render call right
+        // after badges so labels composite on top of their shapes.
+        self.text_pipeline.prepare(
+            device,
+            queue,
+            scene.viewport_width,
+            scene.viewport_height,
+            scene.labels,
+        );
+
         // Crosshair lines update on every frame they are present (mouse moves).
         if tracker.needs_crosshair_update(scene.dirty) {
             self.crosshair_pipeline
@@ -159,6 +191,8 @@ impl ChartRenderer {
 
         // Layer 4.5: Decorator badges (SDF, above candle bodies, below crosshair)
         self.badge_pipeline.draw(render_pass);
+        // Layer 4.6: Decorator text (cryoglyph, above badges).
+        self.text_pipeline.draw(render_pass);
 
         // Layer 5: Crosshair overlay (semi-transparent, on top of everything)
         self.crosshair_pipeline.draw(render_pass);
@@ -213,6 +247,17 @@ impl ChartRenderer {
         self.badge_pipeline
             .update_instances(device, queue, scene.badges);
 
+        // Text labels shape + upload. cryoglyph needs its own
+        // CommandEncoder so the call doesn't share a queue submission
+        // with the other pipelines — it issues its own `queue.submit`.
+        self.text_pipeline.prepare(
+            device,
+            queue,
+            scene.viewport_width,
+            scene.viewport_height,
+            scene.labels,
+        );
+
         // Crosshair overlay always re-uploaded: the buffer is tiny
         // (~16 instances for the volume handle + 2 for crosshair lines)
         // and contains persistent UI elements (volume handle triangle)
@@ -243,6 +288,10 @@ impl ChartRenderer {
         self.candle_pipeline.draw_bodies(render_pass);
         // Layer 4.5: decorator badges, between candle bodies and crosshair.
         self.badge_pipeline.draw(render_pass);
+        // Layer 4.6: decorator text, sits on top of badges — Phase 4
+        // will interleave badge + text draws per z-layer so text and
+        // shapes composite per-element.
+        self.text_pipeline.draw(render_pass);
         self.crosshair_pipeline.draw(render_pass);
     }
 

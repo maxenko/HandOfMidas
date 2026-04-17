@@ -1049,12 +1049,19 @@ struct ChartGpuResources {
     volume_profile_instances: Vec<GridLineInstance>,
     /// Cached SDF decorator badge instances.
     badges: Vec<midas_chart::BadgeInstance>,
+    /// Cached widget text labels — rendered via the cryoglyph text
+    /// pipeline alongside the SDF badges.
+    labels: Vec<midas_chart::widget::compute::WidgetLabel>,
 }
 
 impl ChartGpuResources {
-    fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+    fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+    ) -> Self {
         Self {
-            renderer: ChartRenderer::new(device, format),
+            renderer: ChartRenderer::new(device, queue, format),
             tracker: DirtyTracker::new(),
             candles: Vec::new(),
             volumes: Vec::new(),
@@ -1062,6 +1069,7 @@ impl ChartGpuResources {
             crosshair_lines: Vec::new(),
             volume_profile_instances: Vec::new(),
             badges: Vec::new(),
+            labels: Vec::new(),
         }
     }
 }
@@ -1106,7 +1114,7 @@ impl shader::Primitive for ChartPrimitive {
         let resources = pipeline
             .chart_resources
             .entry(self.chart_id)
-            .or_insert_with(|| ChartGpuResources::new(device, format));
+            .or_insert_with(|| ChartGpuResources::new(device, queue, format));
 
         let scene = match &self.scene {
             Some(s) => s,
@@ -1239,6 +1247,9 @@ impl shader::Primitive for ChartPrimitive {
         // owned `ChartScene`. The `BadgePipeline` uploads these between
         // candle-body and crosshair draw calls.
         resources.badges = scene.badges.clone();
+        // Widget text labels (decorator segment text, bracket STP/R:R).
+        // Rendered on GPU by the text pipeline alongside badges.
+        resources.labels = scene.labels.clone();
 
         // Build the render scene from cached data.
         let dirty = DirtyFlags {
@@ -1259,6 +1270,9 @@ impl shader::Primitive for ChartPrimitive {
             crosshair_lines: &resources.crosshair_lines,
             volume_profile: &resources.volume_profile_instances,
             badges: &resources.badges,
+            labels: &resources.labels,
+            viewport_width: scene.viewport_width,
+            viewport_height: scene.viewport_height,
             dirty: &dirty,
         };
 

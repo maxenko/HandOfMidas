@@ -16,6 +16,11 @@ ab_glyph  = { workspace = true }
 etagere   = { workspace = true }
 thiserror = { workspace = true }
 tracing   = { workspace = true }
+# cryoglyph is iced 0.14's fork of glyphon, pinned to the same wgpu
+# version as iced_wgpu (already transitively in Cargo.lock). Using it
+# directly lets us render text in the same render pass as the SDF
+# badge pipeline, so per-element z-order works without layer-split hacks.
+cryoglyph = "0.1"
 
 [dev-dependencies]
 criterion = { workspace = true }

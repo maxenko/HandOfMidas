@@ -304,6 +304,7 @@ fn compute_normal_scene(
     let volume_profile_instances = build_volume_profile(input, data, camera, vis_start, vis_end);
 
     let badges = widget_output.badges.clone();
+    let labels = widget_output.labels.clone();
     ChartScene {
         projection,
         viewport_width: input.viewport_width,
@@ -323,6 +324,7 @@ fn compute_normal_scene(
         volume_profile_instances,
         widget_output,
         badges,
+        labels,
         generations: SceneGenerations {
             candles: input.dirty.candles,
             camera: input.dirty.camera,
@@ -472,6 +474,7 @@ fn compute_collapsed_scene(
     let volume_profile_instances = build_volume_profile(input, data, camera, vis_start, vis_end);
 
     let badges = widget_output.badges.clone();
+    let labels = widget_output.labels.clone();
     ChartScene {
         projection,
         viewport_width: input.viewport_width,
@@ -491,6 +494,7 @@ fn compute_collapsed_scene(
         volume_profile_instances,
         widget_output,
         badges,
+        labels,
         generations: SceneGenerations {
             candles: input.dirty.candles,
             camera: input.dirty.camera,
