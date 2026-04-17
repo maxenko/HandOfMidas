@@ -124,30 +124,45 @@ fn sd_triangle(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>, c: vec2<f32>) -> f32 {
     return -sqrt(d.x) * sign(d.y);
 }
 
+// PointLeft / PointRight as a single convex pentagon. Computing the SDF
+// directly from the five edges (max of signed distances to each edge
+// line, CCW in Y-down screen space) gives one continuous shape with no
+// body/triangle seam and uniform anti-aliasing along the whole outline.
 fn sd_point_left(p: vec2<f32>, size: vec2<f32>, point_width: f32) -> f32 {
-    let body_size = vec2<f32>(size.x - point_width, size.y);
-    let body_center = vec2<f32>(point_width * 0.5, 0.0);
-    let body = sd_rect(p - body_center, body_size);
+    let hx = size.x * 0.5;
+    let hy = size.y * 0.5;
+    // Vertices CCW in Y-down coords: top-right → bottom-right → bottom-base → tip → top-base.
+    let v2 = vec2<f32>(-hx + point_width, hy);
+    let v3 = vec2<f32>(-hx, 0.0);
+    // Slant outward normals share the same |e|=sqrt(hy^2 + pw^2).
+    let inv_slant = 1.0 / sqrt(hy * hy + point_width * point_width);
+    let n_b = vec2<f32>(-hy, point_width) * inv_slant;
+    let n_t = vec2<f32>(-hy, -point_width) * inv_slant;
 
-    let tip = vec2<f32>(-size.x * 0.5, 0.0);
-    let b0 = vec2<f32>(-size.x * 0.5 + point_width, -size.y * 0.5);
-    let b1 = vec2<f32>(-size.x * 0.5 + point_width, size.y * 0.5);
-    let tri = sd_triangle(p, tip, b1, b0);
-
-    return min(body, tri);
+    var d = p.x - hx;                       // right edge
+    d = max(d, p.y - hy);                   // bottom edge
+    d = max(d, dot(p - v2, n_b));           // bottom slant (v2 -> v3)
+    d = max(d, dot(p - v3, n_t));           // top slant    (v3 -> v4)
+    d = max(d, -p.y - hy);                  // top edge
+    return d;
 }
 
 fn sd_point_right(p: vec2<f32>, size: vec2<f32>, point_width: f32) -> f32 {
-    let body_size = vec2<f32>(size.x - point_width, size.y);
-    let body_center = vec2<f32>(-point_width * 0.5, 0.0);
-    let body = sd_rect(p - body_center, body_size);
+    let hx = size.x * 0.5;
+    let hy = size.y * 0.5;
+    // Vertices CCW in Y-down coords: top-left → top-base → tip → bottom-base → bottom-left.
+    let v1 = vec2<f32>(hx - point_width, -hy);
+    let v2 = vec2<f32>(hx, 0.0);
+    let inv_slant = 1.0 / sqrt(hy * hy + point_width * point_width);
+    let n_t = vec2<f32>(hy, -point_width) * inv_slant;
+    let n_b = vec2<f32>(hy, point_width) * inv_slant;
 
-    let tip = vec2<f32>(size.x * 0.5, 0.0);
-    let b0 = vec2<f32>(size.x * 0.5 - point_width, -size.y * 0.5);
-    let b1 = vec2<f32>(size.x * 0.5 - point_width, size.y * 0.5);
-    let tri = sd_triangle(p, tip, b0, b1);
-
-    return min(body, tri);
+    var d = -p.x - hx;                      // left edge
+    d = max(d, -p.y - hy);                  // top edge
+    d = max(d, dot(p - v1, n_t));           // top slant    (v1 -> v2)
+    d = max(d, dot(p - v2, n_b));           // bottom slant (v2 -> v3)
+    d = max(d, p.y - hy);                   // bottom edge
+    return d;
 }
 
 fn sd_double_point(p: vec2<f32>, size: vec2<f32>, point_width: f32) -> f32 {
