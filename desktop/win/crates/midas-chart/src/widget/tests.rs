@@ -316,12 +316,13 @@ fn compute_level_hit_zones_include_line_plus_decorators() {
         "compute_level should emit exactly one LevelLine hit zone"
     );
 
-    // At minimum the right-edge price badge is emitted as a rect fill,
-    // and the left-edge icon+label badge is emitted as another fill.
-    // Rect badges route through `WidgetOutput.fills` per Slice 4.
+    // Price + label badges now both route through the SDF pipeline
+    // (`PointLeft` on the right, `Rounded { radius: 0.0 }` on the left)
+    // so they land in `WidgetOutput.badges`, not `.fills`. `.fills` is
+    // only populated for explicit `BadgeShape::Rect` badges.
     assert!(
-        !out.fills.is_empty(),
-        "decorator badges should emit at least one fill"
+        !out.badges.is_empty(),
+        "decorator badges should emit at least one BadgeInstance"
     );
     // And at least one label per badge segment (price badge + left badge).
     assert!(

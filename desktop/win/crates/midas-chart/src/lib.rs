@@ -17,6 +17,7 @@
 
 // ── Implemented modules ────────────────────────────────────────────
 pub mod camera;
+pub mod color;
 pub mod compute;
 pub mod crosshair_tool;
 pub mod dirty;

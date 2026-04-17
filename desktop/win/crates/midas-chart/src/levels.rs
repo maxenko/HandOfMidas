@@ -111,19 +111,6 @@ impl LevelIcon {
     }
 }
 
-/// Pick black or white for maximum contrast against `bg`.
-///
-/// Uses the Rec. 709 relative-luminance formula on the sRGB channels.
-/// Alpha is ignored — the badge behind the text is drawn opaque.
-fn contrast_text_color(bg: [f32; 4]) -> [f32; 4] {
-    let luma = 0.2126 * bg[0] + 0.7152 * bg[1] + 0.0722 * bg[2];
-    if luma > 0.5 {
-        [0.0, 0.0, 0.0, 1.0]
-    } else {
-        [1.0, 1.0, 1.0, 1.0]
-    }
-}
-
 /// Compute a smart price step size based on the current price level.
 ///
 /// Returns `(coarse_step, fine_step)` where coarse is for arrow key clicks
@@ -337,7 +324,7 @@ impl HorizontalLevel {
                     padding: 6.0,
                     segments: smallvec![BadgeSegment {
                         text: format!("{:.2}", self.line.price),
-                        text_color: contrast_text_color(badge_fill),
+                        text_color: crate::color::contrast_text_color(badge_fill),
                         font_size: 11.0,
                         // Force the badge body (= badge_width - point_width) to
                         // span from the priceline to the viewport right edge
@@ -367,13 +354,23 @@ impl HorizontalLevel {
         if locked || has_label_or_icon {
             let mut items: smallvec::SmallVec<[DecoratorItem; 4]> = smallvec![];
 
+            // Left-side badges mirror the right-side price badge's
+            // palette: opaque fill in the level's own color with
+            // black/white contrast text. `Rounded { radius: 0.0 }`
+            // renders identically to `Rect` but routes through the SDF
+            // badge pipeline instead of `fills`, which draws after the
+            // grid/line pipeline — the line no longer peeks through
+            // the badge.
+            let badge_fill = [line_color[0], line_color[1], line_color[2], 1.0];
+            let badge_text_color = crate::color::contrast_text_color(badge_fill);
+
             if locked {
                 items.push(DecoratorItem {
                     visibility: Visibility::Always,
                     action: None,
                     content: ItemContent::Badge(Box::new(Badge {
-                        shape: BadgeShape::Rect,
-                        fill: [0.25, 0.25, 0.30, 0.85],
+                        shape: BadgeShape::Rounded { radius: 0.0 },
+                        fill: badge_fill,
                         border: None,
                         height: 18.0,
                         padding: 6.0,
@@ -382,7 +379,7 @@ impl HorizontalLevel {
                             // standard font — use the plain text "LOCK"
                             // tag which every font renders.
                             text: "LOCK".to_owned(),
-                            text_color: [1.0, 1.0, 1.0, 1.0],
+                            text_color: badge_text_color,
                             font_size: 10.0,
                             min_width: None,
                             fill_override: None,
@@ -401,30 +398,18 @@ impl HorizontalLevel {
                     (_, Some(icon_ch)) => icon_ch.to_string(),
                     _ => String::new(),
                 };
-                let fill = [
-                    line_color[0] * 0.3,
-                    line_color[1] * 0.3,
-                    line_color[2] * 0.3,
-                    0.75,
-                ];
-                let text_color = [
-                    line_color[0],
-                    line_color[1],
-                    line_color[2],
-                    line_color[3].max(0.9),
-                ];
                 items.push(DecoratorItem {
                     visibility: Visibility::Always,
                     action: None,
                     content: ItemContent::Badge(Box::new(Badge {
-                        shape: BadgeShape::Rect,
-                        fill,
+                        shape: BadgeShape::Rounded { radius: 0.0 },
+                        fill: badge_fill,
                         border: None,
                         height: 20.0,
                         padding: 6.0,
                         segments: smallvec![BadgeSegment {
                             text: icon_text,
-                            text_color,
+                            text_color: badge_text_color,
                             font_size: 14.0,
                             min_width: None,
                             fill_override: None,
@@ -716,15 +701,17 @@ mod tests {
         level.label = Some("Resistance".into());
         let out = compute_level(&level, AnnotationId(7), &ctx, 1.0, true);
 
-        // Both badges use `BadgeShape::Rect`, which routes through
-        // `WidgetOutput.fills`. Collect every fill rect that sits on
-        // the left half of the viewport — those are the lock + label
-        // badges (the price badge lives on the right edge).
+        // Both badges are now `BadgeShape::Rounded { radius: 0.0 }`
+        // (still visually flat, but routes through the SDF pipeline so
+        // the fill draws above the level line). Collect every
+        // `BadgeInstance` whose rect sits on the left half of the
+        // viewport — those are the lock + label badges (the price
+        // badge lives on the right edge).
         let half_w = camera.viewport_width as f32 * 0.5;
         let left_rects: Vec<[f32; 4]> = out
-            .fills
+            .badges
             .iter()
-            .map(|g| g.rect)
+            .map(|b| b.rect)
             .filter(|r| r[0] < half_w)
             .collect();
         assert_eq!(
