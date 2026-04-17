@@ -1114,6 +1114,39 @@ fn compute_timeline_ticks(camera: &Camera2D) -> Vec<AxisLabel> {
 /// Walks the annotation slice, dispatches to the appropriate widget
 /// compute function, and merges all outputs into a single `WidgetOutput`.
 /// Hovered annotations render last (on top).
+/// Annotation is promoted to the foreground when the cursor comes
+/// within this many vertical pixels of its nearest price line. Chosen
+/// small enough that casual mouse motion doesn't constantly reshuffle
+/// z-order, but wide enough to cover a comfortable target band.
+pub const PROXIMITY_PROMOTION_PX: f32 = 20.0;
+
+/// Vertical (screen-Y) distance from `cursor_y` to the nearest price
+/// line belonging to `ann`. Used by `compute_widget_annotations` to
+/// pick one annotation to render last (on top) when the cursor is
+/// near it. Returns `None` for kinds that don't carry a price line.
+pub fn annotation_min_y_distance(
+    ann: &crate::widget::Annotation,
+    cursor_y: f32,
+    camera: &Camera2D,
+) -> Option<f32> {
+    use crate::widget::AnnotationKind;
+    let dist = |price: f64| (cursor_y - camera.price_to_y(price)).abs();
+    match &ann.kind {
+        AnnotationKind::Level(level) => Some(dist(level.line.price)),
+        AnnotationKind::OrderBracket(bracket) => {
+            let mut min = dist(bracket.entry.line.price);
+            if let Some(tp) = &bracket.take_profit {
+                min = min.min(dist(tp.line.price));
+            }
+            if let Some(sl) = &bracket.stop_loss {
+                min = min.min(dist(sl.line.price));
+            }
+            Some(min)
+        }
+        _ => None,
+    }
+}
+
 fn compute_widget_annotations(
     annotations: &[crate::widget::Annotation],
     camera: &Camera2D,
@@ -1147,6 +1180,27 @@ fn compute_widget_annotations(
 
     let mut merged = WidgetOutput::default();
     let hovered_aid = input.hovered_annotation.map(|(aid, _)| aid);
+    let dragged_aid = input.drag_ghost.map(|(aid, _)| aid);
+
+    // Proximity promotion: when the cursor is within
+    // `PROXIMITY_PROMOTION_PX` of any annotation's nearest price line,
+    // bubble that annotation above its neighbours. Only the single
+    // closest one is promoted — we don't want every near-miss to
+    // reshuffle the whole stack. The hovered and dragged ids are
+    // excluded because they get their own, higher-priority passes.
+    let promoted_aid = input.crosshair.and_then(|(_, cy)| {
+        annotations
+            .iter()
+            .filter(|a| {
+                a.presence.is_visible()
+                    && Some(a.id) != hovered_aid
+                    && Some(a.id) != dragged_aid
+            })
+            .filter_map(|a| annotation_min_y_distance(a, cy, camera).map(|d| (a.id, d)))
+            .filter(|&(_, d)| d <= PROXIMITY_PROMOTION_PX)
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(aid, _)| aid)
+    });
 
     let mut compute_annotation = |ann: &crate::widget::Annotation| {
         let alpha = ann.presence.alpha();
@@ -1161,14 +1215,41 @@ fn compute_widget_annotations(
         }
     };
 
-    // Two passes: non-hovered first (underneath), then hovered (on top).
+    // Four passes bottom-up: background → proximity-promoted → hovered
+    // → dragged. Later passes render on top because
+    // `WidgetOutput::merge` append-concatenates primitive buffers. The
+    // dragged pass is last and unconditional so a drag that overshoots
+    // another level (breaking hover) still keeps the grabbed level on
+    // top.
+    let is_bg = |ann: &crate::widget::Annotation| {
+        ann.presence.is_visible()
+            && Some(ann.id) != hovered_aid
+            && Some(ann.id) != promoted_aid
+            && Some(ann.id) != dragged_aid
+    };
     for ann in annotations {
-        if ann.presence.is_visible() && Some(ann.id) != hovered_aid {
+        if is_bg(ann) {
             compute_annotation(ann);
         }
     }
     for ann in annotations {
-        if ann.presence.is_visible() && Some(ann.id) == hovered_aid {
+        if ann.presence.is_visible()
+            && Some(ann.id) == promoted_aid
+            && Some(ann.id) != dragged_aid
+        {
+            compute_annotation(ann);
+        }
+    }
+    for ann in annotations {
+        if ann.presence.is_visible()
+            && Some(ann.id) == hovered_aid
+            && Some(ann.id) != dragged_aid
+        {
+            compute_annotation(ann);
+        }
+    }
+    for ann in annotations {
+        if ann.presence.is_visible() && Some(ann.id) == dragged_aid {
             compute_annotation(ann);
         }
     }
