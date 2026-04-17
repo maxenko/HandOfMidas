@@ -18,6 +18,13 @@ use midas_core::CandleData;
 /// Fraction of the viewport height reserved for volume bars at the bottom.
 pub const VOLUME_AREA_FRACTION: f32 = 0.20;
 
+/// Width of the price-axis area on the right side of the chart, in
+/// logical pixels. The vertical priceline border sits at
+/// `viewport_width - PRICELINE_WIDTH` and everything to its right is
+/// reserved for axis labels. Callers that need to align decorators to
+/// the chart's right edge (not the viewport's) should subtract this.
+pub const PRICELINE_WIDTH: f32 = 60.0;
+
 /// Body width as a fraction of the full candle slot width.
 const BODY_WIDTH_FRACTION: f32 = 0.70;
 
@@ -158,7 +165,7 @@ fn build_grid_instances(
     });
 
     // 2b. Priceline border (vertical, left of price axis labels).
-    let priceline_x = viewport_width - 60.0;
+    let priceline_x = viewport_width - PRICELINE_WIDTH;
     out.push(GridLineInstance {
         rect: [priceline_x, 0.0, priceline_x + 2.0, separator_y],
         color: [0.50, 0.50, 0.55, 0.60],

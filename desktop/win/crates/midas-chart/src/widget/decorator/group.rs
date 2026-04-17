@@ -40,6 +40,18 @@ pub enum DecoratorAnchor {
     LeftEdge,
     /// Pinned to the right edge of the viewport.
     RightEdge,
+    /// Pinned to the chart-area right edge (viewport right minus the
+    /// price-axis area), offset further left by `pointer_inset`. Items
+    /// pack forward (left-to-right) from this anchor, unlike
+    /// `RightEdge` which packs right-to-left.
+    ///
+    /// `pointer_inset` compensates for shapes that have a protruding
+    /// side (e.g. `BadgeShape::PointLeft` extends `point_width` pixels
+    /// left of the badge body). Set it to the shape's point width and
+    /// the body's left edge — the triangle base — lands exactly on the
+    /// vertical priceline border with the tip sticking into the chart.
+    /// Use `0.0` for shapes without a left-side pointer.
+    AtChartRightEdge { pointer_inset: f32 },
     /// Pinned to a chart-time (epoch ms) coordinate.
     AtTimestamp(i64),
     /// Pinned to a raw screen-X coordinate in logical pixels.

@@ -194,6 +194,9 @@ fn resolve_anchor_x(anchor: &DecoratorAnchor, ctx: &ComputeContext<'_>) -> f32 {
     match *anchor {
         DecoratorAnchor::LeftEdge => 0.0,
         DecoratorAnchor::RightEdge => ctx.viewport.width as f32,
+        DecoratorAnchor::AtChartRightEdge { pointer_inset } => {
+            ctx.viewport.width as f32 - crate::compute::PRICELINE_WIDTH - pointer_inset
+        }
         DecoratorAnchor::AtTimestamp(t) => ctx.camera.time_to_x(t as f64),
         DecoratorAnchor::AtScreenX(x) => x,
     }
