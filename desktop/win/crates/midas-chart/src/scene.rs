@@ -85,6 +85,13 @@ pub struct ChartScene {
     /// future per-layer interleaving pass.
     pub labels: Vec<WidgetLabel>,
 
+    /// End-exclusive indices into `badges` / `labels` for each z-layer
+    /// emitted by `compute_widget_annotations` (background, proximity-
+    /// promoted, hovered, dragged — in that order). The renderer
+    /// interleaves per-layer badge + text draws so each annotation's
+    /// shape and text composite as one unit over lower-z layers.
+    pub layer_ends: [crate::compute::LayerEnd; crate::compute::ANNOTATION_LAYER_COUNT],
+
     /// Dirty generation counters -- renderer compares to decide what to upload.
     pub generations: SceneGenerations,
 }

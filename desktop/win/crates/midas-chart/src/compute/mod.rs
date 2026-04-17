@@ -271,7 +271,8 @@ fn compute_normal_scene(
     let price_grid_lines = compute_grid_lines(camera, &input.grid_color);
     let priceline_labels = compute_priceline_labels(camera);
     let timeline_ticks = compute_timeline_ticks(camera);
-    let widget_output = compute_widget_annotations(input.annotations, camera, input);
+    let (widget_output, layer_ends) =
+        compute_widget_annotations(input.annotations, camera, input);
     let crosshair = compute_crosshair_impl(input.crosshair, data, camera, input.symbol, &|cx| {
         let cursor_time = camera.x_to_time(cx);
         let idx = data.find_index_by_time(cursor_time as i64);
@@ -325,6 +326,7 @@ fn compute_normal_scene(
         widget_output,
         badges,
         labels,
+        layer_ends,
         generations: SceneGenerations {
             candles: input.dirty.candles,
             camera: input.dirty.camera,
@@ -428,7 +430,8 @@ fn compute_collapsed_scene(
         &index_to_x,
     );
 
-    let widget_output = compute_widget_annotations(input.annotations, camera, input);
+    let (widget_output, layer_ends) =
+        compute_widget_annotations(input.annotations, camera, input);
 
     // Crosshair in collapsed mode: convert cursor X to the nearest candle index.
     let crosshair = compute_crosshair_impl(input.crosshair, data, camera, input.symbol, &|cx| {
@@ -495,6 +498,7 @@ fn compute_collapsed_scene(
         widget_output,
         badges,
         labels,
+        layer_ends,
         generations: SceneGenerations {
             candles: input.dirty.candles,
             camera: input.dirty.camera,
@@ -1124,6 +1128,27 @@ fn compute_timeline_ticks(camera: &Camera2D) -> Vec<AxisLabel> {
 /// z-order, but wide enough to cover a comfortable target band.
 pub const PROXIMITY_PROMOTION_PX: f32 = 20.0;
 
+/// Number of logical z-layers produced by `compute_widget_annotations`.
+/// Must stay in lockstep with the pass count inside that function.
+pub const ANNOTATION_LAYER_COUNT: usize = 4;
+
+/// End-exclusive indices into `ChartScene.badges` / `ChartScene.labels`
+/// marking where one z-layer stops and the next begins.
+///
+/// Layer `k` owns:
+///   `badges[prev_end..layer_ends[k].badge_end]`
+///   `labels[prev_end..layer_ends[k].label_end]`
+/// where `prev_end` is the previous layer's end (or `0` for layer 0).
+///
+/// The renderer uses these ranges to interleave badge draws and text
+/// renders per layer so each annotation's shape + text composite as
+/// one unit above lower-z layers.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct LayerEnd {
+    pub badge_end: usize,
+    pub label_end: usize,
+}
+
 /// Vertical (screen-Y) distance from `cursor_y` to the nearest price
 /// line belonging to `ann`. Used by `compute_widget_annotations` to
 /// pick one annotation to render last (on top) when the cursor is
@@ -1155,7 +1180,7 @@ fn compute_widget_annotations(
     annotations: &[crate::widget::Annotation],
     camera: &Camera2D,
     input: &ChartInput<'_>,
-) -> crate::widget::WidgetOutput {
+) -> (crate::widget::WidgetOutput, [LayerEnd; ANNOTATION_LAYER_COUNT]) {
     use crate::widget::compute::{ComputeContext, Viewport};
     use crate::widget::level::compute_level;
     use crate::widget::order_bracket::compute_bracket;
@@ -1206,18 +1231,23 @@ fn compute_widget_annotations(
             .map(|(aid, _)| aid)
     });
 
-    let mut compute_annotation = |ann: &crate::widget::Annotation| {
-        let alpha = ann.presence.alpha();
-        match &ann.kind {
-            crate::widget::AnnotationKind::Level(level) => {
-                merged.merge(compute_level(level, ann.id, &ctx, alpha, ann.locked));
+    // Macro rather than a closure so it doesn't keep `merged`
+    // perpetually borrowed — `record!` further down needs to read it.
+    macro_rules! compute_annotation {
+        ($ann:expr) => {{
+            let ann: &crate::widget::Annotation = $ann;
+            let alpha = ann.presence.alpha();
+            match &ann.kind {
+                crate::widget::AnnotationKind::Level(level) => {
+                    merged.merge(compute_level(level, ann.id, &ctx, alpha, ann.locked));
+                }
+                crate::widget::AnnotationKind::OrderBracket(bracket) => {
+                    merged.merge(compute_bracket(bracket, ann.id, &ctx, alpha));
+                }
+                _ => {}
             }
-            crate::widget::AnnotationKind::OrderBracket(bracket) => {
-                merged.merge(compute_bracket(bracket, ann.id, &ctx, alpha));
-            }
-            _ => {}
-        }
-    };
+        }};
+    }
 
     // Four passes bottom-up: background → proximity-promoted → hovered
     // → dragged. Later passes render on top because
@@ -1225,6 +1255,26 @@ fn compute_widget_annotations(
     // dragged pass is last and unconditional so a drag that overshoots
     // another level (breaking hover) still keeps the grabbed level on
     // top.
+    //
+    // After each pass we record where in the merged buffers this layer
+    // ends. The renderer later uses those boundaries to interleave
+    // badge + text draws per layer so per-element z-order works
+    // across the GPU shape pipeline and the GPU text pipeline.
+    //
+    // `record!` is a macro rather than a closure because
+    // `compute_annotation` already holds a mutable borrow of `merged`
+    // for its whole lifetime — a closure capturing `&merged` would
+    // collide with it. Inlining the read sidesteps the borrow conflict.
+    let mut layer_ends = [LayerEnd::default(); ANNOTATION_LAYER_COUNT];
+    macro_rules! record {
+        ($slot:expr) => {
+            $slot = LayerEnd {
+                badge_end: merged.badges.len(),
+                label_end: merged.labels.len(),
+            };
+        };
+    }
+
     let is_bg = |ann: &crate::widget::Annotation| {
         ann.presence.is_visible()
             && Some(ann.id) != hovered_aid
@@ -1233,32 +1283,39 @@ fn compute_widget_annotations(
     };
     for ann in annotations {
         if is_bg(ann) {
-            compute_annotation(ann);
+            compute_annotation!(ann);
         }
     }
+    record!(layer_ends[0]);
+
     for ann in annotations {
         if ann.presence.is_visible()
             && Some(ann.id) == promoted_aid
             && Some(ann.id) != dragged_aid
         {
-            compute_annotation(ann);
+            compute_annotation!(ann);
         }
     }
+    record!(layer_ends[1]);
+
     for ann in annotations {
         if ann.presence.is_visible()
             && Some(ann.id) == hovered_aid
             && Some(ann.id) != dragged_aid
         {
-            compute_annotation(ann);
+            compute_annotation!(ann);
         }
     }
+    record!(layer_ends[2]);
+
     for ann in annotations {
         if ann.presence.is_visible() && Some(ann.id) == dragged_aid {
-            compute_annotation(ann);
+            compute_annotation!(ann);
         }
     }
+    record!(layer_ends[3]);
 
-    merged
+    (merged, layer_ends)
 }
 
 /// Format a timestamp as a long date/time string (e.g. "Fri 3/27/26 02:40:00 PM").
