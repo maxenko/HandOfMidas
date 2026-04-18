@@ -1553,11 +1553,19 @@ impl MidasApp {
             .padding([6, 8])
             .align_y(iced::Alignment::Center);
 
-        let main_content: Element<'_, Message> =
+        // Wrap in `clip_layer` so the watchlist's row content (which can
+        // include shader widgets like the chart-thumbnail sparkline) is
+        // recorded in a renderer layer pinned to the watchlist pane's
+        // bounds. Without this, fixed-width cells whose total exceeds the
+        // pane width let custom shader primitives paint into adjacent
+        // panes — `container.clip(true)` only clips iced quads/text, not
+        // shader-pipeline output. See `midas_ui::clip_layer`.
+        let main_content: Element<'_, Message> = midas_ui::clip_layer(
             column![header, scrollable(body_rows).height(Fill), add_row,]
                 .width(Fill)
-                .height(Fill)
-                .into();
+                .height(Fill),
+        )
+        .into();
 
         // Wrap in stack only when overlays are needed (resize or link picker).
         let needs_resize_overlay = self

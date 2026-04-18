@@ -229,10 +229,8 @@ impl shader::Primitive for ThumbnailPrimitive {
         let entry = pipeline.entry_for(self.snapshot.widget_key, device);
 
         // Skip the upload when nothing has changed since we last
-        // uploaded for this widget_key. `entry.generation` is the
-        // per-widget-key mirror kept inside the pipeline — correct
-        // across iced device-storage rebuilds because it starts back
-        // at `None` whenever a new [`ThumbnailPipeline`] is created.
+        // uploaded for this widget_key. Generation is the
+        // per-widget-key mirror kept inside the pipeline.
         if entry.generation == Some(self.snapshot.generation) {
             return;
         }
@@ -248,30 +246,70 @@ impl shader::Primitive for ThumbnailPrimitive {
         entry.generation = Some(self.snapshot.generation);
     }
 
-    fn draw(&self, pipeline: &Self::Pipeline, render_pass: &mut wgpu::RenderPass<'_>) -> bool {
-        // iced has already set both viewport and scissor rect to the
-        // widget's clip bounds — the pipeline just needs to issue its
-        // draw call.
-        let Some(entry) = pipeline.entries.get(&self.snapshot.widget_key) else {
-            return false;
-        };
+    /// We deliberately fall back to [`Self::render`] (return `false`
+    /// from `draw`) so iced opens a fresh render pass for us with a
+    /// `clip_bounds: &Rectangle<u32>` we can use as both viewport and
+    /// scissor. This is the pattern the official
+    /// `iced/examples/custom_shader` uses (see PR iced-rs/iced#2738).
+    ///
+    /// We can't use the shared `draw()` path because iced's shared
+    /// render pass sets the wgpu viewport to the shader widget's full
+    /// `instance.bounds`. The sparkline shader emits clip-space
+    /// `[-1, +1]`, so anything wider than the cell — and `Length::Fill`
+    /// inside our `stack!`/`button` chain *can* be — paints over
+    /// sibling cells and adjacent panes. A fresh per-instance render
+    /// pass with viewport = `clip_bounds` makes that mathematically
+    /// impossible: `[-1, +1]` always maps onto exactly the visible
+    /// cell, no matter what `instance.bounds` says.
+    fn draw(&self, _pipeline: &Self::Pipeline, _render_pass: &mut wgpu::RenderPass<'_>) -> bool {
+        false
+    }
 
-        // SAFETY: iced stores the Pipeline in heap-allocated Storage
-        // that outlives the render pass (see
-        // `iced_wgpu::primitive::Storage`). `SparklinePipeline::render`
-        // requires `&'a self` to match the render pass lifetime, but
-        // `shader::Primitive::draw`'s trait signature uses
-        // independent lifetimes. We extend the pipeline reference
-        // lifetime to match the render pass — safe because the
-        // Pipeline is guaranteed to outlive the render pass by iced's
-        // architecture. Mirrors the same trick in
-        // `chart_widget::ChartPrimitive::draw`.
-        let pipe_ref: &SparklinePipeline = &entry.pipe;
-        let pipe_ref: &SparklinePipeline = unsafe { &*(pipe_ref as *const SparklinePipeline) };
-        pipe_ref.render(render_pass);
-        // Returning true keeps iced's main render pass open; the
-        // sparkline pipeline targets the same surface format.
-        true
+    fn render(
+        &self,
+        pipeline: &Self::Pipeline,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        clip_bounds: &Rectangle<u32>,
+    ) {
+        let Some(entry) = pipeline.entries.get(&self.snapshot.widget_key) else {
+            return;
+        };
+        if clip_bounds.width == 0 || clip_bounds.height == 0 {
+            return;
+        }
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("midas.thumbnail.sparkline.pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+
+        pass.set_viewport(
+            clip_bounds.x as f32,
+            clip_bounds.y as f32,
+            clip_bounds.width as f32,
+            clip_bounds.height as f32,
+            0.0,
+            1.0,
+        );
+        pass.set_scissor_rect(
+            clip_bounds.x,
+            clip_bounds.y,
+            clip_bounds.width,
+            clip_bounds.height,
+        );
+        entry.pipe.render(&mut pass);
     }
 }
 
@@ -391,7 +429,18 @@ where
         .width(Length::Fill)
         .height(Length::Fill);
 
-    let stacked = stack![shader_widget, label_overlay];
+    // `stack!` defaults to `Length::Shrink × Shrink` and per its own
+    // docs "will not inspect the [`Vec`], which means it won't
+    // automatically adapt to the sizing strategy of its contents.
+    // If any of the children have a [`Length::Fill`] strategy, you
+    // will need to call [`Stack::width`] or [`Stack::height`]
+    // accordingly." Without these, the stack — and therefore the
+    // shader inside — can pick up oversized layout bounds, which then
+    // become the wgpu viewport, letting the sparkline's clip-space
+    // `[-1, +1]` paint over sibling cells.
+    let stacked = stack![shader_widget, label_overlay]
+        .width(Length::Fill)
+        .height(Length::Fill);
 
     button(stacked)
         .on_press(on_click)
@@ -399,6 +448,7 @@ where
         .width(Length::Fill)
         .height(Length::Fill)
         .style(transparent_button_style)
+        .clip(true)
         .into()
 }
 

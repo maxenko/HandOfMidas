@@ -17,6 +17,7 @@
 
 pub mod button;
 pub mod button_group;
+pub mod clip_layer;
 pub mod editable_label;
 pub mod icon_button;
 pub mod label;
@@ -26,6 +27,7 @@ pub mod tooltip;
 
 pub use button::TextButton;
 pub use button_group::ButtonGroup;
+pub use clip_layer::{clip_layer, ClipLayer};
 pub use editable_label::EditableLabel;
 pub use icon_button::IconButton;
 pub use label::Label;
