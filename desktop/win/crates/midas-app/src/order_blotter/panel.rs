@@ -1,17 +1,13 @@
 //! `OrderBlotterPanel` — the pane-grid-hosted UI that renders
 //! [`super::OrderBlotter`] as a sortable grid.
-//!
-//! Slice 3 lands the skeleton (empty placeholder); Slice 4 wires the
-//! grid columns. See `plan/order-store.md`.
 
-use midas_core::OrderBlotterId;
+use std::collections::HashSet;
+
+use midas_core::{LinkMode, OrderBlotterId};
 
 /// Blotter panel state. One instance per Orders pane the user opens;
 /// all instances read from the single shared [`super::OrderBlotter`]
 /// on `MidasApp`.
-///
-/// `id`, `grid_state`, and `last_seen_generation` are reserved for the
-/// Slice-4 grid rendering; the Slice-3 placeholder only reads `name`.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct OrderBlotterPanel {
@@ -19,10 +15,19 @@ pub struct OrderBlotterPanel {
     pub name: String,
     /// Grid state (column widths, sort, scroll) for this panel.
     pub grid_state: midas_grid::GridState,
+    /// Symbol link group — row clicks broadcast the clicked order's
+    /// symbol to every chart/panel sharing the same colour.
+    pub symbol_link: LinkMode,
+    /// Columns the user has hidden via the column-selector popup.
+    /// Not-present = visible. Defaults to empty (all visible).
+    pub hidden_columns: HashSet<midas_grid::ColumnId>,
     /// Most recent `OrderBlotter::generation()` the panel built its
     /// display rows against. Used by the view layer to skip work when
     /// nothing has changed.
     pub last_seen_generation: u64,
+    /// Currently selected order row, keyed by broker-assigned order UUID.
+    /// `None` = nothing selected. Session state only — not persisted.
+    pub selected_row: Option<uuid::Uuid>,
 }
 
 impl OrderBlotterPanel {
@@ -31,12 +36,16 @@ impl OrderBlotterPanel {
             id,
             name: name.into(),
             grid_state: default_grid_state(),
+            symbol_link: LinkMode::default(),
+            hidden_columns: HashSet::new(),
             last_seen_generation: 0,
+            selected_row: None,
         }
     }
 
     /// Build the panel from a persisted `OrderBlotterConfig`. Column
-    /// widths round-trip through config so user resizes survive restart.
+    /// widths + link mode + hidden columns round-trip so user prefs
+    /// survive restart.
     pub fn from_config(id: OrderBlotterId, cfg: &midas_core::config::OrderBlotterConfig) -> Self {
         let mut state = default_grid_state();
         // Config stores widths in column-id order. If the count matches
@@ -48,11 +57,19 @@ impl OrderBlotterPanel {
                 state.set_column_width(*col_id, *w, 20.0, None);
             }
         }
+        let hidden_columns = cfg
+            .hidden_columns
+            .iter()
+            .map(|s| midas_grid::ColumnId(string_to_static(s)))
+            .collect();
         Self {
             id,
             name: cfg.name.clone(),
             grid_state: state,
+            symbol_link: cfg.symbol_link,
+            hidden_columns,
             last_seen_generation: 0,
+            selected_row: None,
         }
     }
 
@@ -64,11 +81,41 @@ impl OrderBlotterPanel {
             .iter()
             .map(|id| self.grid_state.column_width(*id))
             .collect();
+        let hidden_columns = self
+            .hidden_columns
+            .iter()
+            .map(|id| id.0.to_owned())
+            .collect();
         midas_core::config::OrderBlotterConfig {
             name: self.name.clone(),
             column_widths,
+            symbol_link: self.symbol_link,
+            hidden_columns,
         }
     }
+
+    /// Whether a given column should be rendered. Inlined in the view
+    /// today; exposed for consumers that filter `ALL` elsewhere.
+    #[allow(dead_code)]
+    pub fn column_visible(&self, id: midas_grid::ColumnId) -> bool {
+        !self.hidden_columns.contains(&id)
+    }
+}
+
+/// `midas_grid::ColumnId` wraps a `&'static str`. Persisting an owned
+/// `String` from config requires leaking it into a static — acceptable
+/// because the config schema has a bounded set of column IDs, so
+/// leakage is bounded to one-per-known-id across process lifetime.
+fn string_to_static(s: &str) -> &'static str {
+    // Match against the known column-id set; unknown ids leak a fresh
+    // static (forward-compat for newer configs pointing at columns
+    // this build doesn't know about yet).
+    for known in super::columns::OrderBlotterColumn::ids() {
+        if known.0 == s {
+            return known.0;
+        }
+    }
+    Box::leak(s.to_owned().into_boxed_str())
 }
 
 /// Initialise a grid state with the blotter's column order + default

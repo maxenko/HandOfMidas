@@ -41,8 +41,8 @@ const COLOR_NEUTRAL: Color = Color::from_rgb(0.6, 0.6, 0.6);
 pub struct WatchlistRow {
     /// Ticker symbol, always uppercase.
     pub symbol: String,
-    /// Whether this ticker is marked as a favorite.
-    pub favorite: bool,
+    /// Favourite level: `0` = off, `1..=5` = graded silver→gold.
+    pub favorite: u8,
     /// Formatted last price (e.g. `"182.63"`) or `"--"`.
     pub price_text: String,
     /// Formatted change percent (e.g. `"+1.25%"`) or `"--"`.
@@ -140,7 +140,14 @@ impl GridColumn<WatchlistRow, Message> for WatchlistColumn {
                 .style(hover_text_button_style)
                 .into(),
             Self::Favorite => {
-                let star = if row.favorite { "\u{2605}" } else { "\u{2606}" };
+                // Legacy grid() path — the hand-built view in `views.rs`
+                // is the real renderer. Keep this minimal: just show the
+                // star glyph, no numeric overlay.
+                let star = if row.favorite > 0 {
+                    "\u{2605}"
+                } else {
+                    "\u{2606}"
+                };
                 button(text(star).size(12))
                     .on_press(Message::WatchlistToggleFavorite(
                         row.wl_id,

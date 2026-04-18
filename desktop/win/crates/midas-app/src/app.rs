@@ -228,6 +228,10 @@ pub struct MidasApp {
     pub link_picker_open: Option<(PickerTarget, LinkDimension)>,
     /// Active column resize: (watchlist_id, column_index, start_x, original_width).
     pub resizing_column: Option<(WatchlistId, usize, f32, f32)>,
+    /// Active blotter column resize: (blotter_id, column_index, start_x, original_width).
+    pub resizing_blotter_column: Option<(OrderBlotterId, usize, f32, f32)>,
+    /// Which blotter currently has its column-selector popup open, if any.
+    pub blotter_column_selector_open: Option<OrderBlotterId>,
     /// Dockable order panels keyed by stable OrderPanelId.
     pub order_panels: HashMap<OrderPanelId, crate::order_panel::OrderPanel>,
     /// Per-blotter-panel view state (one entry per open Orders pane).
@@ -547,6 +551,26 @@ pub enum Message {
     AddOrderBlotter,
     /// Grid chrome event (sort / resize / scroll / select) from an Orders pane.
     OrderBlotterGrid(OrderBlotterId, midas_grid::GridMessage),
+    /// User clicked a row — record the selection on the panel and
+    /// (when linked) broadcast the row's symbol to the blotter's
+    /// symbol-link group (charts / order panels sharing the colour).
+    OrderBlotterRowSelected(OrderBlotterId, uuid::Uuid, String),
+    /// Change the blotter's symbol-link colour group.
+    OrderBlotterSetSymbolLink(OrderBlotterId, LinkMode),
+    /// Begin a column-resize drag. `col_idx` indexes into
+    /// `OrderBlotterColumn::ALL`.
+    OrderBlotterColumnResizeStart(OrderBlotterId, usize),
+    /// Cursor-move event while a column resize is active. Carries the
+    /// x-coordinate in window logical pixels.
+    OrderBlotterColumnResizing(f32),
+    /// Drag released — commit width + mark config dirty.
+    OrderBlotterColumnResizeEnd,
+    /// Open the column-selector popup for this blotter.
+    OrderBlotterOpenColumnSelector(OrderBlotterId),
+    /// Dismiss the column-selector popup.
+    OrderBlotterDismissColumnSelector,
+    /// Toggle visibility of a single column in the given blotter.
+    OrderBlotterToggleColumn(OrderBlotterId, midas_grid::ColumnId),
 
     // -- G.ATR hover highlight --
     /// Mouse entered the G.ATR badge on a chart — activate candle dimming.
@@ -1161,6 +1185,8 @@ impl MidasApp {
             dragging_ticker: None,
             link_picker_open: None,
             resizing_column: None,
+            resizing_blotter_column: None,
+            blotter_column_selector_open: None,
             order_panels: restored_order_panels,
             order_blotters: restored_order_blotters,
             order_blotter,
@@ -2326,10 +2352,16 @@ impl MidasApp {
             | Message::OrderPanelSetSymbolLink(..) => self.handle_order_panel_msg(message),
 
             // -- Order blotter --
-            Message::AddOrderBlotter => self.handle_add_order_blotter(),
-            Message::OrderBlotterGrid(blotter_id, gm) => {
-                self.handle_order_blotter_grid(blotter_id, gm)
-            }
+            Message::AddOrderBlotter
+            | Message::OrderBlotterGrid(..)
+            | Message::OrderBlotterRowSelected(..)
+            | Message::OrderBlotterSetSymbolLink(..)
+            | Message::OrderBlotterColumnResizeStart(..)
+            | Message::OrderBlotterColumnResizing(..)
+            | Message::OrderBlotterColumnResizeEnd
+            | Message::OrderBlotterOpenColumnSelector(..)
+            | Message::OrderBlotterDismissColumnSelector
+            | Message::OrderBlotterToggleColumn(..) => self.handle_order_blotter_msg(message),
 
             // -- Watchlist --
             Message::AddWatchlist

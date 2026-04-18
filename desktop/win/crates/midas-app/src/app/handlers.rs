@@ -1602,8 +1602,114 @@ impl MidasApp {
 // ── Order Blotter ────────────────────────────────────────────────────
 
 impl MidasApp {
+    /// Dispatcher for every `Message::OrderBlotter*` variant. Mirrors
+    /// the watchlist handler's shape.
+    pub(crate) fn handle_order_blotter_msg(&mut self, message: Message) -> Task<Message> {
+        match message {
+            Message::AddOrderBlotter => self.handle_add_order_blotter(),
+
+            Message::OrderBlotterGrid(blotter_id, gm) => {
+                self.handle_order_blotter_grid(blotter_id, gm)
+            }
+
+            Message::OrderBlotterRowSelected(blotter_id, order_id, symbol) => {
+                // Selection write happens FIRST — an unlinked panel still
+                // needs its highlight updated locally, so the broadcast
+                // short-circuit below must not skip the mutation.
+                let Some(panel) = self.order_blotters.get_mut(&blotter_id) else {
+                    return Task::none();
+                };
+                panel.selected_row = Some(order_id);
+                let link = panel.symbol_link;
+                if matches!(link, LinkMode::Unlinked) {
+                    return Task::none();
+                }
+                // Broadcast the clicked row's symbol to every chart /
+                // order panel sharing the blotter's link colour. Same
+                // shape as `WatchlistTickerSelected` — re-use the link
+                // wiring there by going through
+                // `crate::link::find_link_targets`.
+                self.broadcast_symbol_to_link_group(link, &symbol)
+            }
+
+            Message::OrderBlotterSetSymbolLink(blotter_id, mode) => {
+                self.link_picker_open = None;
+                if let Some(p) = self.order_blotters.get_mut(&blotter_id) {
+                    p.symbol_link = mode;
+                }
+                self.flush_config()
+            }
+
+            Message::OrderBlotterColumnResizeStart(blotter_id, col_idx) => {
+                let ids = crate::order_blotter::columns::OrderBlotterColumn::ids();
+                if col_idx >= ids.len() {
+                    return Task::none();
+                }
+                let width = self
+                    .order_blotters
+                    .get(&blotter_id)
+                    .map(|p| p.grid_state.column_width(ids[col_idx]))
+                    .unwrap_or(80.0);
+                // start_x is NaN until the first cursor-move lands.
+                self.resizing_blotter_column = Some((blotter_id, col_idx, f32::NAN, width));
+                Task::none()
+            }
+
+            Message::OrderBlotterColumnResizing(cursor_x) => {
+                let Some((blotter_id, col, ref mut start_x, start_w)) =
+                    self.resizing_blotter_column
+                else {
+                    return Task::none();
+                };
+                if start_x.is_nan() {
+                    self.resizing_blotter_column = Some((blotter_id, col, cursor_x, start_w));
+                    return Task::none();
+                }
+                let dx = cursor_x - *start_x;
+                let new_w = (start_w + dx).max(24.0);
+                let ids = crate::order_blotter::columns::OrderBlotterColumn::ids();
+                if col < ids.len() {
+                    if let Some(p) = self.order_blotters.get_mut(&blotter_id) {
+                        p.grid_state.set_column_width(ids[col], new_w, 24.0, None);
+                    }
+                }
+                Task::none()
+            }
+
+            Message::OrderBlotterColumnResizeEnd => {
+                self.resizing_blotter_column = None;
+                self.flush_config()
+            }
+
+            Message::OrderBlotterOpenColumnSelector(blotter_id) => {
+                // Close any other popups first.
+                self.link_picker_open = None;
+                self.blotter_column_selector_open = Some(blotter_id);
+                Task::none()
+            }
+
+            Message::OrderBlotterDismissColumnSelector => {
+                self.blotter_column_selector_open = None;
+                Task::none()
+            }
+
+            Message::OrderBlotterToggleColumn(blotter_id, col_id) => {
+                if let Some(p) = self.order_blotters.get_mut(&blotter_id) {
+                    if p.hidden_columns.contains(&col_id) {
+                        p.hidden_columns.remove(&col_id);
+                    } else {
+                        p.hidden_columns.insert(col_id);
+                    }
+                }
+                self.flush_config()
+            }
+
+            _ => unreachable!(),
+        }
+    }
+
     /// Open a new Orders (blotter) pane in the workspace.
-    pub(crate) fn handle_add_order_blotter(&mut self) -> Task<Message> {
+    fn handle_add_order_blotter(&mut self) -> Task<Message> {
         let Some(focused) = self.workspace.focus else {
             return Task::none();
         };
@@ -1625,9 +1731,8 @@ impl MidasApp {
         Task::none()
     }
 
-    /// Route grid chrome events (sort toggles, row selections) to the
-    /// specified blotter's [`midas_grid::GridState`].
-    pub(crate) fn handle_order_blotter_grid(
+    /// Route `GridMessage`s (sort toggles) to the blotter's grid state.
+    fn handle_order_blotter_grid(
         &mut self,
         blotter_id: midas_core::OrderBlotterId,
         message: midas_grid::GridMessage,
@@ -1733,7 +1838,7 @@ impl MidasApp {
 
             Message::WatchlistToggleFavorite(wl_id, symbol) => {
                 if let Some(wl) = self.watchlists.get_mut(&wl_id) {
-                    wl.toggle_favorite(&symbol);
+                    wl.cycle_favorite(&symbol);
                     return self.flush_config();
                 }
                 Task::none()
@@ -1842,77 +1947,12 @@ impl MidasApp {
                 if let Some(wl) = self.watchlists.get_mut(&wl_id) {
                     wl.selected_symbol = Some(symbol.clone());
                 }
-
-                // Propagate to linked charts using watchlist's own link mode.
-                use crate::link::find_link_targets;
                 let wl_link = self
                     .watchlists
                     .get(&wl_id)
                     .map(|wl| wl.symbol_link)
                     .unwrap_or(LinkMode::Unlinked);
-
-                let mut tasks = Vec::new();
-
-                let targets: Vec<ChartId> = find_link_targets(
-                    wl_link,
-                    self.charts.iter().map(|(id, p)| (*id, p.symbol_link)),
-                );
-                for id in targets {
-                    tasks.push(self.load_symbol_for_chart(id, &symbol));
-                }
-
-                let floating_targets: Vec<window::Id> = find_link_targets(
-                    wl_link,
-                    self.floating_charts
-                        .iter()
-                        .map(|(wid, p)| (*wid, p.symbol_link)),
-                );
-                let wl_sym_key = crate::annotation_store::SymbolKey::new(&symbol);
-                for wid in floating_targets {
-                    let tf = self
-                        .floating_charts
-                        .get(&wid)
-                        .map(|c| c.timeframe)
-                        .unwrap_or(Timeframe::D1);
-                    if let Some(chart) = self.floating_charts.get_mut(&wid) {
-                        chart.bound_symbol = Some(wl_sym_key.clone());
-                        chart.symbol = symbol.clone();
-                        chart.symbol_input = symbol.clone();
-                        chart.load_state = LoadState::Loading;
-                        chart.chart_state.dirty.mark_data();
-                    }
-                    tasks.push(self.load_floating_chart_async(wid, &symbol, tf));
-                }
-
-                // Propagate to order panels via bind_panel_to_symbol.
-                let order_targets: Vec<OrderPanelId> = find_link_targets(
-                    wl_link,
-                    self.order_panels.iter().map(|(id, p)| (*id, p.symbol_link)),
-                );
-                for op_id in order_targets {
-                    let old_sym = self
-                        .order_panels
-                        .get(&op_id)
-                        .map(|p| p.state.symbol.clone())
-                        .unwrap_or_default();
-                    let recalled = self.handle_order_panel_symbol_change(op_id, &old_sym, &symbol);
-                    self.bind_panel_to_symbol(op_id, wl_sym_key.clone());
-                    if let Some(panel) = self.order_panels.get_mut(&op_id) {
-                        if !recalled {
-                            panel.state.tp_value.clear();
-                            panel.state.sl_value.clear();
-                            panel.state.sl_limit_value.clear();
-                        }
-                        panel.state.last_price = None;
-                        panel.state.errors.clear();
-                    }
-                }
-
-                if tasks.is_empty() {
-                    Task::none()
-                } else {
-                    Task::batch(tasks)
-                }
+                self.broadcast_symbol_to_link_group(wl_link, &symbol)
             }
 
             Message::WatchlistSetSymbolLink(wl_id, mode) => {
@@ -3339,6 +3379,89 @@ impl MidasApp {
             }
 
             _ => unreachable!(),
+        }
+    }
+}
+
+// ── Shared symbol-link broadcast ─────────────────────────────────────
+
+impl MidasApp {
+    /// Propagate a selected symbol to every chart, floating window,
+    /// and order panel sharing `source_link`. Called from watchlist
+    /// row clicks and blotter row clicks — behaviour is identical.
+    ///
+    /// `LinkMode::Unlinked` is a no-op. Returns batched data-load
+    /// tasks for every chart that now needs to load the symbol.
+    pub(crate) fn broadcast_symbol_to_link_group(
+        &mut self,
+        source_link: LinkMode,
+        symbol: &str,
+    ) -> Task<Message> {
+        if matches!(source_link, LinkMode::Unlinked) {
+            return Task::none();
+        }
+
+        use crate::link::find_link_targets;
+        let mut tasks = Vec::new();
+
+        let chart_targets: Vec<ChartId> = find_link_targets(
+            source_link,
+            self.charts.iter().map(|(id, p)| (*id, p.symbol_link)),
+        );
+        for id in chart_targets {
+            tasks.push(self.load_symbol_for_chart(id, symbol));
+        }
+
+        let floating_targets: Vec<window::Id> = find_link_targets(
+            source_link,
+            self.floating_charts
+                .iter()
+                .map(|(wid, p)| (*wid, p.symbol_link)),
+        );
+        let sym_key = crate::annotation_store::SymbolKey::new(symbol);
+        for wid in floating_targets {
+            let tf = self
+                .floating_charts
+                .get(&wid)
+                .map(|c| c.timeframe)
+                .unwrap_or(Timeframe::D1);
+            if let Some(chart) = self.floating_charts.get_mut(&wid) {
+                chart.bound_symbol = Some(sym_key.clone());
+                chart.symbol = symbol.to_owned();
+                chart.symbol_input = symbol.to_owned();
+                chart.load_state = LoadState::Loading;
+                chart.chart_state.dirty.mark_data();
+            }
+            tasks.push(self.load_floating_chart_async(wid, symbol, tf));
+        }
+
+        let order_targets: Vec<OrderPanelId> = find_link_targets(
+            source_link,
+            self.order_panels.iter().map(|(id, p)| (*id, p.symbol_link)),
+        );
+        for op_id in order_targets {
+            let old_sym = self
+                .order_panels
+                .get(&op_id)
+                .map(|p| p.state.symbol.clone())
+                .unwrap_or_default();
+            let recalled = self.handle_order_panel_symbol_change(op_id, &old_sym, symbol);
+            self.bind_panel_to_symbol(op_id, sym_key.clone());
+            if let Some(panel) = self.order_panels.get_mut(&op_id) {
+                if !recalled {
+                    panel.state.tp_value.clear();
+                    panel.state.sl_value.clear();
+                    panel.state.sl_limit_value.clear();
+                }
+                panel.state.last_price = None;
+                panel.state.errors.clear();
+            }
+        }
+
+        if tasks.is_empty() {
+            Task::none()
+        } else {
+            Task::batch(tasks)
         }
     }
 }

@@ -1322,17 +1322,22 @@ impl MidasApp {
             view_state.selection.clear();
         }
 
-        // Build grid header + body inline.
+        // Build grid header + body via `midas-grid` helpers.
         // (The Grid builder can't be used here because columns/rows are local
         // variables whose borrows can't escape the function. The Grid API works
         // when data lives on &self — see Phase 2.)
-        use crate::watchlist::{
-            COL_CHANGE, COL_DELETE, COL_DRAG, COL_FAV, COL_GATR, COL_PRICE, COL_TICKER,
+        use crate::watchlist::{COL_CHANGE, COL_DELETE, COL_FAV, COL_GATR, COL_PRICE, COL_TICKER};
+        use midas_grid::{
+            grid_body_cell, grid_body_row, grid_header_cell, HeaderStyle, ResizeHandle,
         };
 
-        // Column definitions: (id, header_label, sortable, width).
-        let col_defs: [(midas_grid::ColumnId, &str, bool); 7] = [
-            (COL_DRAG, "", false),
+        // Column definitions: (id, header_label, sortable).
+        //
+        // `COL_DRAG` has no matching body cell and was shifting the
+        // whole header row one column left of the data. Drop it from
+        // the header — the `col_widths` map still stores a width for
+        // it for legacy configs, but nothing renders it.
+        let col_defs: [(midas_grid::ColumnId, &str, bool); 6] = [
             (COL_FAV, "\u{2605}", false),
             (COL_TICKER, "Ticker", true),
             (COL_PRICE, "Price", true),
@@ -1341,81 +1346,57 @@ impl MidasApp {
             (COL_DELETE, "", false),
         ];
 
+        // Match the order-blotter header: default padding + 0.5 border,
+        // 11-point muted label text. Keeps the two grids visually
+        // identical — one source of truth for panel chrome.
+        let header_style = HeaderStyle {
+            label_color: Some(theme::TEXT_SECONDARY),
+            ..HeaderStyle::default()
+        };
+        // Favourite column is a single glyph and wants to share pixel
+        // coordinates with the body star. Match the body's size and
+        // zero horizontal padding so both are centred on the same axis.
+        let fav_header_style = HeaderStyle {
+            padding: [6, 0],
+            label_size: FAV_STAR_SIZE as u16,
+            align_x: Some(iced::alignment::Horizontal::Center),
+            ..header_style.clone()
+        };
+
         // Header row.
-        let mut header_cells: Vec<Element<'_, Message>> = Vec::with_capacity(13);
+        let mut header_cells: Vec<Element<'_, Message>> = Vec::with_capacity(col_defs.len());
         for (i, &(col_id, label, sortable)) in col_defs.iter().enumerate() {
             let width = view_state.column_width(col_id);
-
-            let header_content: Element<'_, Message> = if sortable {
-                let sort_indicator = view_state
-                    .sort
-                    .filter(|s| s.column_id == col_id)
-                    .map(|s| s.direction.indicator())
-                    .unwrap_or("");
-
-                let msg =
-                    Message::WatchlistGrid(wl_id, midas_grid::GridMessage::SortToggled(col_id));
-                iced::widget::mouse_area(
-                    container(row![text(label).size(12), text(sort_indicator).size(12)])
-                        .width(width)
-                        .padding([2, 4])
-                        .style(|_| container::Style {
-                            border: iced::Border {
-                                color: midas_grid::GRID_HEADER_BORDER_COLOR,
-                                width: 1.0,
-                                radius: 0.0.into(),
-                            },
-                            ..Default::default()
-                        }),
-                )
-                .on_release(msg)
-                .into()
-            } else if label.is_empty() {
-                container(Space::new())
-                    .width(width)
-                    .padding([2, 4])
-                    .style(|_| container::Style {
-                        border: iced::Border {
-                            color: midas_grid::GRID_HEADER_BORDER_COLOR,
-                            width: 1.0,
-                            radius: 0.0.into(),
-                        },
-                        ..Default::default()
-                    })
-                    .into()
+            let sort_indicator = view_state
+                .sort
+                .filter(|s| s.column_id == col_id)
+                .map(|s| s.direction.indicator())
+                .unwrap_or("");
+            let sort_msg = sortable.then(|| {
+                Message::WatchlistGrid(wl_id, midas_grid::GridMessage::SortToggled(col_id))
+            });
+            // `col_idx` is passed in the `WATCHLIST_COLUMN_ORDER` space
+            // (which still has COL_DRAG at index 0), so we offset by +1
+            // to account for the DRAG column we no longer render.
+            let resize = (i < col_defs.len() - 1).then(|| ResizeHandle {
+                on_press: Message::WatchlistColumnResizeStart(wl_id, i + 1, 0.0),
+                height: 26.0,
+            });
+            let style = if col_id == COL_FAV {
+                &fav_header_style
             } else {
-                container(text(label).size(12))
-                    .width(width)
-                    .padding([2, 4])
-                    .style(|_| container::Style {
-                        border: iced::Border {
-                            color: midas_grid::GRID_HEADER_BORDER_COLOR,
-                            width: 1.0,
-                            radius: 0.0.into(),
-                        },
-                        ..Default::default()
-                    })
-                    .into()
+                &header_style
             };
-
-            // Wrap header cell with a resize handle on the right edge.
-            // The handle is layered on top via stack so it doesn't add width.
-            if i < col_defs.len() - 1 {
-                let col_idx = i;
-                let resize_handle = container(
-                    iced::widget::mouse_area(Space::new().width(4).height(26))
-                        .interaction(iced::mouse::Interaction::ResizingHorizontally)
-                        .on_press(Message::WatchlistColumnResizeStart(wl_id, col_idx, 0.0)),
-                )
-                .width(Fill)
-                .align_x(iced::alignment::Horizontal::Right);
-
-                header_cells.push(stack![header_content, resize_handle].width(width).into());
-            } else {
-                header_cells.push(header_content);
-            }
+            header_cells.push(grid_header_cell(
+                label,
+                width,
+                sort_indicator,
+                sort_msg,
+                resize,
+                style,
+            ));
         }
-        let header = Row::with_children(header_cells).padding([0, 4]);
+        let header = Row::with_children(header_cells);
 
         // Body rows.
         let mut body_rows = Column::new();
@@ -1428,26 +1409,16 @@ impl MidasApp {
         } else {
             for (row_idx, row_data) in grid_rows.iter().enumerate() {
                 let is_selected = view_state.selection.is_selected(row_idx);
-                let row_bg = if is_selected {
-                    Color::from_rgba(0.2, 0.35, 0.55, 0.6)
-                } else {
-                    Color::TRANSPARENT
-                };
 
                 // Build cells matching column order.
-                let fav_label = if row_data.favorite {
-                    "\u{2605}"
-                } else {
-                    "\u{2606}"
-                };
                 let sym = row_data.symbol.clone();
                 let sym_del = row_data.symbol.clone();
                 let sym_drag = row_data.symbol.clone();
 
-                let fav_btn = button(text(fav_label).size(12))
-                    .on_press(Message::WatchlistToggleFavorite(wl_id, sym))
-                    .padding([2, 4])
-                    .style(hover_text_button_style);
+                let fav_btn = favorite_star_button(
+                    row_data.favorite,
+                    Message::WatchlistToggleFavorite(wl_id, sym),
+                );
 
                 let del_btn = button(text("\u{00D7}").size(12))
                     .on_press(Message::WatchlistRemoveTicker(wl_id, sym_del))
@@ -1455,9 +1426,11 @@ impl MidasApp {
                     .style(hover_text_button_style);
 
                 // Ticker cell is a drag handle — clicking it starts a drag.
+                // Inner mouse_area captures the press so the outer
+                // `grid_body_row` click only fires on a non-ticker cell.
                 let ticker_cell = iced::widget::mouse_area(
                     text(row_data.symbol.clone())
-                        .size(13)
+                        .size(12)
                         .wrapping(iced::widget::text::Wrapping::None)
                         .color(theme::TEXT_PRIMARY),
                 )
@@ -1465,51 +1438,56 @@ impl MidasApp {
 
                 let w = |col_id| view_state.column_width(col_id);
 
+                // Body cells match the order-blotter layout: text size
+                // 12, `[4, 8]` padding, and clip(true) so values never
+                // bleed into the next column.
                 use iced::widget::text::Wrapping;
-                let inner_row = Row::with_children(vec![
-                    grid_data_cell(fav_btn.into(), w(COL_FAV)),
-                    grid_data_cell(ticker_cell.into(), w(COL_TICKER)),
-                    grid_data_cell(
-                        text(row_data.price_text.clone())
-                            .size(13)
+                let text_cell = |s: String, width: f32, color: Color| -> Element<'_, Message> {
+                    grid_body_cell(
+                        text(s)
+                            .size(12)
                             .wrapping(Wrapping::None)
-                            .color(theme::TEXT_PRIMARY)
+                            .color(color)
                             .into(),
+                        width,
+                    )
+                };
+
+                // Favourite-star cell centres both axes so the header
+                // star (also centred) lines up with body stars. Width
+                // is clipped for symmetry with the other cells.
+                let fav_cell: Element<'_, Message> = container(fav_btn)
+                    .width(w(COL_FAV))
+                    .height(Fill)
+                    .align_x(iced::alignment::Horizontal::Center)
+                    .align_y(iced::alignment::Vertical::Center)
+                    .clip(true)
+                    .into();
+
+                let cells: Vec<Element<'_, Message>> = vec![
+                    fav_cell,
+                    grid_body_cell(ticker_cell.into(), w(COL_TICKER)),
+                    text_cell(
+                        row_data.price_text.clone(),
                         w(COL_PRICE),
+                        theme::TEXT_PRIMARY,
                     ),
-                    grid_data_cell(
-                        text(row_data.change_text.clone())
-                            .size(13)
-                            .wrapping(Wrapping::None)
-                            .color(row_data.change_color)
-                            .into(),
+                    text_cell(
+                        row_data.change_text.clone(),
                         w(COL_CHANGE),
+                        row_data.change_color,
                     ),
-                    grid_data_cell(
-                        text(row_data.gatr_text.clone())
-                            .size(13)
-                            .wrapping(Wrapping::None)
-                            .color(row_data.gatr_color)
-                            .into(),
-                        w(COL_GATR),
-                    ),
-                    grid_data_cell(del_btn.into(), w(COL_DELETE)),
-                ])
-                .padding([0, 4])
-                .align_y(iced::Alignment::Center);
+                    text_cell(row_data.gatr_text.clone(), w(COL_GATR), row_data.gatr_color),
+                    grid_body_cell(del_btn.into(), w(COL_DELETE)),
+                ];
 
                 // Emit WatchlistTickerSelected directly with the symbol.
                 // This avoids the sorted-index mismatch: the view knows the
                 // correct symbol at each visual row position.
-                let sym_for_select = row_data.symbol.clone();
-                let msg = Message::WatchlistTickerSelected(wl_id, sym_for_select);
-                let ticker_row = iced::widget::mouse_area(container(inner_row).style(move |_| {
-                    container::Style {
-                        background: Some(row_bg.into()),
-                        ..Default::default()
-                    }
-                }))
-                .on_release(msg);
+                let click_msg = Message::WatchlistTickerSelected(wl_id, row_data.symbol.clone());
+                // Alternating row tint, matching the blotter.
+                let ticker_row =
+                    grid_body_row(cells, is_selected, row_idx % 2 == 0, Some(click_msg));
 
                 body_rows = body_rows.push(ticker_row);
             }
@@ -2269,6 +2247,46 @@ impl MidasApp {
             name
         };
 
+        // Symbol-link [S] button. Colour matches the link group so
+        // users can see at a glance which colour they're bound to.
+        let link = self
+            .order_blotters
+            .get(&blotter_id)
+            .map(|p| p.symbol_link)
+            .unwrap_or(LinkMode::Unlinked);
+        let link_rgba = link_mode_indicator_rgba(link);
+        let bold_font = iced::Font {
+            weight: iced::font::Weight::Bold,
+            ..iced::Font::default()
+        };
+        let link_btn: Element<'_, Message> =
+            button(text("S").size(10).color(Color::WHITE).font(bold_font))
+                .on_press(Message::ToggleLinkPicker(
+                    PickerTarget::OrderBlotter(blotter_id),
+                    LinkDimension::Symbol,
+                ))
+                .padding([2, 5])
+                .style(move |_theme, _status| button::Style {
+                    background: Some(
+                        Color::from_rgba(link_rgba[0], link_rgba[1], link_rgba[2], link_rgba[3])
+                            .into(),
+                    ),
+                    text_color: Color::WHITE,
+                    border: iced::Border {
+                        radius: 2.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .into();
+
+        let gear_btn: Element<'_, Message> =
+            button(text("⋮").size(12).color(theme::TEXT_SECONDARY))
+                .on_press(Message::OrderBlotterOpenColumnSelector(blotter_id))
+                .padding([2, 6])
+                .style(hover_text_button_style)
+                .into();
+
         let close_btn: Element<'_, Message> = button(text("X").size(10))
             .on_press(Message::PaneClose(pane))
             .padding([2, 6])
@@ -2280,7 +2298,15 @@ impl MidasApp {
                 .align_y(iced::Alignment::Center),
         )
         .controls(Element::from(
-            row![close_btn].spacing(2).align_y(iced::Alignment::Center),
+            row![
+                link_btn,
+                Space::new().width(4),
+                gear_btn,
+                Space::new().width(2),
+                close_btn
+            ]
+            .spacing(2)
+            .align_y(iced::Alignment::Center),
         ))
         .padding([2, 4])
         .always_show_controls()
@@ -2341,18 +2367,20 @@ impl MidasApp {
             }
         }
 
-        // Hand-build the table inline rather than calling
-        // `midas_grid::grid()` — the same constraint that
-        // `view_watchlist_body` hits: the grid builder borrows `rows`,
-        // and the local `Vec<DisplayRow>` can't escape the view fn.
+        // Hand-built table — `midas_grid::grid()` can't borrow a
+        // Vec<DisplayRow> local to this view fn (see watchlist body
+        // for the same constraint).
 
         use crate::order_blotter::columns::{
             symbol_badge, COL_AVG_FILL, COL_INSTRUCTION, COL_LAST_UPDATE, COL_LIMIT, COL_ORDER_ID,
             COL_QTY, COL_SIDE, COL_SL, COL_STATUS, COL_STOP, COL_SYMBOL, COL_TP, COL_TYPE,
         };
-        use iced::widget::{mouse_area, scrollable, Column as IcedColumn, Row as IcedRow};
+        use iced::widget::{scrollable, Column as IcedColumn, Row as IcedRow};
+        use midas_grid::{
+            grid_body_cell, grid_body_row, grid_header_cell, HeaderStyle, ResizeHandle,
+        };
 
-        let col_defs: [(midas_grid::ColumnId, &str, bool); 13] = [
+        const ALL_COL_DEFS: &[(midas_grid::ColumnId, &str, bool)] = &[
             (COL_SYMBOL, "Symbol", false),
             (COL_SIDE, "Side", true),
             (COL_TYPE, "Type", true),
@@ -2368,9 +2396,27 @@ impl MidasApp {
             (COL_ORDER_ID, "Order ID", true),
         ];
 
+        // Filter out hidden columns. Symbol stays always visible —
+        // a blotter with no symbol cell is useless.
+        let visible: Vec<(midas_grid::ColumnId, &'static str, bool, usize)> = ALL_COL_DEFS
+            .iter()
+            .enumerate()
+            .filter(|(_, (col_id, _, _))| {
+                *col_id == COL_SYMBOL || !panel.hidden_columns.contains(col_id)
+            })
+            .map(|(idx, (col_id, label, sortable))| (*col_id, *label, *sortable, idx))
+            .collect();
+
         // ── Header ─────────────────────────────────────────────────
-        let mut header_cells: Vec<Element<'_, Message>> = Vec::with_capacity(col_defs.len());
-        for (col_id, label, sortable) in col_defs.iter().copied() {
+        // Blotter uses the default HeaderStyle: [6, 8] padding, 0.5px
+        // border, 11-point muted label text.
+        let header_style = HeaderStyle {
+            label_color: Some(theme::TEXT_SECONDARY),
+            ..HeaderStyle::default()
+        };
+        let mut header_cells: Vec<Element<'_, Message>> = Vec::with_capacity(visible.len());
+        let last_idx = visible.len().saturating_sub(1);
+        for (i, (col_id, label, sortable, all_col_idx)) in visible.iter().copied().enumerate() {
             let width = panel.grid_state.column_width(col_id);
             let indicator = panel
                 .grid_state
@@ -2378,55 +2424,33 @@ impl MidasApp {
                 .filter(|s| s.column_id == col_id)
                 .map(|s| s.direction.indicator())
                 .unwrap_or("");
-            let header_inner = IcedRow::new()
-                .push(text(label).size(11).color(theme::TEXT_SECONDARY))
-                .push(text(indicator).size(11).color(theme::TEXT_SECONDARY))
-                .spacing(4);
-            let cell: Element<'_, Message> = if sortable {
-                mouse_area(
-                    container(header_inner)
-                        .width(width)
-                        .padding([6, 8])
-                        .style(|_| container::Style {
-                            border: iced::Border {
-                                color: midas_grid::GRID_HEADER_BORDER_COLOR,
-                                width: 0.5,
-                                radius: 0.0.into(),
-                            },
-                            ..Default::default()
-                        }),
-                )
-                .on_press(Message::OrderBlotterGrid(
-                    blotter_id,
-                    midas_grid::GridMessage::SortToggled(col_id),
-                ))
-                .into()
-            } else {
-                container(header_inner)
-                    .width(width)
-                    .padding([6, 8])
-                    .style(|_| container::Style {
-                        border: iced::Border {
-                            color: midas_grid::GRID_HEADER_BORDER_COLOR,
-                            width: 0.5,
-                            radius: 0.0.into(),
-                        },
-                        ..Default::default()
-                    })
-                    .into()
-            };
-            header_cells.push(cell);
+            let sort_msg = sortable.then(|| {
+                Message::OrderBlotterGrid(blotter_id, midas_grid::GridMessage::SortToggled(col_id))
+            });
+            // `all_col_idx` refers to the position in `ALL_COL_DEFS` /
+            // `OrderBlotterColumn::ids()` so visibility changes don't
+            // invalidate saved widths. Last visible column has no
+            // resize handle (no column to drag against on the right).
+            let resize = (i < last_idx).then(|| ResizeHandle {
+                on_press: Message::OrderBlotterColumnResizeStart(blotter_id, all_col_idx),
+                height: 26.0,
+            });
+            header_cells.push(grid_header_cell(
+                label,
+                width,
+                indicator,
+                sort_msg,
+                resize,
+                &header_style,
+            ));
         }
+
         let header = IcedRow::with_children(header_cells);
 
         // ── Body rows ─────────────────────────────────────────────
         let mut body = IcedColumn::new();
         for (row_idx, r) in rows.iter().enumerate() {
-            let bg = if row_idx % 2 == 0 {
-                Color::from_rgba(1.0, 1.0, 1.0, 0.02)
-            } else {
-                Color::TRANSPARENT
-            };
+            let is_selected = panel.selected_row == Some(r.order_uuid);
             let w = |id| panel.grid_state.column_width(id);
 
             let side_color = match r.side {
@@ -2458,72 +2482,170 @@ impl MidasApp {
                 } else {
                     container(body).width(Fill)
                 };
-                container(aligned).width(width).padding([4, 8]).into()
+                grid_body_cell(aligned.into(), width)
             };
 
-            // Symbol badge owns a String too, via badge() — clone the
-            // symbol once and pass by value so the widget tree doesn't
-            // borrow from `r` (which is dropped at end of loop).
-            let symbol_cell: Element<'_, Message> =
-                container(symbol_badge(r.symbol.clone(), r.side))
-                    .width(w(COL_SYMBOL))
-                    .padding([4, 6])
-                    .into();
+            let mut cells: Vec<Element<'_, Message>> = Vec::with_capacity(visible.len());
+            for (col_id, _, _, _) in visible.iter().copied() {
+                let cell: Element<'_, Message> = match col_id {
+                    id if id == COL_SYMBOL => {
+                        grid_body_cell(symbol_badge(r.symbol.clone(), r.side).into(), w(COL_SYMBOL))
+                    }
+                    id if id == COL_SIDE => text_cell(
+                        match r.side {
+                            midas_core::broker::OrderAction::Buy => "Buy".to_owned(),
+                            midas_core::broker::OrderAction::Sell => "Sell".to_owned(),
+                        },
+                        12,
+                        w(COL_SIDE),
+                        side_color,
+                        false,
+                    ),
+                    id if id == COL_TYPE => {
+                        text_cell(r.kind_text.clone(), 12, w(COL_TYPE), primary, false)
+                    }
+                    id if id == COL_QTY => {
+                        text_cell(r.qty_text.clone(), 12, w(COL_QTY), primary, true)
+                    }
+                    id if id == COL_AVG_FILL => {
+                        text_cell(r.avg_fill_text.clone(), 12, w(COL_AVG_FILL), primary, true)
+                    }
+                    id if id == COL_LIMIT => {
+                        text_cell(r.limit_text.clone(), 12, w(COL_LIMIT), primary, true)
+                    }
+                    id if id == COL_STOP => {
+                        text_cell(r.stop_text.clone(), 12, w(COL_STOP), primary, true)
+                    }
+                    id if id == COL_TP => {
+                        text_cell(r.tp_text.clone(), 12, w(COL_TP), primary, true)
+                    }
+                    id if id == COL_SL => {
+                        text_cell(r.sl_text.clone(), 12, w(COL_SL), primary, true)
+                    }
+                    id if id == COL_STATUS => text_cell(
+                        r.status.as_str().to_owned(),
+                        12,
+                        w(COL_STATUS),
+                        status_color,
+                        false,
+                    ),
+                    id if id == COL_LAST_UPDATE => text_cell(
+                        r.last_update_text.clone(),
+                        11,
+                        w(COL_LAST_UPDATE),
+                        primary,
+                        true,
+                    ),
+                    id if id == COL_INSTRUCTION => text_cell(
+                        r.instruction_text.clone(),
+                        12,
+                        w(COL_INSTRUCTION),
+                        primary,
+                        false,
+                    ),
+                    id if id == COL_ORDER_ID => {
+                        text_cell(r.order_id.clone(), 11, w(COL_ORDER_ID), primary, true)
+                    }
+                    _ => Space::new().into(),
+                };
+                cells.push(cell);
+            }
 
-            let cells: Vec<Element<'_, Message>> = vec![
-                symbol_cell,
-                text_cell(
-                    match r.side {
-                        midas_core::broker::OrderAction::Buy => "Buy".to_owned(),
-                        midas_core::broker::OrderAction::Sell => "Sell".to_owned(),
-                    },
-                    12,
-                    w(COL_SIDE),
-                    side_color,
-                    false,
-                ),
-                text_cell(r.kind_text.clone(), 12, w(COL_TYPE), primary, false),
-                text_cell(r.qty_text.clone(), 12, w(COL_QTY), primary, true),
-                text_cell(r.avg_fill_text.clone(), 12, w(COL_AVG_FILL), primary, true),
-                text_cell(r.limit_text.clone(), 12, w(COL_LIMIT), primary, true),
-                text_cell(r.stop_text.clone(), 12, w(COL_STOP), primary, true),
-                text_cell(r.tp_text.clone(), 12, w(COL_TP), primary, true),
-                text_cell(r.sl_text.clone(), 12, w(COL_SL), primary, true),
-                text_cell(
-                    r.status.as_str().to_owned(),
-                    12,
-                    w(COL_STATUS),
-                    status_color,
-                    false,
-                ),
-                text_cell(
-                    r.last_update_text.clone(),
-                    11,
-                    w(COL_LAST_UPDATE),
-                    primary,
-                    true,
-                ),
-                text_cell(
-                    r.instruction_text.clone(),
-                    12,
-                    w(COL_INSTRUCTION),
-                    primary,
-                    false,
-                ),
-                text_cell(r.order_id.clone(), 11, w(COL_ORDER_ID), primary, true),
-            ];
-
-            let row_widget =
-                container(IcedRow::with_children(cells))
-                    .width(Fill)
-                    .style(move |_| container::Style {
-                        background: Some(bg.into()),
-                        ..Default::default()
-                    });
+            // Clicking anywhere in the row broadcasts that row's symbol
+            // to the link group. No-op when `symbol_link == Unlinked`.
+            let click_msg =
+                Message::OrderBlotterRowSelected(blotter_id, r.order_uuid, r.symbol.clone());
+            let row_widget = grid_body_row(cells, is_selected, row_idx % 2 == 0, Some(click_msg));
             body = body.push(row_widget);
         }
 
-        column![header, scrollable(body).height(Fill)].into()
+        let main_content: Element<'_, Message> = column![header, scrollable(body).height(Fill)]
+            .width(Fill)
+            .height(Fill)
+            .into();
+
+        // ── Overlays ─────────────────────────────────────────────
+        // Three possible overlays, layered in priority: resize drag
+        // surface, column-selector popup, link picker. Each is its
+        // own stack layer.
+        let needs_resize_overlay = self
+            .resizing_blotter_column
+            .map(|(id, _, _, _)| id == blotter_id)
+            .unwrap_or(false);
+        let needs_column_selector = self.blotter_column_selector_open == Some(blotter_id);
+        let needs_link_picker = matches!(
+            self.link_picker_open,
+            Some((PickerTarget::OrderBlotter(id), _)) if id == blotter_id
+        );
+
+        if !needs_resize_overlay && !needs_column_selector && !needs_link_picker {
+            return main_content;
+        }
+
+        let mut layers: Vec<Element<'_, Message>> = vec![main_content];
+
+        if needs_resize_overlay {
+            layers.push(
+                iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
+                    .interaction(iced::mouse::Interaction::ResizingHorizontally)
+                    .on_move(|point| Message::OrderBlotterColumnResizing(point.x))
+                    .on_release(Message::OrderBlotterColumnResizeEnd)
+                    .into(),
+            );
+        }
+
+        if needs_column_selector {
+            let backdrop = iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
+                .on_press(Message::OrderBlotterDismissColumnSelector);
+            layers.push(backdrop.into());
+
+            // Build the column-entry vector from `ALL_COL_DEFS`, marking
+            // Symbol as the sole mandatory entry. Entry order follows the
+            // slice order.
+            let entries: Vec<midas_grid::ColumnEntry<'_>> = ALL_COL_DEFS
+                .iter()
+                .map(|(col_id, label, _)| midas_grid::ColumnEntry {
+                    id: *col_id,
+                    label,
+                    mandatory: *col_id == COL_SYMBOL,
+                })
+                .collect();
+            let popup = midas_grid::column_selector_popup(
+                &entries,
+                &panel.hidden_columns,
+                move |col_id| Message::OrderBlotterToggleColumn(blotter_id, col_id),
+                Message::OrderBlotterDismissColumnSelector,
+            );
+            layers.push(
+                container(popup)
+                    .align_x(iced::alignment::Horizontal::Right)
+                    .align_y(iced::alignment::Vertical::Top)
+                    .padding([4, 6])
+                    .width(Fill)
+                    .height(Fill)
+                    .into(),
+            );
+        }
+
+        if needs_link_picker {
+            let backdrop = iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
+                .on_press(Message::DismissLinkPicker);
+            let picker = self.build_link_picker(LinkDimension::Symbol, move |mode| {
+                Message::OrderBlotterSetSymbolLink(blotter_id, mode)
+            });
+            layers.push(backdrop.into());
+            layers.push(
+                container(picker)
+                    .align_x(iced::alignment::Horizontal::Right)
+                    .align_y(iced::alignment::Vertical::Top)
+                    .padding([4, 4])
+                    .width(Fill)
+                    .height(Fill)
+                    .into(),
+            );
+        }
+
+        stack(layers).width(Fill).height(Fill).into()
     }
 }
 
@@ -3225,26 +3347,97 @@ fn build_gerchik_atr_overlay<'a>(
     .into()
 }
 
-// ── Grid cell helpers ──────────────────────────────────────────────
+// ── Favourite-star widget ───────────────────────────────────────────
 
-/// Wrap content in a grid data cell with border styling.
-/// Uses a fixed row height and clips overflow so text never wraps.
-fn grid_data_cell<'a>(content: Element<'a, Message>, width: f32) -> Element<'a, Message> {
-    container(content)
-        .width(width)
-        .height(28.0)
-        .padding([2, 4])
-        .align_y(iced::alignment::Vertical::Center)
-        .clip(true)
-        .style(|_| container::Style {
-            border: iced::Border {
-                color: midas_grid::GRID_BORDER_COLOR,
-                width: 1.0,
-                radius: 0.0.into(),
-            },
-            ..Default::default()
-        })
+/// Font size of the favourite-star glyph. Chosen to leave room for a
+/// digit overlay at level ≥ 1 without becoming the tallest thing in
+/// the body row.
+const FAV_STAR_SIZE: f32 = 20.0;
+
+/// Warm gold reached at favourite level 5.
+const FAV_GOLD: [f32; 3] = [1.00, 0.82, 0.20];
+
+/// Dim silver at favourite level 1. Stays subtly darker than primary
+/// text so the dim end of the gradient reads as "barely pinned".
+const FAV_SILVER: [f32; 3] = [0.55, 0.55, 0.60];
+
+/// Build the favourite-star cell contents for a watchlist row.
+///
+/// - `level == 0`: outline glyph in muted text colour, no overlay.
+/// - `level 1..=5`: filled glyph, colour interpolated silver→gold with
+///   brightness rising toward the gold end, level digit overlaid in
+///   bold and centred inside the glyph.
+fn favorite_star_button<'a>(level: u8, on_press: Message) -> Element<'a, Message> {
+    use iced::widget::stack;
+
+    let content: Element<'a, Message> = if level == 0 {
+        text("\u{2606}")
+            .size(FAV_STAR_SIZE)
+            .color(theme::TEXT_MUTED)
+            .into()
+    } else {
+        let star_color = favorite_star_color(level);
+        let star = text("\u{2605}").size(FAV_STAR_SIZE).color(star_color);
+
+        // The ★ glyph is denser in its lower half; the digit needs to
+        // sit just below the geometric centre so it looks centred
+        // inside the visible shape.
+        let bold = iced::Font {
+            weight: iced::font::Weight::Bold,
+            ..iced::Font::default()
+        };
+        let digit = text(level.to_string())
+            .size(10)
+            .color(Color::from_rgb(0.08, 0.08, 0.10))
+            .font(bold);
+        let overlay = container(digit)
+            .width(Fill)
+            .height(Fill)
+            .align_x(iced::alignment::Horizontal::Center)
+            .align_y(iced::alignment::Vertical::Center)
+            .padding([2, 0]);
+
+        stack![star, overlay].into()
+    };
+
+    button(content)
+        .on_press(on_press)
+        .padding([1, 4])
+        .style(fav_star_button_style)
         .into()
+}
+
+/// Silver→gold gradient for favourite levels `1..=5`.
+fn favorite_star_color(level: u8) -> Color {
+    let level = level.clamp(1, 5);
+    let t = (level as f32 - 1.0) / 4.0; // 0.0 at 1, 1.0 at 5
+    let r = FAV_SILVER[0] + (FAV_GOLD[0] - FAV_SILVER[0]) * t;
+    let g = FAV_SILVER[1] + (FAV_GOLD[1] - FAV_SILVER[1]) * t;
+    let b = FAV_SILVER[2] + (FAV_GOLD[2] - FAV_SILVER[2]) * t;
+    Color::from_rgb(r, g, b)
+}
+
+/// Background hover/press feedback for the favourite-star button with
+/// no text-colour override (the inner text widgets carry their own
+/// colours for gradient + digit overlay).
+fn fav_star_button_style(_theme: &iced::Theme, status: button::Status) -> button::Style {
+    let background = match status {
+        button::Status::Hovered => Some(iced::Background::Color(Color::from_rgba(
+            1.0, 1.0, 1.0, 0.1,
+        ))),
+        button::Status::Pressed => Some(iced::Background::Color(Color::from_rgba(
+            1.0, 1.0, 1.0, 0.15,
+        ))),
+        _ => None,
+    };
+    button::Style {
+        background,
+        border: iced::Border {
+            width: 0.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
 }
 
 // ── Button style helpers ────────────────────────────────────────────

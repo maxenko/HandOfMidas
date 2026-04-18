@@ -50,14 +50,17 @@ fn remove_ticker_case_insensitive() {
 }
 
 #[test]
-fn toggle_favorite() {
+fn cycle_favorite_advances_through_levels() {
     let mut wl = WatchlistPanel::new(WatchlistId::new(1), "Test".into());
     wl.add_ticker("AAPL");
-    assert!(!wl.tickers[0].favorite);
-    wl.toggle_favorite("aapl");
-    assert!(wl.tickers[0].favorite);
-    wl.toggle_favorite("AAPL");
-    assert!(!wl.tickers[0].favorite);
+    assert_eq!(wl.tickers[0].favorite, 0);
+    for expected in 1..=5 {
+        wl.cycle_favorite("aapl");
+        assert_eq!(wl.tickers[0].favorite, expected);
+    }
+    // One more click wraps back to 0.
+    wl.cycle_favorite("AAPL");
+    assert_eq!(wl.tickers[0].favorite, 0);
 }
 
 #[test]
@@ -75,7 +78,9 @@ fn config_roundtrip() {
     let mut wl = WatchlistPanel::new(WatchlistId::new(1), "Main".into());
     wl.add_ticker("AAPL");
     wl.add_ticker("MSFT");
-    wl.toggle_favorite("AAPL");
+    wl.cycle_favorite("AAPL");
+    wl.cycle_favorite("AAPL");
+    wl.cycle_favorite("AAPL");
 
     let config = wl.to_config();
     let restored = WatchlistPanel::from_config(WatchlistId::new(2), &config);
@@ -83,9 +88,9 @@ fn config_roundtrip() {
     assert_eq!(restored.name, "Main");
     assert_eq!(restored.tickers.len(), 2);
     assert_eq!(restored.tickers[0].symbol, "AAPL");
-    assert!(restored.tickers[0].favorite);
+    assert_eq!(restored.tickers[0].favorite, 3);
     assert_eq!(restored.tickers[1].symbol, "MSFT");
-    assert!(!restored.tickers[1].favorite);
+    assert_eq!(restored.tickers[1].favorite, 0);
     // Transient state is not persisted.
     assert!(restored.add_ticker_input.is_empty());
     assert!(restored.selected_symbol.is_none());

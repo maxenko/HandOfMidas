@@ -35,7 +35,7 @@ pub const WATCHLIST_COLUMN_ORDER: [midas_grid::ColumnId; 7] = [
 pub fn default_column_widths() -> HashMap<midas_grid::ColumnId, f32> {
     let mut m = HashMap::new();
     m.insert(COL_DRAG, 26.0);
-    m.insert(COL_FAV, 30.0);
+    m.insert(COL_FAV, 34.0);
     m.insert(COL_TICKER, 70.0);
     m.insert(COL_PRICE, 80.0);
     m.insert(COL_CHANGE, 65.0);
@@ -51,8 +51,12 @@ pub fn default_column_widths() -> HashMap<midas_grid::ColumnId, f32> {
 pub struct WatchlistTicker {
     /// Ticker symbol, always uppercase (e.g. `"AAPL"`).
     pub symbol: String,
-    /// Whether this ticker is marked as a favorite.
-    pub favorite: bool,
+    /// Favourite level: `0` = off, `1..=5` = graded silver→gold.
+    ///
+    /// Click cycles through `0 → 1 → 2 → 3 → 4 → 5 → 0`. Higher levels
+    /// sort first so pinning a ticker with a higher level keeps it at
+    /// the top of the list.
+    pub favorite: u8,
 }
 
 // ── Watchlist panel ─────────────────────────────────────────────────
@@ -100,6 +104,13 @@ impl WatchlistPanel {
         if config.column_widths.len() == 7 {
             let ids = WATCHLIST_COLUMN_ORDER;
             for (i, &w) in config.column_widths.iter().enumerate() {
+                // COL_FAV is non-resizable and its default width is tuned
+                // to the current star size — ignore the saved value so
+                // older configs don't squeeze the glyph into a narrow
+                // column.
+                if ids[i] == COL_FAV {
+                    continue;
+                }
                 widths.insert(ids[i], w.max(20.0));
             }
         }
@@ -155,7 +166,7 @@ impl WatchlistPanel {
         }
         self.tickers.push(WatchlistTicker {
             symbol: normalized,
-            favorite: false,
+            favorite: 0,
         });
         true
     }
@@ -166,11 +177,15 @@ impl WatchlistPanel {
         self.tickers.retain(|t| t.symbol != upper);
     }
 
-    /// Toggle the favorite status of a ticker (case-insensitive).
-    pub fn toggle_favorite(&mut self, symbol: &str) {
+    /// Advance the favourite level of a ticker (case-insensitive).
+    ///
+    /// Levels cycle `0 → 1 → 2 → 3 → 4 → 5 → 0` so a single click type
+    /// covers both "promote" and "clear". Levels above 5 are clamped
+    /// back to 0 defensively.
+    pub fn cycle_favorite(&mut self, symbol: &str) {
         let upper = symbol.to_uppercase();
         if let Some(t) = self.tickers.iter_mut().find(|t| t.symbol == upper) {
-            t.favorite = !t.favorite;
+            t.favorite = if t.favorite >= 5 { 0 } else { t.favorite + 1 };
         }
     }
 

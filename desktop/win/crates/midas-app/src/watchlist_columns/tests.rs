@@ -123,7 +123,7 @@ fn cmp_option_f64_ordering() {
 fn test_row(symbol: &str) -> WatchlistRow {
     WatchlistRow {
         symbol: symbol.to_owned(),
-        favorite: false,
+        favorite: 0,
         price_text: "--".into(),
         change_text: "--".into(),
         change_color: COLOR_NEUTRAL,
@@ -138,7 +138,7 @@ fn test_row(symbol: &str) -> WatchlistRow {
 fn test_row_with_price(symbol: &str, price: Option<f64>) -> WatchlistRow {
     WatchlistRow {
         symbol: symbol.to_owned(),
-        favorite: false,
+        favorite: 0,
         price_text: price.map(|p| format!("{p:.2}")).unwrap_or("--".into()),
         change_text: "--".into(),
         change_color: COLOR_NEUTRAL,

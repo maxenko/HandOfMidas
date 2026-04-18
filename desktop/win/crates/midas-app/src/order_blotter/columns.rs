@@ -10,6 +10,7 @@ use iced::{Color, Element};
 
 use midas_core::broker::{EntryKind, OrderAction, TimeInForce};
 use midas_grid::{Alignment, ColumnId, ColumnWidth, GridColumn};
+use uuid::Uuid;
 
 use crate::app::Message;
 
@@ -58,6 +59,10 @@ const BADGE_BG: Color = Color::from_rgba(1.0, 1.0, 1.0, 0.08);
 pub struct DisplayRow {
     pub order_id: String,
     pub order_id_sort_key: u128,
+    /// Full broker-assigned Uuid for the order. Used at render time to
+    /// match against `OrderBlotterPanel::selected_row` and as the payload
+    /// of `Message::OrderBlotterRowSelected`.
+    pub order_uuid: Uuid,
     pub symbol: String,
     pub side: OrderAction,
     pub leg_role: LegRole,
@@ -94,6 +99,7 @@ impl DisplayRow {
         Self {
             order_id: short_uuid(row.order_id),
             order_id_sort_key: row.order_id.as_u128(),
+            order_uuid: row.order_id,
             symbol: row.symbol.clone(),
             side: row.side,
             leg_role: row.leg_role,
