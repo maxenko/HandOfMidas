@@ -4,6 +4,7 @@
 //! [`crate::header::grid_header`] / [`crate::body::grid_body`] instead.
 
 use iced::alignment::Horizontal;
+use iced::widget::text::Wrapping;
 use iced::widget::{container, mouse_area, row, stack, text, Space};
 use iced::{Color, Element, Fill};
 
@@ -77,7 +78,7 @@ pub fn grid_header_cell<'a, M: Clone + 'a>(
     let label_size = style.label_size;
     let label_color = style.label_color;
 
-    let mut label_text = text(label).size(label_size as f32);
+    let mut label_text = text(label).size(label_size as f32).wrapping(Wrapping::None);
     if let Some(color) = label_color {
         label_text = label_text.color(color);
     }
@@ -87,7 +88,9 @@ pub fn grid_header_cell<'a, M: Clone + 'a>(
     let label_inner: Element<'a, M> = if sort_indicator.is_empty() {
         label_text.into()
     } else {
-        let mut indicator_text = text(sort_indicator).size(label_size as f32);
+        let mut indicator_text = text(sort_indicator)
+            .size(label_size as f32)
+            .wrapping(Wrapping::None);
         if let Some(color) = label_color {
             indicator_text = indicator_text.color(color);
         }
