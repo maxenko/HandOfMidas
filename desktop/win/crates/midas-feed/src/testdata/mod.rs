@@ -382,9 +382,22 @@ fn generate_daily_bars(personality: &StockPersonality, seed: u64) -> Vec<OhlcvBa
         .sqrt()
         .clamp(rp.volatility * 0.3, rp.volatility * 3.0);
 
-        // 3. Daily return with momentum and fat-tail noise
+        // 3. Daily return with momentum, fat-tail noise, and a weak log-
+        //    space pull toward `start_price`. Without the reversion term,
+        //    the regime-switching + momentum + GARCH process is a pure
+        //    random walk: over the ~2600-day horizon, unlucky seeds can
+        //    drift to the `0.01` absolute floor and stay there, producing
+        //    flat tails that the thumbnail sparkline can't render (y_min
+        //    == y_max collapses the shader's normalisation span). The
+        //    rate below gives a ~230-day half-life — gentle enough to
+        //    preserve short-term volatility and multi-year trends, firm
+        //    enough to keep prices in a viewable band over the full
+        //    dataset.
+        const MEAN_REVERSION_RATE: f64 = 0.003;
+        let log_dev = (price / personality.start_price).ln();
+        let reversion = -log_dev * MEAN_REVERSION_RATE;
         let z = standard_normal(&mut rng);
-        let daily_return = rp.drift + personality.momentum * prev_return + sigma * z;
+        let daily_return = rp.drift + reversion + personality.momentum * prev_return + sigma * z;
 
         // 4. Overnight gap
         let gap = standard_normal(&mut rng) * personality.gap_sigma;
