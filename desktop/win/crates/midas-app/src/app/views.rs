@@ -234,30 +234,17 @@ impl MidasApp {
             };
             let shader = crate::chart_widget::chart_shader(program);
 
-            // Compute timeline labels.
+            // Timeline + priceline axis labels both render on GPU via
+            // `midas_render::pipelines::text::TextPipeline::draw_axis`,
+            // which sits BEFORE any annotation/decorator draw so axis
+            // text always lives at the back of the chart.
             let camera = &chart.chart_state.camera;
-            let candle_duration = midas_chart::estimate_candle_duration(data.as_ref());
-            let timeline_labels = midas_chart::timeline::compute(
-                camera,
-                data.as_ref(),
-                candle_duration,
-                chart.chart_state.collapse_gaps,
-            );
-            let timeline_overlay = build_timeline_overlay(
-                &timeline_labels,
-                camera,
-                chart.chart_state.timeline_border_ratio,
-            );
-
-            let priceline_overlay =
-                build_priceline_overlay(camera, chart.chart_state.timeline_border_ratio);
 
             // Build level-related overlays for floating window.
             let floating_chart_id = ChartId::new(0);
             let drawing_panel = build_drawing_panel(floating_chart_id, self.level_placing);
 
-            let mut chart_layers: Vec<Element<'_, Message>> =
-                vec![shader.into(), timeline_overlay, priceline_overlay];
+            let mut chart_layers: Vec<Element<'_, Message>> = vec![shader.into()];
 
             chart_layers.push(build_gerchik_atr_overlay(
                 gerchik_atr.as_ref(),
@@ -912,30 +899,14 @@ impl MidasApp {
             let program = crate::chart_widget::ChartProgram { chart_id, snapshot };
             let shader = crate::chart_widget::chart_shader(program);
 
-            // Compute timeline labels.
+            // Timeline + priceline axis labels render on GPU via the
+            // text pipeline's axis layer.
             let camera = &chart.chart_state.camera;
-            let candle_duration = midas_chart::estimate_candle_duration(data.as_ref());
-            let timeline_labels = midas_chart::timeline::compute(
-                camera,
-                data.as_ref(),
-                candle_duration,
-                chart.chart_state.collapse_gaps,
-            );
-
-            let timeline_overlay = build_timeline_overlay(
-                &timeline_labels,
-                camera,
-                chart.chart_state.timeline_border_ratio,
-            );
-
-            let priceline_overlay =
-                build_priceline_overlay(camera, chart.chart_state.timeline_border_ratio);
 
             // Build level-related overlays.
             let drawing_panel = build_drawing_panel(chart_id, self.level_placing);
 
-            let mut chart_layers: Vec<Element<'_, Message>> =
-                vec![shader.into(), timeline_overlay, priceline_overlay];
+            let mut chart_layers: Vec<Element<'_, Message>> = vec![shader.into()];
 
             chart_layers.push(build_gerchik_atr_overlay(
                 gerchik_atr.as_ref(),
@@ -2380,201 +2351,11 @@ impl MidasApp {
 
 // ── Button style helpers ────────────────────────────────────────────
 
-/// Build an iced widget overlay for timeline labels at the separator line.
-///
-/// Uses `FillPortion`-based positioning so labels scale correctly
-/// regardless of actual widget bounds. Horizontal gaps are also expressed
-/// as fill-portions relative to the camera viewport width.
-fn build_timeline_overlay<'a>(
-    labels: &[midas_chart::TimelineLabel],
-    camera: &midas_chart::camera::Camera2D,
-    timeline_border_ratio: f32,
-) -> Element<'a, Message> {
-    let label_font_size = 10.0;
-    let secondary_font_size = 9.0;
-    let char_width = 5.5_f32;
-    let vw = camera.viewport_width.max(1) as f32;
-
-    // We express horizontal positions as FillPortion values (integers)
-    // so the row scales proportionally to actual widget width.
-    let portion_scale = 1000.0 / vw;
-
-    // Two independent rows: time labels above the separator, timeline labels below.
-    // This keeps time text at a fixed vertical position regardless of whether
-    // a timeline label is present.
-    let mut time_row = Row::new();
-    let mut time_cursor = 0.0_f32;
-
-    let mut date_row = Row::new();
-    let mut date_cursor = 0.0_f32;
-
-    for dl in labels {
-        let text_width = dl.text.len() as f32 * char_width;
-        let target_x = (dl.screen_x - text_width / 2.0).max(0.0);
-        let gap = target_x - time_cursor;
-
-        if gap > 1.0 {
-            let portion = ((gap * portion_scale) as u16).max(1);
-            time_row = time_row.push(Space::new().width(Length::FillPortion(portion)));
-            time_cursor += gap;
-        } else if gap < -1.0 {
-            // Labels overlap — skip.
-            continue;
-        }
-
-        let label_color = if dl.is_boundary {
-            Color::from_rgb(0.75, 0.75, 0.75)
-        } else {
-            Color::from_rgb(0.55, 0.55, 0.55)
-        };
-
-        time_row = time_row.push(
-            text(dl.text.clone())
-                .size(label_font_size)
-                .color(label_color),
-        );
-        time_cursor += text_width;
-
-        // Place secondary (date) text in the separate date row below.
-        if let Some(ref secondary) = dl.secondary {
-            let sec_width = secondary.len() as f32 * (char_width * 0.9);
-            let sec_target_x = (dl.screen_x - sec_width / 2.0).max(0.0);
-            let sec_gap = sec_target_x - date_cursor;
-
-            if sec_gap > 1.0 {
-                let portion = ((sec_gap * portion_scale) as u16).max(1);
-                date_row = date_row.push(Space::new().width(Length::FillPortion(portion)));
-                date_cursor += sec_gap;
-            }
-
-            date_row = date_row.push(
-                text(secondary.clone())
-                    .size(secondary_font_size)
-                    .color(Color::from_rgb(0.65, 0.65, 0.65)),
-            );
-            date_cursor += sec_width;
-        }
-    }
-
-    // Trailing spacers so labels don't stretch to fill.
-    let time_remaining = vw - time_cursor;
-    if time_remaining > 1.0 {
-        let portion = ((time_remaining * portion_scale) as u16).max(1);
-        time_row = time_row.push(Space::new().width(Length::FillPortion(portion)));
-    }
-    let date_remaining = vw - date_cursor;
-    if date_remaining > 1.0 {
-        let portion = ((date_remaining * portion_scale) as u16).max(1);
-        date_row = date_row.push(Space::new().width(Length::FillPortion(portion)));
-    }
-
-    // Fixed heights so the FillPortion math is stable regardless
-    // of whether a timeline label is present.
-    let _time_row_height = label_font_size + 2.0;
-    let _date_row_height = secondary_font_size + 2.0;
-
-    // Time row anchored at the bottom of the price area (above border).
-    // Date row anchored at the top of the volume area (below border).
-    // Neither row's content affects the other's position.
-    // Fixed pixel heights match the GPU separator line exactly.
-    let vh = camera.viewport_height.max(1) as f32;
-    let border_y = vh * (1.0 - timeline_border_ratio);
-    container(
-        column![
-            container(column![
-                Space::new().width(Fill).height(Fill),
-                time_row,
-                Space::new().height(Length::Fixed(4.0)),
-            ])
-            .width(Fill)
-            .height(Length::Fixed(border_y)),
-            container(column![Space::new().height(Length::Fixed(4.0)), date_row,])
-                .width(Fill)
-                .height(Length::Fixed(vh - border_y)),
-        ]
-        .width(Fill)
-        .height(Fill),
-    )
-    .width(Fill)
-    .height(Fill)
-    .into()
-}
-
-/// Build an iced widget overlay for priceline labels along the right edge of
-/// the chart's price area. Labels are positioned at the same Y coordinates
-/// as the horizontal grid lines, using fixed-pixel spacers for exact alignment.
-///
-/// Uses the same font size (10pt) and muted-gray color as the time axis labels
-/// so the two scales look consistent.
-fn build_priceline_overlay<'a>(
-    camera: &midas_chart::camera::Camera2D,
-    timeline_border_ratio: f32,
-) -> Element<'a, Message> {
-    let label_font_size = 10.0;
-    let label_height = label_font_size + 2.0;
-    let vh = camera.viewport_height.max(1) as f32;
-    let border_y = vh * (1.0 - timeline_border_ratio);
-
-    let labels = midas_chart::compute_priceline_labels(camera);
-
-    // Filter to labels within the price area and sort top-to-bottom.
-    // Axis labels are intentionally kept as a background layer — they
-    // sit beneath the level iced overlays in `chart_layers`, so where
-    // a level's opaque-bg badge physically overlaps an axis row the
-    // badge covers the number. Outside that overlap the axis number
-    // stays visible, which matches the "always present, never absent"
-    // convention of a price scale.
-    let mut visible: Vec<_> = labels
-        .iter()
-        .filter(|l| l.screen_y >= label_height / 2.0 && l.screen_y < border_y - label_height / 2.0)
-        .collect();
-    visible.sort_by(|a, b| {
-        a.screen_y
-            .partial_cmp(&b.screen_y)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    // Build a column with fixed-height spacers between right-aligned labels.
-    let mut col = Column::new();
-    let mut cursor_y = 0.0_f32;
-    let label_color = Color::from_rgb(0.55, 0.55, 0.55);
-
-    for label in &visible {
-        let target_y = (label.screen_y - label_height / 2.0).max(0.0);
-        let gap = target_y - cursor_y;
-
-        if gap < 1.0 {
-            // Labels would overlap — skip.
-            continue;
-        }
-
-        col = col.push(Space::new().height(Length::Fixed(gap)));
-        cursor_y += gap;
-
-        col = col.push(
-            container(
-                row![
-                    Space::new().width(Fill),
-                    text(label.text.clone())
-                        .size(label_font_size)
-                        .color(label_color),
-                    Space::new().width(Length::Fixed(8.0)),
-                ]
-                .width(Fill),
-            )
-            .width(Fill),
-        );
-        cursor_y += label_height;
-    }
-
-    // Trailing spacer absorbs remaining height.
-    col = col.push(Space::new().height(Fill));
-
-    container(col.width(Fill))
-        .width(Fill)
-        .height(Length::Fixed(border_y))
-        .into()
-}
+// The iced-based `build_timeline_overlay` and `build_priceline_overlay`
+// used to live here. They've been retired — axis labels now render on
+// the GPU text pipeline. See `midas_render::pipelines::text` and
+// `midas_chart::compute::priceline_labels_to_widget_labels` /
+// `timeline_labels_to_widget_labels`.
 
 // ── Drawing panel overlay ──────────────────────────────────────────
 

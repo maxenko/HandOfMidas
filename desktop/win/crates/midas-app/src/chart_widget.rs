@@ -1080,6 +1080,9 @@ struct ChartGpuResources {
     /// Cached widget text labels — rendered via the cryoglyph text
     /// pipeline alongside the SDF badges.
     labels: Vec<midas_chart::widget::compute::WidgetLabel>,
+    /// Cached axis-area text labels (priceline numbers). Drawn by
+    /// the text pipeline in a dedicated pre-annotation pass.
+    axis_labels: Vec<midas_chart::widget::compute::WidgetLabel>,
 }
 
 impl ChartGpuResources {
@@ -1098,6 +1101,7 @@ impl ChartGpuResources {
             volume_profile_instances: Vec::new(),
             badges: Vec::new(),
             labels: Vec::new(),
+            axis_labels: Vec::new(),
         }
     }
 }
@@ -1278,6 +1282,8 @@ impl shader::Primitive for ChartPrimitive {
         // Widget text labels (decorator segment text, bracket STP/R:R).
         // Rendered on GPU by the text pipeline alongside badges.
         resources.labels = scene.labels.clone();
+        // Axis text (priceline numbers) — GPU pre-annotation pass.
+        resources.axis_labels = scene.axis_labels.clone();
 
         // Build the render scene from cached data.
         let dirty = DirtyFlags {
@@ -1299,6 +1305,7 @@ impl shader::Primitive for ChartPrimitive {
             volume_profile: &resources.volume_profile_instances,
             badges: &resources.badges,
             labels: &resources.labels,
+            axis_labels: &resources.axis_labels,
             layer_ends: scene.layer_ends,
             viewport_width: scene.viewport_width,
             viewport_height: scene.viewport_height,

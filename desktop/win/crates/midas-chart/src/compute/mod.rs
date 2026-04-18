@@ -306,6 +306,15 @@ fn compute_normal_scene(
 
     let badges = widget_output.badges.clone();
     let labels = widget_output.labels.clone();
+    // Axis text (priceline on the right edge, timeline on the
+    // separator) shares one batch — the renderer draws them together
+    // BEFORE any annotation/decorator pass so they sit behind
+    // everything on the chart.
+    let mut axis_labels = priceline_labels_to_widget_labels(&priceline_labels);
+    axis_labels.extend(timeline_labels_to_widget_labels(
+        &timeline_labels,
+        separator_y,
+    ));
     ChartScene {
         projection,
         viewport_width: input.viewport_width,
@@ -326,6 +335,7 @@ fn compute_normal_scene(
         widget_output,
         badges,
         labels,
+        axis_labels,
         layer_ends,
         generations: SceneGenerations {
             candles: input.dirty.candles,
@@ -478,6 +488,15 @@ fn compute_collapsed_scene(
 
     let badges = widget_output.badges.clone();
     let labels = widget_output.labels.clone();
+    // Axis text (priceline on the right edge, timeline on the
+    // separator) shares one batch — the renderer draws them together
+    // BEFORE any annotation/decorator pass so they sit behind
+    // everything on the chart.
+    let mut axis_labels = priceline_labels_to_widget_labels(&priceline_labels);
+    axis_labels.extend(timeline_labels_to_widget_labels(
+        &timeline_labels,
+        separator_y,
+    ));
     ChartScene {
         projection,
         viewport_width: input.viewport_width,
@@ -498,6 +517,7 @@ fn compute_collapsed_scene(
         widget_output,
         badges,
         labels,
+        axis_labels,
         layer_ends,
         generations: SceneGenerations {
             candles: input.dirty.candles,
@@ -974,6 +994,104 @@ fn compute_grid_lines(camera: &Camera2D, grid_color: &[f32; 4]) -> Vec<GridLine>
 
     let _ = grid_color;
     lines
+}
+
+/// Inset in logical pixels from the viewport right edge to the text's
+/// right edge. Matches the old iced priceline overlay's trailing
+/// padding so the visual position is unchanged when the labels move
+/// to the GPU text pipeline.
+const PRICELINE_TEXT_RIGHT_INSET: f32 = 8.0;
+
+/// Font size used for priceline axis labels, matching the iced
+/// overlay's `label_font_size`.
+const PRICELINE_TEXT_FONT_SIZE: f32 = 10.0;
+
+/// Timeline axis font sizes — main time-of-day row and secondary
+/// date row. Match the iced `build_timeline_overlay` values so the
+/// GPU path produces a visually identical axis.
+const TIMELINE_TEXT_FONT_SIZE: f32 = 10.0;
+const TIMELINE_SECONDARY_FONT_SIZE: f32 = 9.0;
+
+/// Muted grey used for non-boundary timeline labels (and the
+/// secondary date line).
+const TIMELINE_REGULAR_COLOR: [f32; 4] = [0.55, 0.55, 0.55, 1.0];
+/// Brighter grey used for boundary-hour timeline labels, matching
+/// the emphasis the iced overlay applied via text color.
+const TIMELINE_BOUNDARY_COLOR: [f32; 4] = [0.75, 0.75, 0.75, 1.0];
+
+/// Convert `TimelineLabel` rows into `WidgetLabel`s for the GPU text
+/// pipeline. Two labels per entry when a secondary date line is
+/// present: the main time-of-day sits just above the separator, the
+/// secondary date just below. Positions mirror the iced overlay's
+/// stacked-row layout so the visual is unchanged.
+pub fn timeline_labels_to_widget_labels(
+    timeline_labels: &[TimelineLabel],
+    separator_y: f32,
+) -> Vec<crate::widget::compute::WidgetLabel> {
+    use crate::widget::compute::{LabelAnchor, WidgetLabel};
+    // Line-height factor mirrors the text pipeline's shaping metric
+    // so the visual centring matches cryoglyph's rendered baseline.
+    let time_half = TIMELINE_TEXT_FONT_SIZE * 1.2 * 0.5;
+    let date_half = TIMELINE_SECONDARY_FONT_SIZE * 1.2 * 0.5;
+    let time_y = separator_y - time_half - 2.0;
+    let date_y = separator_y + date_half + 2.0;
+
+    let mut out = Vec::with_capacity(timeline_labels.len() * 2);
+    for dl in timeline_labels {
+        let time_color = if dl.is_boundary {
+            TIMELINE_BOUNDARY_COLOR
+        } else {
+            TIMELINE_REGULAR_COLOR
+        };
+        out.push(WidgetLabel {
+            text: dl.text.clone(),
+            screen_x: dl.screen_x,
+            screen_y: time_y,
+            bg_color: [0.0; 4],
+            text_color: time_color,
+            font_size: TIMELINE_TEXT_FONT_SIZE,
+            anchor: LabelAnchor::Center,
+        });
+        if let Some(ref secondary) = dl.secondary {
+            out.push(WidgetLabel {
+                text: secondary.clone(),
+                screen_x: dl.screen_x,
+                screen_y: date_y,
+                bg_color: [0.0; 4],
+                text_color: TIMELINE_REGULAR_COLOR,
+                font_size: TIMELINE_SECONDARY_FONT_SIZE,
+                anchor: LabelAnchor::Center,
+            });
+        }
+    }
+    out
+}
+
+/// Translate the `AxisLabel` priceline list into `WidgetLabel`s the
+/// text pipeline can render. Axis labels land in
+/// [`ChartScene::axis_labels`] and are drawn in a dedicated pre-
+/// annotation pass so priceline numbers always sit behind every
+/// decorator, indicator, and other annotation.
+pub fn priceline_labels_to_widget_labels(
+    priceline_labels: &[AxisLabel],
+) -> Vec<crate::widget::compute::WidgetLabel> {
+    use crate::widget::compute::{LabelAnchor, WidgetLabel};
+    priceline_labels
+        .iter()
+        .map(|l| WidgetLabel {
+            text: l.text.clone(),
+            // `Right` anchor interprets `screen_x` as the label's
+            // right edge. The `AxisLabel` already positions its
+            // right edge at the viewport edge — inset slightly so
+            // the digit glyphs don't hug the pixel border.
+            screen_x: l.screen_x - PRICELINE_TEXT_RIGHT_INSET,
+            screen_y: l.screen_y,
+            bg_color: [0.0; 4],
+            text_color: l.text_color,
+            font_size: PRICELINE_TEXT_FONT_SIZE,
+            anchor: LabelAnchor::Right,
+        })
+        .collect()
 }
 
 /// Compute priceline labels.

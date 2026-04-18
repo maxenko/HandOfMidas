@@ -48,6 +48,12 @@ pub struct TextPipeline {
     /// Index-parallel to `buffers`: resolved position + colour for
     /// each label, used to build `TextArea`s at prepare time.
     placements: [Vec<LabelPlacement>; ANNOTATION_LAYER_COUNT],
+    /// Dedicated renderer for axis text (priceline numbers). Drawn
+    /// BEFORE the annotation layers so priceline labels always sit
+    /// behind decorators and indicators.
+    axis_renderer: TextRenderer,
+    axis_buffers: Vec<Buffer>,
+    axis_placements: Vec<LabelPlacement>,
 }
 
 /// Resolved per-label layout — computed once in `prepare` from the
@@ -77,6 +83,8 @@ impl TextPipeline {
             std::array::from_fn(|_| {
                 TextRenderer::new(&mut atlas, device, MultisampleState::default(), None)
             });
+        let axis_renderer =
+            TextRenderer::new(&mut atlas, device, MultisampleState::default(), None);
 
         // `FontSystem::new` populates the database with system fonts.
         // On Windows that picks up Segoe UI Variable / Segoe UI, which
@@ -92,6 +100,9 @@ impl TextPipeline {
             renderers,
             buffers: std::array::from_fn(|_| Vec::new()),
             placements: std::array::from_fn(|_| Vec::new()),
+            axis_renderer,
+            axis_buffers: Vec::new(),
+            axis_placements: Vec::new(),
         }
     }
 
@@ -107,13 +118,20 @@ impl TextPipeline {
         );
     }
 
-    /// Shape each label, split by `layer_ends`, and hand the per-layer
-    /// `TextArea` lists to the matching `TextRenderer`.
+    /// Shape each label (both annotation + axis), split annotation
+    /// labels by `layer_ends`, and hand each per-layer `TextArea`
+    /// list to the matching `TextRenderer`. The dedicated axis
+    /// renderer picks up `axis_labels` verbatim.
     ///
     /// cryoglyph requires a `CommandEncoder`; `prepare` creates and
     /// submits its own one-shot encoder so callers on iced's
     /// `Primitive::prepare` path (which doesn't expose an encoder)
     /// can drive text upload without extra plumbing.
+    // 8 parameters is over the clippy default — justified here because
+    // grouping them into a struct would make every caller do a local
+    // construction-move dance for what is genuinely one ordered list
+    // of render-pass inputs (device/queue/viewport/layers/axis).
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare(
         &mut self,
         device: &Device,
@@ -122,6 +140,7 @@ impl TextPipeline {
         viewport_height: u32,
         labels: &[WidgetLabel],
         layer_ends: [LayerEnd; ANNOTATION_LAYER_COUNT],
+        axis_labels: &[WidgetLabel],
     ) {
         self.update_viewport(queue, viewport_width, viewport_height);
 
@@ -132,6 +151,8 @@ impl TextPipeline {
         for slot in &mut self.placements {
             slot.clear();
         }
+        self.axis_buffers.clear();
+        self.axis_placements.clear();
 
         // Walk the label slice layer-by-layer. Each layer owns
         // `labels[prev..layer_ends[k].label_end]`. Labels outside any
@@ -142,31 +163,23 @@ impl TextPipeline {
         for (layer_idx, end) in layer_ends.iter().enumerate() {
             let layer_slice = &labels[cursor..end.label_end.min(labels.len())];
             for label in layer_slice {
-                let metrics =
-                    Metrics::new(label.font_size, label.font_size * LINE_HEIGHT_FACTOR);
-                let mut buffer = Buffer::new(&mut self.font_system, metrics);
-                let attrs = Attrs::new().family(Family::SansSerif);
-                buffer.set_text(
+                let (buffer, placement) = shape_label(
+                    label,
                     &mut self.font_system,
-                    &label.text,
-                    &attrs,
-                    Shaping::Advanced,
-                    None::<Align>,
                 );
-                buffer.shape_until_scroll(&mut self.font_system, false);
-
-                let (text_w, text_h) = measure_buffer(&buffer);
-                let (left, top) = resolve_anchor(label, text_w, text_h);
-                let color = rgba_to_color(label.text_color);
-
                 self.buffers[layer_idx].push(buffer);
-                self.placements[layer_idx].push(LabelPlacement { left, top, color });
+                self.placements[layer_idx].push(placement);
             }
             cursor = end.label_end.min(labels.len());
         }
+        for label in axis_labels {
+            let (buffer, placement) = shape_label(label, &mut self.font_system);
+            self.axis_buffers.push(buffer);
+            self.axis_placements.push(placement);
+        }
 
-        // One encoder covers every layer's upload. Cheaper than
-        // submitting per-layer — cryoglyph's staging belt is per
+        // One encoder covers every renderer's upload. Cheaper than
+        // submitting per-renderer — cryoglyph's staging belt is per
         // renderer, so encoding is local but the submit is shared.
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some("text_pipeline_prepare"),
@@ -174,6 +187,13 @@ impl TextPipeline {
 
         let vp_w = viewport_width.max(1) as i32;
         let vp_h = viewport_height.max(1) as i32;
+        let bounds = TextBounds {
+            left: 0,
+            top: 0,
+            right: vp_w,
+            bottom: vp_h,
+        };
+
         for layer_idx in 0..ANNOTATION_LAYER_COUNT {
             // Indexing the two arrays separately avoids a compound
             // `&mut self.renderers[..]` + `&self.buffers[..]` borrow.
@@ -181,19 +201,7 @@ impl TextPipeline {
             let areas = self.buffers[layer_idx]
                 .iter()
                 .zip(self.placements[layer_idx].iter())
-                .map(|(buf, p)| TextArea {
-                    buffer: buf,
-                    left: p.left,
-                    top: p.top,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: 0,
-                        top: 0,
-                        right: vp_w,
-                        bottom: vp_h,
-                    },
-                    default_color: p.color,
-                });
+                .map(|(buf, p)| make_area(buf, *p, bounds));
             if let Err(err) = renderer.prepare(
                 device,
                 queue,
@@ -212,7 +220,39 @@ impl TextPipeline {
             }
         }
 
+        // Axis labels: one batch, prepared on the dedicated axis
+        // renderer, drawn before any annotation layer.
+        let axis_areas = self
+            .axis_buffers
+            .iter()
+            .zip(self.axis_placements.iter())
+            .map(|(buf, p)| make_area(buf, *p, bounds));
+        if let Err(err) = self.axis_renderer.prepare(
+            device,
+            queue,
+            &mut encoder,
+            &mut self.font_system,
+            &mut self.atlas,
+            &self.viewport,
+            axis_areas,
+            &mut self.swash_cache,
+        ) {
+            tracing::warn!(?err, "cryoglyph prepare_axis failed");
+        }
+
         queue.submit(Some(encoder.finish()));
+    }
+
+    /// Render the axis-layer text (priceline numbers). Call BEFORE
+    /// any annotation-layer draws so priceline labels sit behind all
+    /// decorators, indicators, and other annotations.
+    pub fn draw_axis(&self, render_pass: &mut RenderPass<'_>) {
+        if let Err(err) = self
+            .axis_renderer
+            .render(&self.atlas, &self.viewport, render_pass)
+        {
+            tracing::warn!(?err, "cryoglyph draw_axis failed");
+        }
     }
 
     /// Render just the text for one z-layer. Call after that layer's
@@ -233,6 +273,40 @@ impl TextPipeline {
         for layer_idx in 0..ANNOTATION_LAYER_COUNT {
             self.draw_layer(layer_idx, render_pass);
         }
+    }
+}
+
+/// Shape a single `WidgetLabel` into a cosmic-text buffer and a
+/// resolved placement. Shared between the annotation-layer and the
+/// axis-layer prepare loops.
+fn shape_label(label: &WidgetLabel, font_system: &mut FontSystem) -> (Buffer, LabelPlacement) {
+    let metrics = Metrics::new(label.font_size, label.font_size * LINE_HEIGHT_FACTOR);
+    let mut buffer = Buffer::new(font_system, metrics);
+    let attrs = Attrs::new().family(Family::SansSerif);
+    buffer.set_text(
+        font_system,
+        &label.text,
+        &attrs,
+        Shaping::Advanced,
+        None::<Align>,
+    );
+    buffer.shape_until_scroll(font_system, false);
+
+    let (text_w, text_h) = measure_buffer(&buffer);
+    let (left, top) = resolve_anchor(label, text_w, text_h);
+    let color = rgba_to_color(label.text_color);
+    (buffer, LabelPlacement { left, top, color })
+}
+
+/// Build a cryoglyph `TextArea` from a shaped buffer + placement.
+fn make_area<'a>(buffer: &'a Buffer, p: LabelPlacement, bounds: TextBounds) -> TextArea<'a> {
+    TextArea {
+        buffer,
+        left: p.left,
+        top: p.top,
+        scale: 1.0,
+        bounds,
+        default_color: p.color,
     }
 }
 

@@ -85,6 +85,12 @@ pub struct ChartScene {
     /// future per-layer interleaving pass.
     pub labels: Vec<WidgetLabel>,
 
+    /// Axis-area text labels (currently just the priceline numbers on
+    /// the right edge). Rendered by the text pipeline in a dedicated
+    /// pre-annotation pass so they always sit BEHIND every annotation,
+    /// decorator, and indicator on the chart.
+    pub axis_labels: Vec<WidgetLabel>,
+
     /// End-exclusive indices into `badges` / `labels` for each z-layer
     /// emitted by `compute_widget_annotations` (background, proximity-
     /// promoted, hovered, dragged — in that order). The renderer

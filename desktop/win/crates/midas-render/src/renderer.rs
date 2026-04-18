@@ -44,6 +44,11 @@ pub struct ChartScene<'a> {
     /// Rendered in the same render pass as `badges` via the cryoglyph
     /// text pipeline so per-element z-order can be preserved.
     pub labels: &'a [WidgetLabel],
+    /// Axis-area text labels (priceline numbers on the right side of
+    /// the chart). Drawn by the text pipeline in a dedicated pre-
+    /// annotation pass so axis labels sit behind every decorator,
+    /// indicator, and other annotation.
+    pub axis_labels: &'a [WidgetLabel],
     /// End-exclusive indices into `badges` / `labels` for each z-layer
     /// emitted by `compute_widget_annotations`. Drives the per-layer
     /// interleaved draw order in [`ChartRenderer::draw_pass`].
@@ -173,6 +178,7 @@ impl ChartRenderer {
             scene.viewport_height,
             scene.labels,
             scene.layer_ends,
+            scene.axis_labels,
         );
         // Cache the boundaries for `draw_pass`'s interleave loop.
         self.layer_ends = scene.layer_ends;
@@ -202,6 +208,10 @@ impl ChartRenderer {
 
         // Layer 4: Candle bodies (opaque, on top of wicks)
         self.candle_pipeline.draw_bodies(render_pass);
+
+        // Layer 4.4: Axis text (priceline numbers) — behind everything
+        // the chart annotates.
+        self.text_pipeline.draw_axis(render_pass);
 
         // Layer 4.5–4.6: decorator badges + text, interleaved per
         // z-layer (see `draw_pass` for the canonical implementation).
@@ -277,6 +287,7 @@ impl ChartRenderer {
             scene.viewport_height,
             scene.labels,
             scene.layer_ends,
+            scene.axis_labels,
         );
         // Cache the boundaries for `draw_pass`'s interleave loop.
         self.layer_ends = scene.layer_ends;
@@ -309,6 +320,11 @@ impl ChartRenderer {
         self.volume_profile_pipeline.draw(render_pass);
         self.candle_pipeline.draw_wicks(render_pass);
         self.candle_pipeline.draw_bodies(render_pass);
+        // Layer 4.4: axis text (priceline numbers). Drawn BEFORE any
+        // annotation/decorator so these labels sit behind everything
+        // the chart annotates.
+        self.text_pipeline.draw_axis(render_pass);
+
         // Layer 4.5–4.6: decorator badges + text, interleaved per
         // z-layer. For each layer k we draw its badge instance range
         // then its text batch, so an annotation's shape and label
