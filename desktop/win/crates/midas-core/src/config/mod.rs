@@ -258,6 +258,15 @@ pub struct OrderBlotterConfig {
     /// Column widths in logical pixels (persisted for session restore).
     #[serde(default)]
     pub column_widths: Vec<f32>,
+    /// Symbol-link group — row clicks broadcast to panels sharing
+    /// the same colour. `Unlinked` (default) = no broadcast.
+    #[serde(default)]
+    pub symbol_link: LinkMode,
+    /// Column IDs the user has hidden via the column-selector popup.
+    /// Stored as strings (the underlying `ColumnId(&'static str)`)
+    /// so future column additions are forward-compat.
+    #[serde(default)]
+    pub hidden_columns: Vec<String>,
 }
 
 impl Default for OrderBlotterConfig {
@@ -265,6 +274,8 @@ impl Default for OrderBlotterConfig {
         Self {
             name: default_order_blotter_name(),
             column_widths: Vec::new(),
+            symbol_link: LinkMode::default(),
+            hidden_columns: Vec::new(),
         }
     }
 }
@@ -299,9 +310,33 @@ pub struct WatchlistConfig {
 pub struct WatchlistTickerConfig {
     /// Ticker symbol (e.g. `"AAPL"`).
     pub symbol: String,
-    /// Whether this ticker is marked as a favorite.
-    #[serde(default)]
-    pub favorite: bool,
+    /// Favourite level: `0` = off, `1..=5` = graded silver→gold.
+    ///
+    /// Stored as a u8 but the deserializer accepts an old-config bool
+    /// (`true` → `1`, `false` → `0`) so configs written before the
+    /// graded star landed keep loading.
+    #[serde(default, deserialize_with = "deserialize_favorite_level")]
+    pub favorite: u8,
+}
+
+fn deserialize_favorite_level<'de, D>(deserializer: D) -> Result<u8, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum FavIn {
+        Bool(bool),
+        Level(u8),
+    }
+    match FavIn::deserialize(deserializer)? {
+        FavIn::Bool(b) => Ok(u8::from(b)),
+        FavIn::Level(n) if n <= 5 => Ok(n),
+        FavIn::Level(n) => Err(D::Error::custom(format!(
+            "favorite level out of range 0..=5: {n}"
+        ))),
+    }
 }
 
 /// Records the type of panel in a pane position for layout restoration.
