@@ -11,6 +11,7 @@
 //! Both types implement [`CandleData`] from `midas-core`.
 
 use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::CandleData;
 
@@ -24,7 +25,18 @@ use crate::CandleData;
 /// - All six `Vec`s always have the same length.
 /// - `timestamps` is monotonically increasing (enforced by `debug_assert!`
 ///   in [`push`](CandleBuffer::push)).
-#[derive(Clone, Debug, Default)]
+///
+/// # Version counter
+///
+/// Every mutation method ([`push`](CandleBuffer::push),
+/// [`update_last`](CandleBuffer::update_last)) bumps a monotonically
+/// increasing `version: AtomicU64`. Downstream caches (e.g.
+/// `ThumbnailDataStore`) store the version at slice time and reslice
+/// when [`version`](CandleBuffer::version) has advanced. The counter
+/// uses `Ordering::Relaxed` — it orders no other memory, it only
+/// signals "something changed". Mirrors the `midas-chart::dirty`
+/// generation-counter idiom.
+#[derive(Debug, Default)]
 pub struct CandleBuffer {
     /// Epoch milliseconds, monotonically increasing.
     pub timestamps: Vec<i64>,
@@ -38,6 +50,29 @@ pub struct CandleBuffer {
     pub closes: Vec<f32>,
     /// Trade volumes (capped at `u32::MAX` for equities).
     pub volumes: Vec<u32>,
+    /// Monotonic mutation counter. Bumped on every `push` /
+    /// `update_last`. Readers compare a saved value to detect change.
+    /// Not `Clone`; see the manual `Clone` impl below.
+    version: AtomicU64,
+}
+
+impl Clone for CandleBuffer {
+    /// Clone the buffer, copying the current version counter so the
+    /// clone starts at the same generation as the source. This matches
+    /// the expectation that a clone is observably identical — a
+    /// version-aware reader that has already synced to the source
+    /// should also be synced to the clone.
+    fn clone(&self) -> Self {
+        Self {
+            timestamps: self.timestamps.clone(),
+            opens: self.opens.clone(),
+            highs: self.highs.clone(),
+            lows: self.lows.clone(),
+            closes: self.closes.clone(),
+            volumes: self.volumes.clone(),
+            version: AtomicU64::new(self.version.load(Ordering::Relaxed)),
+        }
+    }
 }
 
 impl CandleBuffer {
@@ -55,7 +90,19 @@ impl CandleBuffer {
             lows: Vec::with_capacity(n),
             closes: Vec::with_capacity(n),
             volumes: Vec::with_capacity(n),
+            version: AtomicU64::new(0),
         }
+    }
+
+    /// Monotonic version counter. Bumped on every mutation
+    /// (`push`, `update_last`). Readers can compare a saved
+    /// value to detect whether the buffer has changed since
+    /// they last read it. Uses `Ordering::Relaxed` — the
+    /// counter is not ordering any other memory, it only
+    /// signals "something changed".
+    #[inline]
+    pub fn version(&self) -> u64 {
+        self.version.load(Ordering::Relaxed)
     }
 
     /// Number of candles in the buffer.
@@ -89,6 +136,7 @@ impl CandleBuffer {
         self.lows.push(l);
         self.closes.push(c);
         self.volumes.push(v);
+        self.version.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Borrow a sub-range as a [`CandleSlice`]. No allocation, no copy.
@@ -184,6 +232,7 @@ impl CandleBuffer {
             *self.lows.last_mut().expect("lows out of sync") = l;
             *self.closes.last_mut().expect("closes out of sync") = c;
             *self.volumes.last_mut().expect("volumes out of sync") = v;
+            self.version.fetch_add(1, Ordering::Relaxed);
         }
     }
 }

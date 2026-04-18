@@ -363,3 +363,65 @@ fn buffer_clone() {
     assert_eq!(clone.timestamps, buf.timestamps);
     assert_eq!(clone.closes, buf.closes);
 }
+
+// ── Version counter ────────────────────────────────────────────────
+
+#[test]
+fn version_starts_at_zero() {
+    let buf = CandleBuffer::new();
+    assert_eq!(buf.version(), 0);
+}
+
+#[test]
+fn version_advances_on_push() {
+    let mut buf = CandleBuffer::new();
+    buf.push(1000, 1.0, 2.0, 0.5, 1.5, 100);
+    assert_eq!(buf.version(), 1);
+    buf.push(2000, 1.5, 2.5, 1.0, 2.0, 200);
+    assert_eq!(buf.version(), 2);
+}
+
+#[test]
+fn version_advances_on_update_last() {
+    let mut buf = CandleBuffer::new();
+    buf.push(1000, 1.0, 2.0, 0.5, 1.5, 100);
+    buf.push(2000, 1.5, 2.5, 1.0, 2.0, 200);
+    assert_eq!(buf.version(), 2);
+    buf.update_last(2000, 1.6, 2.6, 1.1, 2.1, 250);
+    assert_eq!(buf.version(), 3);
+}
+
+#[test]
+fn version_no_advance_on_empty_update_last() {
+    let mut buf = CandleBuffer::new();
+    assert_eq!(buf.version(), 0);
+    buf.update_last(1000, 1.0, 2.0, 0.5, 1.5, 100);
+    assert_eq!(buf.version(), 0);
+}
+
+#[test]
+fn clone_preserves_version() {
+    let mut buf = CandleBuffer::new();
+    buf.push(1000, 1.0, 2.0, 0.5, 1.5, 100);
+    buf.push(2000, 1.5, 2.5, 1.0, 2.0, 200);
+    buf.push(3000, 2.0, 3.0, 1.5, 2.5, 300);
+    assert_eq!(buf.version(), 3);
+    let clone = buf.clone();
+    assert_eq!(clone.version(), 3);
+}
+
+#[test]
+fn clone_independent_version() {
+    let mut buf = CandleBuffer::new();
+    buf.push(1000, 1.0, 2.0, 0.5, 1.5, 100);
+    buf.push(2000, 1.5, 2.5, 1.0, 2.0, 200);
+    assert_eq!(buf.version(), 2);
+
+    let mut clone = buf.clone();
+    assert_eq!(clone.version(), 2);
+
+    clone.push(3000, 2.0, 3.0, 1.5, 2.5, 300);
+    assert_eq!(clone.version(), 3);
+    // Original counter must not be affected.
+    assert_eq!(buf.version(), 2);
+}
