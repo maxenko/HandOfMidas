@@ -60,6 +60,15 @@ pub struct UiTheme {
     /// Tooltip text color.
     pub tooltip_text: Color,
 
+    // -- Warning / banner --
+    /// Background for warning-level banners (e.g. the Account-panel
+    /// "Broker disconnected — data may be stale" strip). Amber by
+    /// default to match TWS-style conventions.
+    pub warning_bg: Color,
+    /// Foreground text color on top of `warning_bg`. Dark so amber
+    /// has enough contrast.
+    pub warning_text: Color,
+
     // -- Tabs --
     /// Color of the underline beneath the active tab.
     pub tab_underline: Color,
@@ -127,6 +136,10 @@ impl Default for UiTheme {
             tooltip_bg: Color::from_rgb(0.20, 0.20, 0.24),
             tooltip_text: Color::from_rgb(0.88, 0.88, 0.92),
 
+            // Warning / banner — amber background, dark text.
+            warning_bg: Color::from_rgba(1.0, 0.7, 0.2, 1.0),
+            warning_text: Color::from_rgba(0.05, 0.05, 0.05, 1.0),
+
             // Tabs
             tab_underline: Color::from_rgb(0.22, 0.55, 0.95),
             tab_underline_height: 2.0,
@@ -176,6 +189,8 @@ mod tests {
             theme.editable_border,
             theme.tooltip_bg,
             theme.tooltip_text,
+            theme.warning_bg,
+            theme.warning_text,
             theme.tab_underline,
             theme.tab_text_active,
             theme.tab_text_inactive,

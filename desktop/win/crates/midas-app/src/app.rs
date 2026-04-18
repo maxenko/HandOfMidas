@@ -16,7 +16,7 @@ mod views;
 #[cfg(feature = "dev_harness")]
 pub use fixture::FixtureError;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -29,7 +29,7 @@ use midas_chart::state::ChartState;
 use midas_chart::AnnotationId;
 use midas_core::config::{AppConfig, ChartConfig, LayoutNode, PanelSlot};
 use midas_core::{
-    CandleBuffer, ChartId, DataProvider, LinkMode, OrderBlotterId, OrderPanelId, Timeframe,
+    AccountPanelId, CandleBuffer, ChartId, DataProvider, LinkMode, OrderPanelId, Timeframe,
     WatchlistId,
 };
 
@@ -80,6 +80,123 @@ pub struct ToastAction {
 
 /// Seconds a toast remains visible before auto-dismiss.
 pub const TOAST_TTL_SECS: u64 = 4;
+
+// ── Recent instruments (MRU) ──────────────────────────────────────────
+
+/// Maximum number of symbols retained in the Recent Instruments MRU.
+///
+/// Matches the cap documented in the account-panel plan (Decision 6).
+/// `push_recent_symbol` pops from the back until the deque's length is
+/// within this bound.
+pub const MAX_RECENTS: usize = 20;
+
+/// One entry in the Recent Instruments MRU.
+///
+/// `last_seen` is `None` when the entry was rehydrated from the persisted
+/// `AppConfig` (timestamps are not persisted — only the symbol list).
+/// Entries created during the current session carry
+/// `Some(Instant::now())` so the UI can render an "N min ago" suffix.
+#[derive(Clone, Debug)]
+pub struct RecentEntry {
+    /// Upper-cased ticker symbol (e.g. `"AAPL"`).
+    pub symbol: String,
+    /// `None` when loaded from persisted config (timestamps aren't
+    /// persisted); `Some(Instant)` when added during this session.
+    pub last_seen: Option<Instant>,
+}
+
+/// Pure MRU update: dedup, move-to-front, cap at [`MAX_RECENTS`].
+///
+/// Extracted so [`MidasApp::push_recent_symbol`] has a trivially unit-
+/// testable core that doesn't require constructing the full app. Returns
+/// `true` when the deque was actually mutated (empty / whitespace
+/// input short-circuits with `false` so the caller can skip the
+/// accompanying `mark_config_dirty`).
+fn push_recent_symbol_inner(
+    recents: &mut VecDeque<RecentEntry>,
+    symbol: &str,
+    now: Instant,
+) -> bool {
+    let symbol = symbol.trim().to_uppercase();
+    if symbol.is_empty() {
+        return false;
+    }
+    // Dedup: drop any existing entry so we can re-push at the front.
+    if let Some(pos) = recents.iter().position(|e| e.symbol == symbol) {
+        recents.remove(pos);
+    }
+    recents.push_front(RecentEntry {
+        symbol,
+        last_seen: Some(now),
+    });
+    while recents.len() > MAX_RECENTS {
+        recents.pop_back();
+    }
+    true
+}
+
+#[cfg(test)]
+mod recent_symbols_tests {
+    use super::{push_recent_symbol_inner, RecentEntry, MAX_RECENTS};
+    use std::collections::VecDeque;
+    use std::time::{Duration, Instant};
+
+    fn symbols(recents: &VecDeque<RecentEntry>) -> Vec<&str> {
+        recents.iter().map(|e| e.symbol.as_str()).collect()
+    }
+
+    #[test]
+    fn push_prepends_and_uppercases() {
+        let mut recents = VecDeque::new();
+        let t0 = Instant::now();
+        assert!(push_recent_symbol_inner(&mut recents, "aapl", t0));
+        assert_eq!(symbols(&recents), vec!["AAPL"]);
+        assert_eq!(recents[0].last_seen, Some(t0));
+    }
+
+    #[test]
+    fn push_dedups_and_moves_existing_to_front() {
+        let mut recents = VecDeque::new();
+        let t0 = Instant::now();
+        let t1 = t0 + Duration::from_secs(1);
+        let t2 = t0 + Duration::from_secs(2);
+        let t3 = t0 + Duration::from_secs(3);
+
+        push_recent_symbol_inner(&mut recents, "AAPL", t0);
+        push_recent_symbol_inner(&mut recents, "MSFT", t1);
+        push_recent_symbol_inner(&mut recents, "TSLA", t2);
+        // Re-push AAPL — should move it to the front without duplicating.
+        push_recent_symbol_inner(&mut recents, "AAPL", t3);
+
+        assert_eq!(symbols(&recents), vec!["AAPL", "TSLA", "MSFT"]);
+        assert_eq!(recents.len(), 3, "dedup keeps length stable");
+        assert_eq!(recents[0].last_seen, Some(t3), "front has newest Instant");
+    }
+
+    #[test]
+    fn push_enforces_cap() {
+        let mut recents = VecDeque::new();
+        let t0 = Instant::now();
+        // Push MAX_RECENTS + 5 distinct symbols; oldest 5 must be evicted.
+        for i in 0..(MAX_RECENTS + 5) {
+            push_recent_symbol_inner(&mut recents, &format!("SYM{i}"), t0);
+        }
+        assert_eq!(recents.len(), MAX_RECENTS);
+        // Front is the most recently pushed (SYM{MAX+4}); back is
+        // SYM5 (the first one that survived eviction).
+        assert_eq!(recents[0].symbol, format!("SYM{}", MAX_RECENTS + 4));
+        assert_eq!(recents.back().unwrap().symbol, "SYM5");
+    }
+
+    #[test]
+    fn empty_or_whitespace_input_is_ignored() {
+        let mut recents = VecDeque::new();
+        let t0 = Instant::now();
+        assert!(!push_recent_symbol_inner(&mut recents, "", t0));
+        assert!(!push_recent_symbol_inner(&mut recents, "   ", t0));
+        assert!(recents.is_empty(), "empty/whitespace MUST NOT push");
+    }
+}
 
 // ── Load state ────────────────────────────────────────────────────────
 
@@ -228,16 +345,46 @@ pub struct MidasApp {
     pub link_picker_open: Option<(PickerTarget, LinkDimension)>,
     /// Active column resize: (watchlist_id, column_index, start_x, original_width).
     pub resizing_column: Option<(WatchlistId, usize, f32, f32)>,
-    /// Active blotter column resize: (blotter_id, column_index, start_x, original_width).
-    pub resizing_blotter_column: Option<(OrderBlotterId, usize, f32, f32)>,
-    /// Which blotter currently has its column-selector popup open, if any.
-    pub blotter_column_selector_open: Option<OrderBlotterId>,
+    /// Active Account-pane Orders-tab column resize:
+    /// (account_panel_id, column_index, start_x, original_width).
+    pub resizing_account_column: Option<(AccountPanelId, usize, f32, f32)>,
+    /// Active Account-pane History-tab column resize.
+    /// Same shape as `resizing_account_column` but targets the History
+    /// tab's `GridState` instead of Orders'.
+    pub resizing_account_history_column: Option<(AccountPanelId, usize, f32, f32)>,
+    /// Active Account-pane Recents-tab column resize. Two-column grid
+    /// (ticker + last-seen); same shape otherwise.
+    pub resizing_account_recents_column: Option<(AccountPanelId, usize, f32, f32)>,
+    /// Which Account-pane's Orders-tab column-selector popup is open, if any.
+    pub account_column_selector_open: Option<AccountPanelId>,
     /// Dockable order panels keyed by stable OrderPanelId.
     pub order_panels: HashMap<OrderPanelId, crate::order_panel::OrderPanel>,
-    /// Per-blotter-panel view state (one entry per open Orders pane).
-    pub order_blotters: HashMap<OrderBlotterId, crate::order_blotter::panel::OrderBlotterPanel>,
+    /// Tabbed Account panels (Positions / Orders / History / Recents).
+    ///
+    /// Replaces the legacy `order_blotters` map. Migration translates
+    /// old blotter entries at config-load time.
+    pub account_panels:
+        std::collections::BTreeMap<AccountPanelId, crate::account_panel::AccountPanel>,
+    /// Recent Instruments MRU feeding the Account panel's Recents tab.
+    ///
+    /// Bounded at [`MAX_RECENTS`]; front = most-recent. Symbols are
+    /// persisted to `AppConfig::recent_symbols` (timestamps aren't).
+    /// Use [`MidasApp::push_recent_symbol`] to keep dedup + move-to-front
+    /// + cap invariants intact.
+    pub recent_symbols: VecDeque<RecentEntry>,
+    /// App-wide live-position store. Fed by:
+    /// - The coalesced `positions_subscription` stream (steady-state),
+    ///   which delivers `Message::AccountPositionsBatch`.
+    /// - The single-event `BrokerEvent::PositionUpdate` path inside
+    ///   `handle_broker_msg` (reconnect backfills). Both paths are
+    ///   idempotent; last write wins.
+    ///
+    /// Single-account assumption: v1 does not filter by `account`;
+    /// every `PositionUpdate` is applied verbatim. Slice 5 renders the
+    /// Positions tab from this store.
+    pub positions: crate::account_panel::PositionStore,
     /// Shared blotter accumulating rows from `BrokerEvent`s. Single
-    /// instance read by every `OrderBlotterPanel`.
+    /// instance read by every Account pane's Orders tab.
     pub order_blotter: crate::order_blotter::OrderBlotter,
     /// redb-backed persistence for the blotter — survives restart.
     pub order_history_persist: crate::order_blotter::persist::OrderHistoryPersistHandle,
@@ -554,31 +701,48 @@ pub enum Message {
     /// Set the symbol link mode for a dockable order panel.
     OrderPanelSetSymbolLink(OrderPanelId, LinkMode),
 
-    // -- Order-blotter panel (Orders history grid) --
-    /// Add a new Orders blotter pane to the workspace.
-    AddOrderBlotter,
-    /// Grid chrome event (sort / resize / scroll / select) from an Orders pane.
-    OrderBlotterGrid(OrderBlotterId, midas_grid::GridMessage),
-    /// User clicked a row — record the selection on the panel and
-    /// (when linked) broadcast the row's symbol to the blotter's
-    /// symbol-link group (charts / order panels sharing the colour).
-    OrderBlotterRowSelected(OrderBlotterId, uuid::Uuid, String),
-    /// Change the blotter's symbol-link colour group.
-    OrderBlotterSetSymbolLink(OrderBlotterId, LinkMode),
-    /// Begin a column-resize drag. `col_idx` indexes into
-    /// `OrderBlotterColumn::ALL`.
-    OrderBlotterColumnResizeStart(OrderBlotterId, usize),
-    /// Cursor-move event while a column resize is active. Carries the
-    /// x-coordinate in window logical pixels.
-    OrderBlotterColumnResizing(f32),
+    // -- Account panel (tabbed Positions / Orders / History / Recents) --
+    /// Add a new Account pane to the workspace.
+    AddAccountPanel,
+    /// Tab-scoped event routed through the Account pane (wraps `AccountMsg`).
+    Account(AccountPanelId, crate::account_panel::AccountMsg),
+    /// User clicked a row in an Account pane's Orders tab. Records the
+    /// selection and (when linked) broadcasts the symbol.
+    AccountOrdersRowSelected(AccountPanelId, uuid::Uuid, String),
+    /// Change the Account panel's Orders-tab symbol-link colour group.
+    AccountOrdersSetSymbolLink(AccountPanelId, LinkMode),
+    /// Begin a column-resize drag on the Orders tab. `col_idx` indexes
+    /// into `OrderBlotterColumn::ALL` (schema reused for wire-compat).
+    AccountOrdersColumnResizeStart(AccountPanelId, usize),
+    /// Cursor-move while a column resize is active (x in logical pixels).
+    AccountOrdersColumnResizing(f32),
     /// Drag released — commit width + mark config dirty.
-    OrderBlotterColumnResizeEnd,
-    /// Open the column-selector popup for this blotter.
-    OrderBlotterOpenColumnSelector(OrderBlotterId),
+    AccountOrdersColumnResizeEnd,
+    /// Open the column-selector popup for an Account pane's Orders tab.
+    AccountOrdersOpenColumnSelector(AccountPanelId),
     /// Dismiss the column-selector popup.
-    OrderBlotterDismissColumnSelector,
-    /// Toggle visibility of a single column in the given blotter.
-    OrderBlotterToggleColumn(OrderBlotterId, midas_grid::ColumnId),
+    AccountOrdersDismissColumnSelector,
+    /// Toggle visibility of a single column in the given Account pane.
+    AccountOrdersToggleColumn(AccountPanelId, midas_grid::ColumnId),
+    /// Begin a column-resize drag on the Trade History tab. `col_idx`
+    /// indexes into `HistoryColumn::ALL`. Widths are runtime-only in v1
+    /// (no config persistence) per plan Decision 4.
+    AccountHistoryColumnResizeStart(AccountPanelId, usize),
+    /// Cursor-move while a History-tab column resize is active.
+    AccountHistoryColumnResizing(f32),
+    /// Drag released — commit width.
+    AccountHistoryColumnResizeEnd,
+    /// Begin a column-resize drag on the Recents tab. `col_idx` indexes
+    /// into the Recents column list (0 = ticker, 1 = last-seen).
+    AccountRecentsColumnResizeStart(AccountPanelId, usize),
+    /// Cursor-move while a Recents-tab column resize is active.
+    AccountRecentsColumnResizing(f32),
+    /// Drag released — commit width.
+    AccountRecentsColumnResizeEnd,
+    /// Coalesced batch of position updates from the broker subscription.
+    /// App-wide (not per-panel) because the `PositionStore` is shared
+    /// across every open Account pane.
+    AccountPositionsBatch(Vec<crate::account_panel::PositionRaw>),
 
     // -- G.ATR hover highlight --
     /// Mouse entered the G.ATR badge on a chart — activate candle dimming.
@@ -870,31 +1034,31 @@ impl MidasApp {
 
         let open_task = open_task.map(Message::MainWindowOpened);
 
-        // Build workspace, charts, watchlists, and order panels from config.
+        // Build workspace, charts, watchlists, and order/account panels from config.
         let (
             workspace,
             charts,
             watchlists,
             restored_order_panels,
-            restored_order_blotters,
+            restored_account_panels,
             status_message,
         );
 
         if !config.layout_tree.is_empty() {
             // Full topology restoration from layout_tree.
-            let (ws, ch, wl, op, ob) = Self::restore_from_layout_tree(
+            let (ws, ch, wl, op, ap) = Self::restore_from_layout_tree(
                 &config.layout_tree,
                 &config.charts,
                 &config.watchlists,
                 &config.order_panels,
-                &config.order_blotters,
+                &config.account_panels,
             );
-            let n = ch.len() + wl.len() + op.len() + ob.len();
+            let n = ch.len() + wl.len() + op.len() + ap.len();
             workspace = ws;
             charts = ch;
             watchlists = wl;
             restored_order_panels = op;
-            restored_order_blotters = ob;
+            restored_account_panels = ap;
             status_message = format!("Restored {n} panel(s) from layout tree");
         } else if !config.panel_order.is_empty() {
             // Legacy: panel_order-driven restoration (flat, no topology).
@@ -947,10 +1111,16 @@ impl MidasApp {
                         // TODO: Slice 5 will restore order panels from legacy panel_order.
                         continue;
                     }
-                    PanelSlot::OrderBlotter { .. } => {
-                        // Order blotters are restored via the layout_tree path,
-                        // which is preferred for multi-panel layouts. Skip in
-                        // the legacy panel_order path.
+                    PanelSlot::OrderBlotter { .. } | PanelSlot::Account { .. } => {
+                        // Account panels (and legacy blotters) are restored via
+                        // the layout_tree path, which is preferred for multi-
+                        // panel layouts. Skip in the legacy panel_order path.
+                        continue;
+                    }
+                    PanelSlot::Unknown => {
+                        // Forward-compat catch-all: config written by a newer
+                        // binary carries a panel type this build doesn't know.
+                        // Treat as no-op so the rest of the layout still loads.
                         continue;
                     }
                 }
@@ -966,7 +1136,7 @@ impl MidasApp {
             charts = ch;
             watchlists = wl;
             restored_order_panels = HashMap::new();
-            restored_order_blotters = HashMap::new();
+            restored_account_panels = std::collections::BTreeMap::new();
             status_message = format!("Restored {n} panel(s) from config");
         } else if !config.charts.is_empty() {
             // Legacy path: charts only (backward compat).
@@ -990,7 +1160,7 @@ impl MidasApp {
             charts = ch;
             watchlists = HashMap::new();
             restored_order_panels = HashMap::new();
-            restored_order_blotters = HashMap::new();
+            restored_account_panels = std::collections::BTreeMap::new();
             status_message = format!("Restored {n} chart(s) from config");
         } else {
             let (ws, first_id) = WorkspaceLayout::single();
@@ -1000,7 +1170,7 @@ impl MidasApp {
             charts = ch;
             watchlists = HashMap::new();
             restored_order_panels = HashMap::new();
-            restored_order_blotters = HashMap::new();
+            restored_account_panels = std::collections::BTreeMap::new();
             status_message = "Ready".to_string();
         };
 
@@ -1221,10 +1391,22 @@ impl MidasApp {
             dragging_ticker: None,
             link_picker_open: None,
             resizing_column: None,
-            resizing_blotter_column: None,
-            blotter_column_selector_open: None,
+            resizing_account_column: None,
+            resizing_account_history_column: None,
+            resizing_account_recents_column: None,
+            account_column_selector_open: None,
             order_panels: restored_order_panels,
-            order_blotters: restored_order_blotters,
+            account_panels: restored_account_panels,
+            positions: crate::account_panel::PositionStore::new(),
+            recent_symbols: config
+                .recent_symbols
+                .iter()
+                .cloned()
+                .map(|symbol| RecentEntry {
+                    symbol,
+                    last_seen: None,
+                })
+                .collect(),
             order_blotter,
             order_history_persist,
             order_annotation_links: HashMap::new(),
@@ -1375,6 +1557,20 @@ impl MidasApp {
         }
         // Also load market snapshots for all watchlist symbols.
         let watchlist_task = app.load_all_watchlist_snapshots();
+        // After layout restore, the blotter may already carry hydrated
+        // rows from disk. Seed every Account panel's Trade-History
+        // cache so panels whose `active_tab` was persisted as
+        // `TradeHistory` render rows on their very first `view()`
+        // without waiting for a user click.
+        app.rebuild_account_history_caches();
+        // Same rationale for Positions: during `MidasApp::new` the
+        // store is necessarily empty, but keeping this call
+        // symmetrical with the History path means future restart
+        // workflows (e.g. a persisted-positions follow-up slice) pick
+        // up the seeding for free. Today's call is effectively a
+        // cheap no-op (generation == 0 == last_seen_generation).
+        app.rebuild_account_positions_caches();
+
         // Pre-warm the thumbnail cache so the watchlist's Chart column
         // starts rendering mountains as soon as the user opens the
         // panel, not only after they click a thumbnail.
@@ -1402,13 +1598,13 @@ impl MidasApp {
         chart_cfgs: &[ChartConfig],
         watchlist_cfgs: &[midas_core::config::WatchlistConfig],
         order_panel_cfgs: &[midas_core::config::OrderPanelConfig],
-        order_blotter_cfgs: &[midas_core::config::OrderBlotterConfig],
+        account_panel_cfgs: &[midas_core::config::AccountPanelConfig],
     ) -> (
         WorkspaceLayout,
         HashMap<ChartId, ChartPanel>,
         HashMap<WatchlistId, WatchlistPanel>,
         HashMap<OrderPanelId, crate::order_panel::OrderPanel>,
-        HashMap<OrderBlotterId, crate::order_blotter::panel::OrderBlotterPanel>,
+        std::collections::BTreeMap<AccountPanelId, crate::account_panel::AccountPanel>,
     ) {
         use crate::layout::PaneState;
 
@@ -1416,11 +1612,12 @@ impl MidasApp {
             charts: HashMap<ChartId, ChartPanel>,
             watchlists: HashMap<WatchlistId, WatchlistPanel>,
             order_panels: HashMap<OrderPanelId, crate::order_panel::OrderPanel>,
-            order_blotters: HashMap<OrderBlotterId, crate::order_blotter::panel::OrderBlotterPanel>,
+            account_panels:
+                std::collections::BTreeMap<AccountPanelId, crate::account_panel::AccountPanel>,
             next_chart_id: u32,
             next_wl_id: u32,
             next_order_id: u32,
-            next_blotter_id: u32,
+            next_account_id: u32,
             cursor: usize,
         }
 
@@ -1431,7 +1628,7 @@ impl MidasApp {
                 chart_cfgs: &[ChartConfig],
                 watchlist_cfgs: &[midas_core::config::WatchlistConfig],
                 order_panel_cfgs: &[midas_core::config::OrderPanelConfig],
-                order_blotter_cfgs: &[midas_core::config::OrderBlotterConfig],
+                account_panel_cfgs: &[midas_core::config::AccountPanelConfig],
             ) -> pane_grid::Configuration<PaneState> {
                 if self.cursor >= tree.len() {
                     let id = ChartId::new(self.next_chart_id);
@@ -1453,14 +1650,14 @@ impl MidasApp {
                             chart_cfgs,
                             watchlist_cfgs,
                             order_panel_cfgs,
-                            order_blotter_cfgs,
+                            account_panel_cfgs,
                         );
                         let b = self.parse_node(
                             tree,
                             chart_cfgs,
                             watchlist_cfgs,
                             order_panel_cfgs,
-                            order_blotter_cfgs,
+                            account_panel_cfgs,
                         );
                         pane_grid::Configuration::Split {
                             axis: ax,
@@ -1500,24 +1697,36 @@ impl MidasApp {
                         self.cursor += 1;
                         pane_grid::Configuration::Pane(PaneState::order(op_id))
                     }
-                    LayoutNode::OrderBlotter {
-                        order_blotter_index,
+                    LayoutNode::Account {
+                        account_panel_index,
                     } => {
-                        let blotter_id = OrderBlotterId::new(self.next_blotter_id);
-                        self.next_blotter_id += 1;
-                        let panel = match order_blotter_cfgs.get(*order_blotter_index) {
+                        let account_id = AccountPanelId::new(self.next_account_id);
+                        self.next_account_id += 1;
+                        let panel = match account_panel_cfgs.get(*account_panel_index) {
                             Some(cfg) => {
-                                crate::order_blotter::panel::OrderBlotterPanel::from_config(
-                                    blotter_id, cfg,
-                                )
+                                crate::account_panel::AccountPanel::from_config(account_id, cfg)
                             }
-                            None => crate::order_blotter::panel::OrderBlotterPanel::new(
-                                blotter_id, "Orders",
-                            ),
+                            None => crate::account_panel::AccountPanel::new(account_id, "Account"),
                         };
-                        self.order_blotters.insert(blotter_id, panel);
+                        self.account_panels.insert(account_id, panel);
                         self.cursor += 1;
-                        pane_grid::Configuration::Pane(PaneState::order_blotter(blotter_id))
+                        pane_grid::Configuration::Pane(PaneState::account(account_id))
+                    }
+                    LayoutNode::OrderBlotter { .. } => {
+                        // Legacy blotter nodes are rewritten to `Account`
+                        // at config-load time by the migration step. Any
+                        // residual node is treated as a forward-compat
+                        // placeholder (unusual — a write with the legacy
+                        // enum variant never happens from this build).
+                        tracing::warn!(
+                            "Unexpected legacy OrderBlotter layout node — \
+                             migration should have rewritten it. Falling back to empty chart."
+                        );
+                        let id = ChartId::new(self.next_chart_id);
+                        self.next_chart_id += 1;
+                        self.charts.insert(id, MidasApp::make_empty_panel());
+                        self.cursor += 1;
+                        pane_grid::Configuration::Pane(PaneState::chart(id))
                     }
                     LayoutNode::Unknown => {
                         // Forward-compatibility: skip unknown node types gracefully.
@@ -1536,11 +1745,11 @@ impl MidasApp {
             charts: HashMap::new(),
             watchlists: HashMap::new(),
             order_panels: HashMap::new(),
-            order_blotters: HashMap::new(),
+            account_panels: std::collections::BTreeMap::new(),
             next_chart_id: 1,
             next_wl_id: 1,
             next_order_id: 1,
-            next_blotter_id: 1,
+            next_account_id: 1,
             cursor: 0,
         };
 
@@ -1549,7 +1758,7 @@ impl MidasApp {
             chart_cfgs,
             watchlist_cfgs,
             order_panel_cfgs,
-            order_blotter_cfgs,
+            account_panel_cfgs,
         );
 
         let panes = pane_grid::State::with_configuration(config);
@@ -1560,7 +1769,8 @@ impl MidasApp {
             next_chart_id: ctx.next_chart_id,
             next_watchlist_id: ctx.next_wl_id,
             next_order_panel_id: ctx.next_order_id,
-            next_order_blotter_id: ctx.next_blotter_id,
+            next_order_blotter_id: 1,
+            next_account_panel_id: ctx.next_account_id,
         };
 
         (
@@ -1568,7 +1778,7 @@ impl MidasApp {
             ctx.charts,
             ctx.watchlists,
             ctx.order_panels,
-            ctx.order_blotters,
+            ctx.account_panels,
         )
     }
 
@@ -1882,6 +2092,19 @@ impl MidasApp {
         self.bind_chart_to_symbol(chart_id, key);
 
         self.load_chart_async(chart_id, &symbol, tf)
+    }
+
+    /// Record a symbol in the Recent Instruments MRU.
+    ///
+    /// Dedup-move-to-front with a hard cap of [`MAX_RECENTS`]. Called at
+    /// every user-driven symbol-switch seam (chart input submit, ticker
+    /// drag-drop, Recents-tab row click). Empty / whitespace inputs are
+    /// ignored. The session's `last_seen` is set to `Instant::now()`.
+    pub(crate) fn push_recent_symbol(&mut self, symbol: &str) {
+        if push_recent_symbol_inner(&mut self.recent_symbols, symbol, Instant::now()) {
+            // Symbol list is persisted; mark config dirty.
+            self.mark_config_dirty();
+        }
     }
 
     /// Propagate a symbol change from source chart to all linked charts
@@ -2517,17 +2740,24 @@ impl MidasApp {
             | Message::OrderPanelMsg(..)
             | Message::OrderPanelSetSymbolLink(..) => self.handle_order_panel_msg(message),
 
-            // -- Order blotter --
-            Message::AddOrderBlotter
-            | Message::OrderBlotterGrid(..)
-            | Message::OrderBlotterRowSelected(..)
-            | Message::OrderBlotterSetSymbolLink(..)
-            | Message::OrderBlotterColumnResizeStart(..)
-            | Message::OrderBlotterColumnResizing(..)
-            | Message::OrderBlotterColumnResizeEnd
-            | Message::OrderBlotterOpenColumnSelector(..)
-            | Message::OrderBlotterDismissColumnSelector
-            | Message::OrderBlotterToggleColumn(..) => self.handle_order_blotter_msg(message),
+            // -- Account panel --
+            Message::AddAccountPanel
+            | Message::Account(..)
+            | Message::AccountOrdersRowSelected(..)
+            | Message::AccountOrdersSetSymbolLink(..)
+            | Message::AccountOrdersColumnResizeStart(..)
+            | Message::AccountOrdersColumnResizing(..)
+            | Message::AccountOrdersColumnResizeEnd
+            | Message::AccountOrdersOpenColumnSelector(..)
+            | Message::AccountOrdersDismissColumnSelector
+            | Message::AccountOrdersToggleColumn(..)
+            | Message::AccountHistoryColumnResizeStart(..)
+            | Message::AccountHistoryColumnResizing(..)
+            | Message::AccountHistoryColumnResizeEnd
+            | Message::AccountRecentsColumnResizeStart(..)
+            | Message::AccountRecentsColumnResizing(..)
+            | Message::AccountRecentsColumnResizeEnd
+            | Message::AccountPositionsBatch(..) => self.handle_account_panel_msg(message),
 
             // -- Watchlist --
             Message::AddWatchlist

@@ -34,6 +34,10 @@ impl MidasApp {
                 if symbol.is_empty() {
                     return Task::none();
                 }
+                // Tap the MRU at the user-action seam — before any Task
+                // dispatch. `propagate_symbol_change` spreads the change
+                // to linked charts and must not re-push per hop.
+                self.push_recent_symbol(&symbol);
                 let task = self.load_symbol_for_chart(chart_id, &symbol);
                 self.mark_config_dirty();
                 let propagate = self.propagate_symbol_change(chart_id, &symbol);
@@ -409,9 +413,21 @@ impl MidasApp {
                         }
                         self.status_message = format!("Closed {order_id}");
                     }
-                    Some(PanelContent::OrderBlotter(blotter_id)) => {
-                        self.order_blotters.remove(&blotter_id);
-                        self.status_message = format!("Closed {blotter_id}");
+                    Some(PanelContent::OrderBlotter(_blotter_id)) => {
+                        // Legacy — live panes are `Account` after migration.
+                        // If this fires it means a persisted layout from an
+                        // older build rehydrated an OrderBlotter slot that
+                        // slipped past migration. Nothing to clean up since
+                        // we never populate `order_blotters` in this build.
+                        self.status_message = "Closed legacy Orders pane".to_string();
+                    }
+                    Some(PanelContent::Account(account_id)) => {
+                        self.account_panels.remove(&account_id);
+                        if matches!(self.link_picker_open, Some((PickerTarget::Account(pid), _)) if pid == account_id)
+                        {
+                            self.link_picker_open = None;
+                        }
+                        self.status_message = format!("Closed {account_id}");
                     }
                     None => return Task::none(),
                 }
@@ -1599,106 +1615,241 @@ impl MidasApp {
     }
 }
 
-// ── Order Blotter ────────────────────────────────────────────────────
+// ── Account Panel ────────────────────────────────────────────────────
 
 impl MidasApp {
-    /// Dispatcher for every `Message::OrderBlotter*` variant. Mirrors
-    /// the watchlist handler's shape.
-    pub(crate) fn handle_order_blotter_msg(&mut self, message: Message) -> Task<Message> {
+    /// Dispatcher for every `Message::Account*` variant.
+    pub(crate) fn handle_account_panel_msg(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::AddOrderBlotter => self.handle_add_order_blotter(),
+            Message::AddAccountPanel => self.handle_add_account_panel(),
 
-            Message::OrderBlotterGrid(blotter_id, gm) => {
-                self.handle_order_blotter_grid(blotter_id, gm)
+            Message::Account(account_id, acct_msg) => {
+                use crate::account_panel::AccountMsg;
+                use midas_core::config::AccountTab;
+                match acct_msg {
+                    AccountMsg::TabSelected(tab) => {
+                        if let Some(p) = self.account_panels.get_mut(&account_id) {
+                            p.active_tab = tab;
+                        }
+                        // Activating the Trade History tab on a fresh
+                        // run (or after a restart) needs the cached
+                        // rows populated before the next `view()` —
+                        // broker events before this point may have
+                        // bumped the blotter generation without any
+                        // History tab being open to rebuild its cache.
+                        if tab == AccountTab::TradeHistory {
+                            self.rebuild_account_history_caches();
+                        }
+                        // Same logic for Positions — batches may have
+                        // arrived before the user opened this tab.
+                        if tab == AccountTab::Positions {
+                            self.rebuild_account_positions_caches();
+                        }
+                        self.flush_config()
+                    }
+                    AccountMsg::Orders(gm) => self.handle_account_orders_grid(account_id, gm),
+                    AccountMsg::PositionsBatchApplied(batch) => {
+                        // Per-panel variant kept for symmetry with
+                        // Orders/History messages. The store itself is
+                        // app-wide, so all open panels see the result.
+                        self.positions.apply_batch(&batch);
+                        self.rebuild_account_positions_caches();
+                        Task::none()
+                    }
+                    AccountMsg::Positions(pm) => self.handle_account_positions_msg(account_id, pm),
+                    AccountMsg::DisconnectBannerDismissed => {
+                        if let Some(p) = self.account_panels.get_mut(&account_id) {
+                            p.disconnect_banner_ack = true;
+                        }
+                        Task::none()
+                    }
+                    AccountMsg::RecentClicked(symbol) => self.handle_account_recent_clicked(symbol),
+                }
             }
 
-            Message::OrderBlotterRowSelected(blotter_id, order_id, symbol) => {
+            Message::AccountPositionsBatch(batch) => {
+                // App-wide variant emitted by `positions_subscription`.
+                // Identical effect to the per-panel
+                // `PositionsBatchApplied` path — both paths land in the
+                // same store so last-write-wins is idempotent.
+                self.positions.apply_batch(&batch);
+                self.rebuild_account_positions_caches();
+                Task::none()
+            }
+
+            Message::AccountOrdersRowSelected(account_id, order_id, symbol) => {
                 // Selection write happens FIRST — an unlinked panel still
                 // needs its highlight updated locally, so the broadcast
                 // short-circuit below must not skip the mutation.
-                let Some(panel) = self.order_blotters.get_mut(&blotter_id) else {
+                let Some(panel) = self.account_panels.get_mut(&account_id) else {
                     return Task::none();
                 };
-                panel.selected_row = Some(order_id);
-                let link = panel.symbol_link;
+                panel.orders.selected_row = Some(order_id);
+                let link = panel.orders.symbol_link;
                 if matches!(link, LinkMode::Unlinked) {
                     return Task::none();
                 }
-                // Broadcast the clicked row's symbol to every chart /
-                // order panel sharing the blotter's link colour. Same
-                // shape as `WatchlistTickerSelected` — re-use the link
-                // wiring there by going through
-                // `crate::link::find_link_targets`.
                 self.broadcast_symbol_to_link_group(link, &symbol)
             }
 
-            Message::OrderBlotterSetSymbolLink(blotter_id, mode) => {
+            Message::AccountOrdersSetSymbolLink(account_id, mode) => {
                 self.link_picker_open = None;
-                if let Some(p) = self.order_blotters.get_mut(&blotter_id) {
-                    p.symbol_link = mode;
+                if let Some(p) = self.account_panels.get_mut(&account_id) {
+                    p.orders.symbol_link = mode;
                 }
                 self.flush_config()
             }
 
-            Message::OrderBlotterColumnResizeStart(blotter_id, col_idx) => {
+            Message::AccountOrdersColumnResizeStart(account_id, col_idx) => {
                 let ids = crate::order_blotter::columns::OrderBlotterColumn::ids();
                 if col_idx >= ids.len() {
                     return Task::none();
                 }
                 let width = self
-                    .order_blotters
-                    .get(&blotter_id)
-                    .map(|p| p.grid_state.column_width(ids[col_idx]))
+                    .account_panels
+                    .get(&account_id)
+                    .map(|p| p.orders.grid_state.column_width(ids[col_idx]))
                     .unwrap_or(80.0);
                 // start_x is NaN until the first cursor-move lands.
-                self.resizing_blotter_column = Some((blotter_id, col_idx, f32::NAN, width));
+                self.resizing_account_column = Some((account_id, col_idx, f32::NAN, width));
                 Task::none()
             }
 
-            Message::OrderBlotterColumnResizing(cursor_x) => {
-                let Some((blotter_id, col, ref mut start_x, start_w)) =
-                    self.resizing_blotter_column
+            Message::AccountOrdersColumnResizing(cursor_x) => {
+                let Some((account_id, col, ref mut start_x, start_w)) =
+                    self.resizing_account_column
                 else {
                     return Task::none();
                 };
                 if start_x.is_nan() {
-                    self.resizing_blotter_column = Some((blotter_id, col, cursor_x, start_w));
+                    self.resizing_account_column = Some((account_id, col, cursor_x, start_w));
                     return Task::none();
                 }
                 let dx = cursor_x - *start_x;
                 let new_w = (start_w + dx).max(24.0);
                 let ids = crate::order_blotter::columns::OrderBlotterColumn::ids();
                 if col < ids.len() {
-                    if let Some(p) = self.order_blotters.get_mut(&blotter_id) {
-                        p.grid_state.set_column_width(ids[col], new_w, 24.0, None);
+                    if let Some(p) = self.account_panels.get_mut(&account_id) {
+                        p.orders
+                            .grid_state
+                            .set_column_width(ids[col], new_w, 24.0, None);
                     }
                 }
                 Task::none()
             }
 
-            Message::OrderBlotterColumnResizeEnd => {
-                self.resizing_blotter_column = None;
+            Message::AccountOrdersColumnResizeEnd => {
+                self.resizing_account_column = None;
                 self.flush_config()
             }
 
-            Message::OrderBlotterOpenColumnSelector(blotter_id) => {
+            Message::AccountHistoryColumnResizeStart(account_id, col_idx) => {
+                let ids = crate::account_panel::history_columns::HistoryColumn::ids();
+                if col_idx >= ids.len() {
+                    return Task::none();
+                }
+                let width = self
+                    .account_panels
+                    .get(&account_id)
+                    .map(|p| p.history.grid_state.column_width(ids[col_idx]))
+                    .unwrap_or(80.0);
+                self.resizing_account_history_column = Some((account_id, col_idx, f32::NAN, width));
+                Task::none()
+            }
+
+            Message::AccountHistoryColumnResizing(cursor_x) => {
+                let Some((account_id, col, ref mut start_x, start_w)) =
+                    self.resizing_account_history_column
+                else {
+                    return Task::none();
+                };
+                if start_x.is_nan() {
+                    self.resizing_account_history_column =
+                        Some((account_id, col, cursor_x, start_w));
+                    return Task::none();
+                }
+                let dx = cursor_x - *start_x;
+                let new_w = (start_w + dx).max(24.0);
+                let ids = crate::account_panel::history_columns::HistoryColumn::ids();
+                if col < ids.len() {
+                    if let Some(p) = self.account_panels.get_mut(&account_id) {
+                        p.history
+                            .grid_state
+                            .set_column_width(ids[col], new_w, 24.0, None);
+                    }
+                }
+                Task::none()
+            }
+
+            Message::AccountHistoryColumnResizeEnd => {
+                // Widths are runtime-only in v1 (not persisted); nothing
+                // to flush. Parity with the Orders-tab shape keeps the
+                // drag state lifecycle identical.
+                self.resizing_account_history_column = None;
+                Task::none()
+            }
+
+            Message::AccountRecentsColumnResizeStart(account_id, col_idx) => {
+                let ids = crate::account_panel::recents_tab::column_ids();
+                if col_idx >= ids.len() {
+                    return Task::none();
+                }
+                let width = self
+                    .account_panels
+                    .get(&account_id)
+                    .map(|p| p.recents.grid_state.column_width(ids[col_idx]))
+                    .unwrap_or(80.0);
+                self.resizing_account_recents_column = Some((account_id, col_idx, f32::NAN, width));
+                Task::none()
+            }
+
+            Message::AccountRecentsColumnResizing(cursor_x) => {
+                let Some((account_id, col, ref mut start_x, start_w)) =
+                    self.resizing_account_recents_column
+                else {
+                    return Task::none();
+                };
+                if start_x.is_nan() {
+                    self.resizing_account_recents_column =
+                        Some((account_id, col, cursor_x, start_w));
+                    return Task::none();
+                }
+                let dx = cursor_x - *start_x;
+                let new_w = (start_w + dx).max(24.0);
+                let ids = crate::account_panel::recents_tab::column_ids();
+                if col < ids.len() {
+                    if let Some(p) = self.account_panels.get_mut(&account_id) {
+                        p.recents
+                            .grid_state
+                            .set_column_width(ids[col], new_w, 24.0, None);
+                    }
+                }
+                Task::none()
+            }
+
+            Message::AccountRecentsColumnResizeEnd => {
+                self.resizing_account_recents_column = None;
+                Task::none()
+            }
+
+            Message::AccountOrdersOpenColumnSelector(account_id) => {
                 // Close any other popups first.
                 self.link_picker_open = None;
-                self.blotter_column_selector_open = Some(blotter_id);
+                self.account_column_selector_open = Some(account_id);
                 Task::none()
             }
 
-            Message::OrderBlotterDismissColumnSelector => {
-                self.blotter_column_selector_open = None;
+            Message::AccountOrdersDismissColumnSelector => {
+                self.account_column_selector_open = None;
                 Task::none()
             }
 
-            Message::OrderBlotterToggleColumn(blotter_id, col_id) => {
-                if let Some(p) = self.order_blotters.get_mut(&blotter_id) {
-                    if p.hidden_columns.contains(&col_id) {
-                        p.hidden_columns.remove(&col_id);
+            Message::AccountOrdersToggleColumn(account_id, col_id) => {
+                if let Some(p) = self.account_panels.get_mut(&account_id) {
+                    if p.orders.hidden_columns.contains(&col_id) {
+                        p.orders.hidden_columns.remove(&col_id);
                     } else {
-                        p.hidden_columns.insert(col_id);
+                        p.orders.hidden_columns.insert(col_id);
                     }
                 }
                 self.flush_config()
@@ -1708,36 +1859,191 @@ impl MidasApp {
         }
     }
 
-    /// Open a new Orders (blotter) pane in the workspace.
-    fn handle_add_order_blotter(&mut self) -> Task<Message> {
+    /// Refresh every Account-panel's Trade-History display-row cache
+    /// against the current [`crate::order_blotter::OrderBlotter`]
+    /// generation. Safe to call at any time — individual tabs
+    /// early-return when their `last_seen_generation` already matches
+    /// the blotter. Invoked after broker events mutate the blotter and
+    /// on `TabSelected(TradeHistory)` so iced's `view()` is always
+    /// free of mutation.
+    pub(crate) fn rebuild_account_history_caches(&mut self) {
+        let blotter = &self.order_blotter;
+        for panel in self.account_panels.values_mut() {
+            panel.history.rebuild_rows_if_stale(blotter);
+        }
+    }
+
+    /// Refresh every Account-panel's Positions-tab display-row cache
+    /// against the current [`crate::account_panel::PositionStore`]
+    /// generation. Symmetrical with
+    /// [`Self::rebuild_account_history_caches`]. Called from:
+    ///
+    /// - `Message::AccountPositionsBatch` (coalesced subscription path)
+    /// - `Message::Account(_, AccountMsg::PositionsBatchApplied)` (per-panel
+    ///   variant — currently identical effect; kept for symmetry)
+    /// - Single-event `BrokerEvent::PositionUpdate` path (reconnect
+    ///   backfill)
+    /// - `AccountMsg::TabSelected(Positions)` (user-visible trigger)
+    /// - `MidasApp::new` tail (so a restored Positions tab renders on
+    ///   first frame without waiting for the subscription)
+    ///
+    /// Individual tabs early-return when their `last_seen_generation`
+    /// already matches the store, so repeated calls are cheap.
+    pub(crate) fn rebuild_account_positions_caches(&mut self) {
+        let store = &self.positions;
+        for panel in self.account_panels.values_mut() {
+            panel.positions.rebuild_rows_if_stale(store);
+        }
+    }
+
+    /// Handle a Positions-tab-originating message.
+    ///
+    /// - `CloseRequested(symbol)`: **stub only in v1.** Guards on
+    ///   broker connectivity at the handler level (UI disable is not
+    ///   sufficient per CLAUDE.md rule #3 — dev-harness can inject the
+    ///   message directly). Never constructs a `BrokerCommand`. A unit
+    ///   test pins that guarantee.
+    /// - `Grid(msg)`: forwarded to the tab's grid state for row
+    ///   selection / future resize. No effect on the store.
+    pub(crate) fn handle_account_positions_msg(
+        &mut self,
+        account_id: midas_core::AccountPanelId,
+        msg: crate::account_panel::PositionsMsg,
+    ) -> Task<Message> {
+        use crate::account_panel::PositionsMsg;
+        match msg {
+            PositionsMsg::CloseRequested(symbol) => self.handle_account_close_requested(symbol),
+            PositionsMsg::Grid(gm) => {
+                // Grid events on the Positions tab are row-select
+                // only in v1 (headers are non-sortable, columns
+                // non-resizable). Forward the handful of variants
+                // the plan supports; everything else is an inert
+                // passthrough so a future slice wiring up sort /
+                // resize doesn't need to re-plumb the dispatcher.
+                if let Some(p) = self.account_panels.get_mut(&account_id) {
+                    match gm {
+                        midas_grid::GridMessage::RowSelected(idx) => {
+                            if let Some(row) = p.positions.cached_rows().get(idx) {
+                                p.positions.selected_row = Some(row.symbol.clone());
+                            }
+                            p.positions.grid_state.selection.select(idx);
+                        }
+                        midas_grid::GridMessage::SortToggled(_) => {
+                            // v1: Positions sort is fixed-ascending by
+                            // symbol. Header clicks are inert.
+                        }
+                    }
+                }
+                Task::none()
+            }
+        }
+    }
+
+    /// Close-position request handler.
+    ///
+    /// **Stub in v1.** Guards on broker connectivity and writes an
+    /// intent status message. Never constructs a `BrokerCommand`;
+    /// the plan's non-goals explicitly list "Close-position wired to
+    /// broker (stub only v1)". The decision function
+    /// [`crate::account_panel::positions_msg::CloseDecision`] is
+    /// unit-tested separately to pin the guarantee so a future
+    /// refactor can't accidentally wire it up.
+    pub(crate) fn handle_account_close_requested(&mut self, symbol: String) -> Task<Message> {
+        use crate::account_panel::positions_msg::CloseDecision;
+        let connected = self
+            .broker_bridge
+            .as_ref()
+            .is_some_and(|b| b.is_engine_connected());
+        let decision = CloseDecision::compute(connected, &symbol);
+        // `may_emit_command()` is `false` in v1 for both decision
+        // variants — the assertion below documents the intent at the
+        // call site. Removing it in a future slice that wires the
+        // action to the broker is where the guard transitions live.
+        debug_assert!(
+            !decision.may_emit_command(),
+            "close-position stub must not authorize a broker command in v1"
+        );
+        match &decision {
+            CloseDecision::RefusedDisconnected => {
+                tracing::warn!(
+                    "close position refused: broker disconnected (symbol={})",
+                    symbol
+                );
+            }
+            CloseDecision::Logged(sym) => {
+                tracing::info!("close position intent: symbol={}", sym);
+            }
+        }
+        self.status_message = decision.status_message();
+        Task::none()
+        // NO BrokerCommand emitted. Stub only.
+    }
+
+    /// Re-select the clicked Recent Instrument on the focused chart.
+    ///
+    /// No-ops when no chart is focused (e.g. the workspace contains
+    /// only watchlists / Account panels). Reuses the exact same seam
+    /// `handle_panel_symbol_submitted` uses — load for the focused
+    /// chart + propagate through the link group — so the behaviour
+    /// matches a manual symbol entry.
+    fn handle_account_recent_clicked(&mut self, symbol: String) -> Task<Message> {
+        let trimmed = symbol.trim().to_uppercase();
+        if trimmed.is_empty() {
+            return Task::none();
+        }
+        let Some(chart_id) = self.workspace.focused_chart_id() else {
+            tracing::debug!("RecentClicked({symbol}) ignored — no focused chart in workspace");
+            return Task::none();
+        };
+        self.focus_chart(chart_id);
+        if let Some(chart) = self.charts.get_mut(&chart_id) {
+            chart.symbol_input = trimmed.clone();
+            chart.gatr_hover = false;
+        }
+        // Refreshing `last_seen` also moves the clicked symbol back to
+        // the front of the MRU — matching what the user just did.
+        self.push_recent_symbol(&trimmed);
+        let load = self.load_symbol_for_chart(chart_id, &trimmed);
+        self.mark_config_dirty();
+        let propagate = self.propagate_symbol_change(chart_id, &trimmed);
+        Task::batch([load, propagate])
+    }
+
+    /// Open a new Account pane in the workspace.
+    ///
+    /// Mirrors `handle_add_watchlist`: allocate a fresh ID, split off
+    /// a new pane from the focused pane, drop the auto-created chart,
+    /// install the Account panel, flush config.
+    fn handle_add_account_panel(&mut self) -> Task<Message> {
         let Some(focused) = self.workspace.focus else {
             return Task::none();
         };
-        let blotter_id = self.workspace.next_order_blotter_id();
+        let account_id = self.workspace.next_account_panel_id();
         if let Some((chart_id, new_pane)) = self.workspace.split(pane_grid::Axis::Vertical, focused)
         {
-            // split() always creates a chart pane — replace with blotter.
+            // split() always creates a chart pane — replace with Account.
             if let Some(state) = self.workspace.panes.get_mut(new_pane) {
-                state.content = PanelContent::OrderBlotter(blotter_id);
+                state.content = PanelContent::Account(account_id);
             }
             self.charts.remove(&chart_id);
-            self.order_blotters.insert(
-                blotter_id,
-                crate::order_blotter::panel::OrderBlotterPanel::new(blotter_id, "Orders"),
+            self.account_panels.insert(
+                account_id,
+                crate::account_panel::AccountPanel::new(account_id, "Account"),
             );
-            self.status_message = format!("Added {blotter_id}");
+            self.status_message = format!("Added {account_id}");
             return self.flush_config();
         }
         Task::none()
     }
 
-    /// Route `GridMessage`s (sort toggles) to the blotter's grid state.
-    fn handle_order_blotter_grid(
+    /// Route `GridMessage`s (sort toggles, row clicks) to an Account
+    /// panel's Orders tab grid state.
+    fn handle_account_orders_grid(
         &mut self,
-        blotter_id: midas_core::OrderBlotterId,
+        account_id: midas_core::AccountPanelId,
         message: midas_grid::GridMessage,
     ) -> Task<Message> {
-        let Some(panel) = self.order_blotters.get_mut(&blotter_id) else {
+        let Some(panel) = self.account_panels.get_mut(&account_id) else {
             return Task::none();
         };
         match message {
@@ -1750,7 +2056,7 @@ impl MidasApp {
                     | COL_LAST_UPDATE | COL_ORDER_ID => midas_grid::SortDirection::Descending,
                     _ => midas_grid::SortDirection::Ascending,
                 };
-                panel.grid_state.toggle_sort(col_id, default_dir);
+                panel.orders.grid_state.toggle_sort(col_id, default_dir);
             }
             midas_grid::GridMessage::RowSelected(_) => {
                 // Row selection reserved for future per-row actions
@@ -1804,6 +2110,10 @@ impl MidasApp {
                         wl.add_ticker_input.clear();
                         // Always load fresh data — don't rely on potentially stale cache.
                         let symbol = input.trim().to_uppercase();
+                        // Record the symbol in Recents as well so the MRU
+                        // reflects every user-initiated ticker entry, not
+                        // just chart selections.
+                        self.push_recent_symbol(&symbol);
                         let task = self.load_market_snapshot(&symbol);
                         return Task::batch([self.flush_config(), task]);
                     }
@@ -1932,6 +2242,10 @@ impl MidasApp {
                         if let Some(ps) = self.workspace.panes.get(*pane) {
                             if let Some(chart_id) = ps.chart_id() {
                                 self.workspace.set_focus(*pane);
+                                // Drag-drop of a watchlist ticker onto a
+                                // chart is a user-visible symbol switch;
+                                // record it in the MRU.
+                                self.push_recent_symbol(&drag.symbol);
                                 let load = self.load_symbol_for_chart(chart_id, &drag.symbol);
                                 let propagate =
                                     self.propagate_symbol_change(chart_id, &drag.symbol);
@@ -3092,6 +3406,12 @@ impl MidasApp {
                 // touched row, write-through to the history persist so
                 // the redb flush thread picks it up on its next tick.
                 let touched_ids = self.order_blotter.apply(boxed_event.as_ref());
+                // Refresh any Account-panel Trade-History caches whose
+                // `last_seen_generation` fell behind. Cheap: it's a
+                // u64 compare per panel and an iterator scan only when
+                // the generation actually moved. Keeps iced's `view()`
+                // strictly read-only.
+                self.rebuild_account_history_caches();
                 // Collect symbols from the touched rows so we can both
                 // (a) persist the rows and (b) pre-warm any thumbnails
                 // this event just introduced to the blotter. Unique
@@ -3260,6 +3580,34 @@ impl MidasApp {
                         tracing::warn!("Order validation failed [{code}]: {message}");
                         self.show_toast(format!("Validation: {message}"));
                     }
+                    // Eager single-event position apply. Fires during
+                    // reconnect backfills where events arrive before
+                    // the coalesced `positions_subscription` has time
+                    // to bucket them. The coalesced path
+                    // (`Message::AccountPositionsBatch`) and this path
+                    // both write to `self.positions`; last-write-wins
+                    // is idempotent, so double-delivery is harmless.
+                    BrokerEvent::PositionUpdate {
+                        account,
+                        symbol,
+                        con_id,
+                        quantity,
+                        avg_cost,
+                    } => {
+                        let ev = BrokerEvent::PositionUpdate {
+                            account,
+                            symbol,
+                            con_id,
+                            quantity,
+                            avg_cost,
+                        };
+                        self.positions.apply(&ev);
+                        // Keep every Account-panel Positions cache in
+                        // lock-step with the store — iced's `view()`
+                        // is pure-`&self`, so the rebuild must happen
+                        // here.
+                        self.rebuild_account_positions_caches();
+                    }
                     other => {
                         tracing::trace!("Unhandled broker event: {other:?}");
                     }
@@ -3316,7 +3664,18 @@ impl MidasApp {
             }
 
             Message::BrokerConnectionChanged(state_str) => {
+                // Derive a simple connected/disconnected bool from the
+                // display string; mirrors the status-bar predicate used
+                // in `view_connection_indicator`. "Ready" is the steady
+                // state after Connect + server handshake; "Connected"
+                // (pre-handshake) is also treated as healthy.
+                let now_connected = matches!(state_str.as_str(), "Ready" | "Connected");
                 self.broker_connection_display = state_str;
+                // Propagate the edge to every open Account pane so the
+                // banner-ack flag resets on fresh disconnects.
+                for panel in self.account_panels.values_mut() {
+                    panel.apply_connection_change(now_connected);
+                }
                 Task::none()
             }
 

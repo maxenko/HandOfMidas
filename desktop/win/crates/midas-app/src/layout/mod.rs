@@ -9,7 +9,7 @@
 
 use iced::widget::pane_grid;
 
-use midas_core::{ChartId, OrderBlotterId, OrderPanelId, WatchlistId};
+use midas_core::{AccountPanelId, ChartId, OrderBlotterId, OrderPanelId, WatchlistId};
 
 // ── Panel content ────────────────────────────────────────────────────
 
@@ -23,7 +23,14 @@ pub enum PanelContent {
     /// An order panel identified by a stable `OrderPanelId`.
     Order(OrderPanelId),
     /// An order-blotter panel (order history grid).
+    ///
+    /// Legacy: retained for enum-shape compatibility with existing
+    /// callers during the Account-panel refactor. New panes use
+    /// `Account` instead. Migration rewrites `OrderBlotter` pane slots
+    /// at config-load time.
     OrderBlotter(OrderBlotterId),
+    /// A tabbed Account panel (Positions / Orders / History / Recents).
+    Account(AccountPanelId),
 }
 
 // ── Per-pane state ───────────────────────────────────────────────────
@@ -67,9 +74,21 @@ impl PaneState {
     }
 
     /// Create a new pane state for an order-blotter panel.
+    ///
+    /// Legacy — new code uses [`Self::account`]. Retained for enum
+    /// shape parity with persisted layouts.
+    #[allow(dead_code)]
     pub fn order_blotter(id: OrderBlotterId) -> Self {
         Self {
             content: PanelContent::OrderBlotter(id),
+            is_focused: false,
+        }
+    }
+
+    /// Create a new pane state for an Account (tabbed) panel.
+    pub fn account(id: AccountPanelId) -> Self {
+        Self {
+            content: PanelContent::Account(id),
             is_focused: false,
         }
     }
@@ -78,9 +97,10 @@ impl PaneState {
     pub fn chart_id(&self) -> Option<ChartId> {
         match self.content {
             PanelContent::Chart(id) => Some(id),
-            PanelContent::Watchlist(_) | PanelContent::Order(_) | PanelContent::OrderBlotter(_) => {
-                None
-            }
+            PanelContent::Watchlist(_)
+            | PanelContent::Order(_)
+            | PanelContent::OrderBlotter(_)
+            | PanelContent::Account(_) => None,
         }
     }
 }
@@ -104,7 +124,14 @@ pub struct WorkspaceLayout {
     /// Monotonic counter for generating unique `OrderPanelId` values.
     pub(crate) next_order_panel_id: u32,
     /// Monotonic counter for generating unique `OrderBlotterId` values.
+    ///
+    /// Legacy — kept for layout-restore parity; account panels have
+    /// their own counter. This value is never incremented during a
+    /// normal run (migration rewrites blotter slots to `Account`).
+    #[allow(dead_code)]
     pub(crate) next_order_blotter_id: u32,
+    /// Monotonic counter for generating unique `AccountPanelId` values.
+    pub(crate) next_account_panel_id: u32,
 }
 
 impl WorkspaceLayout {
@@ -122,6 +149,7 @@ impl WorkspaceLayout {
             next_watchlist_id: 1,
             next_order_panel_id: 1,
             next_order_blotter_id: 1,
+            next_account_panel_id: 1,
         };
 
         // Mark the initial pane as focused.
@@ -154,9 +182,19 @@ impl WorkspaceLayout {
     }
 
     /// Allocate a new unique `OrderBlotterId`.
+    ///
+    /// Legacy — no live call sites; retained for ABI parity.
+    #[allow(dead_code)]
     pub fn next_order_blotter_id(&mut self) -> OrderBlotterId {
         let id = OrderBlotterId::new(self.next_order_blotter_id);
         self.next_order_blotter_id += 1;
+        id
+    }
+
+    /// Allocate a new unique `AccountPanelId`.
+    pub fn next_account_panel_id(&mut self) -> AccountPanelId {
+        let id = AccountPanelId::new(self.next_account_panel_id);
+        self.next_account_panel_id += 1;
         id
     }
 

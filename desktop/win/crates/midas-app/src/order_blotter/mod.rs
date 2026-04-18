@@ -1,5 +1,5 @@
 //! Per-leg order blotter — accumulates rows from `BrokerEvent` and
-//! exposes a read-only view for the [`panel`] + grid renderer.
+//! exposes a read-only view for the Account panel's Orders-tab renderer.
 //!
 //! # Shape
 //!
@@ -27,7 +27,6 @@
 //! short-circuit re-renders via cheap equality on a `u64`.
 
 pub mod columns;
-pub mod panel;
 pub mod persist;
 
 use std::collections::{BTreeMap, HashMap};
@@ -88,6 +87,14 @@ impl OrderStatus {
             "Rejected" | "Inactive" => Self::Rejected,
             _ => Self::Working,
         }
+    }
+
+    /// True iff the order has reached a terminal lifecycle state and is
+    /// therefore eligible for the Trade History tab. `Working` and
+    /// `PartiallyFilled` are explicitly excluded so they continue to
+    /// live in the Orders tab until they fill, cancel, or reject.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Filled | Self::Cancelled | Self::Rejected)
     }
 }
 
@@ -156,6 +163,20 @@ impl OrderBlotter {
 
     pub fn len(&self) -> usize {
         self.rows.len()
+    }
+
+    /// Count of rows currently in a terminal lifecycle state
+    /// (`Filled`, `Cancelled`, or `Rejected`). Drives the Trade History
+    /// tab's badge. Recomputed on every call — O(n) over rows; a
+    /// hundred-row blotter is below any rendering cost we care about,
+    /// so no cache field is introduced. Per-frame callers can cache
+    /// the value themselves (e.g. in a tab struct, keyed by
+    /// [`Self::generation`]).
+    pub fn terminal_row_count(&self) -> usize {
+        self.rows
+            .values()
+            .filter(|r| r.status.is_terminal())
+            .count()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -667,6 +688,52 @@ mod tests {
         let mut b = OrderBlotter::new();
         let dirty = b.apply(&BrokerEvent::Connected { server_version: 12 });
         assert!(dirty.is_empty());
+    }
+
+    #[test]
+    fn order_status_is_terminal_truth_table() {
+        assert!(!OrderStatus::Working.is_terminal());
+        assert!(!OrderStatus::PartiallyFilled.is_terminal());
+        assert!(OrderStatus::Filled.is_terminal());
+        assert!(OrderStatus::Cancelled.is_terminal());
+        assert!(OrderStatus::Rejected.is_terminal());
+    }
+
+    #[test]
+    fn terminal_row_count_reflects_mixed_statuses() {
+        let mut b = OrderBlotter::new();
+        let parent = Uuid::from_u128(rand_id());
+        let tp = Uuid::from_u128(rand_id());
+        let sl = Uuid::from_u128(rand_id());
+        b.apply(&bracket_created(parent, Some(tp), Some(sl)));
+
+        // All three legs are Working initially.
+        assert_eq!(b.terminal_row_count(), 0);
+
+        // Fill the entry leg → Filled (terminal).
+        b.apply(&BrokerEvent::OrderStatusChanged {
+            order_id: parent,
+            old_status: "Submitted".to_owned(),
+            new_status: "Filled".to_owned(),
+            filled_qty: 100.0,
+            remaining_qty: 0.0,
+            avg_fill_price: 184.5,
+        });
+        assert_eq!(b.terminal_row_count(), 1);
+
+        // Cancel the TP leg → Cancelled (terminal).
+        b.apply(&BrokerEvent::OrderCancelled {
+            order_id: tp,
+            reason: "oca".to_owned(),
+        });
+        assert_eq!(b.terminal_row_count(), 2);
+
+        // Reject the SL leg → Rejected (terminal). All three terminal.
+        b.apply(&BrokerEvent::OrderRejected {
+            order_id: sl,
+            reason: "invalid".to_owned(),
+        });
+        assert_eq!(b.terminal_row_count(), 3);
     }
 
     #[test]

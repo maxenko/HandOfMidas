@@ -303,12 +303,74 @@ pub fn handle_command(
 
         Command::OpenOrdersPanel => {
             responder.ok_empty(cursor_now());
-            app.update(Message::AddOrderBlotter)
+            app.update(Message::AddAccountPanel)
         }
 
         Command::CycleThumbnail { symbol } => {
             responder.ok(serde_json::json!({ "symbol": symbol }), cursor_now());
             app.update(Message::ThumbnailIntervalCycle(symbol))
+        }
+
+        Command::SetAccountTab { tab } => {
+            use crate::account_panel::AccountMsg;
+            use midas_core::config::AccountTab;
+            let parsed = match tab.as_str() {
+                "positions" => AccountTab::Positions,
+                "orders" => AccountTab::Orders,
+                "trade-history" => AccountTab::TradeHistory,
+                "recents" => AccountTab::Recents,
+                other => {
+                    responder.err(
+                        ErrorKind::Internal,
+                        format!(
+                            "SetAccountTab: unknown tab '{other}' (expected positions|orders|\
+                             trade-history|recents)"
+                        ),
+                        cursor_now(),
+                    );
+                    return iced::Task::none();
+                }
+            };
+            // Target every Account panel currently mounted in the
+            // workspace pane grid. This matters when a config has stale
+            // `account_panels` entries that aren't in the visible layout
+            // — scripting the active tab should affect the panel the
+            // user is looking at, not an orphaned one.
+            use crate::layout::PanelContent;
+            let visible_ids: Vec<midas_core::AccountPanelId> = app
+                .workspace
+                .panes
+                .iter()
+                .filter_map(|(_, state)| match state.content {
+                    PanelContent::Account(id) => Some(id),
+                    _ => None,
+                })
+                .collect();
+            if visible_ids.is_empty() {
+                responder.err(
+                    ErrorKind::Internal,
+                    "SetAccountTab: no Account panel is mounted in the workspace",
+                    cursor_now(),
+                );
+                return iced::Task::none();
+            }
+            responder.ok(
+                serde_json::json!({
+                    "account_panel_ids": visible_ids.iter().map(|i| i.0).collect::<Vec<_>>(),
+                    "tab": tab,
+                }),
+                cursor_now(),
+            );
+            // Dispatch TabSelected to every mounted Account pane. For
+            // scripted visual checks the common case is one pane, so
+            // "all" == "the one the user sees". Iced batches the Task
+            // results; each panel's state advances synchronously inside
+            // the `update` call.
+            let tasks: Vec<_> = visible_ids
+                .into_iter()
+                .map(|id| app.update(Message::Account(id, AccountMsg::TabSelected(parsed))))
+                .collect();
+            iced::Task::batch(tasks)
         }
 
         Command::Key { combo } => match input::dispatch_key(app, &combo) {

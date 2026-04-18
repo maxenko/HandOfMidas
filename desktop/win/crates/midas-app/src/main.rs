@@ -4,6 +4,7 @@
 //! capable) and wires together all workspace crates.
 
 // TODO: Wire into MidasApp when LevelStore is replaced by AnnotationStore.
+mod account_panel;
 mod annotation_persistence;
 mod annotation_store;
 mod app;
@@ -201,6 +202,20 @@ fn subscription(state: &MidasApp) -> Subscription<Message> {
         let conn_sub =
             Subscription::run_with(conn_source, crate::broker_bridge::broker_conn_stream);
         subs.push(conn_sub);
+    }
+
+    // Coalesced positions subscription (Slice 4). Buckets
+    // `BrokerEvent::PositionUpdate`s into 50 ms windows of at most 256
+    // events and folds each window to one update per symbol. Runs
+    // independently of the raw broker-event subscription above — the
+    // single-event path in `handle_broker_msg` applies each update
+    // eagerly for reconnect backfills; this path keeps steady-state
+    // updates batched so the iced `update()` loop doesn't stall.
+    if let Some(ref bridge) = state.broker_bridge {
+        let source = bridge.event_source();
+        let positions_sub = crate::account_panel::positions_subscription(source)
+            .map(Message::AccountPositionsBatch);
+        subs.push(positions_sub);
     }
 
     // Dev harness subscription (feature-gated).

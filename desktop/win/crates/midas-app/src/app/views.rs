@@ -13,7 +13,7 @@ use iced::widget::{
 use iced::{window, Color, Element, Fill, Length};
 
 use midas_core::{
-    ChartId, LinkColor, LinkMode, OrderBlotterId, OrderPanelId, Timeframe, WatchlistId,
+    AccountPanelId, ChartId, LinkColor, LinkMode, OrderPanelId, Timeframe, WatchlistId,
 };
 
 use crate::layout::PanelContent;
@@ -478,8 +478,8 @@ impl MidasApp {
             .padding([4, 10])
             .style(hover_text_button_style);
 
-        let orders_btn = button(text("Orders").size(12))
-            .on_press(Message::AddOrderBlotter)
+        let orders_btn = button(text("Account").size(12))
+            .on_press(Message::AddAccountPanel)
             .padding([4, 10])
             .style(hover_text_button_style);
 
@@ -557,10 +557,22 @@ impl MidasApp {
                         let bd = self.view_order_body(order_id);
                         (tb, bd)
                     }
-                    PanelContent::OrderBlotter(blotter_id) => {
-                        let tb = self.view_order_blotter_title_bar(blotter_id, pane);
-                        let bd = self.view_order_blotter_body(blotter_id);
+                    PanelContent::Account(account_id) => {
+                        let tb = self.view_account_title_bar(account_id, pane);
+                        let bd = self.view_account_body(account_id);
                         (tb, bd)
+                    }
+                    PanelContent::OrderBlotter(_) => {
+                        // Legacy — migration rewrites these at load time.
+                        // Render a minimal placeholder if one sneaks through.
+                        (
+                            pane_grid::TitleBar::new(text("Orders (legacy)").size(14))
+                                .padding([2, 4]),
+                            container(text("Legacy Orders pane — restart to migrate").size(12))
+                                .center_x(Fill)
+                                .center_y(Fill)
+                                .into(),
+                        )
                     }
                 };
 
@@ -2257,20 +2269,22 @@ impl MidasApp {
     }
 }
 
-// ── Order blotter panel ─────────────────────────────────────────────
+// ── Account panel (tabbed) ─────────────────────────────────────────
 
 impl MidasApp {
-    /// Title bar for an Orders (blotter) pane.
-    fn view_order_blotter_title_bar(
+    /// Title bar for an Account pane. Visually identical to the former
+    /// Orders pane's title bar; displays the panel name + current row
+    /// count and the link/gear/close controls.
+    fn view_account_title_bar(
         &self,
-        blotter_id: OrderBlotterId,
+        account_id: AccountPanelId,
         pane: pane_grid::Pane,
     ) -> pane_grid::TitleBar<'_, Message> {
         let name = self
-            .order_blotters
-            .get(&blotter_id)
-            .map(|b| b.name.clone())
-            .unwrap_or_else(|| "Orders".to_string());
+            .account_panels
+            .get(&account_id)
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| "Account".to_string());
         let row_count = self.order_blotter.len();
         let title_text = if row_count > 0 {
             format!("{name} ({row_count})")
@@ -2278,12 +2292,11 @@ impl MidasApp {
             name
         };
 
-        // Symbol-link [S] button. Colour matches the link group so
-        // users can see at a glance which colour they're bound to.
+        // Symbol-link [S] button (Orders tab's link colour).
         let link = self
-            .order_blotters
-            .get(&blotter_id)
-            .map(|p| p.symbol_link)
+            .account_panels
+            .get(&account_id)
+            .map(|p| p.orders.symbol_link)
             .unwrap_or(LinkMode::Unlinked);
         let link_rgba = link_mode_indicator_rgba(link);
         let bold_font = iced::Font {
@@ -2293,7 +2306,7 @@ impl MidasApp {
         let link_btn: Element<'_, Message> =
             button(text("S").size(10).color(Color::WHITE).font(bold_font))
                 .on_press(Message::ToggleLinkPicker(
-                    PickerTarget::OrderBlotter(blotter_id),
+                    PickerTarget::Account(account_id),
                     LinkDimension::Symbol,
                 ))
                 .padding([2, 5])
@@ -2313,7 +2326,7 @@ impl MidasApp {
 
         let gear_btn: Element<'_, Message> =
             button(text("⋮").size(12).color(theme::TEXT_SECONDARY))
-                .on_press(Message::OrderBlotterOpenColumnSelector(blotter_id))
+                .on_press(Message::AccountOrdersOpenColumnSelector(account_id))
                 .padding([2, 6])
                 .style(hover_text_button_style)
                 .into();
@@ -2344,15 +2357,215 @@ impl MidasApp {
         .style(|_theme| container::Style::default())
     }
 
-    /// Body for an Orders (blotter) pane. Renders the shared
-    /// [`crate::order_blotter::OrderBlotter`] via [`midas_grid::grid`].
-    fn view_order_blotter_body(&self, blotter_id: OrderBlotterId) -> Element<'_, Message> {
+    /// Body for an Account pane. Renders a tab strip plus the active
+    /// tab's content. Slice 1 has only the Orders tab backed; other
+    /// tabs show empty-state placeholders.
+    fn view_account_body(&self, account_id: AccountPanelId) -> Element<'_, Message> {
+        use midas_core::config::AccountTab;
+        use midas_ui::{TabItem, Tabs, UiTheme};
+
+        let Some(panel) = self.account_panels.get(&account_id) else {
+            return container(text("Account panel not found").size(14)).into();
+        };
+
+        // Derive a simple connected/disconnected bool from the broker
+        // connection display string. "Ready" is the steady state;
+        // "Connected" (pre-handshake) is treated as healthy.
+        let broker_connected = matches!(
+            self.broker_connection_display.as_str(),
+            "Ready" | "Connected"
+        );
+
+        // Hoist the recents snapshot out of the per-tab match so the
+        // returned `Element` — which borrows from this slice — outlives
+        // the enclosing `col.into()`. `RecentEntry: Clone` so the
+        // snapshot is cheap.
+        let recents_snapshot: Vec<crate::app::RecentEntry> =
+            self.recent_symbols.iter().cloned().collect();
+
+        // Badges cap at 999 so a blotter with thousands of rows never
+        // blows up the fixed-width badge layout. Recents caps at 99
+        // further down (it's bounded to MAX_RECENTS anyway).
+        const BADGE_CAP: usize = 999;
+        // Cache the working-order count for the Orders tab badge. Only
+        // non-terminal orders count.
+        let working_count = self
+            .order_blotter
+            .rows()
+            .filter(|r| !r.status.is_terminal())
+            .count()
+            .min(BADGE_CAP);
+        // Terminal-order count drives the Trade History badge. Hidden
+        // when zero — the `Tabs` widget renders no badge for the 0 case.
+        let history_count = self.order_blotter.terminal_row_count().min(BADGE_CAP);
+        // Open-position count drives the Positions tab badge. Slice 4
+        // turns it on once the first `PositionUpdate` arrives; Slice 5
+        // renders the grid rows that back the count.
+        let positions_count = self.positions.len().min(BADGE_CAP);
+
+        // The Tabs widget is a midas-ui primitive. Store a theme locally so
+        // the tab colours stay consistent with the rest of the UI until
+        // Slice 6 threads the full theme through MidasApp.
+        let ui_theme = UiTheme::default();
+        let mut history_tab_item = TabItem::new("Trade History", AccountTab::TradeHistory);
+        if history_count > 0 {
+            history_tab_item = history_tab_item.with_badge(history_count);
+        }
+        let mut positions_tab_item = TabItem::new("Positions", AccountTab::Positions);
+        if positions_count > 0 {
+            positions_tab_item = positions_tab_item.with_badge(positions_count);
+        }
+        // Recents badge — total count of MRU entries, capped at 99 so a
+        // theoretically-unbounded value never blows up badge layout.
+        let recents_count = self.recent_symbols.len().min(99);
+        let mut recents_tab_item = TabItem::new("Recent Instruments", AccountTab::Recents);
+        if recents_count > 0 {
+            recents_tab_item = recents_tab_item.with_badge(recents_count);
+        }
+        let tabs_el: Element<'_, Message> = Tabs::new(
+            vec![
+                positions_tab_item,
+                TabItem::new("Orders", AccountTab::Orders).with_badge(working_count),
+                history_tab_item,
+                recents_tab_item,
+            ],
+            panel.active_tab,
+            move |tab| {
+                Message::Account(
+                    account_id,
+                    crate::account_panel::AccountMsg::TabSelected(tab),
+                )
+            },
+        )
+        .view(&ui_theme);
+
+        // Tab strip container — no bottom padding/border so the active
+        // tab's underline sits flush with the body (grid) below it.
+        let tab_strip: Element<'_, Message> = container(tabs_el)
+            .padding(iced::Padding {
+                top: 4.0,
+                right: 8.0,
+                bottom: 0.0,
+                left: 8.0,
+            })
+            .width(Fill)
+            .into();
+
+        // Active-tab body.
+        let body: Element<'_, Message> = match panel.active_tab {
+            AccountTab::Orders => self.view_account_orders_tab(account_id),
+            AccountTab::Positions => {
+                // Slice 5: live Positions grid driven by `self.positions`.
+                // The per-panel cache was rebuilt by the update()
+                // path (subscription batches, single-event apply, or
+                // TabSelected); `view()` stays pure-`&self`.
+                panel
+                    .positions
+                    .view(&ui_theme, account_id, broker_connected)
+                    .map(move |m| Message::Account(account_id, m))
+            }
+            AccountTab::TradeHistory => self.view_account_history_tab(account_id),
+            AccountTab::Recents => self.view_account_recents_tab(account_id),
+        };
+        // `recents_snapshot` is only consumed inside the recents tab
+        // now (via `self.recent_symbols` directly), but we still clone
+        // it above for lifetime hygiene in case future paths need it.
+        let _ = recents_snapshot;
+
+        // Disconnect banner — renders above the tab strip when the
+        // broker is offline AND the user has not dismissed the banner
+        // for this disconnect episode. Per the plan, the banner does
+        // NOT auto-dismiss on reconnect.
+        let banner: Option<Element<'_, Message>> =
+            if panel.should_show_disconnect_banner(broker_connected) {
+                let warning_bg = ui_theme.warning_bg;
+                let warning_text = ui_theme.warning_text;
+                let dismiss_msg = Message::Account(
+                    account_id,
+                    crate::account_panel::AccountMsg::DisconnectBannerDismissed,
+                );
+                let banner_el: Element<'_, Message> = container(
+                    iced::widget::row![
+                        text("Disconnected — data may be stale")
+                            .size(13)
+                            .color(warning_text),
+                        Space::new().width(Fill),
+                        button(text("\u{00D7}").size(14).color(warning_text))
+                            .on_press(dismiss_msg)
+                            .padding([0, 6])
+                            .style(move |_theme, _status| iced::widget::button::Style {
+                                background: None,
+                                text_color: warning_text,
+                                ..Default::default()
+                            }),
+                    ]
+                    .align_y(iced::Alignment::Center)
+                    .spacing(8),
+                )
+                .padding([6, 12])
+                .width(Fill)
+                .style(move |_theme| container::Style {
+                    background: Some(warning_bg.into()),
+                    ..Default::default()
+                })
+                .into();
+                Some(banner_el)
+            } else {
+                None
+            };
+
+        let mut col = Column::new().width(Fill).height(Fill);
+        if let Some(b) = banner {
+            col = col.push(b);
+        }
+        col = col.push(tab_strip).push(body);
+        let main_content: Element<'_, Message> = col.into();
+
+        // Link-picker overlay — rendered at the body level (not inside
+        // each tab's view) so the [S] symbol-link button in the title
+        // bar works regardless of which tab is active. Previously the
+        // picker was scoped to the Orders tab, which silently swallowed
+        // clicks when any other tab was active.
+        let needs_link_picker = matches!(
+            self.link_picker_open,
+            Some((PickerTarget::Account(id), _)) if id == account_id
+        );
+        if !needs_link_picker {
+            return main_content;
+        }
+
+        let backdrop = iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
+            .on_press(Message::DismissLinkPicker);
+        let picker = self.build_link_picker(LinkDimension::Symbol, move |mode| {
+            Message::AccountOrdersSetSymbolLink(account_id, mode)
+        });
+        stack(vec![
+            main_content,
+            backdrop.into(),
+            container(picker)
+                .align_x(iced::alignment::Horizontal::Right)
+                .align_y(iced::alignment::Vertical::Top)
+                .padding([4, 4])
+                .width(Fill)
+                .height(Fill)
+                .into(),
+        ])
+        .width(Fill)
+        .height(Fill)
+        .into()
+    }
+
+    /// Orders-tab body. Identical render path to the former Orders pane
+    /// (14 columns, sort, selection, resize, column-selector popup,
+    /// link-picker overlay, empty-state, thumbnail cells).
+    fn view_account_orders_tab(&self, account_id: AccountPanelId) -> Element<'_, Message> {
         use crate::order_blotter::columns::{DisplayRow, OrderBlotterColumn};
         use midas_grid::GridColumn;
 
-        let Some(panel) = self.order_blotters.get(&blotter_id) else {
-            return container(text("Blotter not found").size(14)).into();
+        let Some(panel) = self.account_panels.get(&account_id) else {
+            return container(text("Account panel not found").size(14)).into();
         };
+        let orders = &panel.orders;
 
         if self.order_blotter.is_empty() {
             return container(
@@ -2372,18 +2585,15 @@ impl MidasApp {
             .into();
         }
 
-        // Project every OrderRow → DisplayRow for render. Typical row
-        // count is small (tens). Generation-aware caching is future
-        // growth; for now rebuild each frame — negligible cost.
+        // Project every OrderRow → DisplayRow for render.
         let mut rows: Vec<DisplayRow> = self
             .order_blotter
             .rows()
             .map(DisplayRow::from_row)
             .collect();
 
-        // Apply the grid's active sort. Default is OrderId descending
-        // (set in `OrderBlotterPanel::default_grid_state`).
-        if let Some(sort) = panel.grid_state.sort.as_ref() {
+        // Apply the grid's active sort.
+        if let Some(sort) = orders.grid_state.sort.as_ref() {
             if let Some(col) = OrderBlotterColumn::ALL
                 .iter()
                 .find(|c| c.id() == sort.column_id)
@@ -2397,10 +2607,6 @@ impl MidasApp {
                 });
             }
         }
-
-        // Hand-built table — `midas_grid::grid()` can't borrow a
-        // Vec<DisplayRow> local to this view fn (see watchlist body
-        // for the same constraint).
 
         use crate::order_blotter::columns::{
             symbol_badge, COL_AVG_FILL, COL_CHART, COL_INSTRUCTION, COL_LAST_UPDATE, COL_LIMIT,
@@ -2429,20 +2635,16 @@ impl MidasApp {
             (COL_CHART, "Chart", false),
         ];
 
-        // Filter out hidden columns. Symbol stays always visible —
-        // a blotter with no symbol cell is useless.
         let visible: Vec<(midas_grid::ColumnId, &'static str, bool, usize)> = ALL_COL_DEFS
             .iter()
             .enumerate()
             .filter(|(_, (col_id, _, _))| {
-                *col_id == COL_SYMBOL || !panel.hidden_columns.contains(col_id)
+                *col_id == COL_SYMBOL || !orders.hidden_columns.contains(col_id)
             })
             .map(|(idx, (col_id, label, sortable))| (*col_id, *label, *sortable, idx))
             .collect();
 
         // ── Header ─────────────────────────────────────────────────
-        // Blotter uses the default HeaderStyle: [6, 8] padding, 0.5px
-        // border, 11-point muted label text.
         let header_style = HeaderStyle {
             label_color: Some(theme::TEXT_SECONDARY),
             ..HeaderStyle::default()
@@ -2450,22 +2652,23 @@ impl MidasApp {
         let mut header_cells: Vec<Element<'_, Message>> = Vec::with_capacity(visible.len());
         let last_idx = visible.len().saturating_sub(1);
         for (i, (col_id, label, sortable, all_col_idx)) in visible.iter().copied().enumerate() {
-            let width = panel.grid_state.column_width(col_id);
-            let indicator = panel
+            let width = orders.grid_state.column_width(col_id);
+            let indicator = orders
                 .grid_state
                 .sort
                 .filter(|s| s.column_id == col_id)
                 .map(|s| s.direction.indicator())
                 .unwrap_or("");
             let sort_msg = sortable.then(|| {
-                Message::OrderBlotterGrid(blotter_id, midas_grid::GridMessage::SortToggled(col_id))
+                Message::Account(
+                    account_id,
+                    crate::account_panel::AccountMsg::Orders(midas_grid::GridMessage::SortToggled(
+                        col_id,
+                    )),
+                )
             });
-            // `all_col_idx` refers to the position in `ALL_COL_DEFS` /
-            // `OrderBlotterColumn::ids()` so visibility changes don't
-            // invalidate saved widths. Last visible column has no
-            // resize handle (no column to drag against on the right).
             let resize = (i < last_idx).then(|| ResizeHandle {
-                on_press: Message::OrderBlotterColumnResizeStart(blotter_id, all_col_idx),
+                on_press: Message::AccountOrdersColumnResizeStart(account_id, all_col_idx),
                 height: 26.0,
             });
             header_cells.push(grid_header_cell(
@@ -2483,8 +2686,8 @@ impl MidasApp {
         // ── Body rows ─────────────────────────────────────────────
         let mut body = IcedColumn::new();
         for (row_idx, r) in rows.iter().enumerate() {
-            let is_selected = panel.selected_row == Some(r.order_uuid);
-            let w = |id| panel.grid_state.column_width(id);
+            let is_selected = orders.selected_row == Some(r.order_uuid);
+            let w = |id| orders.grid_state.column_width(id);
 
             let side_color = match r.side {
                 midas_core::broker::OrderAction::Buy => Color::from_rgb(0.30, 0.54, 0.96),
@@ -2592,34 +2795,34 @@ impl MidasApp {
                 cells.push(cell);
             }
 
-            // Clicking anywhere in the row broadcasts that row's symbol
-            // to the link group. No-op when `symbol_link == Unlinked`.
             let click_msg =
-                Message::OrderBlotterRowSelected(blotter_id, r.order_uuid, r.symbol.clone());
+                Message::AccountOrdersRowSelected(account_id, r.order_uuid, r.symbol.clone());
             let row_widget = grid_body_row(cells, is_selected, row_idx % 2 == 0, Some(click_msg));
             body = body.push(row_widget);
         }
 
-        let main_content: Element<'_, Message> = column![header, scrollable(body).height(Fill)]
-            .width(Fill)
-            .height(Fill)
-            .into();
+        // Stable scrollable ID — unique per Account pane so switching
+        // tabs preserves scroll position, and multiple Account panes
+        // don't share state.
+        let scroll_id: iced::widget::Id = format!("account-{}-orders", account_id.0).into();
+        let main_content: Element<'_, Message> =
+            column![header, scrollable(body).id(scroll_id).height(Fill)]
+                .width(Fill)
+                .height(Fill)
+                .into();
 
         // ── Overlays ─────────────────────────────────────────────
-        // Three possible overlays, layered in priority: resize drag
-        // surface, column-selector popup, link picker. Each is its
-        // own stack layer.
+        // Link-picker is rendered at the body level in `view_account_body`
+        // so it works across all tabs, not just Orders. Here we only
+        // handle the two Orders-specific overlays: column-resize drag
+        // and column-visibility popup.
         let needs_resize_overlay = self
-            .resizing_blotter_column
-            .map(|(id, _, _, _)| id == blotter_id)
+            .resizing_account_column
+            .map(|(id, _, _, _)| id == account_id)
             .unwrap_or(false);
-        let needs_column_selector = self.blotter_column_selector_open == Some(blotter_id);
-        let needs_link_picker = matches!(
-            self.link_picker_open,
-            Some((PickerTarget::OrderBlotter(id), _)) if id == blotter_id
-        );
+        let needs_column_selector = self.account_column_selector_open == Some(account_id);
 
-        if !needs_resize_overlay && !needs_column_selector && !needs_link_picker {
+        if !needs_resize_overlay && !needs_column_selector {
             return main_content;
         }
 
@@ -2629,20 +2832,17 @@ impl MidasApp {
             layers.push(
                 iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
                     .interaction(iced::mouse::Interaction::ResizingHorizontally)
-                    .on_move(|point| Message::OrderBlotterColumnResizing(point.x))
-                    .on_release(Message::OrderBlotterColumnResizeEnd)
+                    .on_move(|point| Message::AccountOrdersColumnResizing(point.x))
+                    .on_release(Message::AccountOrdersColumnResizeEnd)
                     .into(),
             );
         }
 
         if needs_column_selector {
             let backdrop = iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
-                .on_press(Message::OrderBlotterDismissColumnSelector);
+                .on_press(Message::AccountOrdersDismissColumnSelector);
             layers.push(backdrop.into());
 
-            // Build the column-entry vector from `ALL_COL_DEFS`, marking
-            // Symbol as the sole mandatory entry. Entry order follows the
-            // slice order.
             let entries: Vec<midas_grid::ColumnEntry<'_>> = ALL_COL_DEFS
                 .iter()
                 .map(|(col_id, label, _)| midas_grid::ColumnEntry {
@@ -2653,9 +2853,9 @@ impl MidasApp {
                 .collect();
             let popup = midas_grid::column_selector_popup(
                 &entries,
-                &panel.hidden_columns,
-                move |col_id| Message::OrderBlotterToggleColumn(blotter_id, col_id),
-                Message::OrderBlotterDismissColumnSelector,
+                &orders.hidden_columns,
+                move |col_id| Message::AccountOrdersToggleColumn(account_id, col_id),
+                Message::AccountOrdersDismissColumnSelector,
             );
             layers.push(
                 container(popup)
@@ -2668,24 +2868,260 @@ impl MidasApp {
             );
         }
 
-        if needs_link_picker {
-            let backdrop = iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
-                .on_press(Message::DismissLinkPicker);
-            let picker = self.build_link_picker(LinkDimension::Symbol, move |mode| {
-                Message::OrderBlotterSetSymbolLink(blotter_id, mode)
-            });
-            layers.push(backdrop.into());
-            layers.push(
-                container(picker)
-                    .align_x(iced::alignment::Horizontal::Right)
-                    .align_y(iced::alignment::Vertical::Top)
-                    .padding([4, 4])
-                    .width(Fill)
-                    .height(Fill)
-                    .into(),
-            );
+        stack(layers).width(Fill).height(Fill).into()
+    }
+
+    /// Trade-History-tab body. Mirrors the Orders-tab render path
+    /// (standard `midas_grid` helpers: header with resize handles,
+    /// alternating body rows) so History looks and feels like Orders
+    /// and the watchlist. Read-only v1 — no sort, no selection, no
+    /// link-picker, no column-selector popup.
+    fn view_account_history_tab(&self, account_id: AccountPanelId) -> Element<'_, Message> {
+        use crate::account_panel::history_columns::HistoryColumn;
+        use iced::widget::{scrollable, Column as IcedColumn, Row as IcedRow};
+        use midas_grid::{
+            grid_body_cell, grid_body_row, grid_header_cell, GridColumn, HeaderStyle, ResizeHandle,
+        };
+
+        let Some(panel) = self.account_panels.get(&account_id) else {
+            return container(text("Account panel not found").size(14)).into();
+        };
+        let history = &panel.history;
+
+        if history.cached_rows().is_empty() {
+            return container(
+                column![
+                    text("No trade history yet")
+                        .size(14)
+                        .color(Color::from_rgba(0.7, 0.7, 0.7, 1.0)),
+                    text("Filled, cancelled, and rejected orders land here.")
+                        .size(11)
+                        .color(Color::from_rgba(0.5, 0.5, 0.5, 1.0)),
+                ]
+                .spacing(6)
+                .align_x(iced::Alignment::Center),
+            )
+            .center_x(Fill)
+            .center_y(Fill)
+            .into();
         }
 
+        let columns: &'static [HistoryColumn; 6] = &HistoryColumn::ALL;
+        let last_idx = columns.len().saturating_sub(1);
+
+        // ── Header ─────────────────────────────────────────────────
+        let header_style = HeaderStyle {
+            label_color: Some(theme::TEXT_SECONDARY),
+            ..HeaderStyle::default()
+        };
+        let mut header_cells: Vec<Element<'_, Message>> = Vec::with_capacity(columns.len());
+        for (i, col) in columns.iter().enumerate() {
+            let label: &'static str = match col {
+                HistoryColumn::Timestamp => "Time",
+                HistoryColumn::Symbol => "Symbol",
+                HistoryColumn::Side => "Side",
+                HistoryColumn::Qty => "Qty",
+                HistoryColumn::FillPrice => "Fill Price",
+                HistoryColumn::Status => "Status",
+            };
+            let width = history.grid_state.column_width(col.id());
+            // No sort in v1 — pass `None` and leave the indicator empty.
+            let resize = (i < last_idx).then(|| ResizeHandle {
+                on_press: Message::AccountHistoryColumnResizeStart(account_id, i),
+                height: 26.0,
+            });
+            header_cells.push(grid_header_cell(
+                label,
+                width,
+                "",
+                None::<Message>,
+                resize,
+                &header_style,
+            ));
+        }
+        let header = IcedRow::with_children(header_cells);
+
+        // ── Body rows ─────────────────────────────────────────────
+        let w = |id| history.grid_state.column_width(id);
+        let mut body = IcedColumn::new();
+        for (row_idx, r) in history.cached_rows().iter().enumerate() {
+            let mut cells: Vec<Element<'_, Message>> = Vec::with_capacity(columns.len());
+            for col in columns.iter() {
+                // Reuse the column's own `cell()` for rendering — it already
+                // handles colour tinting for Side and Status. Map the
+                // AccountMsg output (column emits into its own scope) into
+                // the outer Message universe; the History column never
+                // actually emits messages (read-only), so the mapper is
+                // unreachable, but types need to line up.
+                let inner: Element<'_, Message> = {
+                    let account_inner: Element<'_, crate::account_panel::AccountMsg> =
+                        col.cell(r, row_idx);
+                    account_inner.map(move |m| Message::Account(account_id, m))
+                };
+                cells.push(grid_body_cell(inner, w(col.id())));
+            }
+            body = body.push(grid_body_row(cells, false, row_idx % 2 == 0, None));
+        }
+
+        // Stable scrollable ID — unique per Account pane; switching tabs
+        // preserves scroll position and multiple Account panes don't
+        // share state.
+        let scroll_id: iced::widget::Id = format!("account-{}-history", account_id.0).into();
+        let main_content: Element<'_, Message> =
+            column![header, scrollable(body).id(scroll_id).height(Fill)]
+                .width(Fill)
+                .height(Fill)
+                .into();
+
+        // ── Resize overlay ────────────────────────────────────────
+        let needs_resize_overlay = self
+            .resizing_account_history_column
+            .map(|(id, _, _, _)| id == account_id)
+            .unwrap_or(false);
+
+        if !needs_resize_overlay {
+            return main_content;
+        }
+
+        let mut layers: Vec<Element<'_, Message>> = vec![main_content];
+        layers.push(
+            iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
+                .interaction(iced::mouse::Interaction::ResizingHorizontally)
+                .on_move(|point| Message::AccountHistoryColumnResizing(point.x))
+                .on_release(Message::AccountHistoryColumnResizeEnd)
+                .into(),
+        );
+        stack(layers).width(Fill).height(Fill).into()
+    }
+
+    /// Recent-Instruments-tab body. Two-column grid (Ticker, Last Seen)
+    /// using the same `midas_grid` helpers as Orders/History/Watchlist,
+    /// minus the favourite and delete columns. Clicking a row emits
+    /// `AccountMsg::RecentClicked` which re-selects the symbol on the
+    /// focused chart.
+    fn view_account_recents_tab(&self, account_id: AccountPanelId) -> Element<'_, Message> {
+        use crate::account_panel::recents_tab::{COL_RECENTS_LAST_SEEN, COL_RECENTS_TICKER};
+        use iced::widget::{scrollable, text::Wrapping, Column as IcedColumn, Row as IcedRow};
+        use midas_grid::{
+            grid_body_cell, grid_body_row, grid_header_cell, HeaderStyle, ResizeHandle,
+        };
+        use std::time::Instant;
+
+        let Some(panel) = self.account_panels.get(&account_id) else {
+            return container(text("Account panel not found").size(14)).into();
+        };
+        let recents = &panel.recents;
+
+        if self.recent_symbols.is_empty() {
+            return container(
+                column![
+                    text("No recent instruments yet")
+                        .size(14)
+                        .color(Color::from_rgba(0.7, 0.7, 0.7, 1.0)),
+                    text(
+                        "Switch a chart's symbol, or add a ticker to a watchlist, \
+                          to populate this list."
+                    )
+                    .size(11)
+                    .color(Color::from_rgba(0.5, 0.5, 0.5, 1.0)),
+                ]
+                .spacing(6)
+                .align_x(iced::Alignment::Center),
+            )
+            .center_x(Fill)
+            .center_y(Fill)
+            .into();
+        }
+
+        // Match the watchlist/orders grid chrome.
+        let header_style = HeaderStyle {
+            label_color: Some(theme::TEXT_SECONDARY),
+            ..HeaderStyle::default()
+        };
+
+        let col_defs: [(midas_grid::ColumnId, &str); 2] = [
+            (COL_RECENTS_TICKER, "Ticker"),
+            (COL_RECENTS_LAST_SEEN, "Last Seen"),
+        ];
+        let last_idx = col_defs.len().saturating_sub(1);
+
+        // ── Header ─────────────────────────────────────────────────
+        let mut header_cells: Vec<Element<'_, Message>> = Vec::with_capacity(col_defs.len());
+        for (i, &(col_id, label)) in col_defs.iter().enumerate() {
+            let width = recents.grid_state.column_width(col_id);
+            let resize = (i < last_idx).then(|| ResizeHandle {
+                on_press: Message::AccountRecentsColumnResizeStart(account_id, i),
+                height: 26.0,
+            });
+            header_cells.push(grid_header_cell(
+                label,
+                width,
+                "",
+                None::<Message>,
+                resize,
+                &header_style,
+            ));
+        }
+        let header = IcedRow::with_children(header_cells);
+
+        // ── Body rows ─────────────────────────────────────────────
+        let w = |id| recents.grid_state.column_width(id);
+        let now = Instant::now();
+        let mut body = IcedColumn::new();
+        for (row_idx, entry) in self.recent_symbols.iter().enumerate() {
+            let elapsed = crate::account_panel::recents_tab::format_elapsed(entry.last_seen, now);
+            let ticker_cell: Element<'_, Message> = grid_body_cell(
+                text(entry.symbol.clone())
+                    .size(12)
+                    .wrapping(Wrapping::None)
+                    .color(theme::TEXT_PRIMARY)
+                    .into(),
+                w(COL_RECENTS_TICKER),
+            );
+            let last_seen_cell: Element<'_, Message> = grid_body_cell(
+                text(elapsed)
+                    .size(12)
+                    .wrapping(Wrapping::None)
+                    .color(theme::TEXT_SECONDARY)
+                    .into(),
+                w(COL_RECENTS_LAST_SEEN),
+            );
+            let click_msg = Message::Account(
+                account_id,
+                crate::account_panel::AccountMsg::RecentClicked(entry.symbol.clone()),
+            );
+            body = body.push(grid_body_row(
+                vec![ticker_cell, last_seen_cell],
+                false,
+                row_idx % 2 == 0,
+                Some(click_msg),
+            ));
+        }
+
+        let scroll_id: iced::widget::Id = format!("account-{}-recents", account_id.0).into();
+        let main_content: Element<'_, Message> =
+            column![header, scrollable(body).id(scroll_id).height(Fill)]
+                .width(Fill)
+                .height(Fill)
+                .into();
+
+        // ── Resize overlay ────────────────────────────────────────
+        let needs_resize_overlay = self
+            .resizing_account_recents_column
+            .map(|(id, _, _, _)| id == account_id)
+            .unwrap_or(false);
+        if !needs_resize_overlay {
+            return main_content;
+        }
+
+        let mut layers: Vec<Element<'_, Message>> = vec![main_content];
+        layers.push(
+            iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
+                .interaction(iced::mouse::Interaction::ResizingHorizontally)
+                .on_move(|point| Message::AccountRecentsColumnResizing(point.x))
+                .on_release(Message::AccountRecentsColumnResizeEnd)
+                .into(),
+        );
         stack(layers).width(Fill).height(Fill).into()
     }
 }

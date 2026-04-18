@@ -99,6 +99,14 @@ pub fn parse(value: &serde_json::Value) -> Result<BrokerEvent, InjectBrokerError
             reason: required_string(obj, "reason")?,
         }),
 
+        "PositionUpdate" => Ok(BrokerEvent::PositionUpdate {
+            account: required_string(obj, "account")?,
+            symbol: required_string(obj, "symbol")?,
+            con_id: required_i64(obj, "con_id")? as i32,
+            quantity: required_f64(obj, "quantity")?,
+            avg_cost: required_f64(obj, "avg_cost")?,
+        }),
+
         "BracketStatusChanged" | "OrderError" | "OrderValidationFailed" | "OrderCreated" => {
             Err(InjectBrokerError::NotSupported(
                 "variant carries complex types; extend broker_inject.rs if needed",
@@ -288,5 +296,94 @@ mod tests {
     fn market_data_rejected() {
         let v = serde_json::json!({"type": "Tick"});
         assert!(matches!(parse(&v), Err(InjectBrokerError::NotSupported(_))));
+    }
+
+    #[test]
+    fn parses_position_update() {
+        let v = serde_json::json!({
+            "type": "PositionUpdate",
+            "account": "DU123456",
+            "symbol": "GME",
+            "con_id": 208813720,
+            "quantity": 100.0,
+            "avg_cost": 18.5,
+        });
+        match parse(&v).unwrap() {
+            BrokerEvent::PositionUpdate {
+                account,
+                symbol,
+                con_id,
+                quantity,
+                avg_cost,
+            } => {
+                assert_eq!(account, "DU123456");
+                assert_eq!(symbol, "GME");
+                assert_eq!(con_id, 208813720);
+                assert_eq!(quantity, 100.0);
+                assert!((avg_cost - 18.5).abs() < 1e-9);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn position_update_supports_short_quantity() {
+        let v = serde_json::json!({
+            "type": "PositionUpdate",
+            "account": "DU123456",
+            "symbol": "AAPL",
+            "con_id": 265598,
+            "quantity": -50.0,
+            "avg_cost": 175.25,
+        });
+        match parse(&v).unwrap() {
+            BrokerEvent::PositionUpdate { quantity, .. } => assert_eq!(quantity, -50.0),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn position_update_rejects_missing_symbol() {
+        let v = serde_json::json!({
+            "type": "PositionUpdate",
+            "account": "DU123456",
+            "con_id": 1,
+            "quantity": 100.0,
+            "avg_cost": 10.0,
+        });
+        assert!(matches!(
+            parse(&v),
+            Err(InjectBrokerError::MissingField("symbol"))
+        ));
+    }
+
+    #[test]
+    fn position_update_rejects_missing_con_id() {
+        let v = serde_json::json!({
+            "type": "PositionUpdate",
+            "account": "DU123456",
+            "symbol": "AAPL",
+            "quantity": 100.0,
+            "avg_cost": 10.0,
+        });
+        assert!(matches!(
+            parse(&v),
+            Err(InjectBrokerError::MissingField("con_id"))
+        ));
+    }
+
+    #[test]
+    fn position_update_rejects_missing_quantity() {
+        let v = serde_json::json!({
+            "type": "PositionUpdate",
+            "account": "DU123456",
+            "symbol": "AAPL",
+            "con_id": 1,
+            "avg_cost": 10.0,
+        });
+        assert!(matches!(
+            parse(&v),
+            Err(InjectBrokerError::MissingField("quantity"))
+        ));
     }
 }

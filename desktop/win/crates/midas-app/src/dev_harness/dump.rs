@@ -19,6 +19,17 @@ pub struct StateProjection<'a> {
     pub window_size: (u32, u32),
     pub window_position: Option<(i32, i32)>,
     pub order_blotter: OrderBlotterProjection<'a>,
+    pub account_panels: Vec<AccountPanelProjection<'a>>,
+    pub recent_symbols: Vec<&'a str>,
+}
+
+#[derive(Serialize)]
+pub struct AccountPanelProjection<'a> {
+    pub id: u32,
+    pub name: &'a str,
+    pub active_tab: String,
+    pub disconnect_banner_ack: bool,
+    pub history_cached_rows: usize,
 }
 
 #[derive(Serialize)]
@@ -60,6 +71,24 @@ pub fn build(app: &MidasApp) -> serde_json::Value {
         rows: app.order_blotter.rows().collect(),
     };
 
+    let account_panels: Vec<AccountPanelProjection<'_>> = app
+        .account_panels
+        .iter()
+        .map(|(id, p)| AccountPanelProjection {
+            id: id.0,
+            name: &p.name,
+            active_tab: format!("{:?}", p.active_tab),
+            disconnect_banner_ack: p.disconnect_banner_ack,
+            history_cached_rows: p.history.cached_rows().len(),
+        })
+        .collect();
+
+    let recent_symbols: Vec<&str> = app
+        .recent_symbols
+        .iter()
+        .map(|e| e.symbol.as_str())
+        .collect();
+
     let projection = StateProjection {
         tickers,
         active_chart_id: app.workspace.focused_chart_id().map(|id| id.0),
@@ -67,6 +96,8 @@ pub fn build(app: &MidasApp) -> serde_json::Value {
         window_size: app.window_size,
         window_position: app.window_position,
         order_blotter,
+        account_panels,
+        recent_symbols,
     };
 
     serde_json::to_value(&projection).unwrap_or(serde_json::Value::Null)

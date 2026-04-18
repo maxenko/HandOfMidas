@@ -17,7 +17,7 @@ use midas_core::config::AppConfig;
 use midas_devloop_proto::{FixtureEnvelope, DEVLOOP_FIXTURE_VERSION};
 use thiserror::Error;
 
-use super::{Message, MidasApp};
+use super::{Message, MidasApp, RecentEntry};
 use crate::annotation_store::SymbolKey;
 use crate::ticker_state::{self, TickerState};
 
@@ -104,20 +104,29 @@ impl MidasApp {
 
         // Rebuild workspace + panels. Reuses the same path config loads
         // use at startup, so any bug there shows up in both places.
-        let (workspace, charts, watchlists, order_panels, order_blotters) =
+        let (workspace, charts, watchlists, order_panels, account_panels) =
             Self::restore_from_layout_tree(
                 &config.layout_tree,
                 &config.charts,
                 &config.watchlists,
                 &config.order_panels,
-                &config.order_blotters,
+                &config.account_panels,
             );
 
         self.workspace = workspace;
         self.charts = charts;
         self.watchlists = watchlists;
         self.order_panels = order_panels;
-        self.order_blotters = order_blotters;
+        self.account_panels = account_panels;
+        self.recent_symbols = config
+            .recent_symbols
+            .iter()
+            .cloned()
+            .map(|symbol| RecentEntry {
+                symbol,
+                last_seen: None,
+            })
+            .collect();
         self.tickers = tickers;
         self.level_store = crate::level_store::LevelStore::from_config(&config.levels);
 

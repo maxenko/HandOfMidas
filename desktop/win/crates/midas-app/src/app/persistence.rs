@@ -6,7 +6,7 @@ use iced::widget::pane_grid;
 use iced::Task;
 
 use midas_core::config::{
-    AppConfig, ChartConfig, LayoutNode, OrderBlotterConfig, OrderPanelConfig, PanelSlot,
+    AccountPanelConfig, AppConfig, ChartConfig, LayoutNode, OrderPanelConfig, PanelSlot,
     ProviderConfig,
 };
 
@@ -24,7 +24,7 @@ impl MidasApp {
         let mut chart_configs: Vec<ChartConfig> = Vec::new();
         let mut watchlist_configs = Vec::new();
         let mut order_panel_configs: Vec<OrderPanelConfig> = Vec::new();
-        let mut order_blotter_configs: Vec<OrderBlotterConfig> = Vec::new();
+        let mut account_panel_configs: Vec<AccountPanelConfig> = Vec::new();
         let mut panel_order: Vec<PanelSlot> = Vec::new();
         let mut layout_tree: Vec<LayoutNode> = Vec::new();
 
@@ -35,7 +35,7 @@ impl MidasApp {
             &mut chart_configs,
             &mut watchlist_configs,
             &mut order_panel_configs,
-            &mut order_blotter_configs,
+            &mut account_panel_configs,
             &mut layout_tree,
         );
 
@@ -78,20 +78,24 @@ impl MidasApp {
                         });
                     }
                 }
-                PanelContent::OrderBlotter(blotter_id) => {
+                PanelContent::Account(account_id) => {
                     if let Some(idx) =
-                        order_blotter_configs.iter().enumerate().position(|(i, _)| {
-                            self.order_blotters.get(blotter_id).is_some_and(|panel| {
-                                order_blotter_configs
+                        account_panel_configs.iter().enumerate().position(|(i, _)| {
+                            self.account_panels.get(account_id).is_some_and(|panel| {
+                                account_panel_configs
                                     .get(i)
                                     .is_some_and(|cfg| cfg.name == panel.name)
                             })
                         })
                     {
-                        panel_order.push(PanelSlot::OrderBlotter {
-                            order_blotter_index: idx,
+                        panel_order.push(PanelSlot::Account {
+                            account_panel_index: idx,
                         });
                     }
+                }
+                PanelContent::OrderBlotter(_) => {
+                    // Legacy — never populated by this build. Migration
+                    // rewrote any persisted slots to Account at load time.
                 }
             }
         }
@@ -116,7 +120,15 @@ impl MidasApp {
             levels: self.level_store.to_config(),
             watchlists: watchlist_configs,
             order_panels: order_panel_configs,
-            order_blotters: order_blotter_configs,
+            // Legacy vec stays empty — migration drained it at load time
+            // and this build only writes `account_panels`.
+            order_blotters: Vec::new(),
+            account_panels: account_panel_configs,
+            recent_symbols: self
+                .recent_symbols
+                .iter()
+                .map(|e| e.symbol.clone())
+                .collect(),
             panel_order,
             layout_tree,
             store: midas_core::config::StoreConfig::default(),
@@ -135,7 +147,7 @@ impl MidasApp {
         charts: &mut Vec<ChartConfig>,
         watchlists: &mut Vec<midas_core::config::WatchlistConfig>,
         order_panels: &mut Vec<OrderPanelConfig>,
-        order_blotters: &mut Vec<OrderBlotterConfig>,
+        account_panels: &mut Vec<AccountPanelConfig>,
         tree: &mut Vec<LayoutNode>,
     ) {
         match node {
@@ -150,8 +162,8 @@ impl MidasApp {
                     axis: axis_str.to_string(),
                     ratio: *ratio,
                 });
-                self.walk_node(a, charts, watchlists, order_panels, order_blotters, tree);
-                self.walk_node(b, charts, watchlists, order_panels, order_blotters, tree);
+                self.walk_node(a, charts, watchlists, order_panels, account_panels, tree);
+                self.walk_node(b, charts, watchlists, order_panels, account_panels, tree);
             }
             pane_grid::Node::Pane(pane) => {
                 if let Some(ps) = self.workspace.panes.get(*pane) {
@@ -203,14 +215,17 @@ impl MidasApp {
                                 });
                             }
                         }
-                        PanelContent::OrderBlotter(blotter_id) => {
-                            if let Some(panel) = self.order_blotters.get(blotter_id) {
-                                let idx = order_blotters.len();
-                                order_blotters.push(panel.to_config());
-                                tree.push(LayoutNode::OrderBlotter {
-                                    order_blotter_index: idx,
+                        PanelContent::Account(account_id) => {
+                            if let Some(panel) = self.account_panels.get(account_id) {
+                                let idx = account_panels.len();
+                                account_panels.push(panel.to_config());
+                                tree.push(LayoutNode::Account {
+                                    account_panel_index: idx,
                                 });
                             }
+                        }
+                        PanelContent::OrderBlotter(_) => {
+                            // Legacy — never persisted by this build.
                         }
                     }
                 }
