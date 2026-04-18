@@ -127,6 +127,13 @@ pub enum Command {
     /// the watchlist or blotter. Exposed for devloop debugging of the
     /// thumbnail-load path.
     CycleThumbnail { symbol: String },
+    /// Switch the active tab of the first (or sole) Account panel.
+    /// Useful for scripted visual verification — the devloop otherwise
+    /// has no way to click a tab.
+    ///
+    /// `tab` is one of `"positions" | "orders" | "trade-history" |
+    /// "recents"` (kebab-case, matching `AccountTab` serde).
+    SetAccountTab { tab: String },
 }
 
 // ── Responses ─────────────────────────────────────────────────────────
