@@ -20,6 +20,7 @@ members = [
     "crates/midas-app",
     "crates/mailbox_processor",
     "crates/midas-store",
+    "crates/midas-devloop-proto",
 ]
 default-members = ["crates/midas-app"]
 exclude = ["duckdb-spike"]
@@ -104,6 +105,10 @@ lru = "0.12"
 
 # Benchmarks (dev only)
 criterion = { version = "0.5", features = ["html_reports"] }
+
+# Dev harness: image encoding + perceptual diff for screenshots.
+image = { version = "0.25", default-features = false, features = ["png"] }
+image-compare = "0.4"
 
 # ─── Workspace-wide profiles ──────────────────────────────────────────
 [profile.dev]

@@ -1,0 +1,13 @@
+[package]
+name = "midas-devloop-proto"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Wire-protocol types for the in-process dev harness. Pure serde, no
+# domain dependencies so ad-hoc tooling can speak the protocol without
+# pulling in midas-app.
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
