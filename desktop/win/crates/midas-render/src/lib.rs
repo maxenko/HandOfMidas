@@ -15,6 +15,7 @@ pub mod renderer;
 pub use color::{dark_theme, light_theme, ChartTheme};
 pub use pipelines::candle::CandlePipeline;
 pub use pipelines::grid::GridPipeline;
+pub use pipelines::sparkline::SparklinePipeline;
 pub use pipelines::volume::VolumePipeline;
 pub use pipelines::{CameraUniform, DrawParamsUniform, QuadVertex, UNIT_QUAD_VERTICES};
 pub use renderer::{ChartRenderer, ChartScene};
@@ -29,6 +30,9 @@ pub const VOLUME_SHADER_SRC: &str = include_str!("../shaders/volume.wgsl");
 
 /// Shader source for the grid line pipeline.
 pub const GRID_SHADER_SRC: &str = include_str!("../shaders/grid.wgsl");
+
+/// Shader source for the sparkline (mountain) thumbnail pipeline.
+pub const SPARKLINE_SHADER_SRC: &str = include_str!("../shaders/sparkline.wgsl");
 
 #[cfg(test)]
 mod tests {

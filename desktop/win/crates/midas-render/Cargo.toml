@@ -26,6 +26,8 @@ cryoglyph = "0.1"
 criterion = { workspace = true }
 winit     = "0.30"
 pollster  = "0.3"
+# PNG encoding for the sparkline_demo example + smoke test readback.
+png       = "0.17"
 
 [[bench]]
 name = "render_bench"

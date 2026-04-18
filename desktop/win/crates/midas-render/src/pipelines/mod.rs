@@ -10,6 +10,7 @@
 pub mod badge;
 pub mod candle;
 pub mod grid;
+pub mod sparkline;
 pub mod text;
 pub mod volume;
 

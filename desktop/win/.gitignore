@@ -26,3 +26,7 @@ Desktop.ini
 
 # ── Benchmark output ─────────────────────────────────────────────────
 /target/criterion/
+
+# ── Example outputs ──────────────────────────────────────────────────
+# Reproducible artefacts from `cargo run --example sparkline_demo`.
+/sparkline_demo_*.png
