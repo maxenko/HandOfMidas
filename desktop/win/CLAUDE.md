@@ -38,6 +38,12 @@ cargo run -p midas-app
 # Run with logging
 RUST_LOG=midas=debug cargo run -p midas-app
 
+# Run with dev harness (TCP socket on 127.0.0.1:9898 for Claude-driven
+# fixtures, event-log tailing, screenshot capture, inject_ticker_msg).
+# Boot from a saved fixture: add `-- --fixture <name>`.
+# See plan/devloop-spec.md and scripts/devloop-smoke.sh.
+cargo run -p midas-app --features dev_harness
+
 # Run all tests
 cargo test --workspace
 

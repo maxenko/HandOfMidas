@@ -4,6 +4,18 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[features]
+default = []
+# Compile in the in-process dev harness: TCP listener, event log, fixture
+# save/load, input injection. Zero cost when disabled — the `dev_harness`
+# module and the `midas-devloop-proto` / `image` / `image-compare` deps
+# are all feature-gated.
+dev_harness = [
+    "dep:midas-devloop-proto",
+    "dep:image",
+    "dep:image-compare",
+]
+
 [dependencies]
 midas-core   = { path = "../midas-core" }
 midas-data   = { path = "../midas-data" }
@@ -13,6 +25,9 @@ midas-feed   = { path = "../midas-feed" }
 midas-store  = { path = "../midas-store" }
 midas-grid   = { path = "../midas-grid" }
 mailbox_processor = { path = "../mailbox_processor" }
+midas-devloop-proto = { path = "../midas-devloop-proto", optional = true }
+image = { workspace = true, optional = true }
+image-compare = { workspace = true, optional = true }
 
 iced       = { workspace = true }
 wgpu       = { workspace = true }

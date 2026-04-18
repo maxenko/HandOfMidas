@@ -6,6 +6,9 @@
 /data/config.toml
 !data/.gitkeep
 
+# ── Dev harness runtime (PID file, event log, screenshots, fixtures) ─
+/.devloop/
+
 # ── Binary candle files anywhere ─────────────────────────────────────
 *.candles
 

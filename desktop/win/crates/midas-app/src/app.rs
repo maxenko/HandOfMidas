@@ -6,10 +6,15 @@
 //! - `views`: widget tree construction (toolbar, pane grid, status bar)
 //! - `persistence`: config build, save, and debounce
 
+#[cfg(feature = "dev_harness")]
+mod fixture;
 mod handlers;
 mod persistence;
 mod ticker_wiring;
 mod views;
+
+#[cfg(feature = "dev_harness")]
+pub use fixture::FixtureError;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -24,7 +29,8 @@ use midas_chart::state::ChartState;
 use midas_chart::AnnotationId;
 use midas_core::config::{AppConfig, ChartConfig, LayoutNode, PanelSlot};
 use midas_core::{
-    CandleBuffer, ChartId, DataProvider, LinkMode, OrderPanelId, Timeframe, WatchlistId,
+    CandleBuffer, ChartId, DataProvider, LinkMode, OrderBlotterId, OrderPanelId, Timeframe,
+    WatchlistId,
 };
 
 use crate::registry::ProviderRegistry;
@@ -224,6 +230,13 @@ pub struct MidasApp {
     pub resizing_column: Option<(WatchlistId, usize, f32, f32)>,
     /// Dockable order panels keyed by stable OrderPanelId.
     pub order_panels: HashMap<OrderPanelId, crate::order_panel::OrderPanel>,
+    /// Per-blotter-panel view state (one entry per open Orders pane).
+    pub order_blotters: HashMap<OrderBlotterId, crate::order_blotter::panel::OrderBlotterPanel>,
+    /// Shared blotter accumulating rows from `BrokerEvent`s. Single
+    /// instance read by every `OrderBlotterPanel`.
+    pub order_blotter: crate::order_blotter::OrderBlotter,
+    /// redb-backed persistence for the blotter — survives restart.
+    pub order_history_persist: crate::order_blotter::persist::OrderHistoryPersistHandle,
     /// Links between chart bracket annotations and broker orders,
     /// keyed by the parent (entry) order UUID for O(1) lookup.
     pub order_annotation_links: HashMap<uuid::Uuid, crate::order_panel::OrderAnnotationLink>,
@@ -529,6 +542,12 @@ pub enum Message {
     /// Set the symbol link mode for a dockable order panel.
     OrderPanelSetSymbolLink(OrderPanelId, LinkMode),
 
+    // -- Order-blotter panel (Orders history grid) --
+    /// Add a new Orders blotter pane to the workspace.
+    AddOrderBlotter,
+    /// Grid chrome event (sort / resize / scroll / select) from an Orders pane.
+    OrderBlotterGrid(OrderBlotterId, midas_grid::GridMessage),
+
     // -- G.ATR hover highlight --
     /// Mouse entered the G.ATR badge on a chart — activate candle dimming.
     GatrHoverEnter(ChartId),
@@ -648,6 +667,40 @@ pub enum Message {
         crate::annotation_store::SymbolKey,
         crate::ticker_state::TickerMsg,
     ),
+
+    // -- Dev harness (feature-gated) --
+    /// Command received over the devloop TCP socket. Handled in
+    /// `crate::dev_harness::handle_command`. Carries a one-shot
+    /// responder that is fired with the `Response` the client sees.
+    #[cfg(feature = "dev_harness")]
+    DevHarness {
+        command: midas_devloop_proto::Command,
+        responder: crate::dev_harness::Responder,
+    },
+
+    /// A `window::screenshot()` task returned — encode PNG, compute
+    /// diff against reference, fire the pending responder.
+    #[cfg(feature = "dev_harness")]
+    DevHarnessScreenshotReady {
+        screenshot: iced::window::Screenshot,
+        out_path: std::path::PathBuf,
+        responder: crate::dev_harness::Responder,
+    },
+}
+
+/// Classify messages the `wait_for_idle` tracker should NOT treat as
+/// input activity: `Tick` fires constantly, market-data updates fire
+/// per broker tick, etc. Everything else is considered "real" work.
+#[cfg(feature = "dev_harness")]
+fn is_tick_rate_message(msg: &Message) -> bool {
+    use crate::ticker_state::TickerMsg;
+    matches!(
+        msg,
+        Message::Tick
+            | Message::Ticker(_, TickerMsg::UpdateMarketData { .. })
+            | Message::RefreshMarketData
+            | Message::MarketSnapshotLoaded(..)
+    )
 }
 
 // ── Constructor + helpers ─────────────────────────────────────────────
@@ -758,21 +811,30 @@ impl MidasApp {
         let open_task = open_task.map(Message::MainWindowOpened);
 
         // Build workspace, charts, watchlists, and order panels from config.
-        let (workspace, charts, watchlists, restored_order_panels, status_message);
+        let (
+            workspace,
+            charts,
+            watchlists,
+            restored_order_panels,
+            restored_order_blotters,
+            status_message,
+        );
 
         if !config.layout_tree.is_empty() {
             // Full topology restoration from layout_tree.
-            let (ws, ch, wl, op) = Self::restore_from_layout_tree(
+            let (ws, ch, wl, op, ob) = Self::restore_from_layout_tree(
                 &config.layout_tree,
                 &config.charts,
                 &config.watchlists,
                 &config.order_panels,
+                &config.order_blotters,
             );
-            let n = ch.len() + wl.len() + op.len();
+            let n = ch.len() + wl.len() + op.len() + ob.len();
             workspace = ws;
             charts = ch;
             watchlists = wl;
             restored_order_panels = op;
+            restored_order_blotters = ob;
             status_message = format!("Restored {n} panel(s) from layout tree");
         } else if !config.panel_order.is_empty() {
             // Legacy: panel_order-driven restoration (flat, no topology).
@@ -825,6 +887,12 @@ impl MidasApp {
                         // TODO: Slice 5 will restore order panels from legacy panel_order.
                         continue;
                     }
+                    PanelSlot::OrderBlotter { .. } => {
+                        // Order blotters are restored via the layout_tree path,
+                        // which is preferred for multi-panel layouts. Skip in
+                        // the legacy panel_order path.
+                        continue;
+                    }
                 }
             }
 
@@ -838,6 +906,7 @@ impl MidasApp {
             charts = ch;
             watchlists = wl;
             restored_order_panels = HashMap::new();
+            restored_order_blotters = HashMap::new();
             status_message = format!("Restored {n} panel(s) from config");
         } else if !config.charts.is_empty() {
             // Legacy path: charts only (backward compat).
@@ -861,6 +930,7 @@ impl MidasApp {
             charts = ch;
             watchlists = HashMap::new();
             restored_order_panels = HashMap::new();
+            restored_order_blotters = HashMap::new();
             status_message = format!("Restored {n} chart(s) from config");
         } else {
             let (ws, first_id) = WorkspaceLayout::single();
@@ -870,6 +940,7 @@ impl MidasApp {
             charts = ch;
             watchlists = HashMap::new();
             restored_order_panels = HashMap::new();
+            restored_order_blotters = HashMap::new();
             status_message = "Ready".to_string();
         };
 
@@ -940,6 +1011,39 @@ impl MidasApp {
         tracing::info!(
             "ticker-state: loaded {} symbol(s) from redb v2",
             tickers.len()
+        );
+
+        // Open the order-history persistence handle alongside the
+        // ticker-state store. Same dir, separate file so the two can
+        // rotate independently. Hydrate into the blotter BEFORE the
+        // broker subscription is registered (happens in subscription() )
+        // — the idempotent-BracketCreated apply path will no-op any
+        // replays from the engine on reconnect.
+        let order_history_path = dirs::data_local_dir()
+            .unwrap_or_default()
+            .join("HandOfMidas")
+            .join("order_history.redb");
+        let order_history_persist =
+            match crate::order_blotter::persist::OrderHistoryPersistHandle::open(
+                order_history_path.clone(),
+            ) {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::error!(
+                        "failed to open order-history persist at {}: {e}",
+                        order_history_path.display()
+                    );
+                    panic!(
+                        "order-history persist open failed at {}: {e}",
+                        order_history_path.display()
+                    );
+                }
+            };
+        let mut order_blotter = crate::order_blotter::OrderBlotter::new();
+        order_blotter.hydrate(order_history_persist.all_rows());
+        tracing::info!(
+            "order-history: hydrated {} rows into blotter",
+            order_blotter.len()
         );
 
         // v1→v2 migration: import bracket data from annotation JSON files.
@@ -1058,6 +1162,9 @@ impl MidasApp {
             link_picker_open: None,
             resizing_column: None,
             order_panels: restored_order_panels,
+            order_blotters: restored_order_blotters,
+            order_blotter,
+            order_history_persist,
             order_annotation_links: HashMap::new(),
             toast: None,
             bracket_context_menu: None,
@@ -1226,11 +1333,13 @@ impl MidasApp {
         chart_cfgs: &[ChartConfig],
         watchlist_cfgs: &[midas_core::config::WatchlistConfig],
         order_panel_cfgs: &[midas_core::config::OrderPanelConfig],
+        order_blotter_cfgs: &[midas_core::config::OrderBlotterConfig],
     ) -> (
         WorkspaceLayout,
         HashMap<ChartId, ChartPanel>,
         HashMap<WatchlistId, WatchlistPanel>,
         HashMap<OrderPanelId, crate::order_panel::OrderPanel>,
+        HashMap<OrderBlotterId, crate::order_blotter::panel::OrderBlotterPanel>,
     ) {
         use crate::layout::PaneState;
 
@@ -1238,9 +1347,11 @@ impl MidasApp {
             charts: HashMap<ChartId, ChartPanel>,
             watchlists: HashMap<WatchlistId, WatchlistPanel>,
             order_panels: HashMap<OrderPanelId, crate::order_panel::OrderPanel>,
+            order_blotters: HashMap<OrderBlotterId, crate::order_blotter::panel::OrderBlotterPanel>,
             next_chart_id: u32,
             next_wl_id: u32,
             next_order_id: u32,
+            next_blotter_id: u32,
             cursor: usize,
         }
 
@@ -1251,6 +1362,7 @@ impl MidasApp {
                 chart_cfgs: &[ChartConfig],
                 watchlist_cfgs: &[midas_core::config::WatchlistConfig],
                 order_panel_cfgs: &[midas_core::config::OrderPanelConfig],
+                order_blotter_cfgs: &[midas_core::config::OrderBlotterConfig],
             ) -> pane_grid::Configuration<PaneState> {
                 if self.cursor >= tree.len() {
                     let id = ChartId::new(self.next_chart_id);
@@ -1267,8 +1379,20 @@ impl MidasApp {
                         };
                         let r = *ratio;
                         self.cursor += 1;
-                        let a = self.parse_node(tree, chart_cfgs, watchlist_cfgs, order_panel_cfgs);
-                        let b = self.parse_node(tree, chart_cfgs, watchlist_cfgs, order_panel_cfgs);
+                        let a = self.parse_node(
+                            tree,
+                            chart_cfgs,
+                            watchlist_cfgs,
+                            order_panel_cfgs,
+                            order_blotter_cfgs,
+                        );
+                        let b = self.parse_node(
+                            tree,
+                            chart_cfgs,
+                            watchlist_cfgs,
+                            order_panel_cfgs,
+                            order_blotter_cfgs,
+                        );
                         pane_grid::Configuration::Split {
                             axis: ax,
                             ratio: r,
@@ -1307,6 +1431,25 @@ impl MidasApp {
                         self.cursor += 1;
                         pane_grid::Configuration::Pane(PaneState::order(op_id))
                     }
+                    LayoutNode::OrderBlotter {
+                        order_blotter_index,
+                    } => {
+                        let blotter_id = OrderBlotterId::new(self.next_blotter_id);
+                        self.next_blotter_id += 1;
+                        let panel = match order_blotter_cfgs.get(*order_blotter_index) {
+                            Some(cfg) => {
+                                crate::order_blotter::panel::OrderBlotterPanel::from_config(
+                                    blotter_id, cfg,
+                                )
+                            }
+                            None => crate::order_blotter::panel::OrderBlotterPanel::new(
+                                blotter_id, "Orders",
+                            ),
+                        };
+                        self.order_blotters.insert(blotter_id, panel);
+                        self.cursor += 1;
+                        pane_grid::Configuration::Pane(PaneState::order_blotter(blotter_id))
+                    }
                     LayoutNode::Unknown => {
                         // Forward-compatibility: skip unknown node types gracefully.
                         tracing::warn!("Skipping unknown layout node at index {}", self.cursor);
@@ -1324,13 +1467,21 @@ impl MidasApp {
             charts: HashMap::new(),
             watchlists: HashMap::new(),
             order_panels: HashMap::new(),
+            order_blotters: HashMap::new(),
             next_chart_id: 1,
             next_wl_id: 1,
             next_order_id: 1,
+            next_blotter_id: 1,
             cursor: 0,
         };
 
-        let config = ctx.parse_node(tree, chart_cfgs, watchlist_cfgs, order_panel_cfgs);
+        let config = ctx.parse_node(
+            tree,
+            chart_cfgs,
+            watchlist_cfgs,
+            order_panel_cfgs,
+            order_blotter_cfgs,
+        );
 
         let panes = pane_grid::State::with_configuration(config);
         let first_pane = panes.panes.keys().next().copied();
@@ -1340,9 +1491,16 @@ impl MidasApp {
             next_chart_id: ctx.next_chart_id,
             next_watchlist_id: ctx.next_wl_id,
             next_order_panel_id: ctx.next_order_id,
+            next_order_blotter_id: ctx.next_blotter_id,
         };
 
-        (ws, ctx.charts, ctx.watchlists, ctx.order_panels)
+        (
+            ws,
+            ctx.charts,
+            ctx.watchlists,
+            ctx.order_panels,
+            ctx.order_blotters,
+        )
     }
 
     /// Restore a single chart panel from config.
@@ -2092,6 +2250,15 @@ impl MidasApp {
     /// a domain-specific handler in `app/handlers.rs`. The handlers
     /// contain the actual logic (previously inlined as 108 match arms).
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        #[cfg(feature = "dev_harness")]
+        {
+            if !is_tick_rate_message(&message) {
+                if let Some(idle) = crate::dev_harness::idle::try_global() {
+                    idle.mark();
+                }
+            }
+        }
+
         match message {
             // -- Symbol / data loading --
             Message::PanelSymbolInputChanged(..)
@@ -2157,6 +2324,12 @@ impl MidasApp {
             Message::AddOrderPanel
             | Message::OrderPanelMsg(..)
             | Message::OrderPanelSetSymbolLink(..) => self.handle_order_panel_msg(message),
+
+            // -- Order blotter --
+            Message::AddOrderBlotter => self.handle_add_order_blotter(),
+            Message::OrderBlotterGrid(blotter_id, gm) => {
+                self.handle_order_blotter_grid(blotter_id, gm)
+            }
 
             // -- Watchlist --
             Message::AddWatchlist
@@ -2230,6 +2403,21 @@ impl MidasApp {
 
             // -- Tick / Ticker state machine --
             Message::Tick | Message::Ticker(..) => self.handle_tick_ticker_msg(message),
+
+            // -- Dev harness (feature-gated) --
+            #[cfg(feature = "dev_harness")]
+            Message::DevHarness { command, responder } => {
+                crate::dev_harness::handle_command(command, responder, self)
+            }
+            #[cfg(feature = "dev_harness")]
+            Message::DevHarnessScreenshotReady {
+                screenshot,
+                out_path,
+                responder,
+            } => {
+                crate::dev_harness::handle_screenshot_ready(screenshot, out_path, responder);
+                Task::none()
+            }
         }
     }
 

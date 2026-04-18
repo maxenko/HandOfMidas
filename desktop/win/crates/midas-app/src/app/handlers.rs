@@ -409,6 +409,10 @@ impl MidasApp {
                         }
                         self.status_message = format!("Closed {order_id}");
                     }
+                    Some(PanelContent::OrderBlotter(blotter_id)) => {
+                        self.order_blotters.remove(&blotter_id);
+                        self.status_message = format!("Closed {blotter_id}");
+                    }
                     None => return Task::none(),
                 }
                 self.flush_config()
@@ -1595,6 +1599,63 @@ impl MidasApp {
     }
 }
 
+// ── Order Blotter ────────────────────────────────────────────────────
+
+impl MidasApp {
+    /// Open a new Orders (blotter) pane in the workspace.
+    pub(crate) fn handle_add_order_blotter(&mut self) -> Task<Message> {
+        let Some(focused) = self.workspace.focus else {
+            return Task::none();
+        };
+        let blotter_id = self.workspace.next_order_blotter_id();
+        if let Some((chart_id, new_pane)) = self.workspace.split(pane_grid::Axis::Vertical, focused)
+        {
+            // split() always creates a chart pane — replace with blotter.
+            if let Some(state) = self.workspace.panes.get_mut(new_pane) {
+                state.content = PanelContent::OrderBlotter(blotter_id);
+            }
+            self.charts.remove(&chart_id);
+            self.order_blotters.insert(
+                blotter_id,
+                crate::order_blotter::panel::OrderBlotterPanel::new(blotter_id, "Orders"),
+            );
+            self.status_message = format!("Added {blotter_id}");
+            return self.flush_config();
+        }
+        Task::none()
+    }
+
+    /// Route grid chrome events (sort toggles, row selections) to the
+    /// specified blotter's [`midas_grid::GridState`].
+    pub(crate) fn handle_order_blotter_grid(
+        &mut self,
+        blotter_id: midas_core::OrderBlotterId,
+        message: midas_grid::GridMessage,
+    ) -> Task<Message> {
+        let Some(panel) = self.order_blotters.get_mut(&blotter_id) else {
+            return Task::none();
+        };
+        match message {
+            midas_grid::GridMessage::SortToggled(col_id) => {
+                use crate::order_blotter::columns::*;
+                // Numeric / price / time columns default to descending
+                // (most recent / largest first) to match trading-app UX.
+                let default_dir = match col_id {
+                    COL_QTY | COL_AVG_FILL | COL_LIMIT | COL_STOP | COL_TP | COL_SL
+                    | COL_LAST_UPDATE | COL_ORDER_ID => midas_grid::SortDirection::Descending,
+                    _ => midas_grid::SortDirection::Ascending,
+                };
+                panel.grid_state.toggle_sort(col_id, default_dir);
+            }
+            midas_grid::GridMessage::RowSelected(_) => {
+                // Row selection reserved for future per-row actions
+                // (cancel / modify). v1 rows are read-only.
+            }
+        }
+        Task::none()
+    }
+}
+
 // ── Watchlist ────────────────────────────────────────────────────────
 
 impl MidasApp {
@@ -2316,6 +2377,8 @@ impl MidasApp {
                 // layer. Signals the flush thread to perform a final
                 // `Immediate` commit and blocks until it exits.
                 self.ticker_persist.shutdown_blocking();
+                // Same for the order-history store.
+                self.order_history_persist.shutdown_blocking();
                 self.flush_config()
             }
 
@@ -2980,6 +3043,28 @@ impl MidasApp {
             Message::BrokerEventReceived(boxed_event) => {
                 use midas_broker::BrokerEvent;
 
+                // Feed every broker event into the order blotter first,
+                // so the UI row state is in sync regardless of which
+                // specific arm below also processes the event. For every
+                // touched row, write-through to the history persist so
+                // the redb flush thread picks it up on its next tick.
+                let touched_ids = self.order_blotter.apply(boxed_event.as_ref());
+                for oid in touched_ids {
+                    if let Some(row) = self.order_blotter.row(oid) {
+                        self.order_history_persist.upsert(oid, row.clone());
+                    }
+                }
+
+                // Also log to the devloop event log so `wait_for_event`
+                // can match on broker-side variants like "BracketCreated"
+                // and "OrderFilled".
+                #[cfg(feature = "dev_harness")]
+                {
+                    if let Some(log) = crate::dev_harness::event_log::try_global() {
+                        log.append_broker(boxed_event.as_ref());
+                    }
+                }
+
                 match *boxed_event {
                     BrokerEvent::BracketCreated {
                         parent_id,
@@ -2991,6 +3076,7 @@ impl MidasApp {
                         tp_price,
                         sl_price,
                         reference_price,
+                        ..
                     } => {
                         // Reconcile: find the existing annotation created locally
                         // by matching symbol + side + quantity using cached fields.
@@ -3234,7 +3320,19 @@ impl MidasApp {
                     .tickers
                     .entry(sym.clone())
                     .or_insert_with(|| crate::ticker_state::TickerState::new(sym.clone()));
+
+                #[cfg(feature = "dev_harness")]
+                let msg_for_log = msg.clone();
+
                 let effects = state.apply(msg);
+
+                #[cfg(feature = "dev_harness")]
+                {
+                    if let Some(log) = crate::dev_harness::event_log::try_global() {
+                        log.append_ticker(sym.as_str(), &msg_for_log, &effects);
+                    }
+                }
+
                 self.handle_ticker_effects(&sym, effects);
                 self.ticker_dispatch_active = false;
                 iced::Task::none()

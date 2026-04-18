@@ -9,7 +9,7 @@
 
 use iced::widget::pane_grid;
 
-use midas_core::{ChartId, OrderPanelId, WatchlistId};
+use midas_core::{ChartId, OrderBlotterId, OrderPanelId, WatchlistId};
 
 // ── Panel content ────────────────────────────────────────────────────
 
@@ -22,6 +22,8 @@ pub enum PanelContent {
     Watchlist(WatchlistId),
     /// An order panel identified by a stable `OrderPanelId`.
     Order(OrderPanelId),
+    /// An order-blotter panel (order history grid).
+    OrderBlotter(OrderBlotterId),
 }
 
 // ── Per-pane state ───────────────────────────────────────────────────
@@ -64,11 +66,21 @@ impl PaneState {
         }
     }
 
+    /// Create a new pane state for an order-blotter panel.
+    pub fn order_blotter(id: OrderBlotterId) -> Self {
+        Self {
+            content: PanelContent::OrderBlotter(id),
+            is_focused: false,
+        }
+    }
+
     /// Convenience: returns `Some(chart_id)` if this pane holds a chart.
     pub fn chart_id(&self) -> Option<ChartId> {
         match self.content {
             PanelContent::Chart(id) => Some(id),
-            PanelContent::Watchlist(_) | PanelContent::Order(_) => None,
+            PanelContent::Watchlist(_) | PanelContent::Order(_) | PanelContent::OrderBlotter(_) => {
+                None
+            }
         }
     }
 }
@@ -91,6 +103,8 @@ pub struct WorkspaceLayout {
     pub(crate) next_watchlist_id: u32,
     /// Monotonic counter for generating unique `OrderPanelId` values.
     pub(crate) next_order_panel_id: u32,
+    /// Monotonic counter for generating unique `OrderBlotterId` values.
+    pub(crate) next_order_blotter_id: u32,
 }
 
 impl WorkspaceLayout {
@@ -107,6 +121,7 @@ impl WorkspaceLayout {
             next_chart_id: 2,
             next_watchlist_id: 1,
             next_order_panel_id: 1,
+            next_order_blotter_id: 1,
         };
 
         // Mark the initial pane as focused.
@@ -135,6 +150,13 @@ impl WorkspaceLayout {
     pub fn next_order_panel_id(&mut self) -> OrderPanelId {
         let id = OrderPanelId::new(self.next_order_panel_id);
         self.next_order_panel_id += 1;
+        id
+    }
+
+    /// Allocate a new unique `OrderBlotterId`.
+    pub fn next_order_blotter_id(&mut self) -> OrderBlotterId {
+        let id = OrderBlotterId::new(self.next_order_blotter_id);
+        self.next_order_blotter_id += 1;
         id
     }
 

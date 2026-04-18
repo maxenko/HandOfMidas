@@ -90,6 +90,7 @@ Requires Rust stable toolchain on Windows.
 
 ```bash
 cargo run -p midas-app                              # run the app
+cargo run -p midas-app --features dev_harness       # run with devloop TCP harness (127.0.0.1:9898)
 cargo test --workspace                              # broker workspace tests
 cd desktop/win && cargo test --workspace            # desktop workspace tests
 cargo build --workspace --release                   # release build

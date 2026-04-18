@@ -10,10 +10,13 @@ mod app;
 mod broker_bridge;
 mod chart_view;
 mod chart_widget;
+#[cfg(feature = "dev_harness")]
+mod dev_harness;
 mod layout;
 mod level_store;
 mod link;
 mod market_cache;
+mod order_blotter;
 mod order_panel;
 mod registry;
 mod theme;
@@ -35,6 +38,12 @@ fn main() -> iced::Result {
 
     tracing::info!("Starting Hand of Midas");
 
+    #[cfg(feature = "dev_harness")]
+    dev_harness::init(dev_harness::resolve_port());
+
+    #[cfg(feature = "dev_harness")]
+    let boot_fixture = parse_boot_fixture_arg();
+
     // Verify render crate links correctly.
     tracing::debug!(
         "Candle shader loaded: {} bytes",
@@ -43,11 +52,57 @@ fn main() -> iced::Result {
 
     // Use iced::daemon so the view function receives a window::Id,
     // enabling multi-window support for floating chart panels.
-    iced::daemon(MidasApp::new, update, view)
-        .title("Hand of Midas")
-        .theme(Theme::Dark)
-        .subscription(subscription)
-        .run()
+    //
+    // When `--fixture <name>` was passed, apply the fixture to the
+    // freshly-constructed app before iced renders the first frame.
+    iced::daemon(
+        move || {
+            #[cfg(feature = "dev_harness")]
+            {
+                let (mut app, boot_task) = MidasApp::new();
+                let final_task = match boot_fixture.clone() {
+                    Some(name) => {
+                        match crate::dev_harness::fixture::apply_from_disk(&mut app, &name) {
+                            Ok(fixture_task) => Task::batch([boot_task, fixture_task]),
+                            Err(e) => {
+                                tracing::error!("devloop: boot fixture {name} failed: {e}");
+                                boot_task
+                            }
+                        }
+                    }
+                    None => boot_task,
+                };
+                (app, final_task)
+            }
+            #[cfg(not(feature = "dev_harness"))]
+            {
+                MidasApp::new()
+            }
+        },
+        update,
+        view,
+    )
+    .title("Hand of Midas")
+    .theme(Theme::Dark)
+    .subscription(subscription)
+    .run()
+}
+
+/// Parse `--fixture <name>` from the command line. Returns the fixture
+/// name, or `None` if the flag was absent. Tolerates both
+/// `--fixture name` and `--fixture=name` forms.
+#[cfg(feature = "dev_harness")]
+fn parse_boot_fixture_arg() -> Option<String> {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if let Some(rest) = arg.strip_prefix("--fixture=") {
+            return Some(rest.to_owned());
+        }
+        if arg == "--fixture" {
+            return args.next();
+        }
+    }
+    None
 }
 
 /// iced update function -- delegates to the app state.
@@ -142,6 +197,18 @@ fn subscription(state: &MidasApp) -> Subscription<Message> {
         let conn_sub =
             Subscription::run_with(conn_source, crate::broker_bridge::broker_conn_stream);
         subs.push(conn_sub);
+    }
+
+    // Dev harness subscription (feature-gated).
+    #[cfg(feature = "dev_harness")]
+    {
+        let source = crate::dev_harness::DevHarnessSource {
+            port: crate::dev_harness::resolve_port(),
+        };
+        subs.push(Subscription::run_with(
+            source,
+            crate::dev_harness::dev_harness_stream,
+        ));
     }
 
     Subscription::batch(subs)

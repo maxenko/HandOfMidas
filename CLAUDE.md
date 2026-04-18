@@ -79,6 +79,7 @@ cargo test --workspace
 cargo clippy --workspace -- -D warnings
 cargo fmt --all
 cargo run -p midas-app
+cargo run -p midas-app --features dev_harness   # run with devloop TCP harness on 127.0.0.1:9898
 cargo build --workspace --release
 ```
 

@@ -12,7 +12,9 @@ use iced::widget::{
 };
 use iced::{window, Color, Element, Fill, Length};
 
-use midas_core::{ChartId, LinkColor, LinkMode, OrderPanelId, Timeframe, WatchlistId};
+use midas_core::{
+    ChartId, LinkColor, LinkMode, OrderBlotterId, OrderPanelId, Timeframe, WatchlistId,
+};
 
 use crate::layout::PanelContent;
 use crate::link::{link_color_rgba, link_mode_indicator_rgba, LinkDimension, PickerTarget};
@@ -476,6 +478,11 @@ impl MidasApp {
             .padding([4, 10])
             .style(hover_text_button_style);
 
+        let orders_btn = button(text("Orders").size(12))
+            .on_press(Message::AddOrderBlotter)
+            .padding([4, 10])
+            .style(hover_text_button_style);
+
         // Provider dropdowns (pushed to the right).
         let data_names = self.providers.data_provider_names();
         let active_data = self.providers.active_data_provider_name();
@@ -501,6 +508,7 @@ impl MidasApp {
             add_btn,
             wl_btn,
             order_btn,
+            orders_btn,
             Space::new().width(Fill),
             text("Data:").size(11).color(theme::TEXT_SECONDARY),
             data_picker,
@@ -547,6 +555,11 @@ impl MidasApp {
                     PanelContent::Order(order_id) => {
                         let tb = self.view_order_title_bar(order_id, pane);
                         let bd = self.view_order_body(order_id);
+                        (tb, bd)
+                    }
+                    PanelContent::OrderBlotter(blotter_id) => {
+                        let tb = self.view_order_blotter_title_bar(blotter_id, pane);
+                        let bd = self.view_order_blotter_body(blotter_id);
                         (tb, bd)
                     }
                 };
@@ -2232,6 +2245,285 @@ impl MidasApp {
         }
 
         main_content
+    }
+}
+
+// ── Order blotter panel ─────────────────────────────────────────────
+
+impl MidasApp {
+    /// Title bar for an Orders (blotter) pane.
+    fn view_order_blotter_title_bar(
+        &self,
+        blotter_id: OrderBlotterId,
+        pane: pane_grid::Pane,
+    ) -> pane_grid::TitleBar<'_, Message> {
+        let name = self
+            .order_blotters
+            .get(&blotter_id)
+            .map(|b| b.name.clone())
+            .unwrap_or_else(|| "Orders".to_string());
+        let row_count = self.order_blotter.len();
+        let title_text = if row_count > 0 {
+            format!("{name} ({row_count})")
+        } else {
+            name
+        };
+
+        let close_btn: Element<'_, Message> = button(text("X").size(10))
+            .on_press(Message::PaneClose(pane))
+            .padding([2, 6])
+            .style(hover_text_button_style)
+            .into();
+
+        pane_grid::TitleBar::new(
+            row![text(title_text).size(14), Space::new().width(Fill)]
+                .align_y(iced::Alignment::Center),
+        )
+        .controls(Element::from(
+            row![close_btn].spacing(2).align_y(iced::Alignment::Center),
+        ))
+        .padding([2, 4])
+        .always_show_controls()
+        .style(|_theme| container::Style::default())
+    }
+
+    /// Body for an Orders (blotter) pane. Renders the shared
+    /// [`crate::order_blotter::OrderBlotter`] via [`midas_grid::grid`].
+    fn view_order_blotter_body(&self, blotter_id: OrderBlotterId) -> Element<'_, Message> {
+        use crate::order_blotter::columns::{DisplayRow, OrderBlotterColumn};
+        use midas_grid::GridColumn;
+
+        let Some(panel) = self.order_blotters.get(&blotter_id) else {
+            return container(text("Blotter not found").size(14)).into();
+        };
+
+        if self.order_blotter.is_empty() {
+            return container(
+                column![
+                    text("No orders yet")
+                        .size(14)
+                        .color(Color::from_rgba(0.7, 0.7, 0.7, 1.0)),
+                    text("Submit a bracket on a chart to see orders here.")
+                        .size(11)
+                        .color(Color::from_rgba(0.5, 0.5, 0.5, 1.0)),
+                ]
+                .spacing(6)
+                .align_x(iced::Alignment::Center),
+            )
+            .center_x(Fill)
+            .center_y(Fill)
+            .into();
+        }
+
+        // Project every OrderRow → DisplayRow for render. Typical row
+        // count is small (tens). Generation-aware caching is future
+        // growth; for now rebuild each frame — negligible cost.
+        let mut rows: Vec<DisplayRow> = self
+            .order_blotter
+            .rows()
+            .map(DisplayRow::from_row)
+            .collect();
+
+        // Apply the grid's active sort. Default is OrderId descending
+        // (set in `OrderBlotterPanel::default_grid_state`).
+        if let Some(sort) = panel.grid_state.sort.as_ref() {
+            if let Some(col) = OrderBlotterColumn::ALL
+                .iter()
+                .find(|c| c.id() == sort.column_id)
+            {
+                rows.sort_by(|a, b| {
+                    let ord = col.compare(a, b);
+                    match sort.direction {
+                        midas_grid::SortDirection::Ascending => ord,
+                        midas_grid::SortDirection::Descending => ord.reverse(),
+                    }
+                });
+            }
+        }
+
+        // Hand-build the table inline rather than calling
+        // `midas_grid::grid()` — the same constraint that
+        // `view_watchlist_body` hits: the grid builder borrows `rows`,
+        // and the local `Vec<DisplayRow>` can't escape the view fn.
+
+        use crate::order_blotter::columns::{
+            symbol_badge, COL_AVG_FILL, COL_INSTRUCTION, COL_LAST_UPDATE, COL_LIMIT, COL_ORDER_ID,
+            COL_QTY, COL_SIDE, COL_SL, COL_STATUS, COL_STOP, COL_SYMBOL, COL_TP, COL_TYPE,
+        };
+        use iced::widget::{mouse_area, scrollable, Column as IcedColumn, Row as IcedRow};
+
+        let col_defs: [(midas_grid::ColumnId, &str, bool); 13] = [
+            (COL_SYMBOL, "Symbol", false),
+            (COL_SIDE, "Side", true),
+            (COL_TYPE, "Type", true),
+            (COL_QTY, "Qty", true),
+            (COL_AVG_FILL, "Avg Fill Price", true),
+            (COL_LIMIT, "Limit Price", true),
+            (COL_STOP, "Stop Price", true),
+            (COL_TP, "Take Profit", true),
+            (COL_SL, "Stop Loss", true),
+            (COL_STATUS, "Status", true),
+            (COL_LAST_UPDATE, "Last Update Time", true),
+            (COL_INSTRUCTION, "Instruction", true),
+            (COL_ORDER_ID, "Order ID", true),
+        ];
+
+        // ── Header ─────────────────────────────────────────────────
+        let mut header_cells: Vec<Element<'_, Message>> = Vec::with_capacity(col_defs.len());
+        for (col_id, label, sortable) in col_defs.iter().copied() {
+            let width = panel.grid_state.column_width(col_id);
+            let indicator = panel
+                .grid_state
+                .sort
+                .filter(|s| s.column_id == col_id)
+                .map(|s| s.direction.indicator())
+                .unwrap_or("");
+            let header_inner = IcedRow::new()
+                .push(text(label).size(11).color(theme::TEXT_SECONDARY))
+                .push(text(indicator).size(11).color(theme::TEXT_SECONDARY))
+                .spacing(4);
+            let cell: Element<'_, Message> = if sortable {
+                mouse_area(
+                    container(header_inner)
+                        .width(width)
+                        .padding([6, 8])
+                        .style(|_| container::Style {
+                            border: iced::Border {
+                                color: midas_grid::GRID_HEADER_BORDER_COLOR,
+                                width: 0.5,
+                                radius: 0.0.into(),
+                            },
+                            ..Default::default()
+                        }),
+                )
+                .on_press(Message::OrderBlotterGrid(
+                    blotter_id,
+                    midas_grid::GridMessage::SortToggled(col_id),
+                ))
+                .into()
+            } else {
+                container(header_inner)
+                    .width(width)
+                    .padding([6, 8])
+                    .style(|_| container::Style {
+                        border: iced::Border {
+                            color: midas_grid::GRID_HEADER_BORDER_COLOR,
+                            width: 0.5,
+                            radius: 0.0.into(),
+                        },
+                        ..Default::default()
+                    })
+                    .into()
+            };
+            header_cells.push(cell);
+        }
+        let header = IcedRow::with_children(header_cells);
+
+        // ── Body rows ─────────────────────────────────────────────
+        let mut body = IcedColumn::new();
+        for (row_idx, r) in rows.iter().enumerate() {
+            let bg = if row_idx % 2 == 0 {
+                Color::from_rgba(1.0, 1.0, 1.0, 0.02)
+            } else {
+                Color::TRANSPARENT
+            };
+            let w = |id| panel.grid_state.column_width(id);
+
+            let side_color = match r.side {
+                midas_core::broker::OrderAction::Buy => Color::from_rgb(0.30, 0.54, 0.96),
+                midas_core::broker::OrderAction::Sell => Color::from_rgb(0.88, 0.31, 0.27),
+            };
+            let status_color = match r.status {
+                crate::order_blotter::OrderStatus::Filled => Color::from_rgb(0.27, 0.75, 0.47),
+                crate::order_blotter::OrderStatus::Cancelled
+                | crate::order_blotter::OrderStatus::Rejected => Color::from_rgb(0.91, 0.60, 0.26),
+                _ => Color::from_rgb(0.78, 0.78, 0.78),
+            };
+            let primary = theme::TEXT_PRIMARY;
+
+            let text_cell = |s: String,
+                             size: u32,
+                             width: f32,
+                             color: Color,
+                             right: bool|
+             -> Element<'_, Message> {
+                let body = text(s)
+                    .size(size)
+                    .color(color)
+                    .wrapping(iced::widget::text::Wrapping::None);
+                let aligned = if right {
+                    container(body)
+                        .align_x(iced::alignment::Horizontal::Right)
+                        .width(Fill)
+                } else {
+                    container(body).width(Fill)
+                };
+                container(aligned).width(width).padding([4, 8]).into()
+            };
+
+            // Symbol badge owns a String too, via badge() — clone the
+            // symbol once and pass by value so the widget tree doesn't
+            // borrow from `r` (which is dropped at end of loop).
+            let symbol_cell: Element<'_, Message> =
+                container(symbol_badge(r.symbol.clone(), r.side))
+                    .width(w(COL_SYMBOL))
+                    .padding([4, 6])
+                    .into();
+
+            let cells: Vec<Element<'_, Message>> = vec![
+                symbol_cell,
+                text_cell(
+                    match r.side {
+                        midas_core::broker::OrderAction::Buy => "Buy".to_owned(),
+                        midas_core::broker::OrderAction::Sell => "Sell".to_owned(),
+                    },
+                    12,
+                    w(COL_SIDE),
+                    side_color,
+                    false,
+                ),
+                text_cell(r.kind_text.clone(), 12, w(COL_TYPE), primary, false),
+                text_cell(r.qty_text.clone(), 12, w(COL_QTY), primary, true),
+                text_cell(r.avg_fill_text.clone(), 12, w(COL_AVG_FILL), primary, true),
+                text_cell(r.limit_text.clone(), 12, w(COL_LIMIT), primary, true),
+                text_cell(r.stop_text.clone(), 12, w(COL_STOP), primary, true),
+                text_cell(r.tp_text.clone(), 12, w(COL_TP), primary, true),
+                text_cell(r.sl_text.clone(), 12, w(COL_SL), primary, true),
+                text_cell(
+                    r.status.as_str().to_owned(),
+                    12,
+                    w(COL_STATUS),
+                    status_color,
+                    false,
+                ),
+                text_cell(
+                    r.last_update_text.clone(),
+                    11,
+                    w(COL_LAST_UPDATE),
+                    primary,
+                    true,
+                ),
+                text_cell(
+                    r.instruction_text.clone(),
+                    12,
+                    w(COL_INSTRUCTION),
+                    primary,
+                    false,
+                ),
+                text_cell(r.order_id.clone(), 11, w(COL_ORDER_ID), primary, true),
+            ];
+
+            let row_widget =
+                container(IcedRow::with_children(cells))
+                    .width(Fill)
+                    .style(move |_| container::Style {
+                        background: Some(bg.into()),
+                        ..Default::default()
+                    });
+            body = body.push(row_widget);
+        }
+
+        column![header, scrollable(body).height(Fill)].into()
     }
 }
 
