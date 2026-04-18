@@ -141,8 +141,8 @@ impl Default for UiTheme {
             warning_text: Color::from_rgba(0.05, 0.05, 0.05, 1.0),
 
             // Tabs
-            tab_underline: Color::from_rgb(0.22, 0.55, 0.95),
-            tab_underline_height: 2.0,
+            tab_underline: Color::WHITE,
+            tab_underline_height: 3.0,
             tab_text_active: Color::from_rgb(0.88, 0.88, 0.92),
             tab_text_inactive: Color::from_rgb(0.55, 0.55, 0.60),
             tab_badge_bg: Color::from_rgb(0.18, 0.18, 0.22),

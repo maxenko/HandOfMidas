@@ -11,7 +11,7 @@
 
 use iced::alignment::Vertical;
 use iced::widget::{button, column, container, row, text, Row, Space};
-use iced::{Border, Color, Element, Length};
+use iced::{Border, Color, Element, Length, Padding};
 
 use crate::theme::UiTheme;
 
@@ -214,8 +214,17 @@ impl<'a, T: PartialEq + Clone + 'a, Message: Clone + 'a> Tabs<'a, T, Message> {
 
                 // Transparent button background; text color shifts on hover for
                 // inactive tabs (active tab keeps its color regardless).
+                // Zero bottom padding so the underline sits flush with the
+                // widget's bottom edge — parent can then butt the next
+                // element right up against it.
                 button(inner)
-                    .padding([pad_v, pad_h])
+                    .width(Length::Shrink)
+                    .padding(Padding {
+                        top: pad_v,
+                        right: pad_h,
+                        bottom: 0.0,
+                        left: pad_h,
+                    })
                     .on_press(msg)
                     .style(move |_iced_theme, status| {
                         let text_color = if is_selected {
@@ -236,7 +245,19 @@ impl<'a, T: PartialEq + Clone + 'a, Message: Clone + 'a> Tabs<'a, T, Message> {
             })
             .collect();
 
-        Row::with_children(buttons).spacing(spacing).into()
+        // Left-align: wrap tabs in a Fill-wide row with a trailing Space
+        // flex so the buttons hug the left edge regardless of what the
+        // parent container does. Without this, some parent layouts cause
+        // the tab buttons to spread evenly across the available width.
+        row![
+            Row::with_children(buttons)
+                .spacing(spacing)
+                .width(Length::Shrink),
+            Space::new().width(Length::Fill),
+        ]
+        .width(Length::Fill)
+        .align_y(Vertical::Bottom)
+        .into()
     }
 }
 
