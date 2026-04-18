@@ -57,6 +57,8 @@ define_id! {
     OrderPanelId(u32) => "Order",
     /// Unique identifier for an order-blotter panel (order history grid).
     OrderBlotterId(u32) => "Blotter",
+    /// Unique identifier for an Account panel (tabbed positions/orders/history/recents).
+    AccountPanelId(u32) => "Account",
 }
 
 #[cfg(test)]

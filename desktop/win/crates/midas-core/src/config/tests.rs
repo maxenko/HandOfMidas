@@ -97,6 +97,8 @@ fn save_load_roundtrip_preserves_all_fields() {
         watchlists: Vec::new(),
         order_panels: Vec::new(),
         order_blotters: Vec::new(),
+        account_panels: Vec::new(),
+        recent_symbols: Vec::new(),
         panel_order: Vec::new(),
         layout_tree: Vec::new(),
         store: StoreConfig::default(),
@@ -257,6 +259,8 @@ fn chart_config_with_levels_survives_roundtrip() {
         watchlists: Vec::new(),
         order_panels: Vec::new(),
         order_blotters: Vec::new(),
+        account_panels: Vec::new(),
+        recent_symbols: Vec::new(),
         panel_order: Vec::new(),
         layout_tree: Vec::new(),
         store: StoreConfig::default(),
@@ -436,6 +440,8 @@ fn atomic_write_does_not_corrupt_on_success() {
         watchlists: Vec::new(),
         order_panels: Vec::new(),
         order_blotters: Vec::new(),
+        account_panels: Vec::new(),
+        recent_symbols: Vec::new(),
         panel_order: Vec::new(),
         layout_tree: Vec::new(),
         store: StoreConfig::default(),
@@ -554,6 +560,8 @@ fn roundtrip_with_camera_and_collapse_gaps_and_line_width() {
         watchlists: Vec::new(),
         order_panels: Vec::new(),
         order_blotters: Vec::new(),
+        account_panels: Vec::new(),
+        recent_symbols: Vec::new(),
         panel_order: Vec::new(),
         layout_tree: Vec::new(),
         store: StoreConfig::default(),
@@ -978,6 +986,117 @@ symbol_link = "unlinked"
     assert_eq!(config.order_panels.len(), 1);
     assert_eq!(config.order_panels[0].symbol, "AAPL");
     assert_eq!(config.order_panels[0].bracket_active, None);
+
+    cleanup(&dir);
+}
+
+#[test]
+fn load_migrates_order_blotters_and_writes_backup() {
+    let dir = temp_dir();
+    let path = dir.join("config.toml");
+
+    let mut file = std::fs::File::create(&path).expect("create toml");
+    file.write_all(
+        br#"
+[window]
+width = 1280
+height = 800
+
+[theme]
+mode = "dark"
+
+[[order_blotters]]
+name = "Orders"
+column_widths = [80.0, 60.0]
+symbol_link = "unlinked"
+hidden_columns = ["tp"]
+
+[[panel_order]]
+type = "order_blotter"
+order_blotter_index = 0
+
+[[layout_tree]]
+type = "order_blotter"
+order_blotter_index = 0
+"#,
+    )
+    .expect("write legacy config");
+
+    let config = AppConfig::load(&path).expect("load migrates");
+    assert!(config.order_blotters.is_empty(), "legacy vec drained");
+    assert_eq!(config.account_panels.len(), 1, "one account panel");
+    assert_eq!(config.account_panels[0].active_tab, AccountTab::Orders);
+    assert_eq!(
+        config.account_panels[0].orders.column_widths,
+        vec![80.0, 60.0]
+    );
+    assert_eq!(
+        config.account_panels[0].orders.hidden_columns,
+        vec!["tp".to_string()]
+    );
+    // Panel-slot / layout-tree rewritten.
+    assert!(matches!(
+        config.panel_order[0],
+        PanelSlot::Account {
+            account_panel_index: 0
+        }
+    ));
+    assert!(matches!(
+        config.layout_tree[0],
+        LayoutNode::Account {
+            account_panel_index: 0
+        }
+    ));
+
+    // Backup exists and holds the pre-migration bytes.
+    let backup = dir.join("config.toml.bak-account-migration");
+    assert!(backup.exists(), "backup file written");
+    let backup_contents = std::fs::read_to_string(&backup).expect("read backup");
+    assert!(
+        backup_contents.contains("[[order_blotters]]"),
+        "backup retains legacy section"
+    );
+    assert!(
+        !backup_contents.contains("[[account_panels]]"),
+        "backup is pre-migration"
+    );
+
+    cleanup(&dir);
+}
+
+#[test]
+fn recent_symbols_roundtrip_preserves_order() {
+    let dir = temp_dir();
+    let path = dir.join("recents.toml");
+
+    let config = AppConfig {
+        recent_symbols: vec!["AAPL".into(), "TSLA".into(), "MSFT".into()],
+        ..Default::default()
+    };
+
+    config.save(&path).expect("save recents");
+    let loaded = AppConfig::load(&path).expect("load recents");
+    assert_eq!(
+        loaded.recent_symbols,
+        vec!["AAPL".to_string(), "TSLA".into(), "MSFT".into()],
+    );
+
+    // Loading a config written before this field existed must still work.
+    let legacy_path = dir.join("legacy.toml");
+    std::fs::write(
+        &legacy_path,
+        r#"
+[window]
+width = 1280
+height = 800
+
+[theme]
+mode = "dark"
+"#,
+    )
+    .expect("write legacy");
+    let legacy = AppConfig::load(&legacy_path).expect("load legacy");
+    assert!(legacy.recent_symbols.is_empty(), "missing key => empty vec");
 
     cleanup(&dir);
 }

@@ -16,6 +16,8 @@ use thiserror::Error;
 
 use crate::link::LinkMode;
 
+pub mod migrations;
+
 // ── Error type ───────────────────────────────────────────────────────
 
 /// Errors that can occur during config load/save operations.
@@ -57,8 +59,26 @@ pub struct AppConfig {
     #[serde(default)]
     pub order_panels: Vec<OrderPanelConfig>,
     /// Order-blotter panel configurations, persisted across sessions.
+    ///
+    /// Legacy: retained only as migration input.
+    /// [`migrations::migrate_order_blotters_to_account_panels`] clears this
+    /// vec and appends equivalent entries to [`Self::account_panels`] on
+    /// first load. New writes leave it empty.
     #[serde(default)]
     pub order_blotters: Vec<OrderBlotterConfig>,
+    /// Account-panel configurations (tabbed Positions / Orders / History /
+    /// Recents). Replaces the legacy `order_blotters` list.
+    #[serde(default)]
+    pub account_panels: Vec<AccountPanelConfig>,
+    /// Recent-Instruments MRU — just the symbol strings.
+    ///
+    /// Timestamps are deliberately NOT persisted; they're session-only
+    /// and used to render "N min ago" suffixes in the Recents tab. On
+    /// reload the in-app `last_seen` falls back to `None` and the UI
+    /// renders `"—"`. The app caps this list at its `MAX_RECENTS`
+    /// constant (currently 20) before writing.
+    #[serde(default)]
+    pub recent_symbols: Vec<String>,
     /// Ordered list of panel types in the pane grid, in BTreeMap key order
     /// (pane creation order — NOT spatial position). Save and restore both
     /// use the same iteration order, so the mapping is self-consistent.
@@ -250,6 +270,10 @@ fn default_order_side() -> String {
 }
 
 /// Order-blotter panel configuration for session persistence.
+///
+/// Legacy: retained as migration input only. New configs use
+/// [`AccountPanelConfig`]; `migrate_order_blotters_to_account_panels`
+/// converts `order_blotters` entries on first load.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderBlotterConfig {
     /// User-visible panel name.
@@ -282,6 +306,74 @@ impl Default for OrderBlotterConfig {
 
 fn default_order_blotter_name() -> String {
     "Orders".to_string()
+}
+
+// ── Account panel config ─────────────────────────────────────────────
+
+/// Which Account-panel tab is currently active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AccountTab {
+    /// Positions tab.
+    Positions,
+    /// Orders (working / all) tab.
+    #[default]
+    Orders,
+    /// Trade History tab (terminal orders).
+    TradeHistory,
+    /// Recent Instruments tab.
+    Recents,
+}
+
+/// Persisted state for the Orders tab inside an Account panel.
+///
+/// Structurally equal to the legacy [`OrderBlotterConfig`]; the
+/// migration step copies fields 1:1 when converting.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OrdersTabConfig {
+    /// Column widths in logical pixels (persisted for session restore).
+    #[serde(default)]
+    pub column_widths: Vec<f32>,
+    /// Symbol-link group — row clicks broadcast to panels sharing
+    /// the same colour. `Unlinked` (default) = no broadcast.
+    #[serde(default)]
+    pub symbol_link: LinkMode,
+    /// Column IDs the user has hidden via the column-selector popup.
+    /// Stored as strings (the underlying `ColumnId(&'static str)`)
+    /// so future column additions are forward-compat.
+    #[serde(default)]
+    pub hidden_columns: Vec<String>,
+}
+
+/// Account-panel configuration for session persistence.
+///
+/// Wraps the former Orders blotter + future Positions / History /
+/// Recents tab state. v1: only Orders persists per-tab widths.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountPanelConfig {
+    /// User-visible panel name. Defaults to `"Account"`.
+    #[serde(default = "default_account_panel_name")]
+    pub name: String,
+    /// Which tab was active when the panel was last rendered.
+    #[serde(default)]
+    pub active_tab: AccountTab,
+    /// Orders tab state (column widths, link mode, hidden columns).
+    #[serde(default)]
+    pub orders: OrdersTabConfig,
+}
+
+impl Default for AccountPanelConfig {
+    fn default() -> Self {
+        Self {
+            name: default_account_panel_name(),
+            active_tab: AccountTab::default(),
+            orders: OrdersTabConfig::default(),
+        }
+    }
+}
+
+fn default_account_panel_name() -> String {
+    "Account".to_string()
 }
 
 /// Default order quantity for configs missing the field.
@@ -363,11 +455,26 @@ pub enum PanelSlot {
         order_panel_index: usize,
     },
     /// An order-blotter panel — index into `AppConfig::order_blotters`.
+    ///
+    /// Legacy variant: on load, any `OrderBlotter` slots are converted to
+    /// `Account` slots referencing a migrated entry in `account_panels`.
     #[serde(rename = "order_blotter")]
     OrderBlotter {
         /// Index into `AppConfig::order_blotters`.
         order_blotter_index: usize,
     },
+    /// An Account panel (tabbed) — index into `AppConfig::account_panels`.
+    #[serde(rename = "account")]
+    Account {
+        /// Index into `AppConfig::account_panels`.
+        account_panel_index: usize,
+    },
+    /// Forward-compatibility catch-all for unknown panel types.
+    /// Matches the pattern on `LayoutNode` — prevents deserialization
+    /// failure if an older binary loads a config written by a newer one.
+    /// Restoration code treats `Unknown` as a no-op slot.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Flattened layout tree node for pane grid topology persistence.
@@ -402,10 +509,18 @@ pub enum LayoutNode {
         order_panel_index: usize,
     },
     /// An order-blotter pane — index into `AppConfig::order_blotters`.
+    ///
+    /// Legacy variant: converted to `Account` on load by the migration step.
     #[serde(rename = "order_blotter")]
     OrderBlotter {
         /// Index into `AppConfig::order_blotters`.
         order_blotter_index: usize,
+    },
+    /// An Account pane — index into `AppConfig::account_panels`.
+    #[serde(rename = "account")]
+    Account {
+        /// Index into `AppConfig::account_panels`.
+        account_panel_index: usize,
     },
     /// Forward-compatibility catch-all for unknown panel types.
     /// Prevents deserialization failure if a newer config format is loaded.
@@ -499,6 +614,8 @@ impl Default for AppConfig {
             watchlists: Vec::new(),
             order_panels: Vec::new(),
             order_blotters: Vec::new(),
+            account_panels: Vec::new(),
+            recent_symbols: Vec::new(),
             panel_order: Vec::new(),
             layout_tree: Vec::new(),
             store: StoreConfig::default(),
@@ -535,6 +652,36 @@ impl AppConfig {
 
         let mut config: Self = toml::from_str(&content)?;
         migrate_levels(&mut config);
+
+        // One-shot migration: legacy `order_blotters` → `account_panels`.
+        // If any entries are translated, back up the existing file
+        // BEFORE the caller saves the migrated form, so the raw input
+        // is recoverable. Guard the backup with an `.exists()` check so
+        // repeat migrations (should not happen, but defensive) never
+        // overwrite the original pre-migration file.
+        let migrated = migrations::migrate_order_blotters_to_account_panels(&mut config);
+        if migrated > 0 {
+            // Append the suffix to the full file name (not .with_extension,
+            // which mangles paths that already contain dots in the stem).
+            let file_name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let backup = path.with_file_name(format!("{file_name}.bak-account-migration"));
+            if !backup.exists() {
+                std::fs::copy(path, &backup).map_err(ConfigError::Io)?;
+                tracing::info!(
+                    "Migrated {migrated} order_blotters → account_panels; backup at {}",
+                    backup.display()
+                );
+            } else {
+                tracing::warn!(
+                    "Migrated {migrated} order_blotters → account_panels; \
+                     existing backup at {} preserved",
+                    backup.display()
+                );
+            }
+        }
         Ok(config)
     }
 
