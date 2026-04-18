@@ -1166,6 +1166,30 @@ impl MidasApp {
 // ── Watchlist ──────────────────────────────────────────────────────
 
 impl MidasApp {
+    /// Build a [`crate::thumbnail_widget::ThumbnailSnapshot`] for
+    /// `symbol` from the current thumbnail stores.
+    ///
+    /// Used at row-build time by both the watchlist and the order
+    /// blotter. Reads the per-ticker interval preference from
+    /// [`crate::thumbnail_store::ThumbnailStore`], the cached closes
+    /// from [`crate::thumbnail_data::ThumbnailDataStore`] (read-only
+    /// via `peek` — `view()` only has `&self`), and picks a trend
+    /// color from the theme.
+    fn build_thumbnail_snapshot(&self, symbol: &str) -> crate::thumbnail_widget::ThumbnailSnapshot {
+        let tf = self.thumbnail_store.get(symbol);
+        let entry = self.thumbnail_data.peek(symbol, tf);
+        let color = thumbnail_color(&entry.closes);
+        crate::thumbnail_widget::ThumbnailSnapshot {
+            widget_key: crate::thumbnail_widget::widget_key(symbol, tf),
+            closes: entry.closes,
+            y_min: entry.y_min,
+            y_max: entry.y_max,
+            color,
+            generation: entry.source_version,
+            label: crate::thumbnail_widget::label_for_tf(tf),
+        }
+    }
+
     /// Build the TitleBar for a watchlist pane.
     fn view_watchlist_title_bar(
         &self,
@@ -1269,6 +1293,7 @@ impl MidasApp {
                         Color::from_rgba(c[0], c[1], c[2], c[3])
                     })
                     .unwrap_or(Color::from_rgb(0.6, 0.6, 0.6));
+                let thumbnail = self.build_thumbnail_snapshot(&ticker.symbol);
                 crate::watchlist_columns::WatchlistRow {
                     symbol: ticker.symbol.clone(),
                     favorite: ticker.favorite,
@@ -1280,6 +1305,7 @@ impl MidasApp {
                     wl_id,
                     price_value: snap.last_price,
                     change_value: snap.change_pct,
+                    thumbnail,
                 }
             })
             .collect();
@@ -1326,7 +1352,9 @@ impl MidasApp {
         // (The Grid builder can't be used here because columns/rows are local
         // variables whose borrows can't escape the function. The Grid API works
         // when data lives on &self — see Phase 2.)
-        use crate::watchlist::{COL_CHANGE, COL_DELETE, COL_FAV, COL_GATR, COL_PRICE, COL_TICKER};
+        use crate::watchlist::{
+            COL_CHANGE, COL_CHART, COL_DELETE, COL_FAV, COL_GATR, COL_PRICE, COL_TICKER,
+        };
         use midas_grid::{
             grid_body_cell, grid_body_row, grid_header_cell, HeaderStyle, ResizeHandle,
         };
@@ -1337,12 +1365,13 @@ impl MidasApp {
         // whole header row one column left of the data. Drop it from
         // the header — the `col_widths` map still stores a width for
         // it for legacy configs, but nothing renders it.
-        let col_defs: [(midas_grid::ColumnId, &str, bool); 6] = [
+        let col_defs: [(midas_grid::ColumnId, &str, bool); 7] = [
             (COL_FAV, "", false),
             (COL_TICKER, "Ticker", true),
             (COL_PRICE, "Price", true),
             (COL_CHANGE, "Chg%", true),
             (COL_GATR, "G.ATR", true),
+            (COL_CHART, "Chart", false),
             (COL_DELETE, "", false),
         ];
 
@@ -1460,6 +1489,11 @@ impl MidasApp {
                     .clip(true)
                     .into();
 
+                let thumbnail_cell_widget = crate::thumbnail_widget::thumbnail_cell(
+                    row_data.thumbnail.clone(),
+                    Message::ThumbnailIntervalCycle(row_data.symbol.clone()),
+                );
+
                 let cells: Vec<Element<'_, Message>> = vec![
                     fav_cell,
                     grid_body_cell(ticker_cell.into(), w(COL_TICKER)),
@@ -1474,6 +1508,7 @@ impl MidasApp {
                         row_data.change_color,
                     ),
                     text_cell(row_data.gatr_text.clone(), w(COL_GATR), row_data.gatr_color),
+                    grid_body_cell(thumbnail_cell_widget, w(COL_CHART)),
                     grid_body_cell(del_btn.into(), w(COL_DELETE)),
                 ];
 
@@ -2368,8 +2403,9 @@ impl MidasApp {
         // for the same constraint).
 
         use crate::order_blotter::columns::{
-            symbol_badge, COL_AVG_FILL, COL_INSTRUCTION, COL_LAST_UPDATE, COL_LIMIT, COL_ORDER_ID,
-            COL_QTY, COL_SIDE, COL_SL, COL_STATUS, COL_STOP, COL_SYMBOL, COL_TP, COL_TYPE,
+            symbol_badge, COL_AVG_FILL, COL_CHART, COL_INSTRUCTION, COL_LAST_UPDATE, COL_LIMIT,
+            COL_ORDER_ID, COL_QTY, COL_SIDE, COL_SL, COL_STATUS, COL_STOP, COL_SYMBOL, COL_TP,
+            COL_TYPE,
         };
         use iced::widget::{scrollable, Column as IcedColumn, Row as IcedRow};
         use midas_grid::{
@@ -2390,6 +2426,7 @@ impl MidasApp {
             (COL_LAST_UPDATE, "Last Update Time", true),
             (COL_INSTRUCTION, "Instruction", true),
             (COL_ORDER_ID, "Order ID", true),
+            (COL_CHART, "Chart", false),
         ];
 
         // Filter out hidden columns. Symbol stays always visible —
@@ -2541,6 +2578,14 @@ impl MidasApp {
                     ),
                     id if id == COL_ORDER_ID => {
                         text_cell(r.order_id.clone(), 11, w(COL_ORDER_ID), primary, true)
+                    }
+                    id if id == COL_CHART => {
+                        let snapshot = self.build_thumbnail_snapshot(&r.symbol);
+                        let thumb = crate::thumbnail_widget::thumbnail_cell(
+                            snapshot,
+                            Message::ThumbnailIntervalCycle(r.symbol.clone()),
+                        );
+                        grid_body_cell(thumb, w(COL_CHART))
                     }
                     _ => Space::new().into(),
                 };
@@ -3510,5 +3555,19 @@ fn active_neutral_button_style(_theme: &iced::Theme, _status: button::Status) ->
             ..Default::default()
         },
         ..Default::default()
+    }
+}
+
+/// Pick the thumbnail fill color for the given trailing-closes slice.
+///
+/// `first > last` → down-trend (red), `first < last` → up-trend (green),
+/// equal / empty → flat (muted grey). The thresholds use strict
+/// inequalities so truly-equal closes land on the flat color rather
+/// than the slightly warmer up color.
+fn thumbnail_color(closes: &[f32]) -> [f32; 4] {
+    match (closes.first(), closes.last()) {
+        (Some(&first), Some(&last)) if last > first => theme::THUMBNAIL_UP,
+        (Some(&first), Some(&last)) if last < first => theme::THUMBNAIL_DOWN,
+        _ => theme::THUMBNAIL_FLAT,
     }
 }

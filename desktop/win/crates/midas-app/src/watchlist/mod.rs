@@ -23,12 +23,14 @@ pub const COL_PRICE: midas_grid::ColumnId = midas_grid::ColumnId("price");
 pub const COL_CHANGE: midas_grid::ColumnId = midas_grid::ColumnId("change");
 /// Column ID for the GATR column.
 pub const COL_GATR: midas_grid::ColumnId = midas_grid::ColumnId("gatr");
+/// Column ID for the inline chart thumbnail column.
+pub const COL_CHART: midas_grid::ColumnId = midas_grid::ColumnId("chart");
 /// Column ID for the delete button column.
 pub const COL_DELETE: midas_grid::ColumnId = midas_grid::ColumnId("delete");
 
 /// Default column order for the watchlist grid.
-pub const WATCHLIST_COLUMN_ORDER: [midas_grid::ColumnId; 7] = [
-    COL_DRAG, COL_FAV, COL_TICKER, COL_PRICE, COL_CHANGE, COL_GATR, COL_DELETE,
+pub const WATCHLIST_COLUMN_ORDER: [midas_grid::ColumnId; 8] = [
+    COL_DRAG, COL_FAV, COL_TICKER, COL_PRICE, COL_CHANGE, COL_GATR, COL_CHART, COL_DELETE,
 ];
 
 /// Build the default column widths for the watchlist grid.
@@ -40,6 +42,7 @@ pub fn default_column_widths() -> HashMap<midas_grid::ColumnId, f32> {
     m.insert(COL_PRICE, 80.0);
     m.insert(COL_CHANGE, 65.0);
     m.insert(COL_GATR, 70.0);
+    m.insert(COL_CHART, 120.0);
     m.insert(COL_DELETE, 30.0);
     m
 }
@@ -101,18 +104,21 @@ impl WatchlistPanel {
     /// Restore a watchlist from persisted config.
     pub fn from_config(id: WatchlistId, config: &WatchlistConfig) -> Self {
         let mut widths = default_column_widths();
-        if config.column_widths.len() == 7 {
-            let ids = WATCHLIST_COLUMN_ORDER;
-            for (i, &w) in config.column_widths.iter().enumerate() {
-                // COL_FAV is non-resizable and its default width is tuned
-                // to the current star size — ignore the saved value so
-                // older configs don't squeeze the glyph into a narrow
-                // column.
-                if ids[i] == COL_FAV {
-                    continue;
-                }
-                widths.insert(ids[i], w.max(20.0));
+        // Apply every saved width whose index lines up with the current
+        // column order. Configs saved before the Chart column landed are
+        // 7-wide and resolve through the same loop against the current
+        // 8-wide `WATCHLIST_COLUMN_ORDER` — any missing trailing entries
+        // keep their default width from `default_column_widths()`.
+        let ids = WATCHLIST_COLUMN_ORDER;
+        for (i, &w) in config.column_widths.iter().take(ids.len()).enumerate() {
+            // COL_FAV is non-resizable and its default width is tuned
+            // to the current star size — ignore the saved value so
+            // older configs don't squeeze the glyph into a narrow
+            // column.
+            if ids[i] == COL_FAV {
+                continue;
             }
+            widths.insert(ids[i], w.max(20.0));
         }
         Self {
             id,

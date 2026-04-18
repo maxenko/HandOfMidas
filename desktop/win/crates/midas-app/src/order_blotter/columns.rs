@@ -31,6 +31,8 @@ pub const COL_STATUS: ColumnId = ColumnId("status");
 pub const COL_LAST_UPDATE: ColumnId = ColumnId("last_update");
 pub const COL_INSTRUCTION: ColumnId = ColumnId("instruction");
 pub const COL_ORDER_ID: ColumnId = ColumnId("order_id");
+/// Inline chart thumbnail column. Click cycles the per-ticker interval.
+pub const COL_CHART: ColumnId = ColumnId("chart");
 
 // ── Colours ──────────────────────────────────────────────────────────
 
@@ -175,10 +177,13 @@ pub enum OrderBlotterColumn {
     LastUpdate,
     Instruction,
     OrderId,
+    /// Inline chart thumbnail for the order's symbol. Click cycles the
+    /// per-ticker interval.
+    Thumbnail,
 }
 
 impl OrderBlotterColumn {
-    pub const ALL: [OrderBlotterColumn; 13] = [
+    pub const ALL: [OrderBlotterColumn; 14] = [
         Self::Symbol,
         Self::Side,
         Self::Type,
@@ -192,6 +197,7 @@ impl OrderBlotterColumn {
         Self::LastUpdate,
         Self::Instruction,
         Self::OrderId,
+        Self::Thumbnail,
     ];
 
     pub fn default_widths() -> Vec<(ColumnId, f32)> {
@@ -209,6 +215,7 @@ impl OrderBlotterColumn {
             (COL_LAST_UPDATE, 140.0),
             (COL_INSTRUCTION, 140.0),
             (COL_ORDER_ID, 110.0),
+            (COL_CHART, 120.0),
         ]
     }
 
@@ -233,6 +240,7 @@ impl GridColumn<DisplayRow, Message> for OrderBlotterColumn {
             Self::LastUpdate => COL_LAST_UPDATE,
             Self::Instruction => COL_INSTRUCTION,
             Self::OrderId => COL_ORDER_ID,
+            Self::Thumbnail => COL_CHART,
         }
     }
 
@@ -251,6 +259,7 @@ impl GridColumn<DisplayRow, Message> for OrderBlotterColumn {
             Self::LastUpdate => "Last Update Time",
             Self::Instruction => "Instruction",
             Self::OrderId => "Order ID",
+            Self::Thumbnail => "Chart",
         };
         text(label).size(11).into()
     }
@@ -306,6 +315,15 @@ impl GridColumn<DisplayRow, Message> for OrderBlotterColumn {
                 .wrapping(Wrapping::None)
                 .into(),
             Self::OrderId => text(&row.order_id).size(11).wrapping(Wrapping::None).into(),
+            // The real thumbnail cell is built in the hand-laid
+            // `view_order_blotter_body` pass — it needs access to the
+            // app-level thumbnail stores, which a `GridColumn::cell`
+            // impl can't reach through `&DisplayRow` alone. The token
+            // returned here is only exercised by unit tests and the
+            // legacy `grid()` path, neither of which render a real
+            // thumbnail. Keeping a non-panicking placeholder preserves
+            // the `cell()` contract.
+            Self::Thumbnail => text("").size(11).into(),
         }
     }
 
@@ -324,6 +342,7 @@ impl GridColumn<DisplayRow, Message> for OrderBlotterColumn {
             Self::LastUpdate => ColumnWidth::Flex(1.5),
             Self::Instruction => ColumnWidth::Flex(1.3),
             Self::OrderId => ColumnWidth::Fixed(110.0),
+            Self::Thumbnail => ColumnWidth::Fixed(120.0),
         }
     }
 
@@ -331,6 +350,7 @@ impl GridColumn<DisplayRow, Message> for OrderBlotterColumn {
         match self {
             Self::Side | Self::Status => 48.0,
             Self::Symbol => 80.0,
+            Self::Thumbnail => 80.0,
             _ => 60.0,
         }
     }
@@ -340,7 +360,7 @@ impl GridColumn<DisplayRow, Message> for OrderBlotterColumn {
     }
 
     fn sortable(&self) -> bool {
-        !matches!(self, Self::Symbol)
+        !matches!(self, Self::Symbol | Self::Thumbnail)
     }
 
     fn reorderable(&self) -> bool {
@@ -365,14 +385,20 @@ impl GridColumn<DisplayRow, Message> for OrderBlotterColumn {
             Self::Instruction => a.instruction_text.cmp(&b.instruction_text),
             Self::OrderId => a.order_id_sort_key.cmp(&b.order_id_sort_key),
             Self::Symbol => a.symbol.cmp(&b.symbol),
+            // Not sortable — enum variant is still required to be
+            // handled exhaustively here.
+            Self::Thumbnail => Ordering::Equal,
         }
     }
 
     fn align(&self) -> Alignment {
         match self {
-            Self::Symbol | Self::Side | Self::Type | Self::Status | Self::Instruction => {
-                Alignment::Start
-            }
+            Self::Symbol
+            | Self::Side
+            | Self::Type
+            | Self::Status
+            | Self::Instruction
+            | Self::Thumbnail => Alignment::Start,
             Self::Qty
             | Self::AvgFill
             | Self::Limit

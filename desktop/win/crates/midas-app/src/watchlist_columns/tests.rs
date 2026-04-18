@@ -1,15 +1,18 @@
 use super::*;
 use std::collections::HashSet;
+use std::sync::Arc;
+
+use crate::thumbnail_widget::ThumbnailSnapshot;
 
 #[test]
-fn all_returns_six_columns() {
-    assert_eq!(WatchlistColumn::all().len(), 6);
+fn all_returns_seven_columns() {
+    assert_eq!(WatchlistColumn::all().len(), 7);
 }
 
 #[test]
 fn all_column_ids_are_unique() {
     let ids: HashSet<ColumnId> = WatchlistColumn::all().iter().map(|c| c.id()).collect();
-    assert_eq!(ids.len(), 6, "every column must have a unique ColumnId");
+    assert_eq!(ids.len(), 7, "every column must have a unique ColumnId");
 }
 
 #[test]
@@ -42,16 +45,21 @@ fn reorderable_columns() {
     assert!(WatchlistColumn::Price.reorderable());
     assert!(WatchlistColumn::ChangePercent.reorderable());
     assert!(WatchlistColumn::GATR.reorderable());
+    assert!(WatchlistColumn::Thumbnail.reorderable());
 }
 
 #[test]
-fn resizable_matches_flex_columns() {
+fn resizable_matches_flex_or_thumbnail_columns() {
+    // The Thumbnail column is Fixed-width but still resizable so users
+    // can widen/narrow it in a config. Every other column follows the
+    // `Flex ⇔ resizable` invariant.
     for col in WatchlistColumn::all() {
         let is_flex = matches!(col.width(), ColumnWidth::Flex(_));
+        let is_thumbnail = matches!(col, WatchlistColumn::Thumbnail);
         assert_eq!(
             col.resizable(),
-            is_flex,
-            "resizable should match Flex width for {col:?}"
+            is_flex || is_thumbnail,
+            "resizable should match Flex-or-Thumbnail for {col:?}"
         );
     }
 }
@@ -120,6 +128,18 @@ fn cmp_option_f64_ordering() {
 
 // ── Test helpers ────────────────────────────────────────────────
 
+fn empty_snapshot() -> ThumbnailSnapshot {
+    ThumbnailSnapshot {
+        widget_key: 0,
+        closes: Arc::new(Vec::new()),
+        y_min: 0.0,
+        y_max: 1.0,
+        color: [0.5, 0.5, 0.5, 0.6],
+        generation: 0,
+        label: "--".to_string(),
+    }
+}
+
 fn test_row(symbol: &str) -> WatchlistRow {
     WatchlistRow {
         symbol: symbol.to_owned(),
@@ -132,6 +152,7 @@ fn test_row(symbol: &str) -> WatchlistRow {
         wl_id: WatchlistId::new(1),
         price_value: None,
         change_value: None,
+        thumbnail: empty_snapshot(),
     }
 }
 
@@ -147,5 +168,6 @@ fn test_row_with_price(symbol: &str, price: Option<f64>) -> WatchlistRow {
         wl_id: WatchlistId::new(1),
         price_value: price,
         change_value: None,
+        thumbnail: empty_snapshot(),
     }
 }

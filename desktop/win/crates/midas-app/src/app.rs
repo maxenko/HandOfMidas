@@ -294,6 +294,13 @@ pub struct MidasApp {
     /// Per-(symbol, timeframe) chart view settings. Single authority
     /// for camera positioning on data load (zoom level, positioning).
     pub chart_views: crate::chart_view::ChartViewStore,
+    /// Per-ticker interval preference for the grid-cell thumbnail
+    /// widget. Session-scoped; see `thumbnail_store` module docs.
+    pub(crate) thumbnail_store: crate::thumbnail_store::ThumbnailStore,
+    /// Per-(symbol, timeframe) cache of the last-N close prices
+    /// displayed by the thumbnail widget. See `thumbnail_data` module
+    /// docs.
+    pub(crate) thumbnail_data: crate::thumbnail_data::ThumbnailDataStore,
     /// Per-symbol ticker state map. The single source of truth for all
     /// per-symbol state: order brackets, entry memories, GATR anchors,
     /// price levels, and market data snapshots.
@@ -692,6 +699,34 @@ pub enum Message {
         crate::annotation_store::SymbolKey,
         crate::ticker_state::TickerMsg,
     ),
+
+    // -- Thumbnail cells (Slice 3 / Slice 4) --
+    /// User clicked a grid-cell thumbnail to cycle its interval. The
+    /// handler cycles [`ThumbnailStore`](crate::thumbnail_store::ThumbnailStore)
+    /// and dispatches a load task for the new `(symbol, tf)` via the
+    /// active [`DataProvider`].
+    ThumbnailIntervalCycle(String),
+    /// Async load for a thumbnail completed. Installs the new buffer
+    /// into `thumbnail_data`, clearing any pending marker.
+    ThumbnailDataReady {
+        /// Symbol the load was for.
+        symbol: String,
+        /// Timeframe the load was for.
+        tf: midas_core::Timeframe,
+        /// Freshly-loaded buffer. `Arc`'d so the message enum stays
+        /// cheap to `Clone`.
+        buffer: std::sync::Arc<midas_core::CandleBuffer>,
+    },
+    /// Async load for a thumbnail failed (provider error, zero rows,
+    /// etc.). Installs an empty placeholder entry so
+    /// [`request_load`](crate::thumbnail_data::ThumbnailDataStore::request_load)
+    /// can re-dispatch a retry without looping.
+    ThumbnailLoadFailed {
+        /// Symbol the load was for.
+        symbol: String,
+        /// Timeframe the load was for.
+        tf: midas_core::Timeframe,
+    },
 
     // -- Dev harness (feature-gated) --
     /// Command received over the devloop TCP socket. Handled in
@@ -1203,6 +1238,8 @@ impl MidasApp {
             anchor_seed_toasts_shown: std::collections::HashSet::new(),
             gatr_undo_slots: std::collections::HashMap::new(),
             chart_views: crate::chart_view::ChartViewStore::default(),
+            thumbnail_store: crate::thumbnail_store::ThumbnailStore::default(),
+            thumbnail_data: crate::thumbnail_data::ThumbnailDataStore::default(),
             tickers,
             ticker_persist,
             ticker_dispatch_active: false,
@@ -1338,12 +1375,17 @@ impl MidasApp {
         }
         // Also load market snapshots for all watchlist symbols.
         let watchlist_task = app.load_all_watchlist_snapshots();
+        // Pre-warm the thumbnail cache so the watchlist's Chart column
+        // starts rendering mountains as soon as the user opens the
+        // panel, not only after they click a thumbnail.
+        let thumbnail_task = app.load_all_thumbnails();
 
         let startup_task = if load_tasks.is_empty() {
-            Task::batch([open_task, watchlist_task])
+            Task::batch([open_task, watchlist_task, thumbnail_task])
         } else {
             load_tasks.push(open_task);
             load_tasks.push(watchlist_task);
+            load_tasks.push(thumbnail_task);
             Task::batch(load_tasks)
         };
 
@@ -2136,6 +2178,75 @@ impl MidasApp {
         }
     }
 
+    /// Dispatch an async load for the thumbnail at `(symbol, tf)`.
+    ///
+    /// Consults [`ThumbnailDataStore::request_load`] to dedup in-flight
+    /// loads and to skip when real data is already cached. Returns
+    /// [`Task::none`] when no load is needed.
+    fn spawn_thumbnail_load(&mut self, symbol: String, tf: Timeframe) -> Task<Message> {
+        let days = Self::days_for_timeframe(tf);
+        let Some(task) = self.thumbnail_data.request_load(&symbol, tf, days) else {
+            return Task::none();
+        };
+        let Some(provider) = self.providers.active_data_provider() else {
+            // No active provider — drop the pending marker so a future
+            // provider switch can retry, and render the empty-state.
+            self.thumbnail_data.install_empty(&symbol, tf);
+            return Task::none();
+        };
+        let req_symbol = task.symbol.clone();
+        let req_tf = task.tf;
+        let req_days = task.days;
+        Task::perform(
+            async move {
+                let result = provider.get_candles(&req_symbol, req_tf, req_days).await;
+                (req_symbol, req_tf, result)
+            },
+            |(symbol, tf, result)| match result {
+                Ok(buffer) => Message::ThumbnailDataReady {
+                    symbol,
+                    tf,
+                    buffer: Arc::new(buffer),
+                },
+                Err(err) => {
+                    tracing::debug!(%symbol, ?tf, error = %err, "thumbnail load failed");
+                    Message::ThumbnailLoadFailed { symbol, tf }
+                }
+            },
+        )
+    }
+
+    /// Pre-warm the thumbnail cache on startup by dispatching one load
+    /// per unique (symbol, current interval) across every watchlist.
+    ///
+    /// Called once during `new()` after the watchlist panels are
+    /// populated from config so thumbnails begin rendering as soon as
+    /// the user opens the panel, rather than only after they click a
+    /// thumbnail to cycle its interval.
+    fn load_all_thumbnails(&mut self) -> Task<Message> {
+        let mut seen: std::collections::HashSet<(String, Timeframe)> =
+            std::collections::HashSet::new();
+        let mut pairs: Vec<(String, Timeframe)> = Vec::new();
+        for wl in self.watchlists.values() {
+            for ticker in &wl.tickers {
+                let tf = self.thumbnail_store.get(&ticker.symbol);
+                let key = (ticker.symbol.clone(), tf);
+                if seen.insert(key.clone()) {
+                    pairs.push(key);
+                }
+            }
+        }
+        let mut tasks: Vec<Task<Message>> = Vec::with_capacity(pairs.len());
+        for (symbol, tf) in pairs {
+            tasks.push(self.spawn_thumbnail_load(symbol, tf));
+        }
+        if tasks.is_empty() {
+            Task::none()
+        } else {
+            Task::batch(tasks)
+        }
+    }
+
     /// Apply loaded candle data to a chart panel.
     ///
     /// When `view_state` is `Some`, the camera is positioned using the
@@ -2436,6 +2547,25 @@ impl MidasApp {
 
             // -- Tick / Ticker state machine --
             Message::Tick | Message::Ticker(..) => self.handle_tick_ticker_msg(message),
+
+            // -- Thumbnail cells (Slice 3 / Slice 4) --
+            // The watchlist + blotter views read `thumbnail_store` and
+            // `thumbnail_data` on every `view()` call, so mutating the
+            // stores is sufficient to trigger a rebuild — no explicit
+            // dirty flag is needed. When the new interval has no cached
+            // data yet we also dispatch a load via the active provider.
+            Message::ThumbnailIntervalCycle(symbol) => {
+                let new_tf = self.thumbnail_store.cycle(&symbol);
+                self.spawn_thumbnail_load(symbol, new_tf)
+            }
+            Message::ThumbnailDataReady { symbol, tf, buffer } => {
+                self.thumbnail_data.install(&symbol, tf, &buffer);
+                Task::none()
+            }
+            Message::ThumbnailLoadFailed { symbol, tf } => {
+                self.thumbnail_data.install_empty(&symbol, tf);
+                Task::none()
+            }
 
             // -- Dev harness (feature-gated) --
             #[cfg(feature = "dev_harness")]

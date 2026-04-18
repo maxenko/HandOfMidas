@@ -67,3 +67,25 @@ pub const STATUS_ERROR: Color = Color::from_rgb(0.85, 0.20, 0.25);
 
 /// Warning status color.
 pub const STATUS_WARN: Color = Color::from_rgb(0.90, 0.70, 0.15);
+
+// ── Thumbnail colors ────────────────────────────────────────────────
+//
+// Linear-RGBA `[f32; 4]` rather than `Color` because the sparkline
+// shader takes a raw color uniform, not an iced theme value. Alpha is
+// tuned so thumbnails read as muted background decoration rather than
+// foreground content.
+
+/// Thumbnail fill for a ticker whose last close is above its first
+/// (up trend). A desaturated green tuned to match [`STATUS_OK`] at ~85%
+/// alpha so the thumbnail sits behind header text without competing.
+pub const THUMBNAIL_UP: [f32; 4] = [0.15, 0.70, 0.40, 0.85];
+
+/// Thumbnail fill for a ticker whose last close is below its first
+/// (down trend). A desaturated red tuned to match [`STATUS_ERROR`] at
+/// ~85% alpha.
+pub const THUMBNAIL_DOWN: [f32; 4] = [0.85, 0.30, 0.30, 0.85];
+
+/// Thumbnail fill for a flat ticker (first and last close equal).
+/// Muted grey at 60% alpha — even less visually dominant than the
+/// trend colors because the line is expected to be nearly horizontal.
+pub const THUMBNAIL_FLAT: [f32; 4] = [0.55, 0.55, 0.55, 0.60];

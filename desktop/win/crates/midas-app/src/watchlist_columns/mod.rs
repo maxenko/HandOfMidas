@@ -14,8 +14,9 @@ use midas_core::WatchlistId;
 use midas_grid::{Alignment, ColumnId, ColumnWidth, GridColumn};
 
 use crate::app::Message;
+use crate::thumbnail_widget::{thumbnail_cell, ThumbnailSnapshot};
 use crate::watchlist::{
-    COL_CHANGE, COL_DELETE, COL_DRAG, COL_FAV, COL_GATR, COL_PRICE, COL_TICKER,
+    COL_CHANGE, COL_CHART, COL_DELETE, COL_DRAG, COL_FAV, COL_GATR, COL_PRICE, COL_TICKER,
 };
 
 // ── Colors ──────────────────────────────────────────────────────────
@@ -59,11 +60,15 @@ pub struct WatchlistRow {
     pub price_value: Option<f64>,
     /// Parsed change percent for numeric sorting (`None` when no data).
     pub change_value: Option<f64>,
+    /// Snapshot the thumbnail column renders for this row. Pre-built at
+    /// row construction time so `cell()` can return without chasing
+    /// cross-row state.
+    pub thumbnail: ThumbnailSnapshot,
 }
 
 // ── Column enum ─────────────────────────────────────────────────────
 
-/// The seven columns of the watchlist grid.
+/// The columns of the watchlist grid.
 ///
 /// Each variant maps to a `ColumnId` constant defined in
 /// [`crate::watchlist`] and renders its own header + cell content.
@@ -86,19 +91,23 @@ pub enum WatchlistColumn {
         reason = "GATR is a domain-specific indicator name"
     )]
     GATR,
+    /// Inline chart thumbnail (mountain fill of the trailing closes).
+    /// Click cycles the per-ticker interval.
+    Thumbnail,
     /// Delete (remove from watchlist) button.
     Delete,
 }
 
 impl WatchlistColumn {
     /// All columns in their default display order.
-    pub fn all() -> [WatchlistColumn; 6] {
+    pub fn all() -> [WatchlistColumn; 7] {
         [
             WatchlistColumn::Favorite,
             WatchlistColumn::Ticker,
             WatchlistColumn::Price,
             WatchlistColumn::ChangePercent,
             WatchlistColumn::GATR,
+            WatchlistColumn::Thumbnail,
             WatchlistColumn::Delete,
         ]
     }
@@ -113,6 +122,7 @@ impl GridColumn<WatchlistRow, Message> for WatchlistColumn {
             Self::Price => COL_PRICE,
             Self::ChangePercent => COL_CHANGE,
             Self::GATR => COL_GATR,
+            Self::Thumbnail => COL_CHART,
             Self::Delete => COL_DELETE,
         }
     }
@@ -125,6 +135,7 @@ impl GridColumn<WatchlistRow, Message> for WatchlistColumn {
             Self::Price => text("Price").size(12).into(),
             Self::ChangePercent => text("Chg%").size(12).into(),
             Self::GATR => text("G.ATR").size(12).into(),
+            Self::Thumbnail => text("Chart").size(12).into(),
             Self::Delete => Space::new().into(),
         }
     }
@@ -165,6 +176,10 @@ impl GridColumn<WatchlistRow, Message> for WatchlistColumn {
                 .wrapping(Wrapping::None)
                 .color(row.gatr_color)
                 .into(),
+            Self::Thumbnail => thumbnail_cell(
+                row.thumbnail.clone(),
+                Message::ThumbnailIntervalCycle(row.symbol.clone()),
+            ),
             Self::Delete => button(text("\u{00D7}").size(12))
                 .on_press(Message::WatchlistRemoveTicker(
                     row.wl_id,
@@ -184,6 +199,7 @@ impl GridColumn<WatchlistRow, Message> for WatchlistColumn {
             Self::Price => ColumnWidth::Flex(1.0),
             Self::ChangePercent => ColumnWidth::Flex(1.0),
             Self::GATR => ColumnWidth::Flex(1.0),
+            Self::Thumbnail => ColumnWidth::Fixed(120.0),
             Self::Delete => ColumnWidth::Fixed(30.0),
         }
     }
@@ -196,6 +212,7 @@ impl GridColumn<WatchlistRow, Message> for WatchlistColumn {
             Self::Price => 50.0,
             Self::ChangePercent => 45.0,
             Self::GATR => 45.0,
+            Self::Thumbnail => 80.0,
             Self::Delete => 30.0,
         }
     }
@@ -203,7 +220,7 @@ impl GridColumn<WatchlistRow, Message> for WatchlistColumn {
     fn resizable(&self) -> bool {
         matches!(
             self,
-            Self::Ticker | Self::Price | Self::ChangePercent | Self::GATR
+            Self::Ticker | Self::Price | Self::ChangePercent | Self::GATR | Self::Thumbnail
         )
     }
 

@@ -20,6 +20,10 @@ mod order_blotter;
 mod order_panel;
 mod registry;
 mod theme;
+mod thumbnail_data;
+mod thumbnail_store;
+#[path = "thumbnail_widget.rs"]
+mod thumbnail_widget;
 mod ticker_state;
 mod watchlist;
 mod watchlist_columns;
