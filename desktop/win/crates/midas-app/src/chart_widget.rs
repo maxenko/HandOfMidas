@@ -305,7 +305,8 @@ fn recompute_hit_zones_for_group(
     use midas_chart::widget::compute::{ComputeContext, Viewport};
     use midas_chart::widget::decorator::compute_decorator_group;
     use midas_chart::widget::order_bracket::decorators::{
-        entry_decorator_group, pin_toggle_group, sl_decorator_group, tp_decorator_group,
+        entry_decorator_group, quick_create_above_group, quick_create_below_group,
+        sl_decorator_group, tp_decorator_group,
     };
     use midas_chart::widget::theme::Theme;
 
@@ -373,17 +374,25 @@ fn recompute_hit_zones_for_group(
                         }
                     }
                 }
-                3 => {
-                    // Pin-toggle is `Visibility::Always`, so the main
-                    // compute pass already emits its hit zone each
-                    // frame. The fallback recompute path still needs a
-                    // branch here so an expanded pin group (never
-                    // expected in practice — the pin has no hover
-                    // children) is re-resolved correctly instead of
-                    // silently returning an empty zone list.
-                    let group = pin_toggle_group(bracket, &ctx);
-                    return compute_decorator_group(&group, &bracket.entry.line, aid, &ctx, 1.0)
-                        .hit_zones;
+                4 => {
+                    if let Some(group) = quick_create_above_group(bracket) {
+                        let line = midas_chart::widget::order_bracket::quick_create_anchor_line(
+                            &bracket.entry.line,
+                            &ctx,
+                            midas_chart::widget::order_bracket::QuickCreateSlot::Above,
+                        );
+                        return compute_decorator_group(&group, &line, aid, &ctx, 1.0).hit_zones;
+                    }
+                }
+                5 => {
+                    if let Some(group) = quick_create_below_group(bracket) {
+                        let line = midas_chart::widget::order_bracket::quick_create_anchor_line(
+                            &bracket.entry.line,
+                            &ctx,
+                            midas_chart::widget::order_bracket::QuickCreateSlot::Below,
+                        );
+                        return compute_decorator_group(&group, &line, aid, &ctx, 1.0).hit_zones;
+                    }
                 }
                 _ => {}
             }
@@ -1086,11 +1095,7 @@ struct ChartGpuResources {
 }
 
 impl ChartGpuResources {
-    fn new(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        format: wgpu::TextureFormat,
-    ) -> Self {
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         Self {
             renderer: ChartRenderer::new(device, queue, format),
             tracker: DirtyTracker::new(),

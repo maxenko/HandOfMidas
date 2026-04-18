@@ -24,9 +24,7 @@ use cryoglyph::{
 };
 use midas_chart::compute::{LayerEnd, ANNOTATION_LAYER_COUNT};
 use midas_chart::widget::compute::{LabelAnchor, WidgetLabel};
-use wgpu::{
-    CommandEncoderDescriptor, Device, MultisampleState, Queue, RenderPass, TextureFormat,
-};
+use wgpu::{CommandEncoderDescriptor, Device, MultisampleState, Queue, RenderPass, TextureFormat};
 
 /// Line-height multiplier applied on top of `font_size` when building
 /// cosmic-text [`Metrics`]. 1.2× covers typical ascender/descender
@@ -79,10 +77,9 @@ impl TextPipeline {
 
         // Allocate N renderers up-front. Cheap — each wraps a vertex
         // buffer + a staging belt; they all share the atlas's pipeline.
-        let renderers: [TextRenderer; ANNOTATION_LAYER_COUNT] =
-            std::array::from_fn(|_| {
-                TextRenderer::new(&mut atlas, device, MultisampleState::default(), None)
-            });
+        let renderers: [TextRenderer; ANNOTATION_LAYER_COUNT] = std::array::from_fn(|_| {
+            TextRenderer::new(&mut atlas, device, MultisampleState::default(), None)
+        });
         let axis_renderer =
             TextRenderer::new(&mut atlas, device, MultisampleState::default(), None);
 
@@ -163,10 +160,7 @@ impl TextPipeline {
         for (layer_idx, end) in layer_ends.iter().enumerate() {
             let layer_slice = &labels[cursor..end.label_end.min(labels.len())];
             for label in layer_slice {
-                let (buffer, placement) = shape_label(
-                    label,
-                    &mut self.font_system,
-                );
+                let (buffer, placement) = shape_label(label, &mut self.font_system);
                 self.buffers[layer_idx].push(buffer);
                 self.placements[layer_idx].push(placement);
             }
@@ -331,10 +325,7 @@ fn measure_buffer(buffer: &Buffer) -> (f32, f32) {
 fn resolve_anchor(label: &WidgetLabel, text_w: f32, text_h: f32) -> (f32, f32) {
     match label.anchor {
         LabelAnchor::TopLeft => (label.screen_x, label.screen_y),
-        LabelAnchor::Center => (
-            label.screen_x - text_w * 0.5,
-            label.screen_y - text_h * 0.5,
-        ),
+        LabelAnchor::Center => (label.screen_x - text_w * 0.5, label.screen_y - text_h * 0.5),
         LabelAnchor::Left => (label.screen_x, label.screen_y - text_h * 0.5),
         LabelAnchor::Right => (label.screen_x - text_w, label.screen_y - text_h * 0.5),
     }
@@ -345,5 +336,10 @@ fn resolve_anchor(label: &WidgetLabel, text_w: f32, text_h: f32) -> (f32, f32) {
 /// cryoglyph does its own gamma handling in-shader.
 fn rgba_to_color(rgba: [f32; 4]) -> Color {
     let to_u8 = |c: f32| (c.clamp(0.0, 1.0) * 255.0) as u8;
-    Color::rgba(to_u8(rgba[0]), to_u8(rgba[1]), to_u8(rgba[2]), to_u8(rgba[3]))
+    Color::rgba(
+        to_u8(rgba[0]),
+        to_u8(rgba[1]),
+        to_u8(rgba[2]),
+        to_u8(rgba[3]),
+    )
 }

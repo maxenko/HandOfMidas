@@ -1247,13 +1247,16 @@ fn bracket_leg_new_shape_round_trip() {
 // Slice 8a-ii: decorator group constructors
 // -----------------------------------------------------------------------
 
-use super::decorators::{entry_decorator_group, sl_decorator_group, tp_decorator_group};
+use super::decorators::{
+    entry_decorator_group, quick_create_above_group, quick_create_below_group, sl_decorator_group,
+    tp_decorator_group,
+};
 use crate::widget::decorator::{
     BadgeShape, DecoratorAction, DecoratorAnchor, FlexDirection, ItemContent, Visibility,
 };
 
 #[test]
-fn entry_decorator_group_limit_long_has_three_segments() {
+fn entry_decorator_group_draft_limit_long_has_two_segments() {
     let mut b = make_bracket(185.0, 192.0, 182.0);
     b.entry_type = EntryType::Limit;
     b.side = BracketSide::Long;
@@ -1264,78 +1267,121 @@ fn entry_decorator_group_limit_long_has_three_segments() {
     assert!(matches!(group.anchor, DecoratorAnchor::RightEdge));
     assert!(matches!(group.direction, FlexDirection::Row));
 
-    // Items: [close, submit, save, main badge, quick-create stack]
-    // `make_bracket` is a Draft bracket with a non-zero entry price,
-    // so both `Submit` and `Save` buttons are emitted before the badge.
-    assert_eq!(group.items.len(), 5);
-
-    let badge = match &group.items[3].content {
+    // Draft bracket: items[0] is the main badge (rightmost under the
+    // Row+RightEdge right-to-left layout), followed by hover-only
+    // cancel/submit/save buttons.
+    assert_eq!(group.items.len(), 4);
+    let badge = match &group.items[0].content {
         ItemContent::Badge(b) => b.as_ref(),
-        _ => panic!("expected badge at slot 3"),
+        _ => panic!("expected badge at slot 0"),
     };
     assert!(matches!(badge.shape, BadgeShape::PointLeft { .. }));
-    assert_eq!(badge.segments.len(), 3);
-    // Segment 0: type glyph, Segment 1: quantity "5000", Segment 2: price "185.00"
-    assert_eq!(badge.segments[1].text, "5000");
-    assert_eq!(badge.segments[2].text, "185.00");
-    // Segment actions match the plan's wiring.
+    // Two segments for non-filled brackets: [glyph, price].
+    assert_eq!(badge.segments.len(), 2);
+    assert_eq!(badge.segments[0].text, "L");
+    assert_eq!(badge.segments[1].text, "185.00");
     assert_eq!(
         badge.segments[0].action,
         Some(DecoratorAction::CycleEntryType)
     );
-    assert_eq!(
-        badge.segments[1].action,
-        Some(DecoratorAction::EditQuantity)
-    );
-    assert_eq!(badge.segments[2].action, Some(DecoratorAction::EditPrice));
+    assert_eq!(badge.segments[1].action, Some(DecoratorAction::EditPrice));
+    // Dividers are gone — the whole badge reads as a single color block.
+    assert!(badge.divider_color.is_none());
+    // No per-segment color tinting on non-filled brackets.
+    assert!(badge.segments[0].fill_override.is_none());
+    assert!(badge.segments[1].fill_override.is_none());
 }
 
 #[test]
-fn entry_decorator_group_hover_close_button_is_on_group_hover_only() {
-    let b = make_bracket(185.0, 192.0, 182.0);
+fn entry_decorator_group_market_glyph_reflects_side() {
+    let mut b = make_bracket(185.0, 192.0, 182.0);
+    b.entry_type = EntryType::Market;
+    b.side = BracketSide::Long;
+    let glyph_long = match &entry_decorator_group(&b).items[0].content {
+        ItemContent::Badge(bb) => bb.segments[0].text.clone(),
+        _ => panic!(),
+    };
+    b.side = BracketSide::Short;
+    let glyph_short = match &entry_decorator_group(&b).items[0].content {
+        ItemContent::Badge(bb) => bb.segments[0].text.clone(),
+        _ => panic!(),
+    };
+    assert_eq!(glyph_long, "B");
+    assert_eq!(glyph_short, "S");
+}
+
+#[test]
+fn entry_decorator_group_filled_position_adds_close_and_qty() {
+    let mut b = make_bracket(185.0, 192.0, 182.0);
+    b.entry_type = EntryType::Market;
+    b.side = BracketSide::Long;
+    b.status = BracketStatus::Active;
+    b.filled_qty = Some(5000.0);
+    b.quantity = Some(5000.0);
     let group = entry_decorator_group(&b);
-    let close = &group.items[0];
+
+    // Filled position: [badge, close]. Badge rightmost, close hovers
+    // to its left.
+    assert_eq!(group.items.len(), 2);
+    let badge = match &group.items[0].content {
+        ItemContent::Badge(bb) => bb.as_ref(),
+        _ => panic!("expected badge at slot 0"),
+    };
+    let close = &group.items[1];
     assert!(matches!(close.visibility, Visibility::OnGroupHover));
     assert_eq!(close.action, Some(DecoratorAction::CloseAnnotation));
+    // Three segments for filled: [P, qty, price].
+    assert_eq!(badge.segments.len(), 3);
+    assert_eq!(badge.segments[0].text, "P");
+    assert_eq!(badge.segments[1].text, "5000");
+    assert_eq!(badge.segments[2].text, "185.00");
+    // The qty segment is the black inset.
+    assert_eq!(badge.segments[1].fill_override, Some([0.0, 0.0, 0.0, 1.0]));
 }
 
 #[test]
-fn entry_decorator_group_tp_sl_stack_is_on_group_hover_only() {
+fn entry_decorator_group_draft_emits_hover_cancel_submit_save() {
     let b = make_bracket(185.0, 192.0, 182.0);
     let group = entry_decorator_group(&b);
-    // Draft bracket: [close, submit, save, badge, stack] — stack is last.
-    let stack_item = group.items.last().expect("non-empty items");
-    assert!(matches!(stack_item.visibility, Visibility::OnGroupHover));
-    let inner = match &stack_item.content {
-        ItemContent::Stack(g) => g.as_ref(),
-        _ => panic!("expected Stack as the final item"),
-    };
-    assert!(matches!(inner.direction, FlexDirection::Column));
-    assert_eq!(inner.items.len(), 2);
+    // Draft bracket → [badge, cancel, submit, save].
+    assert_eq!(group.items.len(), 4);
+    assert!(matches!(group.items[0].content, ItemContent::Badge(_)));
     assert_eq!(
-        inner.items[0].action,
-        Some(DecoratorAction::CreateTakeProfit)
+        group.items[1].action,
+        Some(DecoratorAction::CloseAnnotation)
     );
-    assert_eq!(inner.items[1].action, Some(DecoratorAction::CreateStopLoss));
+    assert_eq!(group.items[2].action, Some(DecoratorAction::Submit));
+    assert_eq!(group.items[3].action, Some(DecoratorAction::Save));
+    for item in &group.items[1..] {
+        assert!(matches!(item.visibility, Visibility::OnGroupHover));
+    }
 }
 
 #[test]
-fn tp_decorator_group_position_count_is_circle_segment() {
+fn tp_decorator_group_has_four_segments_and_close_button() {
     let b = make_bracket(185.0, 192.0, 182.0);
     let group = tp_decorator_group(&b).expect("TP present");
     assert_eq!(group.group_id, 1);
+    // [badge, close] — badge rightmost, close hovers to the left.
+    assert_eq!(group.items.len(), 2);
+    let close = &group.items[1];
+    assert!(matches!(close.visibility, Visibility::OnGroupHover));
+    assert_eq!(close.action, Some(DecoratorAction::CloseAnnotation));
+
     let badge = match &group.items[0].content {
         ItemContent::Badge(bb) => bb.as_ref(),
         _ => panic!("expected badge"),
     };
-    // Segments: [T, position_count, pct, price]
+    // Segments: [T, counter, pct, price]. Counter = black circle,
+    // pct = black rect inset.
     assert_eq!(badge.segments.len(), 4);
-    let circle_seg = &badge.segments[1];
-    assert!(matches!(
-        circle_seg.shape_override,
-        Some(BadgeShape::Circle)
-    ));
-    assert_eq!(circle_seg.fill_override, Some([0.0, 0.0, 0.0, 1.0]));
+    assert_eq!(badge.segments[0].text, "T");
+    let counter = &badge.segments[1];
+    assert!(matches!(counter.shape_override, Some(BadgeShape::Circle)));
+    assert_eq!(counter.fill_override, Some([0.0, 0.0, 0.0, 1.0]));
+    let pct = &badge.segments[2];
+    assert_eq!(pct.fill_override, Some([0.0, 0.0, 0.0, 1.0]));
+    assert!(matches!(pct.shape_override, Some(BadgeShape::Rect)));
 }
 
 #[test]
@@ -1346,46 +1392,26 @@ fn tp_decorator_group_none_when_tp_missing() {
 }
 
 #[test]
-fn entry_decorator_nested_stack_has_distinct_group_id_from_tp_sl() {
-    // Regression for BUG 2: the entry group's nested hover stack used
-    // to share `group_id: 1` with `tp_decorator_group`, so any hover
-    // on the TP line also flagged the entry's nested stack as hovered.
-    // The nested stack id is now namespaced above 0x80 and must not
-    // collide with either sibling top-level id (TP=1, SL=2).
+fn top_level_group_ids_are_distinct() {
     let b = make_bracket(185.0, 192.0, 182.0);
-    let entry = entry_decorator_group(&b);
-    let stack_item = entry.items.last().expect("non-empty items");
-    let inner = match &stack_item.content {
-        ItemContent::Stack(g) => g.as_ref(),
-        _ => panic!("expected Stack as the final entry item"),
-    };
-    assert_ne!(inner.group_id, 1, "must not collide with tp group_id");
-    assert_ne!(inner.group_id, 2, "must not collide with sl group_id");
-    assert!(
-        inner.group_id >= 0x80,
-        "nested stack ids live in the 0x80+ namespace, got {}",
-        inner.group_id
-    );
-
-    // Sanity: TP and SL still sit on their canonical top-level ids.
+    assert_eq!(entry_decorator_group(&b).group_id, 0);
     assert_eq!(tp_decorator_group(&b).expect("tp").group_id, 1);
     assert_eq!(sl_decorator_group(&b).expect("sl").group_id, 2);
 }
 
 #[test]
-fn sl_decorator_group_uses_orange_fill() {
+fn sl_decorator_group_uses_orange_fill_and_sl_label() {
     let b = make_bracket(185.0, 192.0, 182.0);
     let group = sl_decorator_group(&b).expect("SL present");
     assert_eq!(group.group_id, 2);
-    // SL group is `[hover close button, main badge]`.
-    let close = &group.items[0];
+    // [badge, close] — badge rightmost.
+    let badge = match &group.items[0].content {
+        ItemContent::Badge(bb) => bb.as_ref(),
+        _ => panic!("expected badge at slot 0"),
+    };
+    let close = &group.items[1];
     assert!(matches!(close.visibility, Visibility::OnGroupHover));
     assert_eq!(close.action, Some(DecoratorAction::RemoveStopLoss));
-    let badge = match &group.items[1].content {
-        ItemContent::Badge(bb) => bb.as_ref(),
-        _ => panic!("expected badge at slot 1"),
-    };
-    // Orange SL base color.
     assert!(
         (badge.fill[0] - 1.0).abs() < 0.01
             && (badge.fill[1] - 0.60).abs() < 0.01
@@ -1393,10 +1419,10 @@ fn sl_decorator_group_uses_orange_fill() {
         "SL badge fill should be orange, got {:?}",
         badge.fill
     );
-    // Segments: [S, risk, price]
-    assert_eq!(badge.segments.len(), 3);
-    assert_eq!(badge.segments[0].text, "S");
-    assert_eq!(badge.segments[2].text, "182.00");
+    // Segments: [SL label, price] — risk/dollar segment is gone.
+    assert_eq!(badge.segments.len(), 2);
+    assert_eq!(badge.segments[0].text, "SL");
+    assert_eq!(badge.segments[1].text, "182.00");
 }
 
 #[test]
@@ -1404,6 +1430,42 @@ fn sl_decorator_group_none_when_sl_missing() {
     let mut b = make_bracket(185.0, 192.0, 182.0);
     b.stop_loss = None;
     assert!(sl_decorator_group(&b).is_none());
+}
+
+#[test]
+fn quick_create_above_long_adds_take_profit_when_missing() {
+    let mut b = make_bracket(185.0, 192.0, 182.0);
+    b.side = BracketSide::Long;
+    b.take_profit = None;
+    let group = quick_create_above_group(&b).expect("TP slot open");
+    let item = &group.items[0];
+    assert_eq!(item.action, Some(DecoratorAction::CreateTakeProfit));
+    assert!(matches!(item.visibility, Visibility::OnLineHover));
+}
+
+#[test]
+fn quick_create_above_short_adds_stop_loss_when_missing() {
+    let mut b = make_bracket(185.0, 192.0, 182.0);
+    b.side = BracketSide::Short;
+    b.stop_loss = None;
+    let group = quick_create_above_group(&b).expect("SL slot open");
+    assert_eq!(group.items[0].action, Some(DecoratorAction::CreateStopLoss));
+}
+
+#[test]
+fn quick_create_below_long_adds_stop_loss_when_missing() {
+    let mut b = make_bracket(185.0, 192.0, 182.0);
+    b.side = BracketSide::Long;
+    b.stop_loss = None;
+    let group = quick_create_below_group(&b).expect("SL slot open");
+    assert_eq!(group.items[0].action, Some(DecoratorAction::CreateStopLoss));
+}
+
+#[test]
+fn quick_create_returns_none_when_leg_already_present() {
+    let b = make_bracket(185.0, 192.0, 182.0); // has both TP and SL
+    assert!(quick_create_above_group(&b).is_none());
+    assert!(quick_create_below_group(&b).is_none());
 }
 
 #[test]

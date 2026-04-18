@@ -619,8 +619,7 @@ impl MidasApp {
                 // Tag the active drag app-wide so sibling charts
                 // showing the same symbol also promote this level into
                 // their drag-pass z-layer (cleared on ChartDragLevelEnd).
-                self.dragging_annotation =
-                    Some(midas_chart::widget::AnnotationId(level_id));
+                self.dragging_annotation = Some(midas_chart::widget::AnnotationId(level_id));
                 Task::none()
             }
 

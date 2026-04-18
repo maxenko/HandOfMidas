@@ -271,8 +271,7 @@ fn compute_normal_scene(
     let price_grid_lines = compute_grid_lines(camera, &input.grid_color);
     let priceline_labels = compute_priceline_labels(camera);
     let timeline_ticks = compute_timeline_ticks(camera);
-    let (widget_output, layer_ends) =
-        compute_widget_annotations(input.annotations, camera, input);
+    let (widget_output, layer_ends) = compute_widget_annotations(input.annotations, camera, input);
     let crosshair = compute_crosshair_impl(input.crosshair, data, camera, input.symbol, &|cx| {
         let cursor_time = camera.x_to_time(cx);
         let idx = data.find_index_by_time(cursor_time as i64);
@@ -440,8 +439,7 @@ fn compute_collapsed_scene(
         &index_to_x,
     );
 
-    let (widget_output, layer_ends) =
-        compute_widget_annotations(input.annotations, camera, input);
+    let (widget_output, layer_ends) = compute_widget_annotations(input.annotations, camera, input);
 
     // Crosshair in collapsed mode: convert cursor X to the nearest candle index.
     let crosshair = compute_crosshair_impl(input.crosshair, data, camera, input.symbol, &|cx| {
@@ -1298,7 +1296,10 @@ fn compute_widget_annotations(
     annotations: &[crate::widget::Annotation],
     camera: &Camera2D,
     input: &ChartInput<'_>,
-) -> (crate::widget::WidgetOutput, [LayerEnd; ANNOTATION_LAYER_COUNT]) {
+) -> (
+    crate::widget::WidgetOutput,
+    [LayerEnd; ANNOTATION_LAYER_COUNT],
+) {
     use crate::widget::compute::{ComputeContext, Viewport};
     use crate::widget::level::compute_level;
     use crate::widget::order_bracket::compute_bracket;
@@ -1339,9 +1340,7 @@ fn compute_widget_annotations(
         annotations
             .iter()
             .filter(|a| {
-                a.presence.is_visible()
-                    && Some(a.id) != hovered_aid
-                    && Some(a.id) != dragged_aid
+                a.presence.is_visible() && Some(a.id) != hovered_aid && Some(a.id) != dragged_aid
             })
             .filter_map(|a| annotation_min_y_distance(a, cy, camera).map(|d| (a.id, d)))
             .filter(|&(_, d)| d <= PROXIMITY_PROMOTION_PX)
@@ -1407,9 +1406,7 @@ fn compute_widget_annotations(
     record!(layer_ends[0]);
 
     for ann in annotations {
-        if ann.presence.is_visible()
-            && Some(ann.id) == promoted_aid
-            && Some(ann.id) != dragged_aid
+        if ann.presence.is_visible() && Some(ann.id) == promoted_aid && Some(ann.id) != dragged_aid
         {
             compute_annotation!(ann);
         }
@@ -1417,10 +1414,7 @@ fn compute_widget_annotations(
     record!(layer_ends[1]);
 
     for ann in annotations {
-        if ann.presence.is_visible()
-            && Some(ann.id) == hovered_aid
-            && Some(ann.id) != dragged_aid
-        {
+        if ann.presence.is_visible() && Some(ann.id) == hovered_aid && Some(ann.id) != dragged_aid {
             compute_annotation!(ann);
         }
     }

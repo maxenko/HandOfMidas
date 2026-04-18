@@ -90,11 +90,7 @@ impl ChartRenderer {
     ///
     /// `queue` is required because the text pipeline (cryoglyph) queues
     /// its initial atlas-texture upload during construction.
-    pub fn new(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        format: wgpu::TextureFormat,
-    ) -> Self {
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         Self {
             candle_pipeline: CandlePipeline::new(device, format),
             volume_pipeline: VolumePipeline::new(device, format),

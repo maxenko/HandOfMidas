@@ -2154,13 +2154,20 @@ fn decorator_button_center(
     use crate::widget::compute::{ComputeContext, Viewport};
     use crate::widget::decorator::compute_decorator_group;
     use crate::widget::order_bracket::decorators::{
-        entry_decorator_group, sl_decorator_group, tp_decorator_group,
+        entry_decorator_group, quick_create_above_group, quick_create_below_group,
+        sl_decorator_group, tp_decorator_group,
     };
     use crate::widget::theme::Theme;
 
     let theme = Theme::default();
     let data = super::EmptyCandleData;
-    let hovered_groups: [(AnnotationId, u16); 3] = [(ann.id, 0), (ann.id, 1), (ann.id, 2)];
+    let hovered_groups: [(AnnotationId, u16); 5] = [
+        (ann.id, 0),
+        (ann.id, 1),
+        (ann.id, 2),
+        (ann.id, 4),
+        (ann.id, 5),
+    ];
     let ctx = ComputeContext {
         camera,
         data: &data,
@@ -2203,6 +2210,22 @@ fn decorator_button_center(
         if let Some(g) = sl_decorator_group(bracket) {
             outputs.push(compute_decorator_group(&g, &sl.line, ann.id, &ctx, 1.0));
         }
+    }
+    if let Some(g) = quick_create_above_group(bracket) {
+        let line = crate::widget::order_bracket::quick_create_anchor_line(
+            &bracket.entry.line,
+            &ctx,
+            crate::widget::order_bracket::QuickCreateSlot::Above,
+        );
+        outputs.push(compute_decorator_group(&g, &line, ann.id, &ctx, 1.0));
+    }
+    if let Some(g) = quick_create_below_group(bracket) {
+        let line = crate::widget::order_bracket::quick_create_anchor_line(
+            &bracket.entry.line,
+            &ctx,
+            crate::widget::order_bracket::QuickCreateSlot::Below,
+        );
+        outputs.push(compute_decorator_group(&g, &line, ann.id, &ctx, 1.0));
     }
 
     for out in outputs {

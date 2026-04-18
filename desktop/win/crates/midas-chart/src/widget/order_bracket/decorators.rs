@@ -1,46 +1,60 @@
-//! Slice 8a-ii: decorator-group constructors for order brackets.
+//! Decorator-group constructors for order brackets.
 //!
-//! Three builders translate an `OrderBracket`'s domain state into
-//! visual `DecoratorGroup`s consumed by `compute_decorator_group()`:
+//! Visual model (see `plan/bracket-visuals.md` and the V2 design pass):
 //!
-//! - [`entry_decorator_group`] — always present; the pointed-left entry
-//!   badge with `[type | qty | price]` segments plus hover-only close
-//!   button, quick-create stack, and (for draft brackets) `Submit` /
-//!   `Save` action buttons.
-//! - [`tp_decorator_group`] — emitted when the bracket has a TP leg. The
-//!   TP badge carries a role glyph, a black-circle position counter, a
-//!   percentage segment and the price.
-//! - [`sl_decorator_group`] — emitted when the bracket has an SL leg.
-//!   Orange-filled pointed-left badge with `[role | dollar_risk | price]`
-//!   and a hover-only `RemoveStopLoss` close button.
+//! - [`entry_decorator_group`] — the pointed-left entry badge showing
+//!   `[type_glyph | price]`. For filled positions the glyph becomes `P`
+//!   and a black `qty` segment is inserted between the glyph and the
+//!   price. Hover reveals an `X` close button for filled positions and
+//!   `Submit` / `Save` buttons for drafts.
+//! - [`tp_decorator_group`] — teal pointed-left badge with
+//!   `[T | counter | pct | price]`. Counter and percentage segments are
+//!   painted black. Hover reveals a teal `X` remove-TP button.
+//! - [`sl_decorator_group`] — orange pointed-left badge with
+//!   `[SL | price]`. Hover reveals an orange `X` remove-SL button.
+//! - [`quick_create_above_group`] / [`quick_create_below_group`] —
+//!   hover-only single-button groups that sit one badge-height above and
+//!   below the entry line. Glyph (`^`/`v`), fill color (teal or orange)
+//!   and action (create TP or create SL) are all driven by bracket side:
+//!   for Long the up arrow adds TP and the down arrow adds SL; for Short
+//!   the assignment flips. Each group is only emitted by `compute_bracket`
+//!   when the corresponding leg is absent.
 //!
-//! The GPU renderer treats each group as opaque; status-driven line
-//! styling still flows through `OrderBracket::leg_style()`. These
-//! constructors own the visual badge/button tree anchored on top of
-//! each leg's `PriceLine` and carry the per-item `DecoratorAction`
-//! wiring that Slice 8b relies on to route clicks through
-//! `ChartAction::DecoratorClick`.
+//! The old ENTRY_QUICK_CREATE_STACK_GROUP_ID stack and the `pin_toggle_group`
+//! badge are gone — both replaced by the cleaner V2 layout.
 
 use super::{
     BracketSide, BracketStatus, EntryType, OrderBracket, BRACKET_LONG_ENTRY_COLOR,
     BRACKET_LONG_STOP_COLOR, BRACKET_LONG_STOP_LIMIT_COLOR, BRACKET_SHORT_ENTRY_COLOR,
     BRACKET_SHORT_STOP_COLOR, BRACKET_SHORT_STOP_LIMIT_COLOR, BRACKET_SL_COLOR, BRACKET_TP_COLOR,
 };
-use crate::widget::compute::ComputeContext;
 use crate::widget::decorator::{
-    Badge, BadgeBorder, BadgeSegment, BadgeShape, Button, DecoratorAction, DecoratorAnchor,
-    DecoratorGroup, DecoratorItem, FlexDirection, ItemContent, Visibility,
+    Badge, BadgeSegment, BadgeShape, Button, DecoratorAction, DecoratorAnchor, DecoratorGroup,
+    DecoratorItem, FlexDirection, ItemContent, Visibility,
 };
 use smallvec::smallvec;
 
-/// Nested-stack group id for the entry-decorator quick-create column.
-///
-/// Top-level bracket groups use `0` (entry), `1` (TP), `2` (SL). Nested
-/// stacks inside a top-level group get ids namespaced above `0x80` so
-/// they cannot collide with a sibling top-level id — `03-data-model.md`
-/// requires unique `group_id` values within one annotation's decorator
-/// set, including nested groups reached through `ItemContent::Stack`.
-pub(crate) const ENTRY_QUICK_CREATE_STACK_GROUP_ID: u16 = 0x80;
+// ── Group ids ────────────────────────────────────────────────────────
+
+/// Entry badge + hover buttons.
+pub(crate) const ENTRY_GROUP_ID: u16 = 0;
+/// Take-profit leg badge + hover close.
+pub(crate) const TP_GROUP_ID: u16 = 1;
+/// Stop-loss leg badge + hover close.
+pub(crate) const SL_GROUP_ID: u16 = 2;
+/// Quick-create button positioned above the entry line.
+pub(crate) const QUICK_CREATE_ABOVE_GROUP_ID: u16 = 4;
+/// Quick-create button positioned below the entry line.
+pub(crate) const QUICK_CREATE_BELOW_GROUP_ID: u16 = 5;
+
+// ── Palette extensions for the V2 design ─────────────────────────────
+
+/// Filled-position fill for long brackets (the "P" badge).
+pub(crate) const POSITION_LONG_COLOR: [f32; 4] = [0.20, 0.40, 0.95, 1.0];
+/// Filled-position fill for short brackets (the "P" badge).
+pub(crate) const POSITION_SHORT_COLOR: [f32; 4] = [0.95, 0.20, 0.20, 1.0];
+/// Black fill used for highlighted inset segments (counter, pct, qty).
+const INSET_BLACK: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
 // ── Color helpers ────────────────────────────────────────────────────
 
@@ -56,6 +70,7 @@ pub(crate) fn lighten(color: [f32; 4], amount: f32) -> [f32; 4] {
 }
 
 /// Linearly interpolate `color` toward black by `amount` (`0.0..=1.0`).
+#[allow(dead_code)]
 pub(crate) fn darken(color: [f32; 4], amount: f32) -> [f32; 4] {
     let a = amount.clamp(0.0, 1.0);
     [
@@ -66,11 +81,29 @@ pub(crate) fn darken(color: [f32; 4], amount: f32) -> [f32; 4] {
     ]
 }
 
+/// True when the bracket represents an open position — i.e. it has been
+/// (partially) filled and shows a quantity-backed "P" badge.
+fn is_filled_position(bracket: &OrderBracket) -> bool {
+    matches!(
+        bracket.status,
+        BracketStatus::Active | BracketStatus::PartialFill
+    ) && bracket.filled_qty.unwrap_or(0.0) > 0.0
+}
+
+/// Fill color for the entry badge. Filled positions use the blue/red
+/// "position" palette; everything else uses the `(side, entry_type)`
+/// table.
+pub(crate) fn entry_badge_fill(bracket: &OrderBracket) -> [f32; 4] {
+    if is_filled_position(bracket) {
+        return match bracket.side {
+            BracketSide::Long => POSITION_LONG_COLOR,
+            BracketSide::Short => POSITION_SHORT_COLOR,
+        };
+    }
+    entry_base_color(bracket.side, bracket.entry_type)
+}
+
 /// Base (full-alpha) entry color for a given `(side, entry_type)` pair.
-///
-/// Mirrors the dispatch table inside `OrderBracket::leg_style()` but
-/// returns the unmodulated base color — status-driven alpha handling is
-/// done separately on the line stroke and never leaks into decorators.
 pub(crate) fn entry_base_color(side: BracketSide, entry_type: EntryType) -> [f32; 4] {
     match (side, entry_type) {
         (BracketSide::Long, EntryType::Stop) => BRACKET_LONG_STOP_COLOR,
@@ -82,17 +115,30 @@ pub(crate) fn entry_base_color(side: BracketSide, entry_type: EntryType) -> [f32
     }
 }
 
-/// Single-character glyph for the entry type segment.
-pub(crate) fn entry_type_glyph(et: EntryType) -> char {
-    match et {
-        EntryType::Market => 'M',
-        EntryType::Limit => 'L',
-        EntryType::Stop => 'S',
-        EntryType::StopLimit => 'X',
+/// Label for the entry-badge glyph segment.
+///
+/// - Filled positions → `"P"` (with the qty segment attached alongside).
+/// - Limit orders → `"L"`.
+/// - Stop orders → `"S"` (the orange SL leg uses `"SL"` so there is no
+///   visual collision in the same badge row).
+/// - StopLimit orders → `"X"`.
+/// - Market orders carry the side glyph — `"B"` for long, `"S"` for short.
+pub(crate) fn entry_glyph_label(bracket: &OrderBracket) -> &'static str {
+    if is_filled_position(bracket) {
+        return "P";
+    }
+    match bracket.entry_type {
+        EntryType::Limit => "L",
+        EntryType::Stop => "S",
+        EntryType::StopLimit => "X",
+        EntryType::Market => match bracket.side {
+            BracketSide::Long => "B",
+            BracketSide::Short => "S",
+        },
     }
 }
 
-/// Format quantity for the middle segment. `None` renders as an em-dash.
+/// Format quantity as a bare integer, or an em-dash if missing.
 pub(crate) fn format_quantity(q: Option<f64>) -> String {
     match q {
         Some(v) => format!("{:.0}", v),
@@ -100,92 +146,132 @@ pub(crate) fn format_quantity(q: Option<f64>) -> String {
     }
 }
 
-/// Count of filled/working legs for the TP "position" badge. The plan
-/// shows a black circle with an integer inside it; we approximate with
-/// "number of bracket legs currently attached" (entry + tp + optional
-/// sl). This is cosmetic until Slice 8b wires in execution-report data.
-fn position_count(bracket: &OrderBracket) -> u32 {
-    let mut n = 1_u32; // entry is always present
-    if bracket.take_profit.is_some() {
-        n += 1;
-    }
-    if bracket.stop_loss.is_some() {
-        n += 1;
-    }
-    n
-}
-
 // ── Entry decorator group ────────────────────────────────────────────
 
 /// Build the entry-leg decorator group.
 ///
-/// Structure (main axis = Row, anchored on the right edge — `items[0]`
-/// is placed right-most, subsequent items pack leftward):
-/// 1. `OnGroupHover` close button ('X').
-/// 2. Always-visible `PointLeft` badge with three segments
-///    `[type_glyph | quantity | price]`.
-/// 3. `OnGroupHover` nested column with the `▲` (CreateTakeProfit) and
-///    `▼` (CreateStopLoss) quick-create buttons. `CreateStopLoss` is
-///    the Slice 8b successor to the legacy `[SL]` toggle button — it is
-///    only attached here when the bracket does not yet carry an SL leg,
-///    which matches the legacy overflow rule (the `[SL]` button was
-///    only drawn when `bracket.stop_loss.is_none()`).
-///
-/// Draft brackets also get hover-only `Submit` and `Save` action
-/// buttons: `Submit` is gated on a non-zero entry price (market data
-/// available); `Save` is always emitted for draft brackets. Both are
-/// wired to the matching `DecoratorAction` so clicks route through
-/// `ChartAction::DecoratorClick`.
+/// Non-filled brackets render as `[glyph | price]`. Filled positions add
+/// a middle qty segment on black, and a hover-only `X` close button to
+/// the right of the badge. Draft brackets additionally get hover-only
+/// `Submit` and `Save` action buttons wired to the matching
+/// `DecoratorAction` variants.
 pub fn entry_decorator_group(bracket: &OrderBracket) -> DecoratorGroup {
-    let color_main = entry_base_color(bracket.side, bracket.entry_type);
-    let color_light = lighten(color_main, 0.3);
-    let color_dark = darken(color_main, 0.3);
-
+    let body_color = entry_badge_fill(bracket);
     let is_draft = bracket.status == BracketStatus::Draft;
+    let is_position = is_filled_position(bracket);
+
     let submit_bg: [f32; 4] = match bracket.side {
         BracketSide::Long => [0.20, 0.78, 0.35, 1.0],
         BracketSide::Short => [0.90, 0.25, 0.25, 1.0],
     };
     let save_bg: [f32; 4] = [0.35, 0.45, 0.65, 1.0];
 
-    let mut items: smallvec::SmallVec<[DecoratorItem; 6]> = smallvec![
-        // Hover-only close button on the far right of the group.
-        DecoratorItem {
+    // Main badge: [glyph | qty? | price].
+    let mut segments: smallvec::SmallVec<[BadgeSegment; 3]> = smallvec![BadgeSegment {
+        text: entry_glyph_label(bracket).to_owned(),
+        text_color: [1.0, 1.0, 1.0, 1.0],
+        font_size: 11.0,
+        min_width: Some(18.0),
+        fill_override: None,
+        shape_override: None,
+        action: Some(DecoratorAction::CycleEntryType),
+    }];
+    if is_position {
+        segments.push(BadgeSegment {
+            text: format_quantity(bracket.quantity.or(bracket.filled_qty)),
+            text_color: [1.0, 1.0, 1.0, 1.0],
+            font_size: 11.0,
+            min_width: Some(44.0),
+            fill_override: Some(INSET_BLACK),
+            // Force Rect so the inset doesn't inherit the parent's
+            // PointLeft triangle and render a nose in the middle of
+            // the badge.
+            shape_override: Some(BadgeShape::Rect),
+            action: Some(DecoratorAction::EditQuantity),
+        });
+    }
+    segments.push(BadgeSegment {
+        text: format!("{:.2}", bracket.entry.line.price),
+        text_color: [1.0, 1.0, 1.0, 1.0],
+        font_size: 11.0,
+        min_width: None,
+        fill_override: None,
+        shape_override: None,
+        action: Some(DecoratorAction::EditPrice),
+    });
+
+    // Items pack right-to-left from the viewport edge (see
+    // `compute_decorator_group`: `Row + RightEdge` is right-to-left).
+    // `items[0]` is therefore the rightmost visual element. The entry
+    // badge owns that slot so it sits flush with the priceline; close /
+    // submit / save buttons land to its left as hover affordances.
+    let mut items: smallvec::SmallVec<[DecoratorItem; 6]> = smallvec![DecoratorItem {
+        visibility: Visibility::Always,
+        action: None,
+        content: ItemContent::Badge(Box::new(Badge {
+            shape: BadgeShape::PointLeft { point_width: 8.0 },
+            fill: body_color,
+            border: None,
+            height: 20.0,
+            padding: 6.0,
+            segments,
+            divider_color: None,
+        })),
+    }];
+
+    // Hover-only close button for filled positions (close the trade).
+    if is_position {
+        items.push(DecoratorItem {
             visibility: Visibility::OnGroupHover,
             action: Some(DecoratorAction::CloseAnnotation),
             content: ItemContent::Button(Button {
                 shape: BadgeShape::Rounded { radius: 2.0 },
-                fill: color_main,
-                hover_fill: Some(color_light),
+                fill: body_color,
+                hover_fill: Some(lighten(body_color, 0.25)),
                 glyph: 'X',
                 glyph_color: [1.0, 1.0, 1.0, 1.0],
                 glyph_size: 12.0,
                 size: [18.0, 18.0],
                 border: None,
             }),
-        },
-    ];
-
-    // Draft-only `Submit` button (requires a non-zero entry price).
-    if is_draft && bracket.entry.line.price != 0.0 {
-        items.push(DecoratorItem {
-            visibility: Visibility::OnGroupHover,
-            action: Some(DecoratorAction::Submit),
-            content: ItemContent::Button(Button {
-                shape: BadgeShape::Rounded { radius: 2.0 },
-                fill: submit_bg,
-                hover_fill: Some(lighten(submit_bg, 0.2)),
-                glyph: '\u{2713}',
-                glyph_color: [1.0, 1.0, 1.0, 1.0],
-                glyph_size: 12.0,
-                size: [48.0, 18.0],
-                border: None,
-            }),
         });
     }
 
-    // Draft-only `Save` button.
+    // Draft-only controls: cancel + submit + save, all hover-only. Order
+    // matters — items are appended in the order they should appear
+    // right-to-left, so cancel sits closest to the badge, followed by
+    // submit, with save furthest left.
     if is_draft {
+        items.push(DecoratorItem {
+            visibility: Visibility::OnGroupHover,
+            action: Some(DecoratorAction::CloseAnnotation),
+            content: ItemContent::Button(Button {
+                shape: BadgeShape::Rounded { radius: 2.0 },
+                fill: body_color,
+                hover_fill: Some(lighten(body_color, 0.25)),
+                glyph: 'X',
+                glyph_color: [1.0, 1.0, 1.0, 1.0],
+                glyph_size: 12.0,
+                size: [18.0, 18.0],
+                border: None,
+            }),
+        });
+        if bracket.entry.line.price != 0.0 {
+            items.push(DecoratorItem {
+                visibility: Visibility::OnGroupHover,
+                action: Some(DecoratorAction::Submit),
+                content: ItemContent::Button(Button {
+                    shape: BadgeShape::Rounded { radius: 2.0 },
+                    fill: submit_bg,
+                    hover_fill: Some(lighten(submit_bg, 0.2)),
+                    glyph: '\u{2713}',
+                    glyph_color: [1.0, 1.0, 1.0, 1.0],
+                    glyph_size: 12.0,
+                    size: [18.0, 18.0],
+                    border: None,
+                }),
+            });
+        }
         items.push(DecoratorItem {
             visibility: Visibility::OnGroupHover,
             action: Some(DecoratorAction::Save),
@@ -196,106 +282,14 @@ pub fn entry_decorator_group(bracket: &OrderBracket) -> DecoratorGroup {
                 glyph: '\u{2B50}',
                 glyph_color: [1.0, 1.0, 1.0, 1.0],
                 glyph_size: 12.0,
-                size: [36.0, 18.0],
+                size: [18.0, 18.0],
                 border: None,
             }),
         });
     }
 
-    items.push(DecoratorItem {
-        visibility: Visibility::Always,
-        action: None,
-        content: ItemContent::Badge(Box::new(Badge {
-            shape: BadgeShape::PointLeft { point_width: 8.0 },
-            fill: color_main,
-            border: None,
-            height: 20.0,
-            padding: 6.0,
-            segments: smallvec![
-                BadgeSegment {
-                    text: entry_type_glyph(bracket.entry_type).to_string(),
-                    text_color: [1.0, 1.0, 1.0, 1.0],
-                    font_size: 11.0,
-                    min_width: Some(14.0),
-                    fill_override: Some(color_light),
-                    shape_override: None,
-                    action: Some(DecoratorAction::CycleEntryType),
-                },
-                BadgeSegment {
-                    text: format_quantity(bracket.quantity),
-                    text_color: [1.0, 1.0, 1.0, 1.0],
-                    font_size: 11.0,
-                    min_width: Some(44.0),
-                    fill_override: None,
-                    shape_override: None,
-                    action: Some(DecoratorAction::EditQuantity),
-                },
-                BadgeSegment {
-                    text: format!("{:.2}", bracket.entry.line.price),
-                    text_color: [1.0, 1.0, 1.0, 1.0],
-                    font_size: 11.0,
-                    min_width: None,
-                    fill_override: Some(color_dark),
-                    shape_override: None,
-                    action: Some(DecoratorAction::EditPrice),
-                },
-            ],
-            divider_color: Some(color_dark),
-        })),
-    });
-
-    // Hover-only vertical stack of quick-create buttons. Both are
-    // always attached so the user can (re-)create either leg at any
-    // time — a click on `CreateStopLoss` with an existing SL leg is
-    // treated as "replace" by the app layer.
-    let stack_items: smallvec::SmallVec<[DecoratorItem; 4]> = smallvec![
-        DecoratorItem {
-            visibility: Visibility::Always,
-            action: Some(DecoratorAction::CreateTakeProfit),
-            content: ItemContent::Button(Button {
-                shape: BadgeShape::Rect,
-                fill: [0.15, 0.85, 0.85, 1.0],
-                hover_fill: Some([0.25, 0.95, 0.95, 1.0]),
-                glyph: '\u{25B2}',
-                glyph_color: [1.0, 1.0, 1.0, 1.0],
-                glyph_size: 10.0,
-                size: [14.0, 10.0],
-                border: None,
-            }),
-        },
-        DecoratorItem {
-            visibility: Visibility::Always,
-            action: Some(DecoratorAction::CreateStopLoss),
-            content: ItemContent::Button(Button {
-                shape: BadgeShape::Rect,
-                fill: [0.15, 0.85, 0.85, 1.0],
-                hover_fill: Some([0.25, 0.95, 0.95, 1.0]),
-                glyph: '\u{25BC}',
-                glyph_color: [1.0, 1.0, 1.0, 1.0],
-                glyph_size: 10.0,
-                size: [14.0, 10.0],
-                border: None,
-            }),
-        },
-    ];
-
-    // Nested stack group_ids are namespaced above 0x80 so they never
-    // collide with the top-level TP (1) / SL (2) group_ids used by
-    // their sibling constructors.
-    items.push(DecoratorItem {
-        visibility: Visibility::OnGroupHover,
-        action: None,
-        content: ItemContent::Stack(Box::new(DecoratorGroup {
-            group_id: ENTRY_QUICK_CREATE_STACK_GROUP_ID,
-            anchor: DecoratorAnchor::RightEdge,
-            direction: FlexDirection::Column,
-            gap: 1.0,
-            items: stack_items,
-        })),
-    });
-
     DecoratorGroup {
-        group_id: 0,
+        group_id: ENTRY_GROUP_ID,
         anchor: DecoratorAnchor::RightEdge,
         direction: FlexDirection::Row,
         gap: 3.0,
@@ -307,30 +301,29 @@ pub fn entry_decorator_group(bracket: &OrderBracket) -> DecoratorGroup {
 
 /// Build the TP-leg decorator group or `None` if TP is not present.
 ///
-/// Segments: `[role_glyph 'T' | position_count_circle | pct | price]`.
+/// Segments: `[T | counter | pct | price]` on teal. Counter is drawn as
+/// a black circle; pct is drawn on a black rectangle inset. A teal
+/// hover-only close button sits to the right.
 pub fn tp_decorator_group(bracket: &OrderBracket) -> Option<DecoratorGroup> {
     let tp = bracket.take_profit.as_ref()?;
     let main = BRACKET_TP_COLOR;
-    let dark = darken(main, 0.3);
-    let light = lighten(main, 0.3);
 
-    // Percentage move from entry to TP (based on entry price).
     let pct_text = {
         let entry_price = bracket.entry.line.price;
         if entry_price.abs() > f64::EPSILON {
             let pct = (tp.line.price - entry_price) / entry_price * 100.0;
-            format!("{:.1}%", pct.abs())
+            format!("{:.0}%", pct.abs())
         } else {
             "\u{2014}".to_owned()
         }
     };
 
-    Some(DecoratorGroup {
-        group_id: 1,
-        anchor: DecoratorAnchor::RightEdge,
-        direction: FlexDirection::Row,
-        gap: 3.0,
-        items: smallvec![DecoratorItem {
+    let position_count = tp_position_count(bracket);
+
+    // Right-to-left packing: items[0] is the rightmost visual element,
+    // so the badge owns that slot and the close button sits to its left.
+    let items: smallvec::SmallVec<[DecoratorItem; 4]> = smallvec![
+        DecoratorItem {
             visibility: Visibility::Always,
             action: None,
             content: ItemContent::Badge(Box::new(Badge {
@@ -344,17 +337,17 @@ pub fn tp_decorator_group(bracket: &OrderBracket) -> Option<DecoratorGroup> {
                         text: "T".to_owned(),
                         text_color: [1.0, 1.0, 1.0, 1.0],
                         font_size: 11.0,
-                        min_width: Some(14.0),
-                        fill_override: Some(light),
+                        min_width: Some(16.0),
+                        fill_override: None,
                         shape_override: None,
                         action: None,
                     },
                     BadgeSegment {
-                        text: format!("{}", position_count(bracket)),
+                        text: format!("{}", position_count),
                         text_color: [1.0, 1.0, 1.0, 1.0],
                         font_size: 11.0,
                         min_width: Some(18.0),
-                        fill_override: Some([0.0, 0.0, 0.0, 1.0]),
+                        fill_override: Some(INSET_BLACK),
                         shape_override: Some(BadgeShape::Circle),
                         action: None,
                     },
@@ -362,9 +355,12 @@ pub fn tp_decorator_group(bracket: &OrderBracket) -> Option<DecoratorGroup> {
                         text: pct_text,
                         text_color: [1.0, 1.0, 1.0, 1.0],
                         font_size: 11.0,
-                        min_width: None,
-                        fill_override: None,
-                        shape_override: None,
+                        min_width: Some(34.0),
+                        fill_override: Some(INSET_BLACK),
+                        // Inset rectangle inside the PointLeft parent —
+                        // override so the fragment shader doesn't draw
+                        // the parent's triangle here.
+                        shape_override: Some(BadgeShape::Rect),
                         action: None,
                     },
                     BadgeSegment {
@@ -372,55 +368,71 @@ pub fn tp_decorator_group(bracket: &OrderBracket) -> Option<DecoratorGroup> {
                         text_color: [1.0, 1.0, 1.0, 1.0],
                         font_size: 11.0,
                         min_width: None,
-                        fill_override: Some(dark),
+                        fill_override: None,
                         shape_override: None,
                         action: Some(DecoratorAction::EditPrice),
                     },
                 ],
-                divider_color: Some(dark),
+                divider_color: None,
             })),
-        }],
+        },
+        DecoratorItem {
+            visibility: Visibility::OnGroupHover,
+            action: Some(DecoratorAction::CloseAnnotation),
+            content: ItemContent::Button(Button {
+                shape: BadgeShape::Rounded { radius: 2.0 },
+                fill: main,
+                hover_fill: Some(lighten(main, 0.2)),
+                glyph: 'X',
+                glyph_color: [1.0, 1.0, 1.0, 1.0],
+                glyph_size: 12.0,
+                size: [18.0, 18.0],
+                border: None,
+            }),
+        },
+    ];
+
+    Some(DecoratorGroup {
+        group_id: TP_GROUP_ID,
+        anchor: DecoratorAnchor::RightEdge,
+        direction: FlexDirection::Row,
+        gap: 3.0,
+        items,
     })
+}
+
+/// Number drawn inside the TP badge's black-circle counter. Currently
+/// approximates leg-count but is a cosmetic placeholder until execution
+/// reports drive the real position index.
+fn tp_position_count(bracket: &OrderBracket) -> u32 {
+    let mut n = 1_u32; // entry is always present
+    if bracket.take_profit.is_some() {
+        n += 1;
+    }
+    if bracket.stop_loss.is_some() {
+        n += 1;
+    }
+    n
 }
 
 // ── Stop-loss decorator group ────────────────────────────────────────
 
 /// Build the SL-leg decorator group or `None` if SL is not present.
 ///
-/// Segments: `[role_glyph 'S' | dollar_risk | price]`. Uses the orange
-/// bracket-SL base color.
+/// Segments: `[SL | price]` on orange. Hover-only orange close button
+/// to the right of the badge.
 pub fn sl_decorator_group(bracket: &OrderBracket) -> Option<DecoratorGroup> {
     let sl = bracket.stop_loss.as_ref()?;
     let main = BRACKET_SL_COLOR;
-    let dark = darken(main, 0.3);
-    let light = lighten(main, 0.3);
-
-    let risk_text = match bracket.dollar_risk() {
-        Some(r) => format!("${:.0}", r),
-        None => "\u{2014}".to_owned(),
-    };
 
     Some(DecoratorGroup {
-        group_id: 2,
+        group_id: SL_GROUP_ID,
         anchor: DecoratorAnchor::RightEdge,
         direction: FlexDirection::Row,
         gap: 3.0,
+        // Right-to-left packing: badge is rightmost, close-X sits to its
+        // left as a hover affordance.
         items: smallvec![
-            // Hover-only close button to detach the SL leg.
-            DecoratorItem {
-                visibility: Visibility::OnGroupHover,
-                action: Some(DecoratorAction::RemoveStopLoss),
-                content: ItemContent::Button(Button {
-                    shape: BadgeShape::Rounded { radius: 2.0 },
-                    fill: main,
-                    hover_fill: Some(light),
-                    glyph: 'X',
-                    glyph_color: [1.0, 1.0, 1.0, 1.0],
-                    glyph_size: 12.0,
-                    size: [18.0, 18.0],
-                    border: None,
-                }),
-            },
             DecoratorItem {
                 visibility: Visibility::Always,
                 action: None,
@@ -432,19 +444,10 @@ pub fn sl_decorator_group(bracket: &OrderBracket) -> Option<DecoratorGroup> {
                     padding: 6.0,
                     segments: smallvec![
                         BadgeSegment {
-                            text: "S".to_owned(),
+                            text: "SL".to_owned(),
                             text_color: [1.0, 1.0, 1.0, 1.0],
                             font_size: 11.0,
-                            min_width: Some(14.0),
-                            fill_override: Some(light),
-                            shape_override: None,
-                            action: None,
-                        },
-                        BadgeSegment {
-                            text: risk_text,
-                            text_color: [1.0, 1.0, 1.0, 1.0],
-                            font_size: 11.0,
-                            min_width: None,
+                            min_width: Some(22.0),
                             fill_override: None,
                             shape_override: None,
                             action: None,
@@ -454,112 +457,118 @@ pub fn sl_decorator_group(bracket: &OrderBracket) -> Option<DecoratorGroup> {
                             text_color: [1.0, 1.0, 1.0, 1.0],
                             font_size: 11.0,
                             min_width: None,
-                            fill_override: Some(dark),
+                            fill_override: None,
                             shape_override: None,
                             action: Some(DecoratorAction::EditPrice),
                         },
                     ],
-                    divider_color: Some(dark),
+                    divider_color: None,
                 })),
+            },
+            DecoratorItem {
+                visibility: Visibility::OnGroupHover,
+                action: Some(DecoratorAction::RemoveStopLoss),
+                content: ItemContent::Button(Button {
+                    shape: BadgeShape::Rounded { radius: 2.0 },
+                    fill: main,
+                    hover_fill: Some(lighten(main, 0.2)),
+                    glyph: 'X',
+                    glyph_color: [1.0, 1.0, 1.0, 1.0],
+                    glyph_size: 12.0,
+                    size: [18.0, 18.0],
+                    border: None,
+                }),
             },
         ],
     })
 }
 
-// ── Pin-toggle decorator group ───────────────────────────────────────
+// ── Quick-create buttons (above/below entry line) ────────────────────
 
-/// Top-level group id for the pin-toggle decorator.
+/// Quick-create button group that sits one badge-height above the entry
+/// line. The button is hover-only, packs right-to-left from the viewport
+/// edge, and carries the "create the leg that goes *above* the entry"
+/// semantics: TP for Long brackets (teal + `^`) and SL for Short
+/// brackets (orange + `^`). Returns `None` when the leg this button
+/// would create is already attached.
 ///
-/// Entry uses `0`, TP uses `1`, SL uses `2`; `3` is reserved for the
-/// always-visible pin button anchored on the entry leg's `PriceLine`.
-pub(crate) const PIN_TOGGLE_GROUP_ID: u16 = 3;
-
-/// Gold fill used for the active (pinned) pin badge. Matches the
-/// "active" convention the other decorator builders use for emphasis.
-const PIN_ACTIVE_FILL: [f32; 4] = [0.95, 0.78, 0.18, 1.0];
-
-/// Hover fill for the active pin button — a lighter gold.
-const PIN_ACTIVE_HOVER_FILL: [f32; 4] = [1.0, 0.87, 0.30, 1.0];
-
-/// Outline color used when the intent is not pinned. Renders as a
-/// thin-stroke badge with a near-transparent fill so the entry line
-/// underneath remains visible.
-const PIN_OUTLINE_COLOR: [f32; 4] = [0.78, 0.78, 0.85, 1.0];
-
-/// Background fill for the inactive (outlined) pin button. Kept very
-/// dark so the border dominates the silhouette on a light chart.
-const PIN_OUTLINE_FILL: [f32; 4] = [0.12, 0.12, 0.15, 0.85];
-
-/// Hover fill for the inactive pin button — slightly brighter than
-/// the resting fill.
-const PIN_OUTLINE_HOVER_FILL: [f32; 4] = [0.20, 0.20, 0.24, 0.95];
-
-/// Unicode "pushpin" glyph rendered inside the pin button.
-///
-/// Uses U+1F4CC ("ROUND PUSHPIN"). If the active font lacks this code
-/// point, downstream label rendering falls back to a tofu box — the
-/// cosmetic gap is noted in the Slice 4 visual-review checklist.
-const PIN_GLYPH: char = '\u{1F4CC}';
-
-/// Build the always-visible pin-toggle decorator group anchored on the
-/// entry leg's `PriceLine`.
-///
-/// Visual state is derived entirely from `ctx.pinned`:
-///
-/// - **Pinned (`ctx.pinned == true`)**: a small gold-filled button
-///   with a pushpin glyph. Signals that the GATR drift-snap rule is
-///   suppressed for this symbol.
-/// - **Unpinned (`ctx.pinned == false`)**: an outlined button in the
-///   same silhouette with a dim fill and a light border, inviting the
-///   user to click and lock the bracket in place.
-///
-/// A click on the button emits `DecoratorAction::TogglePin`, which the
-/// app layer routes to `Message::ChartBracketTogglePin(...)` and
-/// ultimately to `OrderIntentAppMsg::TogglePin`. Because the pin state
-/// lives on `TickerOrderIntent`, the next frame's
-/// `ComputeContext.pinned` reflects the flipped value and the badge
-/// swaps variants without any chart-local state.
-pub fn pin_toggle_group(bracket: &OrderBracket, ctx: &ComputeContext<'_>) -> DecoratorGroup {
-    let _ = bracket; // bracket kept in the signature for symmetry with
-                     // entry_/tp_/sl_decorator_group; future revisions
-                     // may tint the badge from the bracket side color.
-
-    let (fill, hover_fill, glyph_color, border) = if ctx.pinned {
-        (
-            PIN_ACTIVE_FILL,
-            Some(PIN_ACTIVE_HOVER_FILL),
-            [0.12, 0.10, 0.02, 1.0],
-            None,
-        )
-    } else {
-        (
-            PIN_OUTLINE_FILL,
-            Some(PIN_OUTLINE_HOVER_FILL),
-            PIN_OUTLINE_COLOR,
-            Some(BadgeBorder {
-                color: PIN_OUTLINE_COLOR,
-                thickness: 1.25,
-            }),
-        )
+/// The caller (`compute_bracket`) is responsible for placing the group's
+/// anchor `PriceLine` at the correct screen offset — see
+/// `bracket_quick_create_line` in `mod.rs`.
+pub fn quick_create_above_group(bracket: &OrderBracket) -> Option<DecoratorGroup> {
+    let (leg_present, action, fill) = match bracket.side {
+        BracketSide::Long => (
+            bracket.take_profit.is_some(),
+            DecoratorAction::CreateTakeProfit,
+            BRACKET_TP_COLOR,
+        ),
+        BracketSide::Short => (
+            bracket.stop_loss.is_some(),
+            DecoratorAction::CreateStopLoss,
+            BRACKET_SL_COLOR,
+        ),
     };
+    if leg_present {
+        return None;
+    }
+    Some(single_button_group(
+        QUICK_CREATE_ABOVE_GROUP_ID,
+        '^',
+        fill,
+        action,
+    ))
+}
 
+/// Mirror of [`quick_create_above_group`] for the slot below the entry
+/// line. Adds SL for Long brackets (orange + `v`) and TP for Short
+/// brackets (teal + `v`). Returns `None` when the leg is already present.
+pub fn quick_create_below_group(bracket: &OrderBracket) -> Option<DecoratorGroup> {
+    let (leg_present, action, fill) = match bracket.side {
+        BracketSide::Long => (
+            bracket.stop_loss.is_some(),
+            DecoratorAction::CreateStopLoss,
+            BRACKET_SL_COLOR,
+        ),
+        BracketSide::Short => (
+            bracket.take_profit.is_some(),
+            DecoratorAction::CreateTakeProfit,
+            BRACKET_TP_COLOR,
+        ),
+    };
+    if leg_present {
+        return None;
+    }
+    Some(single_button_group(
+        QUICK_CREATE_BELOW_GROUP_ID,
+        'v',
+        fill,
+        action,
+    ))
+}
+
+fn single_button_group(
+    group_id: u16,
+    glyph: char,
+    fill: [f32; 4],
+    action: DecoratorAction,
+) -> DecoratorGroup {
     DecoratorGroup {
-        group_id: PIN_TOGGLE_GROUP_ID,
+        group_id,
         anchor: DecoratorAnchor::RightEdge,
         direction: FlexDirection::Row,
-        gap: 3.0,
+        gap: 0.0,
         items: smallvec![DecoratorItem {
-            visibility: Visibility::Always,
-            action: Some(DecoratorAction::TogglePin),
+            visibility: Visibility::OnLineHover,
+            action: Some(action),
             content: ItemContent::Button(Button {
-                shape: BadgeShape::Rounded { radius: 3.0 },
+                shape: BadgeShape::Rounded { radius: 2.0 },
                 fill,
-                hover_fill,
-                glyph: PIN_GLYPH,
-                glyph_color,
+                hover_fill: Some(lighten(fill, 0.2)),
+                glyph,
+                glyph_color: [1.0, 1.0, 1.0, 1.0],
                 glyph_size: 11.0,
-                size: [18.0, 18.0],
-                border,
+                size: [22.0, 14.0],
+                border: None,
             }),
         }],
     }

@@ -1699,7 +1699,8 @@ fn hit_test_decorators(
     use crate::widget::decorator::compute_decorator_group;
     use crate::widget::hit_test::HitZoneKind;
     use crate::widget::order_bracket::decorators::{
-        entry_decorator_group, sl_decorator_group, tp_decorator_group,
+        entry_decorator_group, quick_create_above_group, quick_create_below_group,
+        sl_decorator_group, tp_decorator_group,
     };
     use crate::widget::theme::Theme;
 
@@ -1722,6 +1723,8 @@ fn hit_test_decorators(
         hovered_groups.push((ann.id, 0));
         hovered_groups.push((ann.id, 1));
         hovered_groups.push((ann.id, 2));
+        hovered_groups.push((ann.id, 4));
+        hovered_groups.push((ann.id, 5));
 
         let ctx = ComputeContext {
             camera,
@@ -1785,6 +1788,28 @@ fn hit_test_decorators(
                         if let Some(action) = check_zone(out.hit_zones) {
                             return Some(action);
                         }
+                    }
+                }
+                if let Some(group) = quick_create_above_group(bracket) {
+                    let line = crate::widget::order_bracket::quick_create_anchor_line(
+                        &bracket.entry.line,
+                        &ctx,
+                        crate::widget::order_bracket::QuickCreateSlot::Above,
+                    );
+                    let out = compute_decorator_group(&group, &line, ann.id, &ctx, 1.0);
+                    if let Some(action) = check_zone(out.hit_zones) {
+                        return Some(action);
+                    }
+                }
+                if let Some(group) = quick_create_below_group(bracket) {
+                    let line = crate::widget::order_bracket::quick_create_anchor_line(
+                        &bracket.entry.line,
+                        &ctx,
+                        crate::widget::order_bracket::QuickCreateSlot::Below,
+                    );
+                    let out = compute_decorator_group(&group, &line, ann.id, &ctx, 1.0);
+                    if let Some(action) = check_zone(out.hit_zones) {
+                        return Some(action);
                     }
                 }
             }
