@@ -25,7 +25,7 @@ Supported commands (see `desktop/win/crates/midas-devloop-proto/src/lib.rs`):
 - `InjectTickerMsg` / `InjectBrokerEvent` — drive domain mutations directly
 - `Key`, `Scroll`, `OpenOrdersPanel`
 
-Runtime artifacts land in `desktop/win/.devloop/`: `app.<port>.pid`, `events.jsonl`, `panic.txt`. Smoke scripts: `desktop/win/scripts/devloop-smoke.sh`, `devloop-orders-journey.sh`.
+Runtime artifacts land in `desktop/win/.devloop/`: `app.<port>.pid`, `events.jsonl`, `panic.txt`. Smoke scripts: `desktop/win/tools/devloop-smoke.sh`, `devloop-orders-journey.sh`.
 
 Use the harness (not manual `cargo run` + eyeballing) to verify UI-visible changes in a dev loop: boot a fixture → inject/key → `WaitForIdle` → `Screenshot` → compare.
 
