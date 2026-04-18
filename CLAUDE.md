@@ -4,6 +4,31 @@ Trading platform for Interactive Brokers. Windows desktop app with GPU-rendered 
 
 **Never commit automatically.** Only commit when explicitly asked.
 
+**Use `gh` for all GitHub interactions** — PRs, issues, checks, releases, comments, reviews. Prefer `gh` over the web UI or raw `git` remote commands for anything that touches github.com.
+
+## Dev harness (autonomous loops + UI screenshots)
+
+`midas-app` ships an in-process TCP harness behind the `dev_harness` Cargo feature. It's the entry point for autonomous dev loops: Claude (or any client) drives the running app over newline-delimited JSON on `127.0.0.1:9898`.
+
+```bash
+cd desktop/win
+cargo run -p midas-app --features dev_harness
+cargo run -p midas-app --features dev_harness -- --fixture <name>   # boot from a saved fixture
+```
+
+Supported commands (see `desktop/win/crates/midas-devloop-proto/src/lib.rs`):
+- `Ping`, `Shutdown`
+- `LoadFixture` / `SnapshotFixture` — persist and replay app state
+- `DumpState` — JSON projection of `MidasApp`, optional JSON-pointer path
+- `Screenshot` — captures the main iced window to PNG, diffs against a reference, reports SSIM + diff fraction
+- `WaitForEvent` / `WaitForIdle` — block on the event log or settle quiescence
+- `InjectTickerMsg` / `InjectBrokerEvent` — drive domain mutations directly
+- `Key`, `Scroll`, `OpenOrdersPanel`
+
+Runtime artifacts land in `desktop/win/.devloop/`: `app.<port>.pid`, `events.jsonl`, `panic.txt`. Smoke scripts: `desktop/win/scripts/devloop-smoke.sh`, `devloop-orders-journey.sh`.
+
+Use the harness (not manual `cargo run` + eyeballing) to verify UI-visible changes in a dev loop: boot a fixture → inject/key → `WaitForIdle` → `Screenshot` → compare.
+
 ## Project Status
 
 1000+ tests passing across two workspaces. Order entry with interactive bracket placement, GPU chart rendering, per-ticker state machine, and decorator-based annotation system are implemented. Phase 1 (IB paper trading connection) is next.
