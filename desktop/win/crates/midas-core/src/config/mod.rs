@@ -56,6 +56,9 @@ pub struct AppConfig {
     /// Order panel configurations, persisted across sessions.
     #[serde(default)]
     pub order_panels: Vec<OrderPanelConfig>,
+    /// Order-blotter panel configurations, persisted across sessions.
+    #[serde(default)]
+    pub order_blotters: Vec<OrderBlotterConfig>,
     /// Ordered list of panel types in the pane grid, in BTreeMap key order
     /// (pane creation order — NOT spatial position). Save and restore both
     /// use the same iteration order, so the mapping is self-consistent.
@@ -246,6 +249,30 @@ fn default_order_side() -> String {
     "BUY".to_string()
 }
 
+/// Order-blotter panel configuration for session persistence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderBlotterConfig {
+    /// User-visible panel name.
+    #[serde(default = "default_order_blotter_name")]
+    pub name: String,
+    /// Column widths in logical pixels (persisted for session restore).
+    #[serde(default)]
+    pub column_widths: Vec<f32>,
+}
+
+impl Default for OrderBlotterConfig {
+    fn default() -> Self {
+        Self {
+            name: default_order_blotter_name(),
+            column_widths: Vec::new(),
+        }
+    }
+}
+
+fn default_order_blotter_name() -> String {
+    "Orders".to_string()
+}
+
 /// Default order quantity for configs missing the field.
 fn default_order_quantity() -> String {
     "100".to_string()
@@ -300,6 +327,12 @@ pub enum PanelSlot {
         /// Index into `AppConfig::order_panels`.
         order_panel_index: usize,
     },
+    /// An order-blotter panel — index into `AppConfig::order_blotters`.
+    #[serde(rename = "order_blotter")]
+    OrderBlotter {
+        /// Index into `AppConfig::order_blotters`.
+        order_blotter_index: usize,
+    },
 }
 
 /// Flattened layout tree node for pane grid topology persistence.
@@ -332,6 +365,12 @@ pub enum LayoutNode {
     OrderPanel {
         /// Index into `AppConfig::order_panels`.
         order_panel_index: usize,
+    },
+    /// An order-blotter pane — index into `AppConfig::order_blotters`.
+    #[serde(rename = "order_blotter")]
+    OrderBlotter {
+        /// Index into `AppConfig::order_blotters`.
+        order_blotter_index: usize,
     },
     /// Forward-compatibility catch-all for unknown panel types.
     /// Prevents deserialization failure if a newer config format is loaded.
@@ -424,6 +463,7 @@ impl Default for AppConfig {
             levels: HashMap::new(),
             watchlists: Vec::new(),
             order_panels: Vec::new(),
+            order_blotters: Vec::new(),
             panel_order: Vec::new(),
             layout_tree: Vec::new(),
             store: StoreConfig::default(),

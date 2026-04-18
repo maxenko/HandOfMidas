@@ -55,6 +55,8 @@ define_id! {
     WatchlistId(u32)  => "Watchlist",
     /// Unique identifier for an order panel within the workspace layout.
     OrderPanelId(u32) => "Order",
+    /// Unique identifier for an order-blotter panel (order history grid).
+    OrderBlotterId(u32) => "Blotter",
 }
 
 #[cfg(test)]
