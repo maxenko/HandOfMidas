@@ -1,4 +1,8 @@
 //! Body row layout and rendering.
+//!
+//! Whole-row helper for the `grid()` builder (see [`crate::widget::grid`]).
+//! Hand-built panels should use [`crate::helpers::grid_body_row`] for
+//! per-row composition instead.
 
 use std::collections::HashMap;
 

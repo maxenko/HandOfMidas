@@ -10,6 +10,12 @@ pub const GRID_BORDER_COLOR: Color = Color::from_rgba(1.0, 1.0, 1.0, 0.06);
 /// Border color for header cells (slightly more visible).
 pub const GRID_HEADER_BORDER_COLOR: Color = Color::from_rgba(1.0, 1.0, 1.0, 0.12);
 
+/// Background tint applied to alternating body rows (even-indexed rows).
+///
+/// Used by the `helpers::grid_body_row` renderer when `alt_bg: true` and
+/// the row is not selected. Matches the blotter's historical inline value.
+pub const ALT_ROW_BG: Color = Color::from_rgba(1.0, 1.0, 1.0, 0.02);
+
 /// Configurable style parameters for a grid instance.
 #[derive(Debug, Clone)]
 pub struct GridStyle {

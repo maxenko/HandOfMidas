@@ -1,4 +1,8 @@
 //! Header row layout and rendering.
+//!
+//! Whole-row helper for the `grid()` builder (see [`crate::widget::grid`]).
+//! Hand-built panels should use [`crate::helpers::grid_header_cell`] for
+//! per-cell composition instead.
 
 use std::collections::HashMap;
 
