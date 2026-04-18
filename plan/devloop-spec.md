@@ -7,6 +7,19 @@ calls during a coding session.
 
 This is a dev accelerator. Not a CI system. Not a QA replacement. Not an a11y effort.
 
+## Motivation — what "accelerator" means in numbers
+
+Before: reproducing a bug like "stop-loss decorator misplaces on drag when entry
+type is stop-limit" takes roughly 10 minutes of manual clicks per iteration —
+launch, load symbol, zoom the camera, place the entry, place the TP, start
+dragging the SL, notice the bug, patch code, rebuild, start over. A 20-iteration
+afternoon is ~3 hours of setup for ~30 minutes of thinking.
+
+After: a saved fixture restores that exact state in under a second. An
+iteration becomes `load_fixture` → `inject_ticker_msg` → `dump_state` or
+`screenshot --diff`. Twenty iterations fit in under an hour, most of which is
+actually looking at the problem. That's the payoff.
+
 ---
 
 ## Centerpiece: fixtures
@@ -16,11 +29,14 @@ launch**. Everything else (input injection, screenshots, event log) supports thi
 
 A fixture is a named JSON blob on disk that captures:
 
-- Every `TickerState` in `MidasApp::ticker_states` (already serde-ready — see
+- Every `TickerState` in `MidasApp::tickers` (already serde-ready — see
   `desktop/win/crates/midas-app/src/ticker_state/mod.rs`, schema v2).
 - Per-chart viewport: `Camera2D { time_start, time_end, price_low, price_high,
   viewport_width, viewport_height, dpi_scale }` per bound symbol.
-- Workspace layout + pane-grid splits (already in `AppConfig`).
+- Workspace layout + pane-grid splits, captured through the **existing**
+  `AppConfig` / `LayoutNode` / `PanelSlot` IR (see `midas-core::config` +
+  `midas-app/src/app/persistence.rs`). Fixtures reuse the same IR path as config
+  load — they do NOT serialize `WorkspaceLayout` directly.
 - Window size + position.
 - Bound symbols per chart panel + active timeframes.
 - The current ticker the user is "focused" on (for single-chart dev).
@@ -44,7 +60,7 @@ Top-level shape:
   "captured_at": "2026-04-17T14:22:00Z",
   "note": "bracket half-placed on AAPL, camera zoomed to March 2026",
   "window": { "width": 2560, "height": 1440, "x": 100, "y": 60 },
-  "layout": { /* serialized WorkspaceLayout */ },
+  "layout": { /* AppConfig layout tree: Vec<LayoutNode> + Vec<PanelSlot> */ },
   "active_ticker": "AAPL",
   "charts": [
     {
@@ -54,7 +70,7 @@ Top-level shape:
       "camera": { "time_start": 1_740_787_200_000, "time_end": ..., "price_low": ..., "price_high": ..., "viewport_width": 1200, "viewport_height": 800, "dpi_scale": 1.0 }
     }
   ],
-  "ticker_states": [ /* Vec<TickerState>, one per touched symbol */ ]
+  "tickers": [ /* Vec<TickerState>, one per touched symbol */ ]
 }
 ```
 
@@ -77,8 +93,12 @@ loud error, not silent migration — devloop is dev-only, not a persistence laye
 - `TickerState` — already done.
 - `Camera2D` in `midas-chart/src/camera/mod.rs` — currently no serde impl. Add
   `#[derive(Serialize, Deserialize)]`. All fields are `f64`/`u32`/`f32` — trivial.
-- `WorkspaceLayout` in `midas-app/src/layout/` — check, likely already done for
-  config persistence.
+- `WorkspaceLayout` in `midas-app/src/layout/` — **not** directly serializable.
+  It wraps `iced::widget::pane_grid::State<PaneState>` with no serde derives.
+  Persistence today goes through an `AppConfig` / `LayoutNode` / `PanelSlot` IR
+  (`midas-core::config`, applied in `midas-app/src/app/persistence.rs`). Fixtures
+  reuse that IR: capture with the existing config-build path, restore with the
+  existing config-apply path. No new layout IR.
 - `ChartState` and `ChartScene` — do NOT try to serialize these. They're derived.
   Rebuild from `(symbol, timeframe, camera)` + a fresh data load.
 - A new `FixtureEnvelope` struct in the proto crate (see below).
@@ -159,8 +179,8 @@ pub enum Command {
     SnapshotFixture { name: String, note: Option<String> },
 
     // -- State inspection --
-    DumpState { path: Option<String> },  // jq-like path, e.g. "ticker_states.AAPL.live_bracket"
-    WaitForEvent { event_type: String, timeout_ms: u64 },
+    DumpState { path: Option<String> },  // jq-like path, e.g. "tickers.AAPL.live_bracket"
+    WaitForEvent { event_type: String, timeout_ms: u64, since_cursor: Option<u64> },
     WaitForIdle { timeout_ms: u64 },     // no Messages processed for N frames
 
     // -- Output --
@@ -185,12 +205,33 @@ pub enum Command {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Response {
-    Ok { body: serde_json::Value },
-    Error { kind: ErrorKind, message: String },
+    Ok { body: serde_json::Value, log_cursor: u64 },
+    Error { kind: ErrorKind, message: String, log_cursor: u64 },
 }
 ```
 
+### Error responses
+
+`ErrorKind` variants, one line each:
+
+- `ParseError` — malformed JSON on the wire.
+- `UnknownCommand` — command variant not recognised.
+- `SymbolNotBound` — `click_price` / `inject_ticker_msg` references a symbol
+  with no chart panel.
+- `FixtureNotFound` — named fixture does not exist on disk.
+- `FixtureVersionMismatch` — `devloop_fixture_version` or
+  `ticker_state_version` disagrees with the current build.
+- `Timeout` — `wait_for_event` / `wait_for_idle` expired.
+- `HarnessPanic` — panic hook caught a panic during command handling; process
+  is in an unstable state, client should shut down.
+- `Internal` — catch-all with a message payload.
+
 ### Addressing
+
+All pixel coordinates in the protocol are **iced logical pixels**, origin
+**top-left** of the main window's client area. Same space `click_price`
+resolves into. Physical-pixel reconciliation happens only inside the screenshot
+pipeline via `Screenshot::scale_factor` — callers never see physical pixels.
 
 - **Pixels** `(x, y)` — always available, resolved against the main window's
   client area.
@@ -219,18 +260,52 @@ Never use one when the other is correct. `inject_ticker_msg` should NOT be used
 to assert "clicking on the decorator updates price" — that's the thing being
 tested.
 
+**Blast radius — read this**: `inject_ticker_msg` is full-strength by design.
+Effects fire exactly as in production, which includes `TickerEffect::PersistDirty`
+(writes the live bracket to redb via `ticker_persist`) and — once Phase 1
+IB paper lands — broker-submit effects that send real orders to the paper IB
+gateway. The harness does NOT sandbox these. The contract is: after an
+`inject_ticker_msg` session, `load_fixture` again before the next journey
+starts, so persisted state doesn't leak across iterations. If that contract
+ever proves too error-prone in practice, add an optional `drop_effects:
+["PersistDirty", "SubmitBracket"]` param on the command — listed in Future
+growth, not v1.
+
 ### Timing
 
-No `sleep`. Ever. `wait_for_event { event_type, timeout_ms }` or
+No `sleep`. Ever. `wait_for_event { event_type, timeout_ms, since_cursor }` or
 `wait_for_idle { timeout_ms }`. The harness tracks last-Message-processed time;
-"idle" means no `Message` processed in the last 3 frames (~50ms @ 60fps).
+"idle" means no **input-origin or state-mutating** `Message` processed in the
+last 3 frames (~50ms @ 60fps).
+
+**Log cursor semantics**: every response (`Ok` and `Error`) carries a
+monotonic `log_cursor` — the event-log line count immediately after the
+command's own writes completed. Callers pass the cursor from the
+previous response as `since_cursor` to `wait_for_event`, and the harness
+only matches lines strictly after that cursor. Without this, the example
+bash loop at the bottom of the plan races: a `click_price` might append
+the awaited `SetLegPrice` to the log before the following `wait_for_event`
+arrives, and a naive tail-from-current-end implementation would miss it.
+Cursor threading makes the ordering deterministic.
+
+`wait_for_idle` explicitly excludes market-data and broker-tick message
+variants — with live feeds attached, those never stop arriving, and a literal
+"no `Message` at all" definition would never resolve. The filter set is the
+same one used to suppress tick-rate events from the event log.
+
+If the caller genuinely needs strict idle-all-messages (rare — usually it's a
+symptom of asking the wrong question), prefer `wait_for_event` on a specific
+target instead.
 
 ### Crash handling
 
-- On harness startup, write PID to `.devloop/app.pid`, overwriting any existing.
+- On harness startup, write PID to `.devloop/app.<port>.pid`, overwriting any
+  existing. Port-scoped from day one so parallel instances (see Future growth)
+  don't collide — costs nothing now, prevents cleanup later.
 - Listener holds each client socket open for the duration of the connection.
   Claude's driver script treats a dropped socket mid-command as a crash: check
-  `app.pid`, if process is gone, emit a clear error and stop the journey.
+  the matching port's `app.<port>.pid`, if process is gone, emit a clear error
+  and stop the journey.
 - `ping` on every new connection as a 50ms health check before the first real
   command.
 - Panic hook in `main.rs` (behind `dev_harness` feature) writes
@@ -251,6 +326,12 @@ Hook point: inside `TickerState::apply` — or wrapping it — in
 `ticker_state/apply.rs`. Cheapest place to intercept. Log after `apply()` returns,
 so `effects` are captured.
 
+**Serde dependency**: this serialises `TickerMsg` + `Vec<TickerEffect>`, and
+neither derives `Serialize` today (both are `Debug, Clone` only). The event log
+is the first consumer of the derive cascade described in Step 7 — the two
+steps share that preparatory work. Schedule whichever lands first to do the
+derives; the other picks them up for free.
+
 Also log a smaller set of chart-scene transitions if they turn out to matter:
 ticker switched, camera settled after pan/zoom. Hook these via the Message handler
 in `app/handlers.rs`. Don't overthink it in v1 — add events when a specific
@@ -258,6 +339,18 @@ diagnosis needs one.
 
 **Launch discipline**: truncate `.devloop/events.jsonl` at startup when
 `dev_harness` is enabled. Otherwise every run contaminates the previous one.
+
+**Default filter**: exclude high-frequency tick-rate variants — today
+`TickerMsg::UpdateMarketData` fires per market-data tick, and once IB paper
+trading is attached (Phase 1) a long session produces a multi-GB JSONL. Filter
+these by default. Opt in via a protocol knob (e.g. `set_event_log_filter`) or a
+config flag when a diagnosis needs them. The set of tick-rate variants lives
+alongside the log module — keep it current as `TickerMsg` grows.
+
+**Rotation**: when the active log file exceeds 100MB, rotate with a timestamp
+suffix (`events-<ts>.jsonl`) and start a fresh file. Truncation would lose
+history mid-session; rotation costs one `rename` call and preserves the
+afternoon's evidence. Keep at most the last N rotated files (N=5 is plenty).
 
 ---
 
@@ -269,34 +362,63 @@ Tiered capture:
 
 1. `screenshot --out foo.png` always writes the PNG.
 2. If a reference exists at `.devloop/refs/<fixture>__<journey>.png`, the
-   harness also computes a pixel diff (root-mean-square or max-channel delta) and
-   writes `.devloop/diffs/<fixture>__<journey>.png` plus a numeric delta in the
-   response body.
+   harness computes a **perceptual** diff — SSIM via the `image-compare` crate
+   (pure Rust), or a pixelmatch-style YIQ delta if we end up porting the
+   ~300 LOC core. Writes `.devloop/diffs/<fixture>__<journey>.png` plus a numeric
+   delta in the response body.
 3. The Claude-side driver only READS the PNG into context when:
    - No reference exists (first run / novel verification), OR
-   - The diff exceeds a threshold (default: >0.5% of pixels differ by >8/255).
+   - The perceptual delta exceeds threshold (tune empirically; start at SSIM
+     < 0.995 or YIQ-differing pixel count > 0.2% of frame), OR
    - The human in the loop (Max) explicitly asks for it.
+
+Why not RMS or max-channel RGB delta: GUI screenshots are dominated by
+antialiasing jitter on text and chart lines. A straight RGB delta produces
+false positives on every subpixel text shift, forcing the threshold high
+enough that real visual regressions slip through. `pixelmatch` (Mapbox, >6k
+stars) uses YIQ perceptual distance for exactly this reason.
 
 Max captures references once during manual dev: `curl ... snapshot_fixture` then
 `curl ... screenshot --out .devloop/refs/<fixture>__<journey>.png`. Subsequent
 automated runs compare silently and only surface visuals when something actually
 changed.
 
-Implementation: wgpu surface readback. The app already uses a wgpu `Surface`
-(see `midas-render/src/renderer.rs`). Readback via a COPY_SRC-enabled surface
-texture into a staging buffer, then `image` crate to encode PNG. iced 0.14
-uses its own wgpu context; we need to reach in. Likely path: a custom
-`iced::window::screenshot` call if 0.14 exposes one; otherwise a custom wgpu
-command encoder passed through the chart widget's draw path. **Flag as risk** —
-first thing to prototype.
+Implementation: use iced 0.14's public screenshot API. `iced::window::screenshot(id)`
+returns a `Task<Screenshot>`; the `Screenshot` carries raw RGBA bytes plus a
+`scale_factor` for DPI reconciliation. This is the supported path — no reaching
+into iced's wgpu context, no custom surface readback.
+
+`midas-render/src/renderer.rs` (`ChartRenderer`) does not own a `wgpu::Surface`:
+it receives a `&mut wgpu::RenderPass` from the caller each draw. The surface is
+owned by iced's shader-widget runtime, which we do not touch in v1.
+
+Steps:
+1. Issue `window::screenshot(main_window_id)` from a harness handler, await the
+   returned `Task<Screenshot>`.
+2. Encode the RGBA bytes to PNG via the `image` crate.
+3. Use `Screenshot::scale_factor` to map between logical client-area coordinates
+   (what `click_price` uses) and physical pixel coordinates in the diff output.
+   DPI reconciliation is the one real gotcha here.
+
+Contingency only: if the task-based API proves inadequate for some pane layout
+edge case, fall back to Win32 `PrintWindow` / `BitBlt` by HWND. Note the pitfall:
+DWM composition combined with a wgpu-backed window on Windows is known to return
+black frames via `BitBlt` — do not reach for this reflexively.
 
 ---
 
 ## Build order
 
-Eight steps. Step 1 is infrastructure only; Step 2 delivers the first usable
+Nine steps. Step 1 is infrastructure only; Step 2 delivers the first usable
 thing. Step 5 is the biggest win and should land within one sitting of completing
 Step 4. Step 9 is the validation milestone, not new infra.
+
+**Dependencies**: Steps 1 → 2 are linear. After Step 2, Steps 3 / 4 / 5 / 6 / 7
+can proceed in parallel. Step 8 wants `wait_for_idle` from Step 3. Step 9 is a
+validation milestone that requires 5 + 6 + 7 + 8. **Caveat**: Steps 3 and 7
+both consume the `TickerMsg` + `TickerEffect` serde cascade — whichever lands
+first does the derives, the other picks them up for free. Parallel in
+calendar, coordinated on that one PR.
 
 ### 1. Proto crate (scaffolding, ~1 hour)
 
@@ -316,14 +438,21 @@ workspace members. Pure serde types, no logic.
 - Implement `Ping` → `Ok { body: {"pid": N} }` and `Shutdown` → graceful exit.
 - Smoke test: `cargo run --features dev_harness` then
   `echo '{"cmd":"ping"}' | nc 127.0.0.1 9898`.
+- **While smoke-testing**, issue a one-off `iced::window::screenshot(id)` call
+  against the idle app — just await the `Task<Screenshot>` and confirm RGBA
+  bytes come back. If they do, Step 6's scope is confirmed and can be slotted
+  in parallel with fixture work. Half an hour of de-risking Step 6 for free.
 
 **Use it**: Max can now `curl` ping the running app from Claude sessions.
 
 ### 3. Event log + `wait_for_event` + `wait_for_idle` (~2 hours)
 
 - `src/dev_harness/event_log.rs`: JSONL appender, truncates on startup.
-- Wrap `TickerState::apply` — or add a post-call hook on the app-level `apply_ticker_msg`
-  path (look at `app/ticker_wiring.rs`) — to serialize `(TickerMsg, Vec<TickerEffect>)`.
+- Wrap `TickerState::apply` directly in `ticker_state/apply.rs`, or hook the
+  call sites in `app.rs` (around the `ticker_mut(...).apply(msg)` pattern) and
+  `handle_ticker_effects` in `app/ticker_wiring.rs`. Serialize
+  `(TickerMsg, Vec<TickerEffect>)` after `apply()` returns so effects are
+  captured.
 - Track last-Message-processed `Instant` in `MidasApp`; expose via harness for
   `wait_for_idle`.
 - `wait_for_event`: spawn a tail task that reads new JSONL lines and matches on
@@ -334,9 +463,10 @@ verify what happened.
 
 ### 4. `dump_state` (~1 hour)
 
-- Serialize `MidasApp` state projection: `{"ticker_states": {symbol:
-  TickerState}, "active_chart_id": ..., "charts": [...] }`.
-- Support `path: "ticker_states.AAPL.live_bracket.entry.price"` via a small
+- Serialize `MidasApp` state projection: `{"tickers": {symbol:
+  TickerState}, "active_chart_id": ..., "charts": [...] }` — matches the real
+  `MidasApp::tickers` field name.
+- Support `path: "tickers.AAPL.live_bracket.entry.price"` via a small
   `serde_json::Value` walker. No jq dep.
 
 **Use it**: Claude inspects state without taking screenshots.
@@ -357,23 +487,45 @@ verify what happened.
 session starts with `load_fixture` and is already on the exact state. This is
 the payoff.
 
-### 6. Screenshot (~2–4 hours, possibly more)
+### 6. Screenshot (~2 hours)
 
-- `src/dev_harness/screenshot.rs`. Reach into iced's wgpu context (risky — may
-  require an iced upstream patch or a `wgpu::Surface` copy hack). Prototype
-  early; if blocked, fall back to calling `PowerShell` to take a window
-  screenshot by window handle — uglier but unblocks.
-- Pixel-diff infra: `image` crate, RMS delta, write diff PNG with red
-  highlights on changed regions.
-- Reference-image storage convention.
+- `src/dev_harness/screenshot.rs`. Call `iced::window::screenshot(main_window_id)`
+  from the command handler, await the `Task<Screenshot>`, encode RGBA bytes to
+  PNG via the `image` crate.
+- Use `Screenshot::scale_factor` to reconcile logical coords (what
+  `click_price` produces) with physical pixel positions in diff output.
+- Perceptual-diff infra: SSIM via `image-compare` (pure Rust), or pixelmatch-
+  style YIQ delta. Write diff PNG with highlighted regions; return numeric
+  delta in the response body.
+- Reference-image storage convention under `.devloop/refs/`.
 
-**Use it**: visual regression tracking.
+**Use it**: visual regression via the pixel-diff tiering — Claude only reads
+the PNG when the perceptual delta exceeds threshold or no reference yet exists,
+keeping token budget under control even across long iteration runs.
 
-### 7. `inject_ticker_msg` (~1 hour)
+### 7. `inject_ticker_msg` (~2–3 hours)
 
-- Deserialize `TickerMsg` from JSON (already serde-derives thanks to existing
-  persistence work — verify).
-- Route through same path as real messages. Effects must fire.
+The injection itself is trivial — ~20 LOC to route a deserialized `TickerMsg`
+through the same `apply_ticker_msg` path the app uses in production. The real
+work is the serde derive cascade.
+
+**Verify first** (before coding): `TickerMsg` and `TickerEffect` currently
+derive only `Debug, Clone` (see `ticker_state/apply.rs`). Enumerate the
+transitive type set reachable from both enums — walk every variant field, and
+every type those fields mention in turn — and confirm each has
+`Serialize, Deserialize`. Known set reachable from `TickerMsg`:
+
+- `TickerMsg`, `TickerEffect` themselves — add derives.
+- `OrderSide`, `EditingField`, `StoredLevel`, `ToastAction`, `TickerState`
+  (already serde via persistence work), `uuid::Uuid` (serde via feature).
+- `LegRole`, `EntryType`, `OrderBracket`, `BracketLeg`, `BracketSide`,
+  `BracketStatus` — already serde-ready in `midas-chart/src/widget/order_bracket`.
+- `AnnotationId` — confirm.
+
+Budget the cascade, not the plumbing. If the verify-first pass turns up a type
+with a non-serde field (e.g. an `Instant` or a closure), that's where the time
+goes: replacing it with a serialisable substitute or skipping via
+`#[serde(skip, default = ...)]`.
 
 **Use it**: fast domain tests without input simulation latency.
 
@@ -403,7 +555,7 @@ Wire end-to-end:
 3. Click at chart coords (entry price).
 4. Click at chart coords (TP).
 5. Click at chart coords (SL).
-6. `dump_state ticker_states.AAPL.live_bracket` — verify 3 legs, correct prices.
+6. `dump_state tickers.AAPL.live_bracket` — verify 3 legs, correct prices.
 7. `screenshot` — diff against reference.
 
 If this works, the loop is real. If it doesn't, we know where.
@@ -423,20 +575,39 @@ If this works, the loop is real. If it doesn't, we know where.
 - **TCP port collisions**. If Max runs two instances in parallel, the second
   crashes on bind. Default port `9898`, env override `DEVLOOP_PORT`; error on
   bind is fine for v1.
-- **Feature flag hygiene**. `dev_harness` types must not leak into release
-  builds. `midas-devloop-proto` dep is feature-gated on `midas-app`, not
-  unconditional. CI grep for `devloop` in the release build as a belt-and-suspenders
-  check.
+- **Feature flag hygiene**. "Zero cost when disabled" is partially true and
+  worth being precise about:
+  - *Feature-gated* (absent from release builds): the `midas-devloop-proto`
+    dep on `midas-app`, the entire `src/dev_harness/` module, the TCP listener,
+    the `Message::DevHarness` variant, the event-log writer, the harness panic
+    hook extension.
+  - *Unconditional* (shipped in release): `Serialize, Deserialize` derives
+    added to domain types (`Camera2D`, `TickerMsg`, `TickerEffect`, and any
+    transitive types the cascade reaches). Those crates don't know about
+    `dev_harness`. Cost is negligible — serde is already transitive in the
+    workspace — but it's honest to say so.
+  - CI grep for `devloop` / `dev_harness` identifiers in the release binary
+    verifies no harness surface leaks past the feature gate.
 - **iced update ordering**. `Message::DevHarness` must be processed on the same
   thread that owns `MidasApp`. The TCP listener is on a tokio task; use an
   mpsc channel into iced's subscription to marshal commands back to the UI
   thread. Same pattern as `broker_bridge.rs`.
-- **Screenshot readback is the risk.** iced 0.14's wgpu integration may not
-  cleanly expose the surface texture. Fall back to a Win32
-  `PrintWindow`/`BitBlt` by HWND if needed — the app runs only on Windows.
+- **Screenshot DPI reconciliation.** The main gotcha here is not readback —
+  iced 0.14 exposes `window::screenshot` as a first-class API. It's the
+  `scale_factor` the `Screenshot` comes with: `click_price` works in logical
+  client-area coords, but the PNG is physical pixels. Every diff region,
+  every reference lookup has to multiply through `scale_factor` consistently
+  or high-DPI boxes will mis-map. Get it right once in the diff helper.
 - **Chart coordinates are per-chart, not global**. `click_price` needs the
   chart's window-relative offset (pane-grid position), not just the camera
   projection. Look up via `ChartPanel` lookup in `MidasApp`.
+- **Mid-apply failure in `load_fixture`.** If deserialisation succeeds but
+  applying the envelope to `MidasApp` fails partway — panel creation errors,
+  data load fails, IR-apply hits a missing symbol — the app must either
+  complete a rollback to its pre-load state or fail loudly and exit. No silent
+  half-loaded state: a fixture that "kind of" loaded is strictly worse than no
+  fixture. Simplest implementation: apply into a staging `MidasApp` clone,
+  swap on success, discard on error.
 
 ---
 
@@ -472,7 +643,7 @@ bash: curl ... '{"cmd":"inject_ticker_msg","symbol":"AAPL","msg_json":{"SetBrack
 bash: curl ... '{"cmd":"click_price","symbol":"AAPL","price":184.50,"bar_index":-10,"button":"Left","modifiers":{}}'
 bash: curl ... '{"cmd":"wait_for_event","event_type":"SetLegPrice","timeout_ms":1000}'
 bash: curl ... '{"cmd":"screenshot","out_path":".devloop/shots/step3.png"}'
-bash: curl ... '{"cmd":"dump_state","path":"ticker_states.AAPL.live_bracket"}'
+bash: curl ... '{"cmd":"dump_state","path":"tickers.AAPL.live_bracket"}'
 [... Claude reads dump, decides to fix code, iterates ...]
 bash: curl ... '{"cmd":"shutdown"}'
 ```
