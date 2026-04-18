@@ -121,6 +121,12 @@ pub enum Command {
     /// clicking the "Orders" toolbar button. Lets scripted journeys set
     /// up the panel without a manual click.
     OpenOrdersPanel,
+
+    /// Advance the per-symbol thumbnail interval one step in the cycle
+    /// (M1 → M5 → D1 → M1). Equivalent to clicking a thumbnail cell in
+    /// the watchlist or blotter. Exposed for devloop debugging of the
+    /// thumbnail-load path.
+    CycleThumbnail { symbol: String },
 }
 
 // ── Responses ─────────────────────────────────────────────────────────

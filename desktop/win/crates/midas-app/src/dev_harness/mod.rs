@@ -306,6 +306,11 @@ pub fn handle_command(
             app.update(Message::AddOrderBlotter)
         }
 
+        Command::CycleThumbnail { symbol } => {
+            responder.ok(serde_json::json!({ "symbol": symbol }), cursor_now());
+            app.update(Message::ThumbnailIntervalCycle(symbol))
+        }
+
         Command::Key { combo } => match input::dispatch_key(app, &combo) {
             Ok(task) => {
                 responder.ok(serde_json::json!({ "combo": combo }), cursor_now());
