@@ -793,11 +793,11 @@ fn watchlist_config_roundtrip() {
             tickers: vec![
                 WatchlistTickerConfig {
                     symbol: "AAPL".into(),
-                    favorite: true,
+                    favorite: 1,
                 },
                 WatchlistTickerConfig {
                     symbol: "MSFT".into(),
-                    favorite: false,
+                    favorite: 0,
                 },
             ],
             symbol_link: LinkMode::default(),
@@ -817,9 +817,9 @@ fn watchlist_config_roundtrip() {
     assert_eq!(loaded.watchlists[0].name, "Main");
     assert_eq!(loaded.watchlists[0].tickers.len(), 2);
     assert_eq!(loaded.watchlists[0].tickers[0].symbol, "AAPL");
-    assert!(loaded.watchlists[0].tickers[0].favorite);
+    assert_eq!(loaded.watchlists[0].tickers[0].favorite, 1);
     assert_eq!(loaded.watchlists[0].tickers[1].symbol, "MSFT");
-    assert!(!loaded.watchlists[0].tickers[1].favorite);
+    assert_eq!(loaded.watchlists[0].tickers[1].favorite, 0);
 
     assert_eq!(loaded.panel_order.len(), 2);
     match &loaded.panel_order[0] {
