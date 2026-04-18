@@ -650,3 +650,85 @@ bash: curl ... '{"cmd":"shutdown"}'
 
 The loop is literally bash + curl. No CLI to maintain. No phase harness. No
 headless orchestration. Max presses Enter, Claude drives.
+
+---
+
+## When Claude reaches for devloop
+
+Max never invokes devloop directly. He asks for a bug fix or feature; Claude
+decides whether the launch cost (~10s cold build + ~3s boot + fixture load) is
+worth paying for this task. CLAUDE.md wiring comes later — this section is the
+source of truth the eventual CLAUDE.md entry will distil.
+
+### Use devloop when
+
+- **Any chart / overlay / decorator / interaction change.** Visual feedback
+  matters; screenshot-diff against a reference is the fastest way to confirm
+  a change is right without asking Max to look.
+- **Bug reproduction where reaching the state takes more than a few clicks.**
+  Any bug that needs "load symbol, zoom to date, place bracket, start drag"
+  to repro is a fixture waiting to be recorded. After the first recording,
+  every subsequent iteration is one `--fixture <name>` away.
+- **Verifying a runtime sequence, even without visuals.** The event log is a
+  ground-truth JSONL trace of every `TickerMsg` + `TickerEffect`. Beats
+  `println` for confirming "did the expected messages fire in the expected
+  order?" — works whether or not the change has visible output.
+- **Multi-step domain bugs that sans-IO tests can't easily reach.** Lifecycle
+  bugs (load → interact → save → reload), persistence bugs, effect-ordering
+  bugs, cross-ticker interactions — cheaper to reproduce from a fixture than
+  to invent test scaffolding.
+- **Regression checks after touching drag / hit-test / bracket / camera
+  code.** Saved fixture + saved reference PNG = one-command regression check.
+- **Exploratory debugging.** `dump_state tickers.AAPL.live_bracket` is a
+  runtime debugger without a debugger. Cheap to pepper through a session.
+- **Testing logic branches that depend on effects firing.** `inject_ticker_msg`
+  reaches code paths sans-IO tests can't — any branch gated on
+  `TickerEffect::PersistDirty` or broker-submit firing.
+
+### Skip devloop when
+
+- Pure domain logic that `midas-chart` sans-IO tests already exercise.
+  Tests are faster to run and green-bar cheaper than a full app boot.
+- Backend / broker-engine / data-pipeline work that doesn't reach the UI.
+  The root workspace (`crates/midas-broker/`) has no harness and doesn't
+  need one.
+- Refactors with no behaviour change. `cargo test --workspace` is the
+  verification, not a screenshot.
+- One-file fixes where the compiler + unit test catches it. Don't boot the
+  app to verify a null check.
+
+### Workspace / desktop policy
+
+**The app opens on Max's desktop during every run**. That's accepted cost,
+not a bug — a hidden-window mode would break rendering on most GPUs, and
+virtual displays are heavy for dev iteration.
+
+Working agreement: when Claude is in a devloop session, assume Max is NOT
+also trying to use the desktop. If Max needs his desktop back mid-session,
+he pauses Claude. A devloop run should be bounded (Claude ends it with
+`shutdown` when the journey completes), not an ambient state that steals
+focus at random.
+
+Rule of thumb for Claude: name the devloop session in chat ("running the
+bracket-placement journey against `sl-placement-bug` fixture"), so Max
+knows when focus-stealing is expected. Silence during devloop-driven
+iteration is fine; sudden unexplained focus-steals are not.
+
+### Non-visual wins to remember
+
+Even when a task is "not visual," three devloop capabilities often beat
+alternatives:
+
+- **`dump_state <jq-path>`** — inspect runtime state without instrumenting
+  code. `dump_state tickers.AAPL.camera.price_low` is one curl; adding a
+  `tracing::info!` plus a rebuild is a minute.
+- **Event log as post-hoc tracer** — after any interaction, a single
+  `grep` on `.devloop/events.jsonl` answers "what actually happened,
+  in what order?"
+- **Fixtures as fast-reproduce** — a fixture isn't a visual artefact, it's
+  a serialised app state. Useful for any bug whose setup is expensive,
+  visual or not.
+
+The mental model: devloop is the debugger + reproducer + visual verifier
+rolled into a socket. Reach for it whenever the shortest path to ground
+truth runs through a live `MidasApp` rather than a unit test.
