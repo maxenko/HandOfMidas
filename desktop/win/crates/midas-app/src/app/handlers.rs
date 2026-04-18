@@ -3092,10 +3092,22 @@ impl MidasApp {
                 // touched row, write-through to the history persist so
                 // the redb flush thread picks it up on its next tick.
                 let touched_ids = self.order_blotter.apply(boxed_event.as_ref());
+                // Collect symbols from the touched rows so we can both
+                // (a) persist the rows and (b) pre-warm any thumbnails
+                // this event just introduced to the blotter. Unique
+                // symbols per tick bound the work.
+                let mut touched_symbols: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
                 for oid in touched_ids {
                     if let Some(row) = self.order_blotter.row(oid) {
+                        touched_symbols.insert(row.symbol.clone());
                         self.order_history_persist.upsert(oid, row.clone());
                     }
+                }
+                let mut thumb_tasks: Vec<Task<Message>> = Vec::new();
+                for symbol in touched_symbols {
+                    let tf = self.thumbnail_store.get(&symbol);
+                    thumb_tasks.push(self.spawn_thumbnail_load(symbol, tf));
                 }
 
                 // Also log to the devloop event log so `wait_for_event`
@@ -3107,6 +3119,15 @@ impl MidasApp {
                         log.append_broker(boxed_event.as_ref());
                     }
                 }
+
+                // Combine the optional thumbnail-load batch with whatever
+                // the match below produces so every return path dispatches
+                // the prewarm for new blotter symbols.
+                let thumbnail_batch = if thumb_tasks.is_empty() {
+                    Task::none()
+                } else {
+                    Task::batch(thumb_tasks)
+                };
 
                 match *boxed_event {
                     BrokerEvent::BracketCreated {
@@ -3152,7 +3173,7 @@ impl MidasApp {
                         } else {
                             // No local annotation — create from engine event.
                             let entry_price = reference_price.unwrap_or(0.0);
-                            return self.update(Message::BrokerBracketCreated {
+                            let inner = self.update(Message::BrokerBracketCreated {
                                 parent_id,
                                 take_profit_id,
                                 stop_loss_id,
@@ -3163,6 +3184,7 @@ impl MidasApp {
                                 tp_price,
                                 sl_price,
                             });
+                            return Task::batch([inner, thumbnail_batch]);
                         }
                     }
                     BrokerEvent::BracketStatusChanged {
@@ -3193,11 +3215,12 @@ impl MidasApp {
                             midas_broker::BracketLifecycleStatus::Error => BracketStatus::Cancelled,
                             midas_broker::BracketLifecycleStatus::Closed => BracketStatus::Closed,
                         };
-                        return self.update(Message::BrokerBracketStatusChanged {
+                        let inner = self.update(Message::BrokerBracketStatusChanged {
                             parent_id,
                             status: chart_status,
                             entry_fill_price,
                         });
+                        return Task::batch([inner, thumbnail_batch]);
                     }
                     BrokerEvent::OrderFilled {
                         order_id,
@@ -3241,7 +3264,7 @@ impl MidasApp {
                         tracing::trace!("Unhandled broker event: {other:?}");
                     }
                 }
-                Task::none()
+                thumbnail_batch
             }
 
             Message::BrokerBracketStatusChanged {

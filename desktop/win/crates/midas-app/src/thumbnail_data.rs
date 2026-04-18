@@ -9,7 +9,7 @@
 //!
 //! See `plan/feature-chart-thumbnail-cells.md` Decision 4 + 9.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use midas_core::{CandleBuffer, Timeframe};
@@ -18,6 +18,16 @@ use midas_core::{CandleBuffer, Timeframe};
 /// entry. 100 is enough for a readable thumbnail at the target cell
 /// width (~100 px) while keeping per-entry memory ~400 bytes of f32s.
 pub const DEFAULT_TAIL_LEN: usize = 100;
+
+/// Maximum number of thumbnail loads allowed in flight at once.
+///
+/// Bounds concurrent calls into `DataProvider::get_candles`. `TestProvider`
+/// is CPU-bound and serialises through a `parking_lot::Mutex`, so the cap
+/// chiefly prevents burst backpressure that would stall the UI thread; for
+/// a real rate-limited provider (e.g. IB with ~50 msg/s), the cap keeps
+/// startup prewarm from exceeding the budget. Overflow is queued in
+/// [`ThumbnailDataStore::waiting`] and drained as loads complete.
+pub const DEFAULT_MAX_CONCURRENT_LOADS: usize = 6;
 
 /// Cached entry for a single (symbol, timeframe) pair.
 ///
@@ -73,6 +83,15 @@ pub struct ThumbnailDataStore {
     /// Keys for which an async load has been dispatched but not yet
     /// resolved. Prevents dispatching a duplicate load.
     pending: HashSet<(String, Timeframe)>,
+    /// Queued loads waiting for a `pending` slot to free up. Drained
+    /// FIFO via [`drain_next`](Self::drain_next) after each completed
+    /// load. Deduped on enqueue against both `pending` and existing
+    /// queue entries, so repeated [`request_load`](Self::request_load)
+    /// calls for the same key never produce duplicates.
+    waiting: VecDeque<LoadTask>,
+    /// Maximum number of loads permitted in `pending` at once.
+    /// Defaults to [`DEFAULT_MAX_CONCURRENT_LOADS`].
+    max_concurrent: usize,
     /// Tail length the store reslices to on every refresh.
     tail_len: usize,
 }
@@ -83,11 +102,14 @@ pub struct ThumbnailDataStore {
 // this file and intentionally exposed ahead of that wiring.
 #[allow(dead_code)]
 impl ThumbnailDataStore {
-    /// Create a new store with the default [`DEFAULT_TAIL_LEN`].
+    /// Create a new store with the default [`DEFAULT_TAIL_LEN`] and
+    /// [`DEFAULT_MAX_CONCURRENT_LOADS`].
     pub fn new() -> Self {
         Self {
             cache: HashMap::new(),
             pending: HashSet::new(),
+            waiting: VecDeque::new(),
+            max_concurrent: DEFAULT_MAX_CONCURRENT_LOADS,
             tail_len: DEFAULT_TAIL_LEN,
         }
     }
@@ -97,8 +119,16 @@ impl ThumbnailDataStore {
         Self {
             cache: HashMap::new(),
             pending: HashSet::new(),
+            waiting: VecDeque::new(),
+            max_concurrent: DEFAULT_MAX_CONCURRENT_LOADS,
             tail_len: n,
         }
+    }
+
+    /// Override the concurrent-load cap. Primarily for tests.
+    pub fn with_max_concurrent(mut self, max: usize) -> Self {
+        self.max_concurrent = max.max(1);
+        self
     }
 
     /// Return the cached [`Entry`] for `(symbol, tf)`, reslicing if
@@ -146,8 +176,15 @@ impl ThumbnailDataStore {
     }
 
     /// Return a [`LoadTask`] the caller should spawn, or `None` if
-    /// a load is already pending or an entry already exists with
-    /// real data (`source_version > 0`).
+    /// the request is redundant or the concurrent-load cap is saturated
+    /// (in which case the task is queued for later
+    /// [`drain_next`](Self::drain_next)).
+    ///
+    /// A return of `None` means either:
+    /// - the entry is already loaded with real data (`source_version > 0`), or
+    /// - a load is already in flight for the same key, or
+    /// - the same key is already queued, or
+    /// - the queue just accepted this task because `pending` is at capacity.
     pub fn request_load(&mut self, symbol: &str, tf: Timeframe, days: u32) -> Option<LoadTask> {
         let key = (symbol.to_string(), tf);
 
@@ -163,12 +200,68 @@ impl ThumbnailDataStore {
             return None;
         }
 
+        // Already queued.
+        if self
+            .waiting
+            .iter()
+            .any(|t| t.symbol == symbol && t.tf == tf)
+        {
+            return None;
+        }
+
+        // At capacity — enqueue and let `drain_next` pick it up later.
+        if self.pending.len() >= self.max_concurrent {
+            self.waiting.push_back(LoadTask {
+                symbol: symbol.to_string(),
+                tf,
+                days,
+            });
+            return None;
+        }
+
         self.pending.insert(key);
         Some(LoadTask {
             symbol: symbol.to_string(),
             tf,
             days,
         })
+    }
+
+    /// Pop the next queued [`LoadTask`] if the concurrent-load cap has
+    /// room. Called after each [`install`](Self::install) or
+    /// [`install_empty`](Self::install_empty) to keep the pipeline fed.
+    /// Returns `None` when the queue is empty or `pending` is still full.
+    pub fn drain_next(&mut self) -> Option<LoadTask> {
+        while self.pending.len() < self.max_concurrent {
+            let task = self.waiting.pop_front()?;
+            let key = (task.symbol.clone(), task.tf);
+
+            // Skip if it completed while queued.
+            if let Some(entry) = self.cache.get(&key) {
+                if entry.source_version > 0 {
+                    continue;
+                }
+            }
+            if self.pending.contains(&key) {
+                continue;
+            }
+
+            self.pending.insert(key);
+            return Some(task);
+        }
+        None
+    }
+
+    /// Current count of in-flight loads. Primarily for tests.
+    #[cfg(test)]
+    pub fn pending_count(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// Current count of queued loads waiting for a slot. Primarily for tests.
+    #[cfg(test)]
+    pub fn waiting_count(&self) -> usize {
+        self.waiting.len()
     }
 
     /// Install a freshly-loaded buffer for `(symbol, tf)`. Clears the
@@ -200,6 +293,7 @@ impl ThumbnailDataStore {
     pub fn clear(&mut self) {
         self.cache.clear();
         self.pending.clear();
+        self.waiting.clear();
     }
 }
 
@@ -393,5 +487,68 @@ mod tests {
         // longer pending.
         assert!(store.request_load("AAPL", Timeframe::M5, 1).is_some());
         assert!(store.request_load("MSFT", Timeframe::M1, 1).is_some());
+    }
+
+    #[test]
+    fn request_load_caps_concurrency_and_queues_overflow() {
+        let mut store = ThumbnailDataStore::new().with_max_concurrent(2);
+
+        // First two admit immediately.
+        assert!(store.request_load("A", Timeframe::M1, 1).is_some());
+        assert!(store.request_load("B", Timeframe::M1, 1).is_some());
+        assert_eq!(store.pending_count(), 2);
+        assert_eq!(store.waiting_count(), 0);
+
+        // Third is queued — returns None but nothing else happens.
+        assert!(store.request_load("C", Timeframe::M1, 1).is_none());
+        assert_eq!(store.pending_count(), 2);
+        assert_eq!(store.waiting_count(), 1);
+
+        // Duplicate enqueue is rejected (same key already queued).
+        assert!(store.request_load("C", Timeframe::M1, 1).is_none());
+        assert_eq!(store.waiting_count(), 1);
+
+        // drain_next yields None while at capacity.
+        assert!(store.drain_next().is_none());
+
+        // Completing A frees a slot and drain_next pops C into pending.
+        let buf = buf_with(3, 1.0);
+        store.install("A", Timeframe::M1, &buf);
+        assert_eq!(store.pending_count(), 1);
+        let drained = store.drain_next().expect("C should drain");
+        assert_eq!(drained.symbol, "C");
+        assert_eq!(store.pending_count(), 2);
+        assert_eq!(store.waiting_count(), 0);
+    }
+
+    #[test]
+    fn drain_next_skips_keys_that_completed_while_queued() {
+        let mut store = ThumbnailDataStore::new().with_max_concurrent(1);
+
+        // Admit A, queue B, queue C.
+        assert!(store.request_load("A", Timeframe::M1, 1).is_some());
+        assert!(store.request_load("B", Timeframe::M1, 1).is_none());
+        assert!(store.request_load("C", Timeframe::M1, 1).is_none());
+        assert_eq!(store.waiting_count(), 2);
+
+        // B's data arrives out-of-band (e.g. a live tick) before its
+        // queued slot opened — mark it installed.
+        let buf = buf_with(3, 1.0);
+        store.install("B", Timeframe::M1, &buf);
+
+        // Finish A. drain_next should skip B (already installed) and
+        // return C.
+        store.install("A", Timeframe::M1, &buf);
+        let drained = store.drain_next().expect("C should be next");
+        assert_eq!(drained.symbol, "C");
+        assert_eq!(store.waiting_count(), 0);
+    }
+
+    #[test]
+    fn drain_next_returns_none_when_queue_empty() {
+        let mut store = ThumbnailDataStore::new();
+        assert!(store.drain_next().is_none());
+        assert!(store.request_load("A", Timeframe::M1, 1).is_some());
+        assert!(store.drain_next().is_none());
     }
 }

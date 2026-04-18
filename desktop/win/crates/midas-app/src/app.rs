@@ -2186,6 +2186,9 @@ impl MidasApp {
     fn spawn_thumbnail_load(&mut self, symbol: String, tf: Timeframe) -> Task<Message> {
         let days = Self::days_for_timeframe(tf);
         let Some(task) = self.thumbnail_data.request_load(&symbol, tf, days) else {
+            // Either redundant, already in flight, or queued behind the
+            // concurrent-load cap. In the queued case,
+            // `drain_thumbnail_queue` will pick it up when a slot frees.
             return Task::none();
         };
         let Some(provider) = self.providers.active_data_provider() else {
@@ -2194,7 +2197,18 @@ impl MidasApp {
             self.thumbnail_data.install_empty(&symbol, tf);
             return Task::none();
         };
-        let req_symbol = task.symbol.clone();
+        Self::perform_thumbnail_load(provider, task)
+    }
+
+    /// Build the async [`Task`] that calls `provider.get_candles` and
+    /// folds the result into the matching thumbnail [`Message`]. Stateless
+    /// helper so both the initial dispatch site and
+    /// [`drain_thumbnail_queue`](Self::drain_thumbnail_queue) can reuse it.
+    fn perform_thumbnail_load(
+        provider: Arc<dyn midas_core::provider::DataProvider>,
+        task: crate::thumbnail_data::LoadTask,
+    ) -> Task<Message> {
+        let req_symbol = task.symbol;
         let req_tf = task.tf;
         let req_days = task.days;
         Task::perform(
@@ -2216,6 +2230,32 @@ impl MidasApp {
         )
     }
 
+    /// Drain any thumbnail loads that were queued while the
+    /// concurrent-load cap in
+    /// [`crate::thumbnail_data::ThumbnailDataStore`] was saturated.
+    ///
+    /// Called from the `Message::ThumbnailDataReady` and
+    /// `Message::ThumbnailLoadFailed` handlers so every completed load
+    /// frees exactly one slot for a queued request. Produces a
+    /// [`Task::batch`] of the dispatches picked up on this tick.
+    fn drain_thumbnail_queue(&mut self) -> Task<Message> {
+        let mut tasks: Vec<Task<Message>> = Vec::new();
+        while let Some(task) = self.thumbnail_data.drain_next() {
+            let Some(provider) = self.providers.active_data_provider() else {
+                // Provider gone — mark the drained key empty so
+                // `request_load` won't respawn it, and stop draining.
+                self.thumbnail_data.install_empty(&task.symbol, task.tf);
+                break;
+            };
+            tasks.push(Self::perform_thumbnail_load(provider, task));
+        }
+        if tasks.is_empty() {
+            Task::none()
+        } else {
+            Task::batch(tasks)
+        }
+    }
+
     /// Pre-warm the thumbnail cache on startup by dispatching one load
     /// per unique (symbol, current interval) across every watchlist.
     ///
@@ -2224,6 +2264,12 @@ impl MidasApp {
     /// the user opens the panel, rather than only after they click a
     /// thumbnail to cycle its interval.
     fn load_all_thumbnails(&mut self) -> Task<Message> {
+        // Union of every symbol currently rendered with a thumbnail:
+        // watchlist rows + order-blotter rows. Both surfaces call
+        // `build_thumbnail_snapshot` in their view paths. Deduped by
+        // (symbol, current tf) so a ticker appearing in multiple
+        // watchlists or in both a watchlist and the blotter costs one
+        // load, not N.
         let mut seen: std::collections::HashSet<(String, Timeframe)> =
             std::collections::HashSet::new();
         let mut pairs: Vec<(String, Timeframe)> = Vec::new();
@@ -2236,6 +2282,14 @@ impl MidasApp {
                 }
             }
         }
+        for row in self.order_blotter.rows() {
+            let tf = self.thumbnail_store.get(&row.symbol);
+            let key = (row.symbol.clone(), tf);
+            if seen.insert(key.clone()) {
+                pairs.push(key);
+            }
+        }
+        tracing::debug!(count = pairs.len(), "thumbnail prewarm: dispatching loads");
         let mut tasks: Vec<Task<Message>> = Vec::with_capacity(pairs.len());
         for (symbol, tf) in pairs {
             tasks.push(self.spawn_thumbnail_load(symbol, tf));
@@ -2560,11 +2614,11 @@ impl MidasApp {
             }
             Message::ThumbnailDataReady { symbol, tf, buffer } => {
                 self.thumbnail_data.install(&symbol, tf, &buffer);
-                Task::none()
+                self.drain_thumbnail_queue()
             }
             Message::ThumbnailLoadFailed { symbol, tf } => {
                 self.thumbnail_data.install_empty(&symbol, tf);
-                Task::none()
+                self.drain_thumbnail_queue()
             }
 
             // -- Dev harness (feature-gated) --
