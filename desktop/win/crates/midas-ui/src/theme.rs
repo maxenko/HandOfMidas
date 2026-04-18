@@ -60,6 +60,22 @@ pub struct UiTheme {
     /// Tooltip text color.
     pub tooltip_text: Color,
 
+    // -- Tabs --
+    /// Color of the underline beneath the active tab.
+    pub tab_underline: Color,
+    /// Height of the active-tab underline in logical pixels.
+    pub tab_underline_height: f32,
+    /// Text color for the active tab label.
+    pub tab_text_active: Color,
+    /// Text color for inactive tab labels.
+    pub tab_text_inactive: Color,
+    /// Background color for the count badge next to a tab label.
+    pub tab_badge_bg: Color,
+    /// Text color inside the count badge.
+    pub tab_badge_text: Color,
+    /// Spacing in logical pixels between adjacent tabs.
+    pub tab_spacing: f32,
+
     // -- Spacing (in logical pixels) --
     /// Default horizontal padding inside buttons.
     pub button_padding_h: f32,
@@ -111,6 +127,15 @@ impl Default for UiTheme {
             tooltip_bg: Color::from_rgb(0.20, 0.20, 0.24),
             tooltip_text: Color::from_rgb(0.88, 0.88, 0.92),
 
+            // Tabs
+            tab_underline: Color::from_rgb(0.22, 0.55, 0.95),
+            tab_underline_height: 2.0,
+            tab_text_active: Color::from_rgb(0.88, 0.88, 0.92),
+            tab_text_inactive: Color::from_rgb(0.55, 0.55, 0.60),
+            tab_badge_bg: Color::from_rgb(0.18, 0.18, 0.22),
+            tab_badge_text: Color::from_rgb(0.70, 0.70, 0.75),
+            tab_spacing: 16.0,
+
             // Spacing
             button_padding_h: 8.0,
             button_padding_v: 4.0,
@@ -151,6 +176,11 @@ mod tests {
             theme.editable_border,
             theme.tooltip_bg,
             theme.tooltip_text,
+            theme.tab_underline,
+            theme.tab_text_active,
+            theme.tab_text_inactive,
+            theme.tab_badge_bg,
+            theme.tab_badge_text,
         ];
         for color in &colors {
             assert!(
@@ -187,6 +217,8 @@ mod tests {
         assert!(theme.label_font_size > 0.0);
         assert!(theme.tooltip_font_size > 0.0);
         assert!(theme.tooltip_delay_ms > 0);
+        assert!(theme.tab_underline_height > 0.0);
+        assert!(theme.tab_spacing > 0.0);
     }
 
     #[test]

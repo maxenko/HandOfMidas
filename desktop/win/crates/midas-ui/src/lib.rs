@@ -12,6 +12,7 @@
 //! - [`TextButton`] -- Themed text button with 4 visual states.
 //! - [`IconButton`] -- Unicode icon button, transparent at rest.
 //! - [`ButtonGroup`] -- Horizontal toggle group of buttons.
+//! - [`Tabs`] -- Horizontal tab bar with underline indicator and optional badges.
 //! - [`Tooltip`] -- Theme-styled tooltip wrapper.
 
 pub mod button;
@@ -19,6 +20,7 @@ pub mod button_group;
 pub mod editable_label;
 pub mod icon_button;
 pub mod label;
+pub mod tabs;
 pub mod theme;
 pub mod tooltip;
 
@@ -27,5 +29,6 @@ pub use button_group::ButtonGroup;
 pub use editable_label::EditableLabel;
 pub use icon_button::IconButton;
 pub use label::Label;
+pub use tabs::{TabItem, Tabs};
 pub use theme::UiTheme;
 pub use tooltip::Tooltip;

@@ -6,3 +6,6 @@ publish = false
 
 [dependencies]
 iced = { workspace = true }
+
+[dev-dependencies]
+image = { workspace = true }
