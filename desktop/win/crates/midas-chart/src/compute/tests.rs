@@ -803,6 +803,116 @@ fn collapse_gaps_no_gaps_no_boundaries() {
     );
 }
 
+/// Daily candles with weekend gaps should NOT produce session-boundary lines.
+/// On daily+ timeframes, Fri→Mon weekend gaps are not a meaningful visual
+/// signal — the month/year timeline labels already anchor time, and emitting
+/// a line at every weekend paints a picket fence on zoomed-out charts.
+#[test]
+fn daily_candles_with_weekend_gaps_have_no_session_boundaries() {
+    const DAY: i64 = 86_400_000;
+    // Fri, Mon, Tue, Wed, Thu, Fri, Mon, Tue — two weekend gaps (3-day each).
+    let base = 1_000_000_000; // arbitrary epoch anchor
+    let data = TestCandles {
+        timestamps: vec![
+            base,
+            base + 3 * DAY, // Fri -> Mon
+            base + 4 * DAY,
+            base + 5 * DAY,
+            base + 6 * DAY,
+            base + 7 * DAY,
+            base + 10 * DAY, // Fri -> Mon
+            base + 11 * DAY,
+        ],
+        opens: vec![100.0; 8],
+        highs: vec![104.0; 8],
+        lows: vec![98.0; 8],
+        closes: vec![102.0; 8],
+        volumes: vec![1000; 8],
+    };
+    let camera = make_collapsed_camera_for_data(&data);
+    let dirty = DirtyFlags::new();
+    let input = make_input_with_collapse(&data, &camera, &dirty, &[], None, true);
+
+    let scene = compute_chart_scene(&input);
+
+    let session_lines = scene.grid_instances.iter().any(|gl| {
+        let is_vertical = (gl.rect[2] - gl.rect[0]) < 2.0 && (gl.rect[3] - gl.rect[1]) > 10.0;
+        // SESSION_BOUNDARY_COLOR is [0.3, 0.3, 0.5, 0.30].
+        let is_session_color = (gl.color[0] - 0.3).abs() < 0.05
+            && (gl.color[2] - 0.5).abs() < 0.1
+            && gl.color[3] > 0.25;
+        is_vertical && is_session_color
+    });
+    assert!(
+        !session_lines,
+        "daily timeframe should suppress session-boundary lines at weekend gaps"
+    );
+}
+
+/// Dense intraday overnight gaps should be thinned so adjacent session
+/// boundaries never paint a picket fence within `SESSION_BOUNDARY_MIN_SPACING_PX`.
+#[test]
+fn intraday_session_boundaries_respect_minimum_spacing() {
+    // 1-minute candles with a gap every 3 candles, compressed to a tiny
+    // viewport so boundary lines land within a few pixels of each other.
+    const MIN: i64 = 60_000;
+    const GAP: i64 = 12 * 3_600_000; // 12h overnight gap
+    let base = 1_000_000_000;
+    let mut timestamps = Vec::new();
+    let mut t = base;
+    for session in 0..20 {
+        for _ in 0..3 {
+            timestamps.push(t);
+            t += MIN;
+        }
+        // overnight gap after each 3-candle session
+        t += GAP;
+        let _ = session;
+    }
+    let n = timestamps.len();
+    let data = TestCandles {
+        timestamps,
+        opens: vec![100.0; n],
+        highs: vec![104.0; n],
+        lows: vec![98.0; n],
+        closes: vec![102.0; n],
+        volumes: vec![1000; n],
+    };
+    // Narrow viewport -> ~3 pixels per candle -> boundaries near the
+    // minimum-spacing threshold.
+    let mut camera = make_collapsed_camera_for_data(&data);
+    camera.viewport_width = 240;
+
+    let dirty = DirtyFlags::new();
+    let input = make_input_with_collapse(&data, &camera, &dirty, &[], None, true);
+    let scene = compute_chart_scene(&input);
+
+    // Collect session-boundary x positions.
+    let mut xs: Vec<f32> = scene
+        .grid_instances
+        .iter()
+        .filter(|gl| {
+            let is_vertical = (gl.rect[2] - gl.rect[0]) < 2.0 && (gl.rect[3] - gl.rect[1]) > 10.0;
+            let is_session = (gl.color[0] - 0.3).abs() < 0.05
+                && (gl.color[2] - 0.5).abs() < 0.1
+                && gl.color[3] > 0.25;
+            is_vertical && is_session
+        })
+        .map(|gl| gl.rect[0])
+        .collect();
+    xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+    for win in xs.windows(2) {
+        assert!(
+            win[1] - win[0] >= 24.0,
+            "adjacent session boundaries must be >=24px apart (got {} - {} = {})",
+            win[1],
+            win[0],
+            win[1] - win[0]
+        );
+    }
+}
+
 #[test]
 fn collapse_gaps_volumes_use_index_x() {
     let data = sample_with_gap();

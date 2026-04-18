@@ -41,6 +41,20 @@ const SESSION_BOUNDARY_COLOR: [f32; 4] = [0.3, 0.3, 0.5, 0.30];
 /// if it exceeds this multiple of the expected candle duration.
 const SESSION_GAP_THRESHOLD: f64 = 1.5;
 
+/// Session-boundary detection runs only for intraday candle durations.
+/// At or above this threshold (1 day), weekend and month-close gaps become
+/// visual noise — the month/year timeline labels already anchor time,
+/// and a line at every Fri→Mon transition on a 2-year daily chart adds
+/// ~100 unlabeled pickets without informing the trader.
+const SESSION_BOUNDARY_MAX_CANDLE_DURATION_MS: f64 = 86_400_000.0;
+
+/// Minimum pixel spacing between consecutive session-boundary lines.
+/// When overnight-gap detection fires on dense intraday data zoomed out,
+/// adjacent boundaries can land within a few pixels of each other and
+/// form a picket fence. Drop any boundary within this distance of the
+/// previously emitted one.
+const SESSION_BOUNDARY_MIN_SPACING_PX: f32 = 24.0;
+
 /// Rendering configuration for candle instances (body/wick sizes, colors,
 /// bright-range highlighting). Grouped to keep `build_candle_instances`
 /// under Clippy's argument-count limit.
@@ -193,12 +207,15 @@ fn build_grid_instances(
 
     // 4. Session boundary lines (collapsed mode only).
     //    Skip boundaries that overlap with a date-label boundary line
-    //    (both fire at day transitions, producing a double line).
+    //    (both fire at day transitions, producing a double line), and
+    //    thin adjacent boundaries so dense intraday data never paints
+    //    a picket fence.
     let slot_tol = if candle_count > 1 {
         viewport_width / candle_count as f32
     } else {
         40.0
     };
+    let mut last_sb_x = f32::NEG_INFINITY;
     for sb in session_boundaries {
         let dominated = timeline_labels
             .iter()
@@ -206,10 +223,14 @@ fn build_grid_instances(
         if dominated {
             continue;
         }
+        if sb.x - last_sb_x < SESSION_BOUNDARY_MIN_SPACING_PX {
+            continue;
+        }
         out.push(GridLineInstance {
             rect: [sb.x, 0.0, sb.x + 1.0, separator_y],
             color: sb.color,
         });
+        last_sb_x = sb.x;
     }
 
     out
@@ -748,6 +769,11 @@ fn detect_session_boundaries(
     index_to_x: &dyn Fn(usize) -> f32,
 ) -> Vec<SessionBoundary> {
     if vis_end.saturating_sub(vis_start) < 2 {
+        return Vec::new();
+    }
+
+    // Daily+ timeframes: weekend gaps are not a meaningful visual signal.
+    if candle_duration >= SESSION_BOUNDARY_MAX_CANDLE_DURATION_MS {
         return Vec::new();
     }
 
