@@ -3,7 +3,7 @@ use midas_core::SymbolKey;
 use uuid::Uuid;
 
 use crate::orders::bracket::BracketLifecycleStatus;
-use crate::orders::types::OrderAction;
+use crate::orders::types::{OrderAction, OrderKind, TimeInForce};
 
 /// Every event the broker engine can emit.
 /// Sent over broadcast channels to consumers (UI, logger, strategy).
@@ -82,6 +82,18 @@ pub enum BrokerEvent {
         sl_price: Option<f64>,
         /// Last traded price at submission time (from BracketParams).
         reference_price: Option<f64>,
+        /// Entry order kind (Market / Limit / Stop / StopLimit / etc.).
+        entry_kind: OrderKind,
+        /// Entry limit price (Limit / StopLimit only).
+        entry_limit_price: Option<f64>,
+        /// Entry stop-trigger price (Stop / StopLimit only).
+        entry_stop_price: Option<f64>,
+        /// Stop-loss limit price (StopLimit SL only; `None` for a pure Stop SL).
+        sl_limit_price: Option<f64>,
+        /// Time-in-force for the take-profit leg (if any).
+        tp_tif: Option<TimeInForce>,
+        /// Time-in-force for the stop-loss leg (if any).
+        sl_tif: Option<TimeInForce>,
     },
     /// A bracket's lifecycle status changed (derived from leg statuses).
     BracketStatusChanged {

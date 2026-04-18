@@ -579,6 +579,7 @@ async fn test_create_full_bracket_emits_event() {
             tp_price: _,
             sl_price: _,
             reference_price: _,
+            ..
         } => {
             assert!(!parent_id.is_nil(), "parent_id should be a valid UUID");
             assert!(take_profit_id.is_some(), "full bracket should have TP");

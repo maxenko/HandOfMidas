@@ -475,6 +475,12 @@ impl BrokerEngine {
             tp_price: params.take_profit.as_ref().map(|tp| tp.price),
             sl_price: params.stop_loss.as_ref().map(|sl| sl.stop_price),
             reference_price: params.reference_price,
+            entry_kind: params.entry_kind,
+            entry_limit_price: params.entry_price,
+            entry_stop_price: params.entry_stop_price,
+            sl_limit_price: params.stop_loss.as_ref().and_then(|sl| sl.limit_price),
+            tp_tif: params.take_profit.as_ref().and_then(|tp| tp.tif),
+            sl_tif: params.stop_loss.as_ref().and_then(|sl| sl.tif),
         });
 
         tracing::info!(
