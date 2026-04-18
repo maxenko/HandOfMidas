@@ -185,6 +185,14 @@ fn build_grid_instances(
         color: [0.50, 0.50, 0.55, 0.60],
     });
 
+    // 2c. Top border (horizontal, divides chart from the header above).
+    //     Matches the timeline separator so the chart is framed on all
+    //     three axis sides (top, right, bottom-timeline).
+    out.push(GridLineInstance {
+        rect: [0.0, 0.0, viewport_width, 2.0],
+        color: [0.50, 0.50, 0.55, 0.60],
+    });
+
     // 3. Vertical time lines at every date label position.
     //    Opacity and thickness scale with tier so hourly lines stay faint
     //    while daily/monthly boundaries stand out.
