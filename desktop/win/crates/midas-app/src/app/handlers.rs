@@ -1836,9 +1836,12 @@ impl MidasApp {
                 Task::none()
             }
 
-            Message::WatchlistToggleFavorite(wl_id, symbol) => {
+            Message::WatchlistAdjustFavorite(wl_id, symbol, delta) => {
+                if delta == 0 {
+                    return Task::none();
+                }
                 if let Some(wl) = self.watchlists.get_mut(&wl_id) {
-                    wl.cycle_favorite(&symbol);
+                    wl.adjust_favorite(&symbol, delta);
                     return self.flush_config();
                 }
                 Task::none()

@@ -499,8 +499,9 @@ pub enum Message {
     WatchlistAddTicker(WatchlistId),
     /// Remove a ticker from a watchlist.
     WatchlistRemoveTicker(WatchlistId, String),
-    /// Toggle the favorite status of a ticker in a watchlist.
-    WatchlistToggleFavorite(WatchlistId, String),
+    /// Adjust the favourite level of a ticker by a signed delta
+    /// (scroll-wheel driven: `+1` per line up, `-1` per line down).
+    WatchlistAdjustFavorite(WatchlistId, String, i8),
     /// User pressed down on a ticker cell — starts the hold timer.
     WatchlistTickerPressed(WatchlistId, String),
     /// Hold threshold reached — promote pending drag to active drag.
@@ -2368,7 +2369,7 @@ impl MidasApp {
             | Message::WatchlistTickerInputChanged(..)
             | Message::WatchlistAddTicker(..)
             | Message::WatchlistRemoveTicker(..)
-            | Message::WatchlistToggleFavorite(..)
+            | Message::WatchlistAdjustFavorite(..)
             | Message::WatchlistTickerPressed(..)
             | Message::WatchlistDragConfirm(..)
             | Message::WatchlistDragCancel

@@ -141,21 +141,14 @@ impl GridColumn<WatchlistRow, Message> for WatchlistColumn {
                 .into(),
             Self::Favorite => {
                 // Legacy grid() path — the hand-built view in `views.rs`
-                // is the real renderer. Keep this minimal: just show the
-                // star glyph, no numeric overlay.
-                let star = if row.favorite > 0 {
-                    "\u{2605}"
+                // is the real renderer. Keep a minimal, non-interactive
+                // glyph here: the real widget lives at the call site.
+                let glyph = if row.favorite > 0 {
+                    "\u{25CF}"
                 } else {
-                    "\u{2606}"
+                    "\u{25CB}"
                 };
-                button(text(star).size(12))
-                    .on_press(Message::WatchlistToggleFavorite(
-                        row.wl_id,
-                        row.symbol.clone(),
-                    ))
-                    .padding([2, 4])
-                    .style(hover_text_button_style)
-                    .into()
+                text(glyph).size(12).into()
             }
             Self::Ticker => text(&row.symbol).size(13).wrapping(Wrapping::None).into(),
             Self::Price => text(&row.price_text)

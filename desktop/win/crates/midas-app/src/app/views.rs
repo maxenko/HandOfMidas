@@ -1338,7 +1338,7 @@ impl MidasApp {
         // the header — the `col_widths` map still stores a width for
         // it for legacy configs, but nothing renders it.
         let col_defs: [(midas_grid::ColumnId, &str, bool); 6] = [
-            (COL_FAV, "\u{2605}", false),
+            (COL_FAV, "", false),
             (COL_TICKER, "Ticker", true),
             (COL_PRICE, "Price", true),
             (COL_CHANGE, "Chg%", true),
@@ -1352,15 +1352,6 @@ impl MidasApp {
         let header_style = HeaderStyle {
             label_color: Some(theme::TEXT_SECONDARY),
             ..HeaderStyle::default()
-        };
-        // Favourite column is a single glyph and wants to share pixel
-        // coordinates with the body star. Match the body's size and
-        // zero horizontal padding so both are centred on the same axis.
-        let fav_header_style = HeaderStyle {
-            padding: [6, 0],
-            label_size: FAV_STAR_SIZE as u16,
-            align_x: Some(iced::alignment::Horizontal::Center),
-            ..header_style.clone()
         };
 
         // Header row.
@@ -1382,18 +1373,13 @@ impl MidasApp {
                 on_press: Message::WatchlistColumnResizeStart(wl_id, i + 1, 0.0),
                 height: 26.0,
             });
-            let style = if col_id == COL_FAV {
-                &fav_header_style
-            } else {
-                &header_style
-            };
             header_cells.push(grid_header_cell(
                 label,
                 width,
                 sort_indicator,
                 sort_msg,
                 resize,
-                style,
+                &header_style,
             ));
         }
         let header = Row::with_children(header_cells);
@@ -1415,10 +1401,20 @@ impl MidasApp {
                 let sym_del = row_data.symbol.clone();
                 let sym_drag = row_data.symbol.clone();
 
-                let fav_btn = favorite_star_button(
-                    row_data.favorite,
-                    Message::WatchlistToggleFavorite(wl_id, sym),
-                );
+                let fav_widget = favorite_circle(row_data.favorite);
+                let fav_scroll = move |delta: iced::mouse::ScrollDelta| {
+                    let lines = match delta {
+                        iced::mouse::ScrollDelta::Lines { y, .. } => y,
+                        iced::mouse::ScrollDelta::Pixels { y, .. } => y / 50.0,
+                    };
+                    let step: i8 = match lines {
+                        l if l > 0.0 => 1,
+                        l if l < 0.0 => -1,
+                        _ => 0,
+                    };
+                    Message::WatchlistAdjustFavorite(wl_id, sym.clone(), step)
+                };
+                let fav_btn = iced::widget::mouse_area(fav_widget).on_scroll(fav_scroll);
 
                 let del_btn = button(text("\u{00D7}").size(12))
                     .on_press(Message::WatchlistRemoveTicker(wl_id, sym_del))
@@ -3347,97 +3343,77 @@ fn build_gerchik_atr_overlay<'a>(
     .into()
 }
 
-// ── Favourite-star widget ───────────────────────────────────────────
+// ── Favourite circle widget ─────────────────────────────────────────
 
-/// Font size of the favourite-star glyph. Chosen to leave room for a
-/// digit overlay at level ≥ 1 without becoming the tallest thing in
-/// the body row.
-const FAV_STAR_SIZE: f32 = 20.0;
+/// Diameter of the favourite circle, in logical px.
+const FAV_CIRCLE_SIZE: f32 = 18.0;
 
 /// Warm gold reached at favourite level 5.
 const FAV_GOLD: [f32; 3] = [1.00, 0.82, 0.20];
 
-/// Dim silver at favourite level 1. Stays subtly darker than primary
-/// text so the dim end of the gradient reads as "barely pinned".
+/// Dim silver at favourite level 1.
 const FAV_SILVER: [f32; 3] = [0.55, 0.55, 0.60];
 
-/// Build the favourite-star cell contents for a watchlist row.
+/// Build the favourite-circle cell contents for a watchlist row.
 ///
-/// - `level == 0`: outline glyph in muted text colour, no overlay.
-/// - `level 1..=5`: filled glyph, colour interpolated silver→gold with
-///   brightness rising toward the gold end, level digit overlaid in
-///   bold and centred inside the glyph.
-fn favorite_star_button<'a>(level: u8, on_press: Message) -> Element<'a, Message> {
-    use iced::widget::stack;
-
-    let content: Element<'a, Message> = if level == 0 {
-        text("\u{2606}")
-            .size(FAV_STAR_SIZE)
-            .color(theme::TEXT_MUTED)
-            .into()
-    } else {
-        let star_color = favorite_star_color(level);
-        let star = text("\u{2605}").size(FAV_STAR_SIZE).color(star_color);
-
-        // The ★ glyph is denser in its lower half; the digit needs to
-        // sit just below the geometric centre so it looks centred
-        // inside the visible shape.
-        let bold = iced::Font {
-            weight: iced::font::Weight::Bold,
-            ..iced::Font::default()
-        };
-        let digit = text(level.to_string())
-            .size(10)
-            .color(Color::from_rgb(0.08, 0.08, 0.10))
-            .font(bold);
-        let overlay = container(digit)
-            .width(Fill)
-            .height(Fill)
-            .align_x(iced::alignment::Horizontal::Center)
-            .align_y(iced::alignment::Vertical::Center)
-            .padding([2, 0]);
-
-        stack![star, overlay].into()
+/// - `level == 0`: empty outline circle in muted colour, no digit.
+/// - `level 1..=5`: filled circle, colour interpolated silver→gold,
+///   level digit drawn bold and centred inside the circle.
+///
+/// The caller wraps this in a `mouse_area` with an `on_scroll` handler
+/// to drive the level up/down via the wheel.
+fn favorite_circle<'a>(level: u8) -> Element<'a, Message> {
+    let bold = iced::Font {
+        weight: iced::font::Weight::Bold,
+        ..iced::Font::default()
     };
 
-    button(content)
-        .on_press(on_press)
-        .padding([1, 4])
-        .style(fav_star_button_style)
-        .into()
+    if level == 0 {
+        container(iced::widget::Space::new())
+            .width(FAV_CIRCLE_SIZE)
+            .height(FAV_CIRCLE_SIZE)
+            .style(|_| container::Style {
+                background: None,
+                border: iced::Border {
+                    color: theme::TEXT_MUTED,
+                    width: 1.2,
+                    radius: (FAV_CIRCLE_SIZE / 2.0).into(),
+                },
+                ..Default::default()
+            })
+            .into()
+    } else {
+        let fill = favorite_circle_color(level);
+        let digit = text(level.to_string())
+            .size(11)
+            .color(Color::from_rgb(0.08, 0.08, 0.10))
+            .font(bold);
+        container(digit)
+            .width(FAV_CIRCLE_SIZE)
+            .height(FAV_CIRCLE_SIZE)
+            .align_x(iced::alignment::Horizontal::Center)
+            .align_y(iced::alignment::Vertical::Center)
+            .style(move |_| container::Style {
+                background: Some(iced::Background::Color(fill)),
+                border: iced::Border {
+                    color: Color::TRANSPARENT,
+                    width: 0.0,
+                    radius: (FAV_CIRCLE_SIZE / 2.0).into(),
+                },
+                ..Default::default()
+            })
+            .into()
+    }
 }
 
 /// Silver→gold gradient for favourite levels `1..=5`.
-fn favorite_star_color(level: u8) -> Color {
+fn favorite_circle_color(level: u8) -> Color {
     let level = level.clamp(1, 5);
     let t = (level as f32 - 1.0) / 4.0; // 0.0 at 1, 1.0 at 5
     let r = FAV_SILVER[0] + (FAV_GOLD[0] - FAV_SILVER[0]) * t;
     let g = FAV_SILVER[1] + (FAV_GOLD[1] - FAV_SILVER[1]) * t;
     let b = FAV_SILVER[2] + (FAV_GOLD[2] - FAV_SILVER[2]) * t;
     Color::from_rgb(r, g, b)
-}
-
-/// Background hover/press feedback for the favourite-star button with
-/// no text-colour override (the inner text widgets carry their own
-/// colours for gradient + digit overlay).
-fn fav_star_button_style(_theme: &iced::Theme, status: button::Status) -> button::Style {
-    let background = match status {
-        button::Status::Hovered => Some(iced::Background::Color(Color::from_rgba(
-            1.0, 1.0, 1.0, 0.1,
-        ))),
-        button::Status::Pressed => Some(iced::Background::Color(Color::from_rgba(
-            1.0, 1.0, 1.0, 0.15,
-        ))),
-        _ => None,
-    };
-    button::Style {
-        background,
-        border: iced::Border {
-            width: 0.0,
-            ..Default::default()
-        },
-        ..Default::default()
-    }
 }
 
 // ── Button style helpers ────────────────────────────────────────────

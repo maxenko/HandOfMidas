@@ -177,15 +177,16 @@ impl WatchlistPanel {
         self.tickers.retain(|t| t.symbol != upper);
     }
 
-    /// Advance the favourite level of a ticker (case-insensitive).
+    /// Adjust the favourite level of a ticker by `delta`, clamped to `0..=5`.
     ///
-    /// Levels cycle `0 → 1 → 2 → 3 → 4 → 5 → 0` so a single click type
-    /// covers both "promote" and "clear". Levels above 5 are clamped
-    /// back to 0 defensively.
-    pub fn cycle_favorite(&mut self, symbol: &str) {
+    /// Driven by the scroll wheel over the favourite column: `+1` per
+    /// line up, `-1` per line down. A no-op if the symbol is unknown
+    /// or the clamped value is unchanged.
+    pub fn adjust_favorite(&mut self, symbol: &str, delta: i8) {
         let upper = symbol.to_uppercase();
         if let Some(t) = self.tickers.iter_mut().find(|t| t.symbol == upper) {
-            t.favorite = if t.favorite >= 5 { 0 } else { t.favorite + 1 };
+            let next = (t.favorite as i16 + delta as i16).clamp(0, 5) as u8;
+            t.favorite = next;
         }
     }
 

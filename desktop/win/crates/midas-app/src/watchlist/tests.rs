@@ -50,16 +50,23 @@ fn remove_ticker_case_insensitive() {
 }
 
 #[test]
-fn cycle_favorite_advances_through_levels() {
+fn adjust_favorite_clamps_to_range() {
     let mut wl = WatchlistPanel::new(WatchlistId::new(1), "Test".into());
     wl.add_ticker("AAPL");
     assert_eq!(wl.tickers[0].favorite, 0);
     for expected in 1..=5 {
-        wl.cycle_favorite("aapl");
+        wl.adjust_favorite("aapl", 1);
         assert_eq!(wl.tickers[0].favorite, expected);
     }
-    // One more click wraps back to 0.
-    wl.cycle_favorite("AAPL");
+    // Already at max — further increments clamp.
+    wl.adjust_favorite("AAPL", 1);
+    assert_eq!(wl.tickers[0].favorite, 5);
+    for expected in (0..=4).rev() {
+        wl.adjust_favorite("AAPL", -1);
+        assert_eq!(wl.tickers[0].favorite, expected);
+    }
+    // Already at min — further decrements clamp.
+    wl.adjust_favorite("AAPL", -1);
     assert_eq!(wl.tickers[0].favorite, 0);
 }
 
@@ -78,9 +85,7 @@ fn config_roundtrip() {
     let mut wl = WatchlistPanel::new(WatchlistId::new(1), "Main".into());
     wl.add_ticker("AAPL");
     wl.add_ticker("MSFT");
-    wl.cycle_favorite("AAPL");
-    wl.cycle_favorite("AAPL");
-    wl.cycle_favorite("AAPL");
+    wl.adjust_favorite("AAPL", 3);
 
     let config = wl.to_config();
     let restored = WatchlistPanel::from_config(WatchlistId::new(2), &config);
