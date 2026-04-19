@@ -96,7 +96,7 @@ impl HistoryTab {
             .map(DisplayRow::from_row)
             .collect();
         // Most-recent-first. Ties broken arbitrarily (BTreeMap order).
-        rows.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        rows.sort_by_key(|r| std::cmp::Reverse(r.timestamp));
         self.cached_rows = rows;
         self.last_seen_generation = blotter.generation();
     }
