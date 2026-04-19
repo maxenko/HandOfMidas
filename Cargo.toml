@@ -5,4 +5,7 @@ members = [
     "crates/midas-broker",
     "crates/midas-ib-sim",
 ]
-exclude = ["desktop/win/duckdb-spike"]
+exclude = [
+    "desktop/win/duckdb-spike",
+    "crates/midas-ib-sim/fuzz",
+]
