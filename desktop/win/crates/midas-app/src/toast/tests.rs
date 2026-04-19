@@ -79,12 +79,8 @@ fn action_clicked_with_action_emits_fire_parent_msg_and_clears() {
 
     let effects = c.update(ToastMsg::ActionClicked);
     assert_eq!(effects.len(), 1);
-    match effects.into_iter().next().unwrap() {
-        Effect::FireParentMsg(boxed) => {
-            assert!(matches!(*boxed, Message::Tick));
-        }
-        _ => panic!("expected FireParentMsg"),
-    }
+    let Effect::FireParentMsg(boxed) = effects.into_iter().next().unwrap();
+    assert!(matches!(*boxed, Message::Tick));
     assert!(
         c.state().is_none(),
         "state must clear regardless of action presence"
@@ -148,15 +144,17 @@ fn tick_when_empty_is_noop() {
 }
 
 #[test]
-fn clear_force_drops_state_without_firing_action() {
-    // Escape-key path: hide the toast immediately, never fire its
-    // action (the user is dismissing, not engaging).
+fn dismiss_after_show_with_action_does_not_fire_action() {
+    // Escape-key path: route Dismiss through update() so the
+    // "all mutation via update" invariant holds. Action is dropped,
+    // not fired.
     let mut c = ToastController::new();
     c.update(ToastMsg::Show {
         message: "x".into(),
         action: Some(make_action()),
     });
-    c.clear();
+    let effects = c.update(ToastMsg::Dismiss);
+    assert!(effects.is_empty(), "Dismiss must not fire the action");
     assert!(c.state().is_none());
 }
 

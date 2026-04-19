@@ -73,7 +73,6 @@ pub struct ToastAction {
 /// outer `Message` type except via the opaque [`Effect::FireParentMsg`]
 /// payload.
 #[derive(Clone, Debug)]
-#[allow(dead_code)] // `Dismiss` is exposed for future click-outside affordance.
 pub enum ToastMsg {
     /// Replace the current toast (if any) with a new one.
     Show {
@@ -81,6 +80,9 @@ pub enum ToastMsg {
         action: Option<ToastAction>,
     },
     /// Manually dismiss the current toast. No-op if none is visible.
+    /// Used by the global Escape-key handler so every dismissal goes
+    /// through `update()` (preserving the "all mutation via update"
+    /// invariant the module docstring promises).
     Dismiss,
     /// The action button on the current toast was clicked. Fires the
     /// stored `on_click` message via [`Effect::FireParentMsg`] and
@@ -90,16 +92,12 @@ pub enum ToastMsg {
 
 /// Effects emitted from [`ToastController::update`] / [`ToastController::tick`].
 ///
-/// Two variants only — kept tight on purpose. New variants need a
-/// real cross-controller use case AND a paragraph of justification at
-/// the call site. The compile-time assertion at the bottom of this
-/// file pins the count.
+/// Single variant on purpose — every additional variant is a new way
+/// for the controller to reach back into parent state, which erodes
+/// the split. Add only with a paragraph of justification at the call
+/// site. The compile-time guard below pins the count.
 #[derive(Debug)]
-#[allow(dead_code)] // `Spawn` reserved for future async controllers; kept for symmetry.
 pub enum Effect {
-    /// Async work spawned by the controller. Parent maps the resulting
-    /// task to its top-level message via `.map(Message::Toast)`.
-    Spawn(iced::Task<ToastMsg>),
     /// Fire an arbitrary parent message. The only path Toast has to
     /// influence sibling controllers — used by [`ToastMsg::ActionClicked`]
     /// to re-dispatch the embedded action.
@@ -109,13 +107,9 @@ pub enum Effect {
 /// Compile-time guard against [`Effect`] drift. Bump deliberately when
 /// a new effect variant is genuinely warranted.
 const _: () = {
-    // Effect doesn't `impl Copy`; we count via a manual exhaustive match
-    // on a sentinel rather than `mem::variant_count` (still nightly-only
-    // on stable rustc 1.94 unless `#[feature(variant_count)]` is on).
     fn _count(e: &Effect) -> u8 {
         match e {
-            Effect::Spawn(_) => 1,
-            Effect::FireParentMsg(_) => 2,
+            Effect::FireParentMsg(_) => 1,
         }
     }
 };
@@ -133,18 +127,12 @@ impl ToastController {
         Self { state: None }
     }
 
-    /// Read-only access for callers that need to inspect toast state
-    /// (e.g. global Escape-key handler that clears every popover).
-    #[allow(dead_code)] // exposed for callers outside the module + tests.
+    /// Read-only access for tests + future callers outside the module.
+    /// Production paths route everything through [`Self::update`] /
+    /// [`Self::tick`] — keep this read-only.
+    #[cfg(test)]
     pub fn state(&self) -> Option<&ToastState> {
         self.state.as_ref()
-    }
-
-    /// Force-clear the toast bypassing the message loop. Used by the
-    /// Escape-key global handler. Doesn't fire the action; just hides
-    /// the UI.
-    pub fn clear(&mut self) {
-        self.state = None;
     }
 
     /// Apply a `ToastMsg` and return any effects the parent must

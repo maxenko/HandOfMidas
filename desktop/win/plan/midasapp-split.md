@@ -2,6 +2,51 @@
 
 *Architecture audit P1 — first slice, written after 5 research + 3 critique agents.*
 
+## Status
+
+| Slice | Status |
+|---|---|
+| 0 — Toast controller | **shipped** (commits `f4015da`, `9614b4b`, follow-up review fixes) |
+| Slice 1 — see "Post-slice-0 review verdict" below | open |
+
+Slice 0 ratio came in at **3.98×** (438 LOC new / 110 LOC removed) — just under the 4× kill threshold the plan set. Pattern works for trivial controllers (single-instance state, no shared deps); it is **not yet proven** for cross-cutting controllers like Watchlist.
+
+## Post-slice-0 review verdict
+
+Three review agents (code-scrutiny, bug-hunt, pattern-scaling) ran against the slice. Highlights:
+
+- **No correctness bugs.** `consume_toast_effects`'s recursive `self.update(*boxed)` is bounded — `state.take()` defuses any Toast-cycle on the second hop.
+- **`Effect::Spawn` deleted as YAGNI.** Was added for symmetry with no caller; removed in the follow-up. Effect enum down to 1 variant, the `FireParentMsg` back-edge.
+- **`clear()` removed.** Escape now routes through `ToastMsg::Dismiss` so the "all mutation via `update()`" invariant holds without exception.
+- **`state()` test-only** (`#[cfg(test)]`).
+- **Pre-existing UX bug surfaced** (not a regression): `ToastMsg::Show` unconditionally replaces an existing toast, dropping any pending action button. Same as old code; tracked separately, not blocking.
+- **Integration test deferred.** A round-trip test through `dispatch_toast` + `FireParentMsg` requires constructing `MidasApp`, which is itself the object the audit is trying to split. Adding a test harness is its own slice. Documented as a known coverage gap.
+
+## Slice 1 recommendation: NOT another controller
+
+The pattern-scaling agent's verdict was unambiguous: extracting Watchlist next will hit problems Toast didn't and likely fire the kill criterion. Concrete reasons:
+
+- Watchlist's drag emits ~3 cross-domain mutations per drop (`MovePane`, `RebindChart`, `RouteLink`). The controller becomes a thin pass-through; the parent's `consume_*` interpreter grows by exactly the LOC the struct shrinks. Net architectural lever ≈ 0.
+- `FireParentMsg(Box<Message>)` becomes the routing strategy, not the back-edge it is for Toast — every cross-domain mutation goes through the parent re-dispatch. That's god-state with extra Box allocation.
+- Plan's "introduce `SharedServices` on second caller" is exactly wrong: slice 1 IS the second caller and the abstraction would be designed under deadline pressure.
+
+**Better next move**: take the audit's *other* P2 finding — collapse `Message::Chart*` (30 variants, 132-LOC `action_to_message`) into a single `Message::Chart(ChartId, ChartAction)` wrapper. This:
+
+- Deletes ~30 enum variants and the entire fan-out function
+- Introduces zero new abstraction; no `SharedServices` debate
+- Directly attacks the "Message enum is the real god, not the struct" diagnosis from the audit research
+- Decisive, measurable shrink with no pattern question to validate
+
+**If a second controller still wanted as a sanity check** before tackling Watchlist, do `WindowGeometry` (4 OS-window fields, no view, no shared deps) — explicitly mechanical, fast, validates the trait-ification of dispatch+interpret on a slice that can't fail.
+
+**Before any real cross-cutting controller (Watchlist, Account, Chart):**
+1. Introduce `SharedServices` struct (start with `link_routing`, `drag`, `market_cache`)
+2. Introduce `Controller` trait + a single generic interpreter so `consume_*` boilerplate doesn't multiply by 12
+
+These two abstractions need to land *before* slice 1's first cross-cutting controller, not during it.
+
+
+
 ## Overview
 
 Split the 76-field `MidasApp` god struct into per-domain controllers, each owning a slice of state and exposing `update(msg) -> Vec<Effect>` + `view(&self) -> Element<SubMsg>`. The pattern matches our existing `TickerState::apply -> Vec<TickerEffect>` (already shipped, hundreds of tests) — **deliberately the SAME shape**, not a new one, so the codebase has one mental model rather than two.

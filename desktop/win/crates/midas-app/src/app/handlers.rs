@@ -3710,10 +3710,12 @@ impl MidasApp {
         let mut tasks: Vec<Task<Message>> = Vec::new();
         for eff in effects {
             match eff {
-                crate::toast::Effect::Spawn(task) => tasks.push(task.map(Message::Toast)),
                 crate::toast::Effect::FireParentMsg(boxed) => {
                     // Re-dispatch the embedded message synchronously so
-                    // the toast-action UX stays single-tick.
+                    // the toast-action UX stays single-tick. Bounded:
+                    // `ToastController::update(ActionClicked)` takes
+                    // state first, so any cycle through Toast hits an
+                    // empty-state no-op on the second hop.
                     tasks.push(self.update(*boxed));
                 }
             }

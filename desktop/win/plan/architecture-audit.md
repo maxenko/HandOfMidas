@@ -7,10 +7,10 @@
 
 | # | Finding | Status |
 |---|---------|--------|
-| P1 | Split `MidasApp` god object | open |
+| P1 | Split `MidasApp` god object | **slice 0 shipped** (Toast — commits `f4015da`, `9614b4b`); pattern-scaling review re-routed slice 1 — see [`midasapp-split.md`](midasapp-split.md) |
 | P1 | Delete `midas_core::broker` mirror | **shipped** (commit `7254f79`, 2026-04-18) |
 | P1 | Introduce view-models | open |
-| P2 | Collapse `Message::Chart*` into `Message::Chart(ChartId, ChartAction)` | open |
+| P2 | Collapse `Message::Chart*` into `Message::Chart(ChartId, ChartAction)` | **promoted to next slice** by post-`MidasApp`-split-0 pattern-scaling review |
 | P2 | Versioned config migrations | open |
 | P2 | `SymbolKey` to `midas-core` + normalize | open |
 | P3 | Rename one `midas-core` | open |

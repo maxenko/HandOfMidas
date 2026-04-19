@@ -359,12 +359,10 @@ pub struct MidasApp {
     /// Links between chart bracket annotations and broker orders,
     /// keyed by the parent (entry) order UUID for O(1) lookup.
     pub order_annotation_links: HashMap<uuid::Uuid, crate::order_panel::OrderAnnotationLink>,
-    /// Floating toast notification state. `None` when no toast is
-    /// currently visible. Replaces the previous
     /// Toast notification controller. State + auto-dismiss + view all
     /// live behind [`crate::toast::ToastController`]; `MidasApp` only
     /// routes [`Message::Toast`] into it and interprets the resulting
-    /// effects.
+    /// effects via `dispatch_toast` / `consume_toast_effects`.
     pub toasts: crate::toast::ToastController,
     /// Bracket context menu state: (chart_id, annotation_id, leg_role, screen_x, screen_y).
     pub bracket_context_menu: Option<(
@@ -2852,7 +2850,11 @@ impl MidasApp {
                 self.level_placing = false;
                 self.placing_preview = None;
                 self.bracket_context_menu = None;
-                self.toasts.clear();
+                // Route Dismiss through the controller so all toast
+                // mutations land in one named place (no `clear()` /
+                // `self.state = None` back-doors). Effects always
+                // empty for Dismiss; safe to discard.
+                let _ = self.toasts.update(crate::toast::ToastMsg::Dismiss);
                 self.pending_drag = None;
                 if self.dragging_ticker.is_some() {
                     self.dragging_ticker = None;
