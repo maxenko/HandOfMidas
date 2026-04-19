@@ -3,5 +3,6 @@ resolver = "2"
 members = [
     "crates/midas-broker-core",
     "crates/midas-broker",
+    "crates/midas-ib-sim",
 ]
 exclude = ["desktop/win/duckdb-spike"]
