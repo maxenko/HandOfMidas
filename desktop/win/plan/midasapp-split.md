@@ -13,7 +13,8 @@
 | 1B batch 2 — Delete level/placing/setting variants (11) | **shipped** (commit `bf5a807`); `Crosshair`, `CreateLevel`, `DragLevel`, `SelectLevel`, `DeselectLevel`, `DeleteSelectedLevel`, `CancelPlacing`, `PlacingCursorMoved`, `SetTimelineBorderRatio`, `SetVolumeScale`, `RightClickLevel` |
 | 1B batch 3 — Delete bracket variants (9) | **shipped** (commit `9204054`). Bodies extracted into `handle_chart_bracket_*` methods on `MidasApp`; `dispatch_chart_action` calls them directly. Dispatcher routing for brackets shrinks from 11 entries to 2 (only `BracketContextCancel`/`Dismiss` from the popup widget remain). |
 | **Slice 1 (audit P2 #4) — COMPLETE** | All 23 chart-action `Message::Chart*` variants deleted. Top-level `Message` enum: 134 → ~110 variants. |
-| 2+ — see "Post-slice-0 review verdict" below | open |
+| **View-models migration (audit P1) — COMPLETE** | 12 slices, ~30 unit tests. Account / Watchlist / Chart pane / Order panel / Status bar / Toolbar all read from `*Vm` projections built once via `MidasApp::*_vm()` builders. Commits `d58c75d`, `4cbad6e`, `deb9e2b`, `cac474b`, `78f114b`, `012a800`. **This is the new floor for the controller split**: every cross-cutting controller can now consume a VM rather than reach into MidasApp internals, which removes one of the original "Watchlist is too coupled" objections. |
+| 3 — Watchlist controller | **gated** (see "Next steps" below). Pattern-scaling review still applies: needs `SharedServices` + `Controller` trait first. View-models work has narrowed the scope but not removed the gate. |
 
 Slice 0 ratio came in at **3.98×** (438 LOC new / 110 LOC removed) — just under the 4× kill threshold the plan set. Pattern works for trivial controllers (single-instance state, no shared deps); it is **not yet proven** for cross-cutting controllers like Watchlist.
 
@@ -266,3 +267,59 @@ Slice 0 is independent. Outcomes feed into the slice-1 decision:
 The design critique correctly identified that this plan is more "trying the pattern" than "executing the pattern". That's deliberate — the cost of one slice we might revert is much lower than the cost of committing to a 12-slice refactor before learning whether the pattern fits. The kill criterion (Decision 5) is the explicit acknowledgment.
 
 If slice 0 succeeds, the audit's TL;DR ranking (Watchlist → Account → …) holds. If it fails, the TL;DR has to be re-visited with a different decomposition strategy.
+
+## Next steps
+
+Three slices ahead, in order. Each gates the next.
+
+### A. `SharedServices` struct (gates everything else)
+
+**Goal**: a single `&mut SharedServices` borrow that controllers can take to read/write the app-wide stores they need, without re-deriving access policies per controller.
+
+**Members** (start narrow; expand as a second controller demands a third member):
+- `link_routing: &mut LinkBus` — symbol/timeframe link propagation
+- `market_cache: &mut MarketDataCache` — price snapshots
+- `annotation_store: &mut AnnotationStore` — order brackets + levels
+
+**Construction**: `MidasApp::shared_services(&mut self) -> SharedServices<'_>` packs the borrows into a struct. The borrow checker enforces that no two controllers can write the same store simultaneously — the design intent.
+
+**What it doesn't include**: `tickers`, `charts`, `workspace`. Those are owned by the controllers that *will* exist (TickerStore controller, Chart-list controller, Workspace controller); having the parent loan them out via `SharedServices` is exactly the god-pattern the split is supposed to break.
+
+**Done when**: a stub controller (any new feature, even trivial) constructs `SharedServices`, calls one method on `link_routing` through it, and the change compiles. No production controller migrates yet.
+
+### B. `Controller` trait + generic interpreter
+
+**Goal**: kill the `consume_*_effects` boilerplate. Today every controller needs its own `dispatch_<name>` method on `MidasApp` that interprets `Vec<Effect>`. Twelve controllers = twelve dispatchers, each ~30 LOC of `match effect { … }`.
+
+**Shape**:
+
+```rust
+pub trait Controller {
+    type Msg;
+    type Effect;
+    fn update(&mut self, msg: Self::Msg, services: &mut SharedServices) -> Vec<Self::Effect>;
+}
+
+// On MidasApp:
+fn dispatch<C: Controller, F>(&mut self, controller: C, msg: C::Msg, interpret: F)
+where F: Fn(&mut Self, C::Effect) -> Task<Message>;
+```
+
+The trait gives controllers a uniform contract; the generic dispatcher handles the routing scaffold. Each effect type still needs its parent-side interpreter (the `interpret` closure), but the *dispatch loop* is written once.
+
+**Done when**: Toast and WindowGeometry both implement `Controller`, share the generic dispatcher, and the per-controller `dispatch_toast`/`dispatch_window` methods on `MidasApp` collapse into trait calls. Existing tests stay green.
+
+### C. Watchlist controller (the original gated slice)
+
+With A + B in place, Watchlist becomes:
+1. `WatchlistController` owns `watchlists: BTreeMap<WatchlistId, WatchlistPanel>` + `selected_symbol`-bridging logic.
+2. `update(WatchlistMsg, &mut SharedServices) -> Vec<WatchlistEffect>` handles all 14 of the `self.*` reads the current view does, plus drag/drop's three cross-domain mutations (which now route through `services.link_routing` etc., not `Box<Message>`).
+3. View consumes the existing `WatchlistBodyVm` (already shipped) — no refactor of the view function.
+4. Parent's `consume_watchlist_effects` interprets `MovePane` / `RebindChart` / `RouteLink` against its own state.
+
+**Kill criterion (carried over from Slice 0)**: ratio of (LOC added in controller + parent interpreter) ÷ (LOC removed from `MidasApp`) must be < 4×. The view-models work has already shifted ~150 LOC of inline projection out of the view; if the controller migration adds another 600 LOC of machinery to remove 150, the abstraction is paying its cost in the wrong direction and the slice should be reverted.
+
+### Out of scope for this plan
+
+- Account / Order / Chart-list / Workspace controllers — those are post-Watchlist slices, sized after we see what the actual cost of `SharedServices` + `Controller` looks like in production.
+- Splitting the `Message` enum into per-controller `Msg` types globally. Only Watchlist's slice needs `WatchlistMsg`; the rest stay flat until proven otherwise.
