@@ -7,6 +7,7 @@
 //! §"Extension-enum pattern").
 
 pub mod clock;
+pub mod orchestrator;
 pub mod scheduler;
 pub mod state;
 pub mod types;

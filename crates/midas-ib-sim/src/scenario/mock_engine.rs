@@ -352,8 +352,11 @@ fn apply_to_state(s: &mut MockState, cmd: &EngineCmd) {
 }
 
 /// Project an `EngineCmd` into a record-friendly `MockCmd`. Returns `None`
-/// for commands that are internal-only (e.g. `Tick`).
-fn project(cmd: &EngineCmd) -> Option<MockCmd> {
+/// for commands that are internal-only (e.g. `Tick`). Crate-public so the
+/// [`super::engine_adapter::RealScenarioEngine`] can reuse the same
+/// projection and keep `.expected.jsonl` recordings byte-identical across
+/// engine back-ends.
+pub(crate) fn project(cmd: &EngineCmd) -> Option<MockCmd> {
     use EngineCmd::*;
     Some(match cmd {
         SubscribeMarketData { contract, mode, .. } => MockCmd::SubscribeMarketData {

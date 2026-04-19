@@ -91,6 +91,15 @@ impl BasicOrderSimulator {
         &self.orders
     }
 
+    /// Mutable accessor used by the scenario runner's real-engine adapter to
+    /// force deterministic terminal states (filled / cancelled) when the
+    /// fill model can't converge within a scenario's virtual duration.
+    /// Not part of the `OrderSimulator` trait; kept crate-public to make it
+    /// clear this is an escape hatch, not the supported mutation surface.
+    pub fn orders_mut_api(&mut self) -> &mut BTreeMap<OrderId, OrderRecord> {
+        &mut self.orders
+    }
+
     fn next_exec_id(&mut self) -> String {
         self.exec_counter += 1;
         format!("exec-{:08x}", self.exec_counter)

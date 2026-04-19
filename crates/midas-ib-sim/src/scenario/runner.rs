@@ -31,6 +31,7 @@ use tracing::{debug, warn};
 
 use crate::engine::clock::{Clock, VirtualInstant};
 
+use super::engine_adapter::ScenarioEngine;
 use super::expr::{self, Expr};
 use super::injector;
 use super::mock_engine::{MockCmd, MockEngine, MOCK_FILL_DELAY};
@@ -102,12 +103,16 @@ struct PendingAfter {
 // ScenarioRunner
 // ---------------------------------------------------------------------------
 
-/// The scenario runner. Drives a loaded [`Scenario`] against a [`MockEngine`]
-/// under a chosen [`Clock`].
-pub struct ScenarioRunner {
+/// The scenario runner. Drives a loaded [`Scenario`] against any
+/// [`ScenarioEngine`] (either [`MockEngine`] or the Wave-3
+/// [`super::engine_adapter::RealScenarioEngine`]) under a chosen [`Clock`].
+///
+/// Generic over the engine type so the same runner binary serves both
+/// back-ends without dynamic dispatch in the hot `when:`-evaluation path.
+pub struct ScenarioRunner<E: ScenarioEngine = MockEngine> {
     scenario: Scenario,
     clock: Arc<dyn Clock>,
-    engine: MockEngine,
+    engine: E,
     named_anchors: BTreeMap<String, VirtualInstant>,
     fixed: Vec<TimedEvent>,
     pending_after: Vec<PendingAfter>,
@@ -117,11 +122,11 @@ pub struct ScenarioRunner {
     assert_count: u32,
 }
 
-impl ScenarioRunner {
+impl<E: ScenarioEngine> ScenarioRunner<E> {
     /// Build a runner from a loaded scenario. Seeds prices + session state
     /// but does not start running — call [`Self::run`].
-    pub fn new(scenario: Scenario, engine: MockEngine, clock: Arc<dyn Clock>) -> Self {
-        // Seed the mock engine with declared symbols.
+    pub fn new(scenario: Scenario, engine: E, clock: Arc<dyn Clock>) -> Self {
+        // Seed the engine with declared symbols.
         for sym in &scenario.symbols {
             engine.seed_price(&sym.symbol, sym.initial_price);
         }

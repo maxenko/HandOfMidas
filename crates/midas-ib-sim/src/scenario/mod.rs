@@ -17,6 +17,7 @@
 //! - [`recording`] — persist and compare `.expected.jsonl` command logs.
 //! - [`injector`] — verb → `EngineCmd` translation.
 
+pub mod engine_adapter;
 pub mod expr;
 pub mod injector;
 pub mod json_schema;
