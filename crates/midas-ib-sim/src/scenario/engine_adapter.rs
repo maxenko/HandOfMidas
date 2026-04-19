@@ -217,6 +217,12 @@ impl RealScenarioEngine {
     }
 }
 
+// `RealScenarioEngine`'s `ScenarioQuery` impl mostly delegates to the direct
+// `impl ScenarioQuery for OrchestratedEngine` (see
+// `crate::engine::orchestrator`). `orders()` is the one method we can't
+// delegate: scenarios attach user-supplied `order_ref`s that the direct
+// impl (which uses a canonical `account/order_id` naming) doesn't know
+// about. We keep the custom `orders()` here and delegate the rest.
 impl ScenarioQuery for RealScenarioEngine {
     fn orders(&self) -> Vec<OrderSnapshot> {
         self.with_state(|s| {
@@ -266,51 +272,15 @@ impl ScenarioQuery for RealScenarioEngine {
     }
 
     fn position_for(&self, symbol: &str) -> Option<PositionSnapshot> {
-        self.with_state(|s| {
-            s.engine
-                .orders
-                .account()
-                .positions
-                .iter()
-                .find(|(k, _)| k.symbol == symbol)
-                .map(|(k, p)| PositionSnapshot {
-                    symbol: k.symbol.clone(),
-                    quantity: p.shares,
-                    avg_cost: p.avg_cost,
-                    realized_pnl: p.realized_pnl,
-                    unrealized_pnl: 0.0,
-                })
-        })
+        self.with_state(|s| ScenarioQuery::position_for(&s.engine, symbol))
     }
 
     fn positions(&self) -> Vec<PositionSnapshot> {
-        self.with_state(|s| {
-            s.engine
-                .orders
-                .account()
-                .positions
-                .iter()
-                .map(|(k, p)| PositionSnapshot {
-                    symbol: k.symbol.clone(),
-                    quantity: p.shares,
-                    avg_cost: p.avg_cost,
-                    realized_pnl: p.realized_pnl,
-                    unrealized_pnl: 0.0,
-                })
-                .collect()
-        })
+        self.with_state(|s| ScenarioQuery::positions(&s.engine))
     }
 
     fn session_metrics(&self, id: u64) -> Option<SessionMetrics> {
-        self.with_state(|s| {
-            let exists = s.engine.sessions.contains_key(&SessionId(id));
-            Some(SessionMetrics {
-                msg_count: 0,
-                msg_count_last_5s: 0,
-                tick_count: 0,
-                connected: exists,
-            })
-        })
+        self.with_state(|s| ScenarioQuery::session_metrics(&s.engine, id))
     }
 
     fn session_duration(&self) -> Duration {

@@ -32,7 +32,17 @@ pub enum MarketDataMode {
 /// and `HybridEngine` (Stage 03). The engine actor calls `step()` each time
 /// virtual time advances; each emission becomes an outbound wire message and
 /// (for L1 ticks) a `MarketSnapshot` fed to the order simulator.
-pub trait MarketDataEngine: Send {
+///
+/// ## Runtime perturbations (Wave 4)
+///
+/// Scenarios can `inject_*` price perturbations mid-session via the orchestrator's
+/// `EngineCmd::InjectPriceJump` / `InjectGap` / `InjectHalt` / `InjectBurst`.
+/// The orchestrator routes those to the corresponding method below. Engines
+/// that can't perturb (e.g. `ReplayEngine` — perturbing a recorded session
+/// would invalidate the replay's determinism) return
+/// [`MarketDataError::PerturbationNotSupported`]. `SyntheticEngine` and
+/// `HybridEngine` handle them.
+pub trait MarketDataEngine: Send + Sync {
     /// Open a new subscription. May fail if the contract is unknown.
     fn subscribe(&mut self, key: SubKey, mode: SubMode) -> Result<(), MarketDataError>;
 
@@ -44,6 +54,49 @@ pub trait MarketDataEngine: Send {
 
     /// Return the current best-effort snapshot for `symbol`, if any.
     fn snapshot(&self, symbol: &SymbolKey) -> Option<Snapshot>;
+
+    /// Inject a runtime price jump. Default: unsupported.
+    fn inject_jump(
+        &mut self,
+        _symbol: &SymbolKey,
+        _magnitude_pct: f64,
+        _now: VirtualInstant,
+    ) -> Result<(), MarketDataError> {
+        Err(MarketDataError::PerturbationNotSupported)
+    }
+
+    /// Inject a runtime price gap. Default: unsupported.
+    fn inject_gap(
+        &mut self,
+        _symbol: &SymbolKey,
+        _from: f64,
+        _to: f64,
+        _now: VirtualInstant,
+    ) -> Result<(), MarketDataError> {
+        Err(MarketDataError::PerturbationNotSupported)
+    }
+
+    /// Inject a runtime halt. Default: unsupported.
+    fn inject_halt(
+        &mut self,
+        _symbol: &SymbolKey,
+        _duration: Duration,
+        _now: VirtualInstant,
+    ) -> Result<(), MarketDataError> {
+        Err(MarketDataError::PerturbationNotSupported)
+    }
+
+    /// Inject a runtime burst (emission multiplier for a window). Default:
+    /// unsupported.
+    fn inject_burst(
+        &mut self,
+        _symbols: &[SymbolKey],
+        _multiplier: f64,
+        _duration: Duration,
+        _now: VirtualInstant,
+    ) -> Result<(), MarketDataError> {
+        Err(MarketDataError::PerturbationNotSupported)
+    }
 }
 
 /// Read-only snapshot returned from `MarketDataEngine::snapshot`.
@@ -67,6 +120,9 @@ pub enum MarketDataError {
     CapExceeded,
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    /// The engine cannot perturb its stream (e.g. `ReplayEngine`).
+    #[error("perturbation not supported on this engine")]
+    PerturbationNotSupported,
 }
 
 /// Scripted perturbations injected into the hybrid engine. Post-processes the

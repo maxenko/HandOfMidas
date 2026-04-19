@@ -173,6 +173,72 @@ impl MarketDataEngine for HybridEngine {
         }
         Some(s)
     }
+
+    fn inject_jump(
+        &mut self,
+        symbol: &SymbolKey,
+        magnitude_pct: f64,
+        now: VirtualInstant,
+    ) -> Result<(), MarketDataError> {
+        self.pending.push(Perturbation::InjectJump {
+            at: now,
+            symbol: symbol.clone(),
+            magnitude_pct,
+        });
+        self.pending.sort_by_key(|p| p.when().as_duration());
+        Ok(())
+    }
+
+    fn inject_gap(
+        &mut self,
+        symbol: &SymbolKey,
+        from: f64,
+        to: f64,
+        now: VirtualInstant,
+    ) -> Result<(), MarketDataError> {
+        self.pending.push(Perturbation::InjectGap {
+            at: now,
+            symbol: symbol.clone(),
+            from,
+            to,
+        });
+        self.pending.sort_by_key(|p| p.when().as_duration());
+        Ok(())
+    }
+
+    fn inject_halt(
+        &mut self,
+        symbol: &SymbolKey,
+        duration: std::time::Duration,
+        now: VirtualInstant,
+    ) -> Result<(), MarketDataError> {
+        self.pending.push(Perturbation::InjectHalt {
+            at: now,
+            symbol: symbol.clone(),
+            duration,
+        });
+        self.pending.sort_by_key(|p| p.when().as_duration());
+        Ok(())
+    }
+
+    fn inject_burst(
+        &mut self,
+        _symbols: &[SymbolKey],
+        multiplier: f64,
+        duration: std::time::Duration,
+        now: VirtualInstant,
+    ) -> Result<(), MarketDataError> {
+        // BurstMode is global (per-engine), not per-symbol — `symbols` is
+        // accepted for symmetry with the scenario YAML but ignored here.
+        let to = now.saturating_add(duration);
+        self.pending.push(Perturbation::BurstMode {
+            from: now,
+            to,
+            multiplier,
+        });
+        self.pending.sort_by_key(|p| p.when().as_duration());
+        Ok(())
+    }
 }
 
 fn emission_symbol(em: &MarketEmission) -> Option<&SymbolKey> {
