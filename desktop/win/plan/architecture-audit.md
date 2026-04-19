@@ -238,9 +238,11 @@ The original finding is preserved below for historical motivation.
 ## TL;DR ranked
 
 1. ~~Delete `midas_core::broker` mirror (P1, ~30 min, prevents silent divergence).~~ **shipped — commit `7254f79`**
-2. Split `MidasApp` god object (P1, high payoff, incremental).
-3. Introduce view-models (P1, gates the MidasApp split).
-4. Collapse `Message::Chart*` into `Message::Chart(ChartId, ChartAction)` (P2, easy reduction).
-5. Versioned config migrations (P2, before next schema change).
-6. `SymbolKey` to `midas-core` + normalize (P2).
-7. Rename one `midas-core` (P3).
+2. Split `MidasApp` god object (P1, high payoff, incremental). **Slices 0 + 2 shipped (Toast, WindowGeometry); Watchlist controller still gated on SharedServices + Controller trait.**
+3. ~~Introduce view-models (P1, gates the MidasApp split).~~ **shipped — slices 3A–3E, 4–11 (commits `d58c75d`, `4cbad6e`, `deb9e2b`, `cac474b`, `78f114b`, `012a800`)**
+4. ~~Collapse `Message::Chart*` into `Message::Chart(ChartId, ChartAction)` (P2, easy reduction).~~ **shipped — commits `468fd30`, `e8f06c1`, `bf5a807`, `9204054`**
+5. ~~Versioned config migrations (P2, before next schema change).~~ **shipped — commit `51080ce`**
+6. ~~`SymbolKey` to `midas-core` + normalize (P2).~~ **shipped — commit `316503a`**
+7. ~~Rename one `midas-core` (P3).~~ **shipped — commit `c7b3daf`**
+
+**Audit status: closed except for MidasApp split (gated)**.
