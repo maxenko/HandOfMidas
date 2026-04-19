@@ -7,7 +7,8 @@
 //!   Stage 02 plug in the actual codec without restructuring anything).
 //! - Graceful shutdown on ctrl-c: stop accepting, let active sessions drain
 //!   for up to 5 seconds, then drop the listener.
-//! - SO_KEEPALIVE + read/write timeouts, per §"TCP transport robustness".
+//! - SO_KEEPALIVE + per-frame read deadline + buffered-byte cap, per
+//!   §"TCP transport robustness".
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
@@ -17,8 +18,8 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc, Notify};
-use tokio::task::JoinSet;
-use tokio::time::timeout;
+use tokio::task::{JoinHandle, JoinSet};
+use tokio::time::{timeout, Instant};
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::control::ControlApi;
@@ -27,13 +28,27 @@ use crate::engine::types::{EngineCmd, EngineEvent, EngineSnapshot, SessionId};
 use crate::market_data::MarketDataMode;
 use crate::security::{resolve_bind_address, BindError, ControlToken};
 
-/// Read timeout applied to each frame read on the TWS socket. Matches
-/// `plan/ib-sim/01-architecture.md` §"TCP transport robustness".
+/// Per-frame read deadline. The session drops if no complete frame is parsed
+/// off the wire within this window, regardless of how many individual bytes
+/// the peer has dripped. Matches `plan/ib-sim/01-architecture.md`
+/// §"TCP transport robustness" — resets a slow-trickle DoS.
 pub const READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// Write timeout applied to each frame write.
 pub const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Grace period for session drain on shutdown.
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+/// Hard cap on how many unparsed bytes a session may accumulate before
+/// we drop it. A misbehaved peer cannot burn unbounded memory + FDs.
+pub const MAX_BUFFERED_BYTES: usize = 16 * 1024 * 1024;
+/// SO_KEEPALIVE: idle time before the first probe.
+pub const KEEPALIVE_IDLE: Duration = Duration::from_secs(60);
+/// Interval between successive keepalive probes.
+pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+/// Probe count before the kernel declares the peer dead.
+pub const KEEPALIVE_RETRIES: u32 = 3;
+/// Maximum time a child task (engine sink, control plane) is given to
+/// drain after `shutdown.notify_waiters()` before we stop waiting on it.
+pub const CHILD_TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 // ---------------------------------------------------------------------------
 // SimConfig — Stage 01 + 06 contributors.
@@ -90,13 +105,33 @@ pub struct Sim {
     pub control_addr: SocketAddr,
     pub token: Arc<ControlToken>,
     shutdown: Arc<Notify>,
-    task: tokio::task::JoinHandle<()>,
+    task: JoinHandle<()>,
+    control_task: JoinHandle<()>,
+    engine_sink_task: JoinHandle<()>,
 }
 
 impl Sim {
+    /// Gracefully shut down the sim: notify every spawned task, wait for
+    /// the accept loop to drain sessions, then wait (bounded) for the
+    /// control-plane and engine-sink tasks too. This avoids leaking
+    /// tasks + file descriptors when the caller drops the `Sim`.
     pub async fn shutdown(self) {
         self.shutdown.notify_waiters();
         let _ = self.task.await;
+        // Give auxiliary tasks a bounded window to exit; if they overrun,
+        // abort so the caller isn't blocked on a stuck sink.
+        if timeout(CHILD_TASK_SHUTDOWN_TIMEOUT, self.control_task)
+            .await
+            .is_err()
+        {
+            warn!("control-plane task did not exit within grace — leaking handle (aborted)");
+        }
+        if timeout(CHILD_TASK_SHUTDOWN_TIMEOUT, self.engine_sink_task)
+            .await
+            .is_err()
+        {
+            warn!("engine-sink task did not exit within grace — leaking handle (aborted)");
+        }
     }
 
     pub fn shutdown_handle(&self) -> Arc<Notify> {
@@ -183,7 +218,8 @@ pub async fn start_sim(config: SimConfig) -> Result<Sim, StartError> {
     // orchestrator will replace this sink once Stage 09 lands the full
     // boot sequence.
     let (engine_tx, engine_rx) = mpsc::channel::<EngineCmd>(256);
-    tokio::spawn(run_engine_sink(engine_rx));
+    let shutdown_engine_sink = shutdown.clone();
+    let engine_sink_task = tokio::spawn(run_engine_sink(engine_rx, shutdown_engine_sink));
 
     let control_api = ControlApi::new(Arc::clone(&token), engine_tx);
     let control_listener = tokio::net::TcpListener::bind(control_addr).await?;
@@ -191,7 +227,7 @@ pub async fn start_sim(config: SimConfig) -> Result<Sim, StartError> {
     info!(addr = %bound_control_addr, "control plane listening");
     let control_router = control_api.router();
     let shutdown_control = shutdown.clone();
-    tokio::spawn(async move {
+    let control_task = tokio::spawn(async move {
         let axum_serve =
             axum::serve(control_listener, control_router).with_graceful_shutdown(async move {
                 shutdown_control.notified().await;
@@ -212,6 +248,8 @@ pub async fn start_sim(config: SimConfig) -> Result<Sim, StartError> {
         token,
         shutdown,
         task,
+        control_task,
+        engine_sink_task,
     })
 }
 
@@ -223,14 +261,36 @@ pub async fn start_sim(config: SimConfig) -> Result<Sim, StartError> {
 /// concession — full `start_sim` wiring would pull in the
 /// `MarketDataEngine` + `OrderSimulator` + `CompositeQuirkGuard` boot
 /// sequence that Wave 4 still owns.
-async fn run_engine_sink(mut rx: mpsc::Receiver<EngineCmd>) {
-    while let Some(cmd) = rx.recv().await {
-        if let EngineCmd::DumpState { reply } = cmd {
-            let _ = reply.send(EngineSnapshot::default());
+///
+/// The sink selects on a shutdown notifier so it exits when the sim is
+/// told to stop; otherwise it would leak as a zombie `tokio::spawn` task
+/// hanging off the runtime until the process dies.
+async fn run_engine_sink(mut rx: mpsc::Receiver<EngineCmd>, shutdown: Arc<Notify>) {
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown.notified() => {
+                debug!("engine sink: shutdown notified — exiting");
+                return;
+            }
+            maybe_cmd = rx.recv() => {
+                match maybe_cmd {
+                    Some(EngineCmd::DumpState { reply }) => {
+                        let _ = reply.send(EngineSnapshot::default());
+                    }
+                    Some(_) => {
+                        // All other commands are no-ops in the sink — but accepting
+                        // them keeps the control plane's `202 Accepted` semantics
+                        // honest, which is what the devloop integration tests assert.
+                    }
+                    None => {
+                        // Sender dropped — nothing more will arrive. Exit cleanly.
+                        debug!("engine sink: cmd tx closed — exiting");
+                        return;
+                    }
+                }
+            }
         }
-        // All other commands are no-ops in the sink — but accepting
-        // them keeps the control plane's `202 Accepted` semantics
-        // honest, which is what the devloop integration tests assert.
     }
 }
 
@@ -274,23 +334,76 @@ async fn run_accept_loop(listener: TcpListener, shutdown: Arc<Notify>) {
 
 /// Stage 01 session task — reads the TWS stream until EOF, dropping bytes.
 /// Stage 02 replaces this with the real codec + engine wiring.
+///
+/// ## DoS guards
+///
+/// Three layers protect against misbehaved peers:
+///
+/// 1. **Per-frame deadline** — `READ_TIMEOUT` is tracked as an absolute
+///    `Instant` that is bumped *only* when a complete frame is consumed.
+///    A slow-trickle attacker that drips 1 byte every 29 s no longer
+///    resets the timer: the deadline tracks progress at the frame
+///    boundary, not at the byte boundary. Stage 01 has no codec so the
+///    "frame accepted" signal is simply every non-empty read (which is
+///    what the stub's discard semantics imply); Stage 02 will plumb the
+///    codec's `try_decode` return into this loop unchanged.
+/// 2. **Buffered-byte cap** — unparsed bytes are bounded by
+///    `MAX_BUFFERED_BYTES` (16 MiB). Above that the session is dropped.
+///    In Stage 01 the stub discards bytes, so `buffered` is always 0;
+///    the counter is wired so Stage 02's codec can plug in without
+///    reshuffling this function.
+/// 3. **SO_KEEPALIVE** — see [`configure_stream`].
 async fn run_session(id: SessionId, peer: SocketAddr, mut stream: TcpStream) {
     let mut buf = [0u8; 4096];
+    // Monotonic deadline for the *current* frame. Advanced only when a
+    // complete frame is accepted by the codec (Stage 01 stub: every
+    // successful non-empty read).
+    let mut frame_deadline = Instant::now() + READ_TIMEOUT;
+    let mut buffered: usize = 0;
     loop {
-        match timeout(READ_TIMEOUT, stream.read(&mut buf)).await {
+        // `timeout_at` enforces an absolute deadline that does NOT reset
+        // on every byte — slow-trickle sessions hit it even while bytes
+        // keep arriving.
+        let remaining = frame_deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            warn!(session = ?id, %peer, "session frame deadline expired; dropping");
+            break;
+        }
+        match timeout(remaining, stream.read(&mut buf)).await {
             Ok(Ok(0)) => {
                 debug!(session = ?id, %peer, "EOF on session socket");
                 break;
             }
             Ok(Ok(n)) => {
+                // Stage 01 stub: every read "accepts a frame" because we
+                // drop the bytes. Stage 02's codec must replace this with
+                // its own frame-boundary detection and only bump the
+                // deadline + decrement `buffered` when `try_decode` returns
+                // `Ok(Some(frame))`.
+                buffered = buffered.saturating_add(n);
+                if buffered > MAX_BUFFERED_BYTES {
+                    warn!(
+                        session = ?id,
+                        %peer,
+                        buffered,
+                        "session exceeded MAX_BUFFERED_BYTES; dropping"
+                    );
+                    break;
+                }
                 debug!(session = ?id, %peer, bytes = n, "discarding bytes (stage 01 stub)");
+                buffered = 0;
+                frame_deadline = Instant::now() + READ_TIMEOUT;
             }
             Ok(Err(e)) => {
                 warn!(session = ?id, %peer, error = %e, "session read error");
                 break;
             }
             Err(_) => {
-                warn!(session = ?id, %peer, "session read timed out after {READ_TIMEOUT:?}; dropping");
+                warn!(
+                    session = ?id,
+                    %peer,
+                    "session frame read timed out after {READ_TIMEOUT:?}; dropping"
+                );
                 break;
             }
         }
@@ -299,20 +412,35 @@ async fn run_session(id: SessionId, peer: SocketAddr, mut stream: TcpStream) {
     let _ = timeout(WRITE_TIMEOUT, stream.shutdown()).await;
 }
 
-/// Apply SO_KEEPALIVE + TCP_NODELAY. Wave 2 Stage 02 may tune further.
+/// Apply SO_KEEPALIVE + TCP_NODELAY. Keepalive knobs are 60 s idle /
+/// 10 s interval / 3 probes — enough that a disappeared peer is reaped
+/// inside 90 s rather than the platform default (~2 h on Linux).
 fn configure_stream(stream: &TcpStream) {
     if let Err(e) = stream.set_nodelay(true) {
         warn!(error = %e, "set_nodelay failed");
     }
 
-    // SO_KEEPALIVE: use the underlying socket. Best-effort — keepalive probes
-    // fall back to platform default idle time (~2h on Linux), which is fine.
-    // We use the socket2 crate idiom via Tokio's into_std + back, guarded by
-    // cfg to avoid pulling a direct dep at Stage 01. Implementation deferred
-    // to Stage 02 — at that point we'll add socket2 explicitly.
-    //
-    // TODO(stage-02): socket2 SO_KEEPALIVE.
-    let _ = stream;
+    // SO_KEEPALIVE via socket2. Tokio's `TcpStream` exposes the underlying
+    // fd through `as_socket2`-style interop using `SockRef::from(&stream)`.
+    // Any failure is best-effort — the session still works, just without
+    // proactive dead-peer detection.
+    let sock_ref = socket2::SockRef::from(stream);
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(KEEPALIVE_IDLE)
+        .with_interval(KEEPALIVE_INTERVAL);
+    // `with_retries` is not available on every platform socket2 supports.
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "macos",
+        target_os = "ios",
+    ))]
+    let keepalive = keepalive.with_retries(KEEPALIVE_RETRIES);
+    if let Err(e) = sock_ref.set_tcp_keepalive(&keepalive) {
+        warn!(error = %e, "set_tcp_keepalive failed — falling back to kernel defaults");
+    }
 }
 
 // ---------------------------------------------------------------------------

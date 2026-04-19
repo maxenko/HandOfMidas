@@ -171,6 +171,44 @@ impl Recorder {
         }
         Ok(())
     }
+
+    /// Finalise the recording: flush every stream *and* explicitly close
+    /// the trailing zstd frame by consuming the underlying encoder. Use
+    /// this on clean shutdown (SIGTERM / ctrl-c) to guarantee the file
+    /// is decodable. If the process is SIGKILLed before `finalize` runs
+    /// the zstd file is left unfinalised — `zstd::stream::Decoder` may
+    /// be able to recover whole frames but the tail is lost.
+    ///
+    /// Consumes `self` so it can move the non-`Clone` inner writers.
+    pub fn finalize(mut self) -> Result<(), RecorderError> {
+        self.flush()?;
+        // Drop the pcap writer explicitly. For Zstd this triggers
+        // `AutoFinishEncoder`'s drop handler which calls `finish()`
+        // internally, writing the zstd epilogue. For Raw it's just a
+        // BufWriter drop (harmless).
+        match self.pcap_writer {
+            PcapSink::Raw(mut w) => {
+                w.flush()?;
+                drop(w);
+            }
+            PcapSink::Zstd(w) => {
+                // Move out of the writer so the auto-finishing encoder
+                // runs its drop immediately (before this function
+                // returns), and any I/O error it surfaces propagates
+                // through our `flush()` above. We can't call `finish()`
+                // directly on `AutoFinishEncoder` because the wrapper
+                // owns the signal; dropping it is the documented way to
+                // finalise the frame.
+                drop(w);
+            }
+        }
+        if let Some(w) = self.dbn_writer {
+            // Drop after an explicit flush above; no finish() is
+            // needed for the dbn encoder since it's length-framed.
+            drop(w);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

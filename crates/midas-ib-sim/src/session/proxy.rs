@@ -91,6 +91,11 @@ pub struct ProxyStats {
 
 /// Core tee-bidirectional logic, separated for testability: accepts any
 /// duplex streams, not just `TcpStream`.
+///
+/// If either copy task panics or returns an error, the recorder is still
+/// flushed before the error is propagated. Without that flush the last
+/// few seconds of pcap+dbn data would be lost — exactly the window the
+/// operator needs to understand why the session died.
 pub async fn bridge_streams<C, U>(
     client: C,
     upstream: U,
@@ -128,12 +133,56 @@ where
         .await
     });
 
-    let c2u = c_to_u.await.expect("client→upstream task panicked")?;
-    let u2c = u_to_c.await.expect("upstream→client task panicked")?;
-    Ok(ProxyStats {
-        client_to_upstream_bytes: c2u,
-        upstream_to_client_bytes: u2c,
-    })
+    // We must flush the recorder before returning — even on the error
+    // path — so buffered pcap/dbn data is durable. The helper below
+    // turns JoinHandle results + per-direction Result<u64, ProxyError>
+    // into a single `Result<u64, ProxyError>` and avoids the old
+    // `.expect("...panicked")` which would bypass the flush.
+    let c2u = settle(c_to_u.await, "client→upstream");
+    let u2c = settle(u_to_c.await, "upstream→client");
+
+    // Flush regardless of success/failure. Ignore flush errors when an
+    // earlier failure already exists so we don't shadow the root cause.
+    let flush_result = {
+        let mut rec = recorder.lock().await;
+        rec.flush()
+    };
+
+    match (c2u, u2c, flush_result) {
+        (Ok(c), Ok(u), Ok(_)) => Ok(ProxyStats {
+            client_to_upstream_bytes: c,
+            upstream_to_client_bytes: u,
+        }),
+        (Err(e), _, _) | (_, Err(e), _) => Err(e),
+        (_, _, Err(e)) => Err(ProxyError::Recorder(e)),
+    }
+}
+
+/// Collapse `Result<Result<u64, ProxyError>, JoinError>` into
+/// `Result<u64, ProxyError>`, logging + recovering from panics so the
+/// caller can still flush the recorder.
+fn settle(
+    result: Result<Result<u64, ProxyError>, tokio::task::JoinError>,
+    label: &str,
+) -> Result<u64, ProxyError> {
+    match result {
+        Ok(inner) => inner,
+        Err(join_err) if join_err.is_panic() => {
+            tracing::error!(
+                label,
+                "proxy {label} task panicked: {join_err}. Recorder will still be flushed."
+            );
+            Err(ProxyError::Io(std::io::Error::other(format!(
+                "{label} task panicked: {join_err}"
+            ))))
+        }
+        Err(join_err) => {
+            tracing::warn!(label, "proxy {label} task cancelled: {join_err}");
+            Err(ProxyError::Io(std::io::Error::other(format!(
+                "{label} task cancelled: {join_err}"
+            ))))
+        }
+    }
 }
 
 /// Direction tag used by the copy loop — matches pcap `Direction`.

@@ -38,6 +38,20 @@ pub struct GarchParams {
     pub beta: f64,
 }
 
+impl Default for GarchParams {
+    /// Reference preset — the same values `fit_garch_11` returns for
+    /// trivially-small samples. Expressed as a `Default` so the
+    /// short-circuit in `fit_garch_11` for zero-variance inputs doesn't
+    /// have to hard-code the triplet in a second place.
+    fn default() -> Self {
+        Self {
+            omega: 1e-6,
+            alpha: 0.05,
+            beta: 0.9,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct HawkesParams {
     pub mu: f64,
@@ -167,6 +181,16 @@ fn log_returns(prices: &[f64]) -> Vec<f64> {
 /// The grid is intentionally small — the purpose is to be in the right
 /// neighbourhood for the synthetic generator, not to compete with
 /// `arch`-library quality.
+///
+/// ## Degenerate inputs
+///
+/// If the sample has zero variance (e.g. a constant price series), the
+/// MLE is ill-defined — `ω = var*(1-α-β)` collapses to 1e-12 and every
+/// candidate log-likelihood is equally `-∞`. Rather than return the
+/// floor-seeded parameter set (which produces numerically-zero synthetic
+/// paths downstream), we short-circuit to [`GarchParams::default`] and
+/// let the caller see a well-known preset. Callers that care must check
+/// the sample count / variance before calling.
 pub fn fit_garch_11(returns: &[f64]) -> GarchParams {
     if returns.len() < 20 {
         return GarchParams {
@@ -176,6 +200,12 @@ pub fn fit_garch_11(returns: &[f64]) -> GarchParams {
         };
     }
     let var: f64 = returns.iter().map(|r| r * r).sum::<f64>() / returns.len() as f64;
+    if var < f64::EPSILON {
+        // Constant-price input yields no information. Return the preset
+        // rather than a default-seeded param set whose ω floor produces
+        // pathological synthetic trajectories.
+        return GarchParams::default();
+    }
     // Coarse α / β grid, recompute ω from long-run variance ω = var(1−α−β).
     let alpha_grid = [0.02f64, 0.04, 0.06, 0.08, 0.10, 0.12, 0.15, 0.18];
     let beta_grid = [0.80f64, 0.85, 0.88, 0.90, 0.92, 0.94];

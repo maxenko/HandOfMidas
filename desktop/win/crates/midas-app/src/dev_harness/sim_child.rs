@@ -123,16 +123,80 @@ pub struct SpawnOptions {
     pub seed: Option<u64>,
 }
 
+/// Resolve the directory used for devloop runtime artifacts (PID files,
+/// token files, etc.).
+///
+/// Priority:
+/// 1. `MIDAS_DEVLOOP_DIR` env var — explicit override for CI.
+/// 2. `dirs::data_local_dir()/midas-app/.devloop/` — stable per-user
+///    location independent of the process's current working directory,
+///    so two `midas-app` instances launched from different cwds don't
+///    stomp each other's pid/token files.
+/// 3. Cwd-relative `.devloop/` — last-resort fallback for environments
+///    without XDG/LocalAppData (e.g. bare-bones CI containers).
+///
+/// The returned directory is created on demand.
+pub fn devloop_runtime_dir() -> PathBuf {
+    let dir = if let Ok(p) = std::env::var("MIDAS_DEVLOOP_DIR") {
+        PathBuf::from(p)
+    } else if let Some(base) = dirs::data_local_dir() {
+        base.join("midas-app").join(".devloop")
+    } else {
+        PathBuf::from(".devloop")
+    };
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!(
+            "devloop: could not create runtime dir {}: {}",
+            dir.display(),
+            e
+        );
+    }
+    dir
+}
+
+/// Write `contents` to `path` atomically: write to `path.tmp`, fsync,
+/// then rename over `path`. A concurrent reader never observes a
+/// truncated-then-partial file.
+fn atomic_write(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    // Sidestep tempfile crate for the sake of keeping the dev-harness
+    // dep-set small — a `<path>.tmp` suffix is fine for our uses since
+    // the sim spawn is per-port and therefore not racy against itself.
+    let mut tmp = path.to_path_buf();
+    let mut tmp_name = match path.file_name() {
+        Some(f) => f.to_owned(),
+        None => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "atomic_write: path has no file name",
+            ));
+        }
+    };
+    tmp_name.push(".tmp");
+    tmp.set_file_name(tmp_name);
+    std::fs::create_dir_all(parent).ok();
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(contents)?;
+        f.sync_all()?;
+    }
+    // `rename` is atomic on POSIX and on Windows when source + dest are
+    // on the same volume, which they are (both live under `parent`).
+    std::fs::rename(&tmp, path)
+}
+
 /// Spawn the sim binary, wait for `/control/health`, write the pid
 /// file, and return a handle the harness can keep alive.
 pub async fn spawn(opts: SpawnOptions) -> Result<SimChildHandle, SimChildError> {
     let binary = resolve_sim_binary();
 
-    // Put the token file where the sim + harness can both reach it
-    // without needing to guess XDG paths in CI. Per-port keeps parallel
-    // sims from stomping each other.
-    std::fs::create_dir_all(".devloop").ok();
-    let token_path = PathBuf::from(format!(".devloop/sim.{}.token", opts.tws_port));
+    // Put the token file in the resolved devloop runtime dir so two
+    // apps launched from different cwds don't stomp each other's
+    // tokens. Per-port keeps parallel sims from colliding on the same
+    // user account.
+    let runtime_dir = devloop_runtime_dir();
+    let token_path = runtime_dir.join(format!("sim.{}.token", opts.tws_port));
     // Best-effort cleanup: the sim refuses to overwrite an existing
     // token file with `create_new`, so stale tokens break re-spawn.
     let _ = std::fs::remove_file(&token_path);
@@ -191,10 +255,12 @@ pub async fn spawn(opts: SpawnOptions) -> Result<SimChildHandle, SimChildError> 
     })?;
     let token = token.trim().to_owned();
 
-    // Record pid for supervisor reaping.
+    // Record pid for supervisor reaping. Atomic-write so a reaper that
+    // opens the file between `File::create(truncate)` and `write_all` of
+    // the naive path can't observe an empty/partial file.
     let pid = child.id().unwrap_or(0);
-    let pid_path = PathBuf::from(format!(".devloop/sim.{}.pid", opts.tws_port));
-    std::fs::write(&pid_path, pid.to_string()).map_err(|err| SimChildError::PidWrite {
+    let pid_path = runtime_dir.join(format!("sim.{}.pid", opts.tws_port));
+    atomic_write(&pid_path, pid.to_string().as_bytes()).map_err(|err| SimChildError::PidWrite {
         path: pid_path.clone(),
         err,
     })?;
@@ -225,15 +291,26 @@ impl SimChildHandle {
         // — no grace period on that path.
         #[cfg(unix)]
         {
-            use tokio::process::Command;
             if let Some(pid) = child.id() {
-                // `kill -TERM` via the `kill` binary avoids pulling
-                // libc into the feature-gated dep set just for SIGTERM.
-                let _ = Command::new("kill")
-                    .arg("-TERM")
-                    .arg(pid.to_string())
-                    .status()
-                    .await;
+                // Call libc::kill directly rather than shelling out to
+                // /usr/bin/kill: minimal containers may lack the binary,
+                // forking a process per teardown inherits the parent env
+                // unnecessarily, and a direct syscall is one fewer
+                // moving part at shutdown.
+                //
+                // SAFETY: `pid` comes from `tokio::process::Child::id`
+                // which returns the child we just spawned; `libc::kill`
+                // is thread-safe and has no undefined-behaviour hazards
+                // for the `SIGTERM` signal.
+                let rc = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+                if rc != 0 {
+                    let err = std::io::Error::last_os_error();
+                    // ESRCH (no such process) is expected when the child
+                    // already exited — don't surface as an error.
+                    if err.raw_os_error() != Some(libc::ESRCH) {
+                        tracing::warn!("devloop: libc::kill(SIGTERM) on pid {pid} failed: {err}");
+                    }
+                }
             }
             match timeout(SHUTDOWN_GRACE, child.wait()).await {
                 Ok(Ok(_)) => {}

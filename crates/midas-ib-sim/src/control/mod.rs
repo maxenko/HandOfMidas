@@ -11,12 +11,15 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::State;
+use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::IntoResponse;
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use tokio::sync::{mpsc, oneshot};
+use tower_http::limit::RequestBodyLimitLayer;
+use tower_http::timeout::TimeoutLayer;
 use tracing::{info, warn};
 
 use crate::engine::types::{EngineCmd, EngineSnapshot, SessionId};
@@ -24,6 +27,16 @@ use crate::quirks::error_codes;
 use crate::security::ControlToken;
 
 use self::api::FaultInject;
+
+/// Max body size accepted on the control plane. 64 KiB is an order of
+/// magnitude above the largest legitimate `FaultInject` payload.
+pub const CONTROL_BODY_LIMIT_BYTES: usize = 64 * 1024;
+/// Global per-request timeout for control-plane handlers. Past this the
+/// layer returns 408 Request Timeout instead of leaking a blocked task.
+pub const CONTROL_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// Bounded window for the mpsc send in `inject_fault` — if the engine is
+/// wedged we 503 rather than leaving the HTTP task hanging forever.
+pub const INJECT_ENGINE_SEND_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Axum state passed into control-plane handlers.
 #[derive(Clone)]
@@ -48,12 +61,27 @@ impl ControlApi {
     }
 
     /// Build the `axum::Router` for the control plane.
+    ///
+    /// Layer order (applied outermost → innermost):
+    /// 1. `TimeoutLayer` — per-request wall-clock bound.
+    /// 2. `RequestBodyLimitLayer` — caps body size BEFORE extraction, so
+    ///    a 1 GiB body on an unauth'd request is rejected without being
+    ///    fully consumed.
+    /// 3. `from_fn(require_bearer)` — validates `Authorization: Bearer
+    ///    <token>` BEFORE any handler's body extractor runs. `/control/health`
+    ///    is whitelisted (no auth needed) inside the middleware so health
+    ///    probes don't need the token.
     pub fn router(&self) -> Router {
+        let state = self.state.clone();
+        let auth_state = state.clone();
         Router::new()
             .route("/control/health", get(health))
             .route("/control/dump", post(dump_state))
             .route("/control/inject", post(inject_fault))
-            .with_state(self.state.clone())
+            .layer(middleware::from_fn_with_state(auth_state, require_bearer))
+            .layer(RequestBodyLimitLayer::new(CONTROL_BODY_LIMIT_BYTES))
+            .layer(TimeoutLayer::new(CONTROL_REQUEST_TIMEOUT))
+            .with_state(state)
     }
 
     /// Start the control-plane listener. Binds `127.0.0.1` unless the caller
@@ -73,14 +101,37 @@ async fn health() -> impl IntoResponse {
     (StatusCode::OK, "ok")
 }
 
-async fn dump_state(
+/// Middleware: reject any request to an auth-guarded route before the
+/// handler's body extractor runs.
+///
+/// `/control/health` is a whitelist — unauthenticated health probes are
+/// a legitimate monitoring pattern and carry no PII. Everything else
+/// must present a valid bearer token or get 401'd before `axum::Json`
+/// (or any other extractor) touches the body. That means a 1 GiB POST
+/// with a bogus token exits the middleware without being read off the
+/// wire past the `RequestBodyLimitLayer` cap, not after being fully
+/// deserialised.
+async fn require_bearer(
     State(state): State<ControlState>,
-    headers: HeaderMap,
-) -> Result<axum::Json<EngineSnapshot>, StatusCode> {
-    if !authorized(&state.token, &headers) {
-        warn!("control plane: rejected /control/dump — missing/invalid token");
+    req: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let path = req.uri().path();
+    if path == "/control/health" {
+        return Ok(next.run(req).await);
+    }
+    if !authorized(&state.token, req.headers()) {
+        warn!(%path, "control plane: rejected — missing/invalid token");
         return Err(StatusCode::UNAUTHORIZED);
     }
+    Ok(next.run(req).await)
+}
+
+async fn dump_state(
+    State(state): State<ControlState>,
+) -> Result<axum::Json<EngineSnapshot>, StatusCode> {
+    // Auth is enforced upstream by `require_bearer`; by the time the
+    // handler runs the caller is known-good.
 
     // Ask the engine for its current snapshot. A disconnected engine
     // shouldn't 200 OK with stale data — surface 503 instead.
@@ -106,22 +157,32 @@ async fn dump_state(
 /// 202 Accepted to reflect that.
 async fn inject_fault(
     State(state): State<ControlState>,
-    headers: HeaderMap,
     Json(fault): Json<FaultInject>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    if !authorized(&state.token, &headers) {
-        warn!("control plane: rejected /control/inject — missing/invalid token");
-        return Err((StatusCode::UNAUTHORIZED, "unauthorized".into()));
-    }
-
+    // Auth is enforced by the `require_bearer` middleware; by the time
+    // the handler runs we're certain the caller presented the token.
     let cmds = fault_to_cmds(&state, fault).await?;
     for cmd in cmds {
-        state.engine_cmd_tx.send(cmd).await.map_err(|e| {
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                format!("engine closed: {e}"),
-            )
-        })?;
+        // A wedged engine must not pin the HTTP task forever — bound
+        // the send with a short timeout and translate to 503 so the
+        // devloop caller can retry rather than hang on this request.
+        match tokio::time::timeout(INJECT_ENGINE_SEND_TIMEOUT, state.engine_cmd_tx.send(cmd)).await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!("engine closed: {e}"),
+                ));
+            }
+            Err(_) => {
+                warn!("control plane: engine send timed out after {INJECT_ENGINE_SEND_TIMEOUT:?}");
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!("engine send timed out after {INJECT_ENGINE_SEND_TIMEOUT:?}"),
+                ));
+            }
+        }
     }
     Ok(StatusCode::ACCEPTED)
 }
@@ -250,9 +311,19 @@ fn authorized(token: &ControlToken, headers: &HeaderMap) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::http::{Method, Request};
+    use tower::util::ServiceExt;
+
+    fn make_api() -> (ControlApi, mpsc::Receiver<EngineCmd>, String) {
+        let (tx, rx) = mpsc::channel(4);
+        let token = ControlToken::generate();
+        let token_str = token.as_str().to_owned();
+        let api = ControlApi::new(Arc::new(token), tx);
+        (api, rx, token_str)
+    }
 
     /// Smoke: the router builds without panicking under realistic state.
-    /// Exercised against the default `ControlState` with a dummy cmd tx.
     #[test]
     fn router_builds() {
         let (tx, _rx) = mpsc::channel(1);
@@ -260,43 +331,47 @@ mod tests {
         let _router = api.router();
     }
 
+    /// Auth runs BEFORE the JSON body extractor. A wrong-token POST with a
+    /// gigantic body must get 401 without the server reading past the
+    /// `RequestBodyLimitLayer` cap.
     #[tokio::test]
-    async fn inject_rejects_without_auth() {
-        let (tx, _rx) = mpsc::channel(1);
-        let state = ControlState {
-            token: Arc::new(ControlToken::generate()),
-            engine_cmd_tx: tx,
-        };
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            axum::http::header::AUTHORIZATION,
-            "Bearer wrong-token".parse().unwrap(),
-        );
-        let result = inject_fault(State(state), headers, Json(FaultInject::PacingViolation)).await;
-        match result {
-            Err((status, _)) => assert_eq!(status, StatusCode::UNAUTHORIZED),
-            Ok(_) => panic!("expected unauthorized"),
-        }
+    async fn inject_rejects_wrong_token_before_body_extraction() {
+        let (api, _rx, _token) = make_api();
+        let router = api.router();
+        // 1 MiB body of junk — far larger than any real FaultInject payload
+        // and beyond the body-limit cap. Should 401 without OOM / timeout.
+        let huge = vec![b'x'; 1024 * 1024];
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/control/inject")
+            .header("authorization", "Bearer wrong-token")
+            .header("content-type", "application/json")
+            .body(Body::from(huge))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
+    /// With a valid token, a legitimate body fits under the limit and
+    /// reaches the handler.
     #[tokio::test]
-    async fn inject_farm_outage_routes_to_cmd() {
-        let (tx, mut rx) = mpsc::channel(4);
-        let state = ControlState {
-            token: Arc::new(ControlToken::generate()),
-            engine_cmd_tx: tx,
-        };
-        let token = state.token.as_str().to_owned();
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            axum::http::header::AUTHORIZATION,
-            format!("Bearer {token}").parse().unwrap(),
-        );
+    async fn inject_accepts_valid_token_within_limit() {
+        let (api, mut rx, token) = make_api();
+        let router = api.router();
         let fault = FaultInject::FarmOutage {
             farms: vec!["usfarm".into()],
         };
-        let result = inject_fault(State(state), headers, Json(fault)).await;
-        assert!(matches!(result, Ok(StatusCode::ACCEPTED)));
+        let body = serde_json::to_vec(&fault).unwrap();
+        assert!(body.len() < CONTROL_BODY_LIMIT_BYTES);
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/control/inject")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
         let cmd = rx.recv().await.expect("cmd delivered");
         match cmd {
             EngineCmd::InjectFarmOutage { code, farms } => {
@@ -307,25 +382,58 @@ mod tests {
         }
     }
 
+    /// A body above the limit is rejected by `RequestBodyLimitLayer`
+    /// even for an authenticated caller — defence-in-depth.
+    #[tokio::test]
+    async fn inject_rejects_oversized_body_with_valid_token() {
+        let (api, _rx, token) = make_api();
+        let router = api.router();
+        let huge = vec![b'x'; CONTROL_BODY_LIMIT_BYTES + 1];
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/control/inject")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(huge))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        // tower-http returns 413 Payload Too Large when the limit fires.
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    /// `/control/health` is intentionally unauth'd so external probes
+    /// (devloop health-check, k8s liveness) don't need the token.
+    #[tokio::test]
+    async fn health_needs_no_auth() {
+        let (api, _rx, _token) = make_api();
+        let router = api.router();
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/control/health")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
     #[tokio::test]
     async fn inject_farm_restore_picks_code_from_data_lost() {
-        let (tx, mut rx) = mpsc::channel(4);
-        let state = ControlState {
-            token: Arc::new(ControlToken::generate()),
-            engine_cmd_tx: tx,
-        };
-        let token = state.token.as_str().to_owned();
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            axum::http::header::AUTHORIZATION,
-            format!("Bearer {token}").parse().unwrap(),
-        );
+        let (api, mut rx, token) = make_api();
+        let router = api.router();
         let fault = FaultInject::FarmRestore {
             farms: vec!["usfarm".into()],
             data_lost: true,
         };
-        let result = inject_fault(State(state), headers, Json(fault)).await;
-        assert!(matches!(result, Ok(StatusCode::ACCEPTED)));
+        let body = serde_json::to_vec(&fault).unwrap();
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/control/inject")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
         match rx.recv().await.unwrap() {
             EngineCmd::InjectFarmRestore { code, .. } => {
                 assert_eq!(code, error_codes::FARM_RESTORED_NO_DATA);
