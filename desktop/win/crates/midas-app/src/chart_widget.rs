@@ -1526,129 +1526,22 @@ fn translate_mouse_button(button: mouse::Button) -> midas_chart::MouseButton {
 /// convert pixel coordinates (center_x, center_y) into data-space values
 /// (pivot_time, pivot_price) so the app handler does not need to know the
 /// widget's viewport size.
+/// Wrap a chart-core `ChartAction` into the app-layer `Message::Chart`
+/// envelope. The actual fan-out (camera-translation for `Zoom`/`ZoomY`,
+/// per-variant routing, decorator-action dispatch) lives in
+/// [`MidasApp::dispatch_chart_action`] — the chart widget no longer
+/// knows the legacy `Message::Chart*` namespace.
+///
+/// Audit P2 #4: this collapse turns a 132-LOC fan-out into a 1-line
+/// wrapper. The `_camera` parameter is retained for API compatibility
+/// with the call sites; the camera lookup now happens app-side because
+/// the dispatcher already has `self.charts.get(id).camera`.
 fn action_to_message(
     chart_id: ChartId,
     action: &midas_chart::ChartAction,
-    camera: &Camera2D,
+    _camera: &Camera2D,
 ) -> Option<Message> {
-    use midas_chart::ChartAction;
-
-    match action {
-        ChartAction::Pan { dx, dy } => Some(Message::ChartPan(chart_id, *dx, *dy)),
-        ChartAction::Zoom { center_x, factor } => {
-            // Convert pixel X to data-space time using the widget's camera
-            // which has the correct viewport dimensions from actual bounds.
-            let pivot_time = camera.x_to_time(*center_x);
-            Some(Message::ChartZoom(chart_id, pivot_time, *factor))
-        }
-        ChartAction::ZoomY { center_y, factor } => {
-            // Convert pixel Y to data-space price.
-            let pivot_price = camera.y_to_price(*center_y);
-            Some(Message::ChartZoomY(chart_id, pivot_price, *factor))
-        }
-        ChartAction::SetCrosshair { x, y } => {
-            Some(Message::ChartCrosshair(chart_id, Some((*x, *y))))
-        }
-        ChartAction::ClearCrosshair => Some(Message::ChartCrosshair(chart_id, None)),
-        ChartAction::CreateLevel { price } => Some(Message::ChartCreateLevel(chart_id, *price)),
-        ChartAction::SetTimelineBorderRatio { ratio } => {
-            Some(Message::ChartSetTimelineBorderRatio(chart_id, *ratio))
-        }
-        ChartAction::SetVolumeScale { scale } => {
-            Some(Message::ChartSetVolumeScale(chart_id, *scale))
-        }
-        ChartAction::RightClickLevel { id, x, y } => {
-            Some(Message::ChartRightClickLevel(chart_id, id.0, *x, *y))
-        }
-        ChartAction::DragLevel { id, new_price } => {
-            Some(Message::ChartDragLevel(chart_id, id.0, *new_price))
-        }
-        ChartAction::SelectLevel { id } => Some(Message::ChartSelectLevel(chart_id, id.0)),
-        ChartAction::DeselectLevel => Some(Message::ChartDeselectLevel(chart_id)),
-        ChartAction::DeleteSelectedLevel => Some(Message::ChartDeleteSelectedLevel(chart_id)),
-        ChartAction::CancelPlacing => Some(Message::ChartCancelPlacing(chart_id)),
-        ChartAction::PlacingPreview { price } => {
-            Some(Message::PlacingCursorMoved(chart_id, *price))
-        }
-        ChartAction::DragBracketLeg {
-            annotation_id,
-            leg,
-            new_price,
-        } => Some(Message::ChartDragBracketLeg(
-            chart_id,
-            annotation_id.0,
-            *leg,
-            *new_price,
-        )),
-        ChartAction::RightClickBracketLeg {
-            annotation_id,
-            leg,
-            x,
-            y,
-        } => Some(Message::ChartBracketContextMenu(
-            chart_id,
-            annotation_id.0,
-            *leg,
-            *x,
-            *y,
-        )),
-        ChartAction::CreateBracket {
-            entry,
-            tp,
-            sl,
-            side,
-        } => Some(Message::ChartCreateBracket(
-            chart_id, *entry, *tp, *sl, *side,
-        )),
-        ChartAction::DecoratorClick {
-            annotation_id,
-            group_id: _,
-            item_path: _,
-            action,
-        } => {
-            // Route decorator clicks into the existing app side-effect
-            // surface. The bracket-related variants map to the same
-            // `Message::ChartBracket*` handlers the legacy button path
-            // used. Non-bracket arms (quantity/price editors, toggle
-            // locked, entry-type cycling, custom) are deferred to
-            // future work and remain `None` stubs for now.
-            use midas_chart::widget::decorator::DecoratorAction;
-            match action {
-                DecoratorAction::CloseAnnotation => {
-                    Some(Message::ChartBracketCancel(chart_id, *annotation_id))
-                }
-                DecoratorAction::RemoveStopLoss => {
-                    Some(Message::ChartBracketCancelSL(chart_id, *annotation_id))
-                }
-                DecoratorAction::CreateStopLoss => {
-                    Some(Message::ChartBracketToggleSL(chart_id, *annotation_id))
-                }
-                DecoratorAction::Submit => {
-                    Some(Message::ChartBracketSubmit(chart_id, *annotation_id))
-                }
-                DecoratorAction::Save => Some(Message::ChartBracketSave(chart_id, *annotation_id)),
-                // TODO: wire remaining decorator actions (TP quick-create,
-                // inline editors, toggle-locked, custom) once their
-                // app-layer handlers land.
-                DecoratorAction::CreateTakeProfit => None,
-                DecoratorAction::CycleEntryType => None,
-                DecoratorAction::EditQuantity => None,
-                DecoratorAction::EditPrice => None,
-                DecoratorAction::ToggleLocked => None,
-                // Slice 4: pin-toggle decorator clicks route through a
-                // dedicated app-side message that resolves the symbol
-                // from the chart id — the chart crate does not know
-                // the active symbol and the intent handle lives in
-                // `MidasApp`.
-                DecoratorAction::TogglePin => {
-                    Some(Message::ChartBracketTogglePin(chart_id, *annotation_id))
-                }
-                DecoratorAction::Custom(_) => None,
-            }
-        }
-        ChartAction::Redraw => None,
-        _ => None,
-    }
+    Some(Message::Chart(chart_id, action.clone()))
 }
 
 // ── Old-level-to-annotation bridge ───────────────────────────────────

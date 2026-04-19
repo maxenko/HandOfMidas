@@ -508,6 +508,16 @@ pub enum Message {
     PanelTimeframeSelected(ChartId, Timeframe),
 
     // -- Chart interaction (from shader widget) --
+    /// Wrapper for chart-interaction actions emitted by the chart
+    /// widget. The audit's P2 #4 finding: this variant exists so the
+    /// 17 sibling `Message::Chart*` variants (Pan/Zoom/Crosshair/
+    /// CreateLevel/...) can be deleted in favour of one wrapper that
+    /// carries the full `midas_chart::ChartAction` payload. Camera-
+    /// dependent translations (pixel→data for `Zoom`/`ZoomY`) live in
+    /// the dispatcher, which has access to the chart's camera via
+    /// `self.charts`.
+    Chart(ChartId, midas_chart::ChartAction),
+
     /// Viewport dimensions changed (old_w, old_h, new_w, new_h).
     /// Adjusts camera data range to preserve candle scale.
     ChartViewportChanged(ChartId, u32, u32, u32, u32),
@@ -2645,6 +2655,16 @@ impl MidasApp {
             | Message::PaneDragged(..)
             | Message::PaneSplit(..)
             | Message::PaneClose(..) => self.handle_pane_msg(message),
+
+            // -- Chart interaction (wrapper) --
+            // New in audit P2 #4 collapse: every emit-site that used
+            // to fire its own `Message::Chart*(id, ...)` variant now
+            // wraps the raw `ChartAction` payload here. Dispatcher
+            // hands it to `dispatch_chart_action`, which is the SOLE
+            // place that knows how each action variant maps to a
+            // legacy handler arm. Once Phase B inlines all the bodies,
+            // the legacy variants below are deleted.
+            Message::Chart(chart_id, action) => self.dispatch_chart_action(chart_id, action),
 
             // -- Chart interaction (viewport, pan, zoom, crosshair,
             //    levels, level editor, toggles, reset, batch) --
