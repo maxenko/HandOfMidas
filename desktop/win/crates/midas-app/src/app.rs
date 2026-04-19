@@ -521,12 +521,6 @@ pub enum Message {
     /// Viewport dimensions changed (old_w, old_h, new_w, new_h).
     /// Adjusts camera data range to preserve candle scale.
     ChartViewportChanged(ChartId, u32, u32, u32, u32),
-    /// Pan the chart camera by a data-space delta.
-    ChartPan(ChartId, f64, f64),
-    /// Zoom the chart time axis (horizontal). Carries pivot_time (f64) and factor.
-    ChartZoom(ChartId, f64, f64),
-    /// Zoom the chart price axis (vertical). Carries pivot_price (f64) and factor.
-    ChartZoomY(ChartId, f64, f64),
     /// Set or clear the crosshair position.
     ChartCrosshair(ChartId, Option<(f32, f32)>),
     /// Create a new horizontal price level.
@@ -2669,9 +2663,6 @@ impl MidasApp {
             // -- Chart interaction (viewport, pan, zoom, crosshair,
             //    levels, level editor, toggles, reset, batch) --
             Message::ChartViewportChanged(..)
-            | Message::ChartPan(..)
-            | Message::ChartZoom(..)
-            | Message::ChartZoomY(..)
             | Message::ChartCrosshair(..)
             | Message::ChartCreateLevel(..)
             | Message::ChartDragLevel(..)

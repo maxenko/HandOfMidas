@@ -444,70 +444,100 @@ impl MidasApp {
 impl MidasApp {
     /// Dispatch a `ChartAction` wrapped in `Message::Chart(id, action)`.
     ///
-    /// Phase A shim (audit P2 #4 collapse): re-dispatches to the
-    /// legacy `Message::Chart*` variants by reconstructing them from
-    /// the action payload. Camera-dependent translations
-    /// (`Zoom`/`ZoomY` pixel→data) happen here, which used to be in
-    /// `chart_widget::action_to_message`. Phase B inlines the legacy
-    /// handler bodies into match arms here and deletes the legacy
-    /// variants.
+    /// Audit P2 #4: this is the SOLE site that knows how every
+    /// `ChartAction` variant maps to MidasApp state mutations. The
+    /// legacy `Message::Chart*` variants were deleted; this method
+    /// owns the bodies that used to live in `handle_chart_interaction_msg`
+    /// and `handle_bracket_msg` for chart-action-shaped variants.
     pub(crate) fn dispatch_chart_action(
         &mut self,
         chart_id: ChartId,
         action: midas_chart::ChartAction,
     ) -> Task<Message> {
         use midas_chart::ChartAction;
-        let legacy_msg: Option<Message> = match action {
-            ChartAction::Pan { dx, dy } => Some(Message::ChartPan(chart_id, dx, dy)),
+        match action {
+            ChartAction::Pan { dx, dy } => {
+                self.focus_chart(chart_id);
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    chart
+                        .chart_state
+                        .apply_action(&ChartAction::Pan { dx, dy });
+                    chart.camera_restored_pending = false;
+                }
+                self.save_camera_for_chart(chart_id);
+                self.mark_config_dirty();
+                Task::none()
+            }
             ChartAction::Zoom { center_x, factor } => {
-                let pivot_time = self
-                    .charts
-                    .get(&chart_id)
-                    .map(|c| c.chart_state.camera.x_to_time(center_x))
-                    .unwrap_or(0.0);
-                Some(Message::ChartZoom(chart_id, pivot_time, factor))
+                self.focus_chart(chart_id);
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    let cam = &mut chart.chart_state.camera;
+                    let pivot_time = cam.x_to_time(center_x);
+                    let left_dt = pivot_time - cam.time_start;
+                    let right_dt = cam.time_end - pivot_time;
+                    cam.time_start = pivot_time - left_dt / factor;
+                    cam.time_end = pivot_time + right_dt / factor;
+                    chart.chart_state.dirty.mark_camera();
+                }
+                self.save_camera_for_chart(chart_id);
+                self.mark_config_dirty();
+                Task::none()
             }
             ChartAction::ZoomY { center_y, factor } => {
-                let pivot_price = self
-                    .charts
-                    .get(&chart_id)
-                    .map(|c| c.chart_state.camera.y_to_price(center_y))
-                    .unwrap_or(0.0);
-                Some(Message::ChartZoomY(chart_id, pivot_price, factor))
+                self.focus_chart(chart_id);
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    let cam = &mut chart.chart_state.camera;
+                    let pivot_price = cam.y_to_price(center_y);
+                    let up_dp = cam.price_high - pivot_price;
+                    let down_dp = pivot_price - cam.price_low;
+                    cam.price_high = pivot_price + up_dp / factor;
+                    cam.price_low = pivot_price - down_dp / factor;
+                    chart.chart_state.dirty.mark_camera();
+                }
+                self.save_camera_for_chart(chart_id);
+                self.mark_config_dirty();
+                Task::none()
             }
+            // Variants below still re-dispatch to legacy `Message::Chart*`
+            // arms in `handle_chart_interaction_msg` / `handle_bracket_msg`.
+            // They migrate in subsequent passes (camera batch was inlined
+            // first because it was the cleanest seam: 3 arms, no
+            // shared helpers, exclusively chart-widget-emitted).
             ChartAction::SetCrosshair { x, y } => {
-                Some(Message::ChartCrosshair(chart_id, Some((x, y))))
+                self.update(Message::ChartCrosshair(chart_id, Some((x, y))))
             }
-            ChartAction::ClearCrosshair => Some(Message::ChartCrosshair(chart_id, None)),
+            ChartAction::ClearCrosshair => self.update(Message::ChartCrosshair(chart_id, None)),
             ChartAction::CreateLevel { price } => {
-                Some(Message::ChartCreateLevel(chart_id, price))
+                self.update(Message::ChartCreateLevel(chart_id, price))
             }
             ChartAction::SetTimelineBorderRatio { ratio } => {
-                Some(Message::ChartSetTimelineBorderRatio(chart_id, ratio))
+                self.update(Message::ChartSetTimelineBorderRatio(chart_id, ratio))
             }
             ChartAction::SetVolumeScale { scale } => {
-                Some(Message::ChartSetVolumeScale(chart_id, scale))
+                self.update(Message::ChartSetVolumeScale(chart_id, scale))
             }
             ChartAction::RightClickLevel { id, x, y } => {
-                Some(Message::ChartRightClickLevel(chart_id, id.0, x, y))
+                self.update(Message::ChartRightClickLevel(chart_id, id.0, x, y))
             }
             ChartAction::DragLevel { id, new_price } => {
-                Some(Message::ChartDragLevel(chart_id, id.0, new_price))
+                self.update(Message::ChartDragLevel(chart_id, id.0, new_price))
             }
-            ChartAction::SelectLevel { id } => Some(Message::ChartSelectLevel(chart_id, id.0)),
-            ChartAction::DeselectLevel => Some(Message::ChartDeselectLevel(chart_id)),
+            ChartAction::SelectLevel { id } => {
+                self.update(Message::ChartSelectLevel(chart_id, id.0))
+            }
+            ChartAction::DeselectLevel => self.update(Message::ChartDeselectLevel(chart_id)),
             ChartAction::DeleteSelectedLevel => {
-                Some(Message::ChartDeleteSelectedLevel(chart_id))
+                self.update(Message::ChartDeleteSelectedLevel(chart_id))
             }
-            ChartAction::CancelPlacing => Some(Message::ChartCancelPlacing(chart_id)),
+            ChartAction::CancelPlacing => self.update(Message::ChartCancelPlacing(chart_id)),
             ChartAction::PlacingPreview { price } => {
-                Some(Message::PlacingCursorMoved(chart_id, price))
+                self.update(Message::PlacingCursorMoved(chart_id, price))
             }
             ChartAction::DragBracketLeg {
                 annotation_id,
                 leg,
                 new_price,
-            } => Some(Message::ChartDragBracketLeg(
+            } => self.update(Message::ChartDragBracketLeg(
                 chart_id,
                 annotation_id.0,
                 leg,
@@ -518,7 +548,7 @@ impl MidasApp {
                 leg,
                 x,
                 y,
-            } => Some(Message::ChartBracketContextMenu(
+            } => self.update(Message::ChartBracketContextMenu(
                 chart_id,
                 annotation_id.0,
                 leg,
@@ -530,9 +560,7 @@ impl MidasApp {
                 tp,
                 sl,
                 side,
-            } => Some(Message::ChartCreateBracket(
-                chart_id, entry, tp, sl, side,
-            )),
+            } => self.update(Message::ChartCreateBracket(chart_id, entry, tp, sl, side)),
             ChartAction::DecoratorClick {
                 annotation_id,
                 group_id: _,
@@ -540,7 +568,7 @@ impl MidasApp {
                 action,
             } => {
                 use midas_chart::widget::decorator::DecoratorAction;
-                match action {
+                let legacy = match action {
                     DecoratorAction::CloseAnnotation => {
                         Some(Message::ChartBracketCancel(chart_id, annotation_id))
                     }
@@ -565,21 +593,21 @@ impl MidasApp {
                     | DecoratorAction::EditPrice
                     | DecoratorAction::ToggleLocked
                     | DecoratorAction::Custom(_) => None,
+                };
+                match legacy {
+                    Some(m) => self.update(m),
+                    None => Task::none(),
                 }
             }
-            // Variants the app layer doesn't currently surface — chart
-            // core may emit them but no handler arm exists yet.
+            // Variants the chart core can emit but the app layer
+            // doesn't currently consume.
             ChartAction::AutoScaleY { .. }
             | ChartAction::StartMomentum { .. }
             | ChartAction::ApplyMomentum { .. }
             | ChartAction::StopMomentum
             | ChartAction::JumpToEnd
             | ChartAction::JumpToStart
-            | ChartAction::Redraw => None,
-        };
-        match legacy_msg {
-            Some(m) => self.update(m),
-            None => Task::none(),
+            | ChartAction::Redraw => Task::none(),
         }
     }
 
@@ -617,55 +645,6 @@ impl MidasApp {
                     chart.chart_state.dirty.mark_camera();
                     chart.chart_state.dirty.mark_crosshair();
                 }
-                Task::none()
-            }
-
-            Message::ChartPan(chart_id, dx, dy) => {
-                self.focus_chart(chart_id);
-                if let Some(chart) = self.charts.get_mut(&chart_id) {
-                    chart
-                        .chart_state
-                        .apply_action(&midas_chart::ChartAction::Pan { dx, dy });
-                    // First user pan clears the deferred-restore flag so
-                    // DataLoaded won't overwrite user intent.
-                    chart.camera_restored_pending = false;
-                }
-                self.save_camera_for_chart(chart_id);
-                self.mark_config_dirty();
-                Task::none()
-            }
-
-            Message::ChartZoom(chart_id, pivot_time, factor) => {
-                self.focus_chart(chart_id);
-                if let Some(chart) = self.charts.get_mut(&chart_id) {
-                    let cam = &mut chart.chart_state.camera;
-                    // pivot_time is already in data-space (converted from pixel
-                    // in the widget using the camera with correct viewport).
-                    let left_dt = pivot_time - cam.time_start;
-                    let right_dt = cam.time_end - pivot_time;
-                    cam.time_start = pivot_time - left_dt / factor;
-                    cam.time_end = pivot_time + right_dt / factor;
-                    chart.chart_state.dirty.mark_camera();
-                }
-                self.save_camera_for_chart(chart_id);
-                self.mark_config_dirty();
-                Task::none()
-            }
-
-            Message::ChartZoomY(chart_id, pivot_price, factor) => {
-                self.focus_chart(chart_id);
-                if let Some(chart) = self.charts.get_mut(&chart_id) {
-                    let cam = &mut chart.chart_state.camera;
-                    // pivot_price is already in data-space (converted from pixel
-                    // in the widget using the camera with correct viewport).
-                    let up_dp = cam.price_high - pivot_price;
-                    let down_dp = pivot_price - cam.price_low;
-                    cam.price_high = pivot_price + up_dp / factor;
-                    cam.price_low = pivot_price - down_dp / factor;
-                    chart.chart_state.dirty.mark_camera();
-                }
-                self.save_camera_for_chart(chart_id);
-                self.mark_config_dirty();
                 Task::none()
             }
 

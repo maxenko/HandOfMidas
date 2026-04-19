@@ -113,7 +113,21 @@ pub fn dispatch_scroll(
                 (cam.time_start + cam.time_end) / 2.0
             })
             .unwrap_or(0.0);
-        tasks.push(app.update(Message::ChartZoom(chart_id, pivot, factor)));
+        // ChartAction::Zoom takes pixel center_x; back-convert from
+        // the data-space pivot we already computed so the dispatcher's
+        // standard `cam.x_to_time(center_x)` round-trips to it.
+        let center_x_px = app
+            .charts
+            .get(&chart_id)
+            .map(|c| c.chart_state.camera.time_to_x(pivot))
+            .unwrap_or(0.0);
+        tasks.push(app.update(Message::Chart(
+            chart_id,
+            midas_chart::ChartAction::Zoom {
+                center_x: center_x_px,
+                factor,
+            },
+        )));
     }
     if dx.abs() > f32::EPSILON {
         // ChartPan takes a (dx, dy) in data space. Approximate with a
@@ -127,7 +141,13 @@ pub fn dispatch_scroll(
                 (dt, 0.0)
             })
             .unwrap_or((0.0, 0.0));
-        tasks.push(app.update(Message::ChartPan(chart_id, delta_time, delta_price)));
+        tasks.push(app.update(Message::Chart(
+            chart_id,
+            midas_chart::ChartAction::Pan {
+                dx: delta_time,
+                dy: delta_price,
+            },
+        )));
     }
 
     Ok(iced::Task::batch(tasks))
