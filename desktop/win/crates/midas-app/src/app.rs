@@ -1121,6 +1121,66 @@ impl MidasApp {
         }
     }
 
+    /// Project the top-toolbar provider drop-down inputs into a VM.
+    /// Resolves both lists + active selections off `self.providers`
+    /// in one place so the view doesn't reach into the registry four
+    /// times.
+    pub fn toolbar_vm(&self) -> crate::view_models::toolbar::ToolbarVm {
+        crate::view_models::toolbar::ToolbarVm {
+            data_provider_names: self.providers.data_provider_names(),
+            active_data_provider: self.providers.active_data_provider_name(),
+            broker_names: self.providers.order_broker_names(),
+            active_broker: self.providers.active_broker_display_name(),
+        }
+    }
+
+    /// Project the order panel's TitleBar inputs. Always returns a
+    /// value; missing panel falls back to `"Order"` + `Unlinked`.
+    pub fn order_panel_title_bar_vm(
+        &self,
+        order_id: midas_core::OrderPanelId,
+    ) -> crate::view_models::order_panel::OrderPanelTitleBarVm {
+        use crate::view_models::order_panel::OrderPanelTitleBarVm;
+        let panel = self.order_panels.get(&order_id);
+        let title_text = panel
+            .map(|p| {
+                if p.state.symbol.is_empty() {
+                    "Order".to_string()
+                } else {
+                    format!("Order: {}", p.state.symbol)
+                }
+            })
+            .unwrap_or_else(|| "Order".to_string());
+        let symbol_link = panel
+            .map(|p| p.symbol_link)
+            .unwrap_or(midas_core::LinkMode::Unlinked);
+        OrderPanelTitleBarVm {
+            title_text,
+            symbol_link,
+        }
+    }
+
+    /// Project the order panel body inputs (borrowed state +
+    /// last_price + pre-computed coarse step). Returns `None` when
+    /// the panel id doesn't resolve.
+    pub fn order_panel_body_vm(
+        &self,
+        order_id: midas_core::OrderPanelId,
+    ) -> Option<crate::view_models::order_panel::OrderPanelBodyVm<'_>> {
+        use crate::view_models::order_panel::OrderPanelBodyVm;
+        let panel = self.order_panels.get(&order_id)?;
+        let last_price = self
+            .market_cache
+            .get(&panel.state.symbol)
+            .and_then(|snap| snap.last_price);
+        let (coarse_step, _fine_step) = midas_chart::price_step_for(last_price.unwrap_or(100.0));
+        Some(OrderPanelBodyVm {
+            state: &panel.state,
+            last_price,
+            coarse_step,
+        })
+    }
+
     /// Project all status-bar inputs into a single VM. Resolves the
     /// active-chart label, pane count, both connection blocks (data
     /// and broker) with their colours, and the various messages and

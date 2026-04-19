@@ -354,19 +354,21 @@ impl MidasApp {
             .padding([4, 10])
             .style(hover_text_button_style);
 
-        // Provider dropdowns (pushed to the right).
-        let data_names = self.providers.data_provider_names();
-        let active_data = self.providers.active_data_provider_name();
-        let data_picker = pick_list(data_names, Some(active_data), Message::DataProviderSelected)
-            .text_size(11)
-            .padding([3, 6])
-            .style(dark_pick_list_style);
+        // Provider dropdowns (pushed to the right). Both lists +
+        // active selections come from the toolbar VM.
+        let toolbar_vm = self.toolbar_vm();
+        let data_picker = pick_list(
+            toolbar_vm.data_provider_names,
+            Some(toolbar_vm.active_data_provider),
+            Message::DataProviderSelected,
+        )
+        .text_size(11)
+        .padding([3, 6])
+        .style(dark_pick_list_style);
 
-        let broker_names = self.providers.order_broker_names();
-        let active_broker = self.providers.active_broker_display_name();
         let broker_picker = pick_list(
-            broker_names,
-            Some(active_broker),
+            toolbar_vm.broker_names,
+            Some(toolbar_vm.active_broker),
             Message::OrderBrokerSelected,
         )
         .text_size(11)
@@ -1328,25 +1330,9 @@ impl MidasApp {
         order_id: OrderPanelId,
         pane: pane_grid::Pane,
     ) -> pane_grid::TitleBar<'_, Message> {
-        let title_text = self
-            .order_panels
-            .get(&order_id)
-            .map(|p| {
-                if p.state.symbol.is_empty() {
-                    "Order".to_string()
-                } else {
-                    format!("Order: {}", p.state.symbol)
-                }
-            })
-            .unwrap_or_else(|| "Order".to_string());
-
-        // Symbol link [S] button.
-        let op_link = self
-            .order_panels
-            .get(&order_id)
-            .map(|p| p.symbol_link)
-            .unwrap_or(LinkMode::Unlinked);
-        let op_color = link_mode_indicator_rgba(op_link);
+        let vm = self.order_panel_title_bar_vm(order_id);
+        let title_text = vm.title_text;
+        let op_color = link_mode_indicator_rgba(vm.symbol_link);
         let bold_font = iced::Font {
             weight: iced::font::Weight::Bold,
             ..iced::Font::default()
@@ -1395,22 +1381,14 @@ impl MidasApp {
     fn view_order_body(&self, order_id: OrderPanelId) -> Element<'_, Message> {
         use crate::order_panel::OrderPanelAction;
 
-        let panel = match self.order_panels.get(&order_id) {
-            Some(p) => p,
-            None => {
-                return container(text("Order panel not found").size(14))
-                    .center_x(Fill)
-                    .center_y(Fill)
-                    .into();
-            }
+        let Some(vm) = self.order_panel_body_vm(order_id) else {
+            return container(text("Order panel not found").size(14))
+                .center_x(Fill)
+                .center_y(Fill)
+                .into();
         };
-        let state = &panel.state;
-
-        // Fetch last_price from the market cache (authoritative source).
-        let last_price = self
-            .market_cache
-            .get(&state.symbol)
-            .and_then(|snap| snap.last_price);
+        let state = vm.state;
+        let last_price = vm.last_price;
 
         let oid = order_id;
 
@@ -1492,8 +1470,9 @@ impl MidasApp {
         .spacing(4)
         .align_y(iced::Alignment::Center);
 
-        // Price step for mouse wheel adjustment.
-        let (coarse_step, _fine_step) = midas_chart::price_step_for(last_price.unwrap_or(100.0));
+        // Price step for mouse wheel adjustment, pre-computed in the
+        // VM off `last_price` (or the 100.0 fallback).
+        let coarse_step = vm.coarse_step;
 
         // Entry price inputs (shown for non-Market types).
         // Each row is wrapped in mouse_area for scroll-wheel adjustment.
