@@ -43,11 +43,7 @@ pub const BRACKET_ACTIVATION_MAX_MS: u64 = 50;
 pub const OCA_CANCEL_MIN_MS: u64 = 10;
 pub const OCA_CANCEL_MAX_MS: u64 = 100;
 
-pub fn sample_activation_jitter(
-    base_seed: u64,
-    parent_id: OrderId,
-    child_id: OrderId,
-) -> Duration {
+pub fn sample_activation_jitter(base_seed: u64, parent_id: OrderId, child_id: OrderId) -> Duration {
     let mut rng = rng_for(
         base_seed,
         parent_id,

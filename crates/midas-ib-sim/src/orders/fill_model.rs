@@ -197,7 +197,16 @@ mod tests {
     #[test]
     fn market_buy_fills_at_ask() {
         let mut o = rec(OrderKind::Market, Side::Buy, None, None, 100.0);
-        let f = maybe_fill(&mut o, 100.0, 99.98, 100.02, VirtualInstant::ZERO, 0, SlippageKind::None).unwrap();
+        let f = maybe_fill(
+            &mut o,
+            100.0,
+            99.98,
+            100.02,
+            VirtualInstant::ZERO,
+            0,
+            SlippageKind::None,
+        )
+        .unwrap();
         assert_eq!(f.price, 100.02);
         assert_eq!(f.shares, 100.0);
     }
@@ -205,39 +214,108 @@ mod tests {
     #[test]
     fn market_sell_fills_at_bid() {
         let mut o = rec(OrderKind::Market, Side::Sell, None, None, 100.0);
-        let f = maybe_fill(&mut o, 100.0, 99.98, 100.02, VirtualInstant::ZERO, 0, SlippageKind::None).unwrap();
+        let f = maybe_fill(
+            &mut o,
+            100.0,
+            99.98,
+            100.02,
+            VirtualInstant::ZERO,
+            0,
+            SlippageKind::None,
+        )
+        .unwrap();
         assert_eq!(f.price, 99.98);
     }
 
     #[test]
     fn limit_buy_does_not_fill_when_above() {
         let mut o = rec(OrderKind::Limit, Side::Buy, Some(99.50), None, 100.0);
-        assert!(maybe_fill(&mut o, 100.0, 99.98, 100.02, VirtualInstant::ZERO, 0, SlippageKind::None).is_none());
+        assert!(maybe_fill(
+            &mut o,
+            100.0,
+            99.98,
+            100.02,
+            VirtualInstant::ZERO,
+            0,
+            SlippageKind::None
+        )
+        .is_none());
     }
 
     #[test]
     fn limit_buy_fills_when_market_drops() {
         let mut o = rec(OrderKind::Limit, Side::Buy, Some(100.00), None, 100.0);
-        let f = maybe_fill(&mut o, 99.99, 99.98, 100.00, VirtualInstant::ZERO, 0, SlippageKind::None).unwrap();
+        let f = maybe_fill(
+            &mut o,
+            99.99,
+            99.98,
+            100.00,
+            VirtualInstant::ZERO,
+            0,
+            SlippageKind::None,
+        )
+        .unwrap();
         assert_eq!(f.price, 100.00);
     }
 
     #[test]
     fn stop_buy_triggers_and_fills() {
         let mut o = rec(OrderKind::Stop, Side::Buy, None, Some(100.50), 100.0);
-        assert!(maybe_fill(&mut o, 100.00, 99.98, 100.02, VirtualInstant::ZERO, 0, SlippageKind::None).is_none());
+        assert!(maybe_fill(
+            &mut o,
+            100.00,
+            99.98,
+            100.02,
+            VirtualInstant::ZERO,
+            0,
+            SlippageKind::None
+        )
+        .is_none());
         assert!(!o.stop_triggered);
-        let f = maybe_fill(&mut o, 100.60, 100.58, 100.62, VirtualInstant::ZERO, 0, SlippageKind::None).unwrap();
+        let f = maybe_fill(
+            &mut o,
+            100.60,
+            100.58,
+            100.62,
+            VirtualInstant::ZERO,
+            0,
+            SlippageKind::None,
+        )
+        .unwrap();
         assert!(o.stop_triggered);
         assert_eq!(f.price, 100.62);
     }
 
     #[test]
     fn stop_limit_triggers_but_requires_cross() {
-        let mut o = rec(OrderKind::StopLimit, Side::Buy, Some(100.55), Some(100.50), 100.0);
-        assert!(maybe_fill(&mut o, 100.60, 100.58, 100.62, VirtualInstant::ZERO, 0, SlippageKind::None).is_none());
+        let mut o = rec(
+            OrderKind::StopLimit,
+            Side::Buy,
+            Some(100.55),
+            Some(100.50),
+            100.0,
+        );
+        assert!(maybe_fill(
+            &mut o,
+            100.60,
+            100.58,
+            100.62,
+            VirtualInstant::ZERO,
+            0,
+            SlippageKind::None
+        )
+        .is_none());
         assert!(o.stop_triggered);
-        let f = maybe_fill(&mut o, 100.55, 100.50, 100.55, VirtualInstant::ZERO, 0, SlippageKind::None).unwrap();
+        let f = maybe_fill(
+            &mut o,
+            100.55,
+            100.50,
+            100.55,
+            VirtualInstant::ZERO,
+            0,
+            SlippageKind::None,
+        )
+        .unwrap();
         assert_eq!(f.price, 100.55);
     }
 
@@ -266,9 +344,15 @@ mod tests {
     fn slippage_bps_moves_price_against_buyer() {
         let mut o = rec(OrderKind::Market, Side::Buy, None, None, 100.0);
         let f = maybe_fill(
-            &mut o, 100.0, 99.98, 100.00,
-            VirtualInstant::ZERO, 0, SlippageKind::FixedBps(1.0),
-        ).unwrap();
+            &mut o,
+            100.0,
+            99.98,
+            100.00,
+            VirtualInstant::ZERO,
+            0,
+            SlippageKind::FixedBps(1.0),
+        )
+        .unwrap();
         assert_eq!(f.price, 100.01);
     }
 }

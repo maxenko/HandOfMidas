@@ -152,7 +152,11 @@ fn respects_min_tick(price: f64) -> bool {
 impl OrderSimulator for BasicOrderSimulator {
     fn place(&mut self, req: PlaceOrderReq) -> Vec<OrderEmission> {
         if self.seen_order_ids.contains(&req.order_id) {
-            return vec![reject(req.order_id, DUPLICATE_ORDER_ID, "Duplicate order id")];
+            return vec![reject(
+                req.order_id,
+                DUPLICATE_ORDER_ID,
+                "Duplicate order id",
+            )];
         }
         if req.contract.symbol().is_empty() {
             return vec![reject(
@@ -181,10 +185,18 @@ impl OrderSimulator for BasicOrderSimulator {
         }
         match req.kind {
             OrderKind::Limit if req.limit_price.is_none() => {
-                return vec![reject(req.order_id, ORDER_REJECTED, "Limit order missing limit price")];
+                return vec![reject(
+                    req.order_id,
+                    ORDER_REJECTED,
+                    "Limit order missing limit price",
+                )];
             }
             OrderKind::Stop if req.aux_price.is_none() => {
-                return vec![reject(req.order_id, ORDER_REJECTED, "Stop order missing stop price")];
+                return vec![reject(
+                    req.order_id,
+                    ORDER_REJECTED,
+                    "Stop order missing stop price",
+                )];
             }
             OrderKind::StopLimit if req.limit_price.is_none() || req.aux_price.is_none() => {
                 return vec![reject(
@@ -211,9 +223,7 @@ impl OrderSimulator for BasicOrderSimulator {
                     .or_insert_with(|| BracketGroup::new(parent_id, req.oca_group.clone()));
                 match req.kind {
                     OrderKind::Limit => group.take_profit = Some(rec.order_id),
-                    OrderKind::Stop | OrderKind::StopLimit => {
-                        group.stop_loss = Some(rec.order_id)
-                    }
+                    OrderKind::Stop | OrderKind::StopLimit => group.stop_loss = Some(rec.order_id),
                     OrderKind::Market => group.take_profit = Some(rec.order_id),
                 }
             }
@@ -664,9 +674,13 @@ mod tests {
         let mut s = simulator();
         let _ = s.place(place_req(20, OrderKind::Limit, 100.0));
         let out1 = s.on_market_snapshot(&snap(150.5, 150.48, 150.52));
-        assert!(!out1.iter().any(|e| matches!(e, OrderEmission::Execution(_))));
+        assert!(!out1
+            .iter()
+            .any(|e| matches!(e, OrderEmission::Execution(_))));
         let out2 = s.on_market_snapshot(&snap(149.95, 149.93, 149.97));
-        assert!(out2.iter().any(|e| matches!(e, OrderEmission::Execution(_))));
+        assert!(out2
+            .iter()
+            .any(|e| matches!(e, OrderEmission::Execution(_))));
     }
 
     #[test]

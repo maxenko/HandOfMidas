@@ -109,25 +109,49 @@ pub fn steps_for(pattern: PatternKind) -> Vec<(Duration, StepKind)> {
         PatternKind::A => vec![
             (ms(PATTERN_A_OFFSETS_MS[0]), StepKind::OpenOrderSubmitted),
             (ms(PATTERN_A_OFFSETS_MS[1]), StepKind::OrderStatusFilled),
-            (ms(PATTERN_A_OFFSETS_MS[2]), StepKind::ExecutionPart { chunk_idx: 0 }),
-            (ms(PATTERN_A_OFFSETS_MS[3]), StepKind::CommissionPart { chunk_idx: 0 }),
+            (
+                ms(PATTERN_A_OFFSETS_MS[2]),
+                StepKind::ExecutionPart { chunk_idx: 0 },
+            ),
+            (
+                ms(PATTERN_A_OFFSETS_MS[3]),
+                StepKind::CommissionPart { chunk_idx: 0 },
+            ),
         ],
         PatternKind::B => vec![
             (ms(PATTERN_B_OFFSETS_MS[0]), StepKind::OpenOrderPreSubmitted),
-            (ms(PATTERN_B_OFFSETS_MS[1]), StepKind::ExecutionPart { chunk_idx: 0 }),
-            (ms(PATTERN_B_OFFSETS_MS[2]), StepKind::CommissionPart { chunk_idx: 0 }),
+            (
+                ms(PATTERN_B_OFFSETS_MS[1]),
+                StepKind::ExecutionPart { chunk_idx: 0 },
+            ),
+            (
+                ms(PATTERN_B_OFFSETS_MS[2]),
+                StepKind::CommissionPart { chunk_idx: 0 },
+            ),
             (ms(PATTERN_B_OFFSETS_MS[3]), StepKind::OrderStatusFilled),
         ],
         PatternKind::C => vec![
             (ms(PATTERN_C_OFFSETS_MS[0]), StepKind::OpenOrderPreSubmitted),
-            (ms(PATTERN_C_OFFSETS_MS[1]), StepKind::ExecutionPart { chunk_idx: 0 }),
-            (ms(PATTERN_C_OFFSETS_MS[2]), StepKind::CommissionPart { chunk_idx: 0 }),
+            (
+                ms(PATTERN_C_OFFSETS_MS[1]),
+                StepKind::ExecutionPart { chunk_idx: 0 },
+            ),
+            (
+                ms(PATTERN_C_OFFSETS_MS[2]),
+                StepKind::CommissionPart { chunk_idx: 0 },
+            ),
             (
                 ms(PATTERN_C_OFFSETS_MS[3]),
                 StepKind::OrderStatusPartiallyFilled { chunk_idx: 0 },
             ),
-            (ms(PATTERN_C_OFFSETS_MS[4]), StepKind::ExecutionPart { chunk_idx: 1 }),
-            (ms(PATTERN_C_OFFSETS_MS[5]), StepKind::CommissionPart { chunk_idx: 1 }),
+            (
+                ms(PATTERN_C_OFFSETS_MS[4]),
+                StepKind::ExecutionPart { chunk_idx: 1 },
+            ),
+            (
+                ms(PATTERN_C_OFFSETS_MS[5]),
+                StepKind::CommissionPart { chunk_idx: 1 },
+            ),
             (ms(PATTERN_C_OFFSETS_MS[6]), StepKind::OrderStatusFilled),
         ],
     }
