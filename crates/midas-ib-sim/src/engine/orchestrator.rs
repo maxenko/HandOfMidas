@@ -200,7 +200,9 @@ impl OrchestratedEngine {
 
     /// Advance the market-data engine to `now`, project each emission into a
     /// `MarketSnapshot`, feed snapshots to the order simulator, and publish
-    /// all resulting emissions as `EngineEvent`s.
+    /// all resulting emissions as `EngineEvent`s. Also drains any deferred
+    /// order emissions (Wave-4 slow-commission-report path) whose deadlines
+    /// have come due.
     pub fn drive_market_data(&mut self) {
         let now = self.clock.now();
         let emissions = self.market_data.step(now);
@@ -212,6 +214,13 @@ impl OrchestratedEngine {
                 }
             }
             self.pending_emissions.push(em);
+        }
+        // Drain any deferred (slow-commission) emissions that became due
+        // since the last tick. Uses the `OrderSimulator` trait method so
+        // test doubles can participate in the same path.
+        let due = <BasicOrderSimulator as OrderSimulator>::drain_due(&mut self.orders, now);
+        for oe in due {
+            self.record_order_emission(&oe);
         }
     }
 
@@ -313,14 +322,24 @@ impl OrchestratedEngine {
             EngineCmd::InjectFarmRestore { code, farms } => {
                 self.emit_event(EngineEvent::FarmStatusChanged { code, farms });
             }
-            EngineCmd::InjectPriceJump { .. }
-            | EngineCmd::InjectGap { .. }
-            | EngineCmd::InjectHalt { .. }
-            | EngineCmd::InjectBurst { .. } => {
-                // Perturbations belong in the market-data engine; Wave 3
-                // routes scenarios that need them through a `HybridEngine`
-                // configured at boot time. A runtime mutation path lands in
-                // Wave 4.
+            EngineCmd::InjectPriceJump {
+                symbol,
+                magnitude_pct,
+            } => {
+                self.on_inject_price_jump(&symbol, magnitude_pct);
+            }
+            EngineCmd::InjectGap { symbol, from, to } => {
+                self.on_inject_gap(&symbol, from, to);
+            }
+            EngineCmd::InjectHalt { symbol, duration } => {
+                self.on_inject_halt(&symbol, duration);
+            }
+            EngineCmd::InjectBurst {
+                symbols,
+                multiplier,
+                duration,
+            } => {
+                self.on_inject_burst(&symbols, multiplier, duration);
             }
             EngineCmd::InjectDailyRestart => {
                 self.on_inject_daily_restart();
@@ -529,6 +548,53 @@ impl OrchestratedEngine {
         self.handle_violation(session, violation);
     }
 
+    fn on_inject_price_jump(&mut self, symbol: &SymbolKey, magnitude_pct: f64) {
+        let now = self.clock.now();
+        if let Err(e) = self.market_data.inject_jump(symbol, magnitude_pct, now) {
+            warn!(
+                symbol = ?symbol,
+                error = %e,
+                "inject_price_jump: market-data engine rejected perturbation",
+            );
+        }
+    }
+
+    fn on_inject_gap(&mut self, symbol: &SymbolKey, from: f64, to: f64) {
+        let now = self.clock.now();
+        if let Err(e) = self.market_data.inject_gap(symbol, from, to, now) {
+            warn!(
+                symbol = ?symbol,
+                error = %e,
+                "inject_gap: market-data engine rejected perturbation",
+            );
+        }
+    }
+
+    fn on_inject_halt(&mut self, symbol: &SymbolKey, duration: Duration) {
+        let now = self.clock.now();
+        if let Err(e) = self.market_data.inject_halt(symbol, duration, now) {
+            warn!(
+                symbol = ?symbol,
+                error = %e,
+                "inject_halt: market-data engine rejected perturbation",
+            );
+        }
+    }
+
+    fn on_inject_burst(&mut self, symbols: &[SymbolKey], multiplier: f64, duration: Duration) {
+        let now = self.clock.now();
+        if let Err(e) = self
+            .market_data
+            .inject_burst(symbols, multiplier, duration, now)
+        {
+            warn!(
+                symbols = ?symbols,
+                error = %e,
+                "inject_burst: market-data engine rejected perturbation",
+            );
+        }
+    }
+
     fn on_inject_daily_restart(&mut self) {
         // Drop every session + clear quirk bookkeeping. Farm-status event
         // carries code 1300 to mirror real IB.
@@ -693,18 +759,105 @@ impl OrchestratedEngine {
 pub use crate::engine::types::{OrderKind as OrderKind2, Side as OrderSide2};
 
 // ---------------------------------------------------------------------------
+// ScenarioQuery direct impl (Wave 4)
+// ---------------------------------------------------------------------------
+//
+// `MarketDataEngine` is `Send + Sync` since Wave 4 (the default impls are
+// single-threaded state machines with no interior mutability — declaring
+// `Sync` is purely a bound-level change). That makes `OrchestratedEngine`
+// `Send + Sync` too, so it can implement [`crate::scenario::expr::ScenarioQuery`]
+// directly without any `Arc<Mutex<_>>` wrapper.
+//
+// The adapter in `scenario::engine_adapter` still wraps the engine in a
+// `Mutex` because it needs interior mutability for the `ScenarioEngine`
+// trait's `&self`-mutating methods (`accept`, `advance_fills`, …). But its
+// `ScenarioQuery` impl delegates to the direct one here, keeping a single
+// source of truth.
+
+impl crate::scenario::expr::ScenarioQuery for OrchestratedEngine {
+    fn orders(&self) -> Vec<crate::scenario::expr::OrderSnapshot> {
+        use crate::scenario::expr::OrderSnapshot;
+        self.orders
+            .orders()
+            .values()
+            .map(|o| OrderSnapshot {
+                order_ref: format!("{}/{}", o.account, o.order_id.0),
+                symbol: o.contract.symbol().to_string(),
+                side: match o.side {
+                    Side::Buy => "buy".into(),
+                    Side::Sell => "sell".into(),
+                },
+                quantity: o.total_qty,
+                filled_qty: o.filled_qty,
+                remaining_qty: o.remaining_qty,
+                status: status_code_to_name(o.status),
+                limit_price: o.limit_price,
+                stop_price: o.aux_price,
+                avg_fill_price: if o.avg_fill_price > 0.0 {
+                    Some(o.avg_fill_price)
+                } else {
+                    None
+                },
+                parent_ref: o.parent_id.map(|p| format!("{}/{}", o.account, p.0)),
+            })
+            .collect()
+    }
+
+    fn position_for(&self, symbol: &str) -> Option<crate::scenario::expr::PositionSnapshot> {
+        use crate::scenario::expr::PositionSnapshot;
+        self.orders
+            .account()
+            .positions
+            .iter()
+            .find(|(k, _)| k.symbol == symbol)
+            .map(|(k, p)| PositionSnapshot {
+                symbol: k.symbol.clone(),
+                quantity: p.shares,
+                avg_cost: p.avg_cost,
+                realized_pnl: p.realized_pnl,
+                unrealized_pnl: 0.0,
+            })
+    }
+
+    fn positions(&self) -> Vec<crate::scenario::expr::PositionSnapshot> {
+        project_positions(self)
+    }
+
+    fn session_metrics(&self, id: u64) -> Option<crate::scenario::expr::SessionMetrics> {
+        use crate::scenario::expr::SessionMetrics;
+        let connected = self.sessions.contains_key(&SessionId(id));
+        Some(SessionMetrics {
+            msg_count: 0,
+            msg_count_last_5s: 0,
+            tick_count: 0,
+            connected,
+        })
+    }
+
+    fn session_duration(&self) -> Duration {
+        self.clock.now().as_duration()
+    }
+}
+
+// Compile-time assertion: `OrchestratedEngine` is `Send + Sync`. Catches
+// regressions if a future field adds a `!Send` / `!Sync` type and quietly
+// breaks the direct `ScenarioQuery` impl (which requires `Self: Send + Sync`
+// via the trait's super-trait bound).
+#[allow(dead_code)]
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<OrchestratedEngine>();
+};
+
+// ---------------------------------------------------------------------------
 // ScenarioQuery projection helpers
 // ---------------------------------------------------------------------------
 //
-// The scenario DSL's `ScenarioQuery` trait is `Send + Sync`, but
-// `OrchestratedEngine` contains a `Box<dyn MarketDataEngine>` which is
-// only `Send` (by design — the market-data engines are single-threaded
-// state machines). Rather than widen the market-data trait, the adapter
-// in `scenario::engine_adapter` wraps the engine in an `Arc<Mutex<_>>` and
-// implements `ScenarioQuery` on the wrapper. The helpers below project
-// the engine's internals into the snapshot shapes the DSL expects — kept
-// here so both the adapter and future direct consumers (Wave 4 control
-// plane) share one source of truth.
+// These helpers predate the direct `impl` above; they remain public because
+// Wave-4 integration tests and the `RealScenarioEngine` adapter reuse them
+// when they need to project orders with custom `order_ref` naming (the
+// direct impl uses a deterministic `account/order_id` scheme, but the
+// adapter lets scenarios supply their own `order_ref`).
 
 /// Translate the engine's [`crate::orders::state_machine::OrderRecord`]s into
 /// the DSL-facing [`crate::scenario::expr::OrderSnapshot`] projection.

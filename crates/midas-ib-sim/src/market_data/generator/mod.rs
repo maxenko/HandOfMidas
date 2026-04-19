@@ -490,11 +490,10 @@ impl SyntheticEngine {
         out
     }
 
-    /// Apply a scripted perturbation directly to the base engine (in-place
-    /// rather than the `HybridEngine` post-processor). Reserved for future
-    /// use by the scenario runner (Stage 06) — presently the post-processor
-    /// form in `HybridEngine` is preferred.
-    #[allow(dead_code)]
+    /// Apply a scripted price jump directly to the base engine (in-place
+    /// rather than via `HybridEngine` post-processing). Used both by
+    /// `MarketDataEngine::inject_jump` and by unit tests that exercise the
+    /// Roll-GARCH state transitions.
     pub(crate) fn apply_price_jump(&mut self, symbol: &SymbolKey, magnitude_pct: f64) {
         if let Some(state) = self.symbols.get_mut(symbol) {
             state.log_mid += magnitude_pct / 100.0;
@@ -502,7 +501,7 @@ impl SyntheticEngine {
         }
     }
 
-    #[allow(dead_code)]
+    /// Snap the symbol's mid-price to `to`. `from` is advisory.
     pub(crate) fn apply_gap(&mut self, symbol: &SymbolKey, from: f64, to: f64) {
         if let Some(state) = self.symbols.get_mut(symbol) {
             let _ = from; // advisory; we simply snap the mid to `to`.
@@ -511,9 +510,8 @@ impl SyntheticEngine {
         }
     }
 
-    /// Used by tests in this file; exposed via `pub(crate)` for the
-    /// integration-test harness as well.
-    #[allow(dead_code)]
+    /// Halt the symbol for `duration` starting at `now` — emissions are
+    /// suppressed until the halt expires.
     pub(crate) fn apply_halt(
         &mut self,
         symbol: &SymbolKey,
@@ -525,7 +523,8 @@ impl SyntheticEngine {
         }
     }
 
-    #[allow(dead_code)]
+    /// Multiply the tick arrival rate by `multiplier` for `duration` starting
+    /// at `now`, across every symbol in `symbols`.
     pub(crate) fn apply_burst(
         &mut self,
         symbols: &[SymbolKey],
@@ -827,6 +826,65 @@ impl MarketDataEngine for SyntheticEngine {
 
     fn snapshot(&self, symbol: &SymbolKey) -> Option<Snapshot> {
         self.last_snapshot.get(symbol).cloned()
+    }
+
+    fn inject_jump(
+        &mut self,
+        symbol: &SymbolKey,
+        magnitude_pct: f64,
+        _now: VirtualInstant,
+    ) -> Result<(), MarketDataError> {
+        if !self.symbols.contains_key(symbol) {
+            return Err(MarketDataError::UnknownContract);
+        }
+        self.apply_price_jump(symbol, magnitude_pct);
+        Ok(())
+    }
+
+    fn inject_gap(
+        &mut self,
+        symbol: &SymbolKey,
+        from: f64,
+        to: f64,
+        _now: VirtualInstant,
+    ) -> Result<(), MarketDataError> {
+        if !self.symbols.contains_key(symbol) {
+            return Err(MarketDataError::UnknownContract);
+        }
+        self.apply_gap(symbol, from, to);
+        Ok(())
+    }
+
+    fn inject_halt(
+        &mut self,
+        symbol: &SymbolKey,
+        duration: Duration,
+        now: VirtualInstant,
+    ) -> Result<(), MarketDataError> {
+        if !self.symbols.contains_key(symbol) {
+            return Err(MarketDataError::UnknownContract);
+        }
+        self.apply_halt(symbol, now, duration);
+        Ok(())
+    }
+
+    fn inject_burst(
+        &mut self,
+        symbols: &[SymbolKey],
+        multiplier: f64,
+        duration: Duration,
+        now: VirtualInstant,
+    ) -> Result<(), MarketDataError> {
+        // `inject_burst` with an empty symbol list applies to every
+        // currently-registered symbol (mirrors the scenario-DSL convenience
+        // where an empty list means "all symbols").
+        if symbols.is_empty() {
+            let all: Vec<SymbolKey> = self.symbols.keys().cloned().collect();
+            self.apply_burst(&all, now, multiplier, duration);
+        } else {
+            self.apply_burst(symbols, now, multiplier, duration);
+        }
+        Ok(())
     }
 }
 

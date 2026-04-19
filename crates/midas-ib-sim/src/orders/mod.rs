@@ -38,6 +38,21 @@ pub trait OrderSimulator: Send {
     fn cancel(&mut self, order_id: OrderId) -> Vec<OrderEmission>;
     fn on_market_snapshot(&mut self, snap: &MarketSnapshot) -> Vec<OrderEmission>;
     fn open_orders_snapshot(&self) -> Vec<OrderEmission>;
+
+    /// Drain emissions scheduled for delivery at or before `now` — used by
+    /// Wave-4 slow-commission-report overrides that defer a
+    /// `CommissionReport` beyond the default Pattern-B offset.
+    ///
+    /// Default: empty (engines without a deferral queue return nothing).
+    fn drain_due(&mut self, _now: VirtualInstant) -> Vec<OrderEmission> {
+        Vec::new()
+    }
+
+    /// Peek the next deferred deadline, if any. Used by the orchestrator to
+    /// know how far to advance the virtual clock between commands.
+    fn next_deferred_deadline(&self) -> Option<VirtualInstant> {
+        None
+    }
 }
 
 pub struct BasicOrderSimulator {
@@ -52,6 +67,23 @@ pub struct BasicOrderSimulator {
     slippage: SlippageKind,
     last_snapshot: BTreeMap<SymbolKey, MarketSnapshot>,
     exec_counter: u64,
+    /// Per-order commission-report delay overrides. When present, a fill's
+    /// `CommissionReport` step is emitted `delay` after the fill timestamp
+    /// instead of the Pattern's default offset. Fed via
+    /// [`Self::set_commission_delay`] by Wave-4's
+    /// `inject_slow_commission_report` scenario verb.
+    commission_delay: BTreeMap<OrderId, Duration>,
+    /// Deferred emissions — commission reports whose delivery time exceeds
+    /// their Pattern offset. Drained by [`Self::drain_due`] when the
+    /// orchestrator ticks.
+    deferred: Vec<(VirtualInstant, OrderEmission)>,
+    /// Wave-4 `InjectDuplicateOrderStatus` — when set, the next `OrderStatus`
+    /// emission on ANY order is emitted twice. Consumed on first use.
+    duplicate_order_status_next: bool,
+    /// Wave-4 `InjectOutOfOrderEvents` — per-order step reorderings. Keyed by
+    /// `OrderId`, maps `step_idx → new_step_idx`. When present, a fill
+    /// reorders its pattern-steps by this permutation before emission.
+    out_of_order_overrides: BTreeMap<OrderId, Vec<u8>>,
 }
 
 impl BasicOrderSimulator {
@@ -72,7 +104,37 @@ impl BasicOrderSimulator {
             slippage: SlippageKind::FixedBps(1.0),
             last_snapshot: BTreeMap::new(),
             exec_counter: 0,
+            commission_delay: BTreeMap::new(),
+            deferred: Vec::new(),
+            duplicate_order_status_next: false,
+            out_of_order_overrides: BTreeMap::new(),
         }
+    }
+
+    /// Override the commission-report delay for `order_id`. The next fill on
+    /// that order delays its `CommissionReport` emission by `delay` after the
+    /// Execution timestamp, instead of using the Pattern's default offset.
+    ///
+    /// Consumed on first fill — the override is removed so subsequent fills
+    /// (if the order re-fills, which shouldn't happen in practice) use the
+    /// default Pattern timing.
+    pub fn set_commission_delay(&mut self, order_id: OrderId, delay: Duration) {
+        self.commission_delay.insert(order_id, delay);
+    }
+
+    /// Wave-4 `InjectDuplicateOrderStatus` — arm a one-shot flag so the next
+    /// `OrderStatus` emission (from any fill path) is duplicated.
+    pub fn arm_duplicate_order_status(&mut self) {
+        self.duplicate_order_status_next = true;
+    }
+
+    /// Wave-4 `InjectOutOfOrderEvents` — install a permutation of Pattern
+    /// step indices for `order_id`. The vector length must match
+    /// `steps_for(selected_pattern).len()`; elements are the new indices in
+    /// emission order. Malformed permutations are ignored at emit time
+    /// (falls back to the pattern's natural ordering).
+    pub fn install_out_of_order_schedule(&mut self, order_id: OrderId, permutation: Vec<u8>) {
+        self.out_of_order_overrides.insert(order_id, permutation);
     }
 
     pub fn set_slippage(&mut self, s: SlippageKind) {
@@ -341,6 +403,24 @@ impl OrderSimulator for BasicOrderSimulator {
         }
         out
     }
+
+    fn drain_due(&mut self, now: VirtualInstant) -> Vec<OrderEmission> {
+        let mut out = Vec::new();
+        let mut keep = Vec::with_capacity(self.deferred.len());
+        for (deadline, em) in self.deferred.drain(..) {
+            if deadline <= now {
+                out.push(em);
+            } else {
+                keep.push((deadline, em));
+            }
+        }
+        self.deferred = keep;
+        out
+    }
+
+    fn next_deferred_deadline(&self) -> Option<VirtualInstant> {
+        self.deferred.iter().map(|(d, _)| *d).min()
+    }
 }
 
 impl BasicOrderSimulator {
@@ -383,8 +463,17 @@ impl BasicOrderSimulator {
         let side = working.side;
         let symbol_key = symbol_key_for(&contract);
 
+        // Wave-4: commission delay override. When set, the commission step's
+        // offset becomes `fill.ts + delay - now`, routing the emission through
+        // `deferred` for later drain.
+        let commission_delay_override = self.commission_delay.remove(&order_id);
+        // Wave-4: out-of-order schedule override. Maps original step index →
+        // new index; applied after the natural offset-sort.
+        let reorder = self.out_of_order_overrides.remove(&order_id);
+
         for (step_idx, (base_off, kind)) in steps.iter().enumerate() {
-            let offset = actual_offset(*base_off, self.base_seed, order_id, step_idx as u32);
+            let mut offset = actual_offset(*base_off, self.base_seed, order_id, step_idx as u32);
+            let mut emit_deferred = false;
             let emission = match *kind {
                 StepKind::OpenOrderSubmitted => {
                     self.emit_open_order(&working, OrderStatusCode::Submitted)
@@ -428,6 +517,11 @@ impl BasicOrderSimulator {
                     let shares = chunks.get(chunk_idx as usize).copied().unwrap_or(0.0);
                     let commission = (0.005 * shares).max(1.00);
                     let exec_id = format!("exec-{:08x}", self.exec_counter);
+                    // Apply the commission-delay override if present.
+                    if let Some(d) = commission_delay_override {
+                        offset = d;
+                        emit_deferred = true;
+                    }
                     OrderEmission::Commission(CommissionReport {
                         exec_id,
                         commission,
@@ -447,11 +541,57 @@ impl BasicOrderSimulator {
                     self.emit_order_status(&working, OrderStatusCode::Filled)
                 }
             };
+            if emit_deferred {
+                // Commission delayed past its Pattern offset — schedule it
+                // for `drain_due`. We use `fill.ts + offset` so the deadline
+                // is expressed in the same virtual timeline the caller drives.
+                let deadline = VirtualInstant::from_duration(fill.ts.as_duration() + offset);
+                self.deferred.push((deadline, emission));
+                // Do NOT add to `materialized` — the inline emission queue
+                // only carries same-tick emissions.
+                continue;
+            }
             materialized.push((offset, emission));
         }
 
         materialized.sort_by_key(|a| a.0);
+        // Wave-4 out-of-order reordering: when present, permute the sorted
+        // vector by `reorder[i] -> new index`. Malformed permutations
+        // (wrong length or out-of-range indices) silently fall back.
+        if let Some(perm) = reorder {
+            if perm.len() == materialized.len()
+                && perm.iter().all(|&i| (i as usize) < materialized.len())
+            {
+                let mut reordered: Vec<Option<(Duration, OrderEmission)>> =
+                    (0..materialized.len()).map(|_| None).collect();
+                for (src_idx, item) in materialized.into_iter().enumerate() {
+                    let dst = perm[src_idx] as usize;
+                    reordered[dst] = Some(item);
+                }
+                if reordered.iter().all(|x| x.is_some()) {
+                    materialized = reordered.into_iter().map(|x| x.unwrap()).collect();
+                } else {
+                    // Collision — two src entries wrote to the same dst.
+                    // Recover the original order to keep determinism.
+                    materialized = reordered.into_iter().flatten().collect();
+                }
+            }
+        }
         let mut out: Vec<OrderEmission> = materialized.into_iter().map(|(_, e)| e).collect();
+
+        // Wave-4: duplicate OrderStatus. If armed, the first `OrderStatus`
+        // emission in `out` is cloned + inserted right after itself; the flag
+        // is consumed (one-shot).
+        if self.duplicate_order_status_next {
+            if let Some(pos) = out
+                .iter()
+                .position(|e| matches!(e, OrderEmission::OrderStatus(_)))
+            {
+                let dup = out[pos].clone();
+                out.insert(pos + 1, dup);
+                self.duplicate_order_status_next = false;
+            }
+        }
 
         if let Some(rec) = self.orders.get_mut(&order_id) {
             *rec = working;
