@@ -3,12 +3,23 @@
 //! Parses CLI args, initialises tracing with the span hierarchy documented in
 //! `plan/ib-sim/01-architecture.md` §Observability, constructs a `SimConfig`,
 //! and boots the sim via `start_sim`. Blocks on ctrl-c and shuts down cleanly.
+//!
+//! Stage-07 operating modes:
+//!
+//! - `--proxy-to HOST:PORT --record STEM` — record live traffic between the
+//!   API client and a real IB gateway into `STEM.tws.pcap` (+ `.dbn`).
+//! - `--replay SESSION.tws.pcap` — serve the client side of a recorded
+//!   session, per `--replay-mode`.
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use clap::Parser;
+use midas_ib_sim::session::{run_proxy, ProxyConfig, Recorder};
 use midas_ib_sim::{start_sim, ClockMode, MarketDataMode, SimConfig};
+use tokio::sync::Mutex;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
@@ -59,6 +70,30 @@ struct Cli {
     /// Log level (falls back to `RUST_LOG` env var when unset).
     #[arg(long, default_value = "info")]
     log_level: String,
+
+    /// Proxy mode: forward to this upstream IB gateway (e.g. `127.0.0.1:7496`).
+    /// When set the server runs as a recording proxy instead of a sim.
+    #[arg(long)]
+    proxy_to: Option<String>,
+
+    /// Output stem for the `.tws.pcap` + `.dbn` pair written in proxy mode.
+    /// Required when `--proxy-to` is set.
+    #[arg(long)]
+    record: Option<PathBuf>,
+
+    /// Compress the recorded `.tws.pcap` with zstd at rest.
+    #[arg(long)]
+    record_zstd: bool,
+
+    /// Replay a previously recorded `.tws.pcap`. Mutually exclusive with
+    /// `--proxy-to`.
+    #[arg(long)]
+    replay: Option<PathBuf>,
+
+    /// Client-side validation strictness during replay.
+    /// `strict` (default) | `best-effort` | `ignore-client`.
+    #[arg(long, default_value = "strict")]
+    replay_mode: String,
 }
 
 impl Cli {
@@ -125,6 +160,20 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
     init_tracing(&cli.log_level);
 
+    // Stage-07 mode dispatch runs BEFORE we build a `SimConfig` so the
+    // proxy/replay paths don't depend on the sim core (which is still
+    // scaffolded in Stage 01).
+    if let Some(proxy_to) = cli.proxy_to.as_ref() {
+        let Some(record_stem) = cli.record.as_ref() else {
+            error!("--proxy-to requires --record STEM");
+            return ExitCode::from(2);
+        };
+        return run_proxy_mode(proxy_to, cli.port, record_stem, cli.record_zstd).await;
+    }
+    if let Some(replay_path) = cli.replay.as_ref() {
+        return run_replay_mode(replay_path, &cli.replay_mode).await;
+    }
+
     let config = match cli.into_config() {
         Ok(c) => c,
         Err(e) => {
@@ -153,5 +202,82 @@ async fn main() -> ExitCode {
         Err(e) => error!("ctrl-c handler failed: {e}"),
     }
     sim.shutdown().await;
+    ExitCode::SUCCESS
+}
+
+async fn run_proxy_mode(
+    proxy_to: &str,
+    bind_port: u16,
+    record_stem: &PathBuf,
+    zstd: bool,
+) -> ExitCode {
+    let upstream: SocketAddr = match proxy_to.parse() {
+        Ok(a) => a,
+        Err(e) => {
+            error!("invalid --proxy-to address `{proxy_to}`: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let bind: SocketAddr = format!("127.0.0.1:{bind_port}")
+        .parse()
+        .expect("loopback+u16 is always a valid socket address");
+    let recorder = match Recorder::start(record_stem, 0, zstd, Some("IB.LIVE")) {
+        Ok(r) => Arc::new(Mutex::new(r)),
+        Err(e) => {
+            error!("recorder init failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let cfg = ProxyConfig::new(bind, upstream);
+    info!(%bind, %upstream, "proxy mode — waiting for client");
+    match run_proxy(cfg, recorder).await {
+        Ok(stats) => {
+            info!(
+                client_to_upstream_bytes = stats.client_to_upstream_bytes,
+                upstream_to_client_bytes = stats.upstream_to_client_bytes,
+                "proxy session ended"
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            error!("proxy failed: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run_replay_mode(replay_path: &PathBuf, mode_str: &str) -> ExitCode {
+    use midas_ib_sim::session::{ReplayMode, Replayer};
+
+    let mode = match mode_str {
+        "strict" => ReplayMode::Strict,
+        "best-effort" | "best_effort" | "besteffort" => ReplayMode::BestEffort,
+        "ignore-client" | "ignore_client" | "ignoreclient" => ReplayMode::IgnoreClient,
+        other => {
+            error!("unknown --replay-mode `{other}`");
+            return ExitCode::from(2);
+        }
+    };
+    let file = match std::fs::File::open(replay_path) {
+        Ok(f) => f,
+        Err(e) => {
+            error!("opening {}: {}", replay_path.display(), e);
+            return ExitCode::FAILURE;
+        }
+    };
+    let replayer = match Replayer::with_reader(file, mode) {
+        Ok(r) => r,
+        Err(e) => {
+            error!("replay init failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    info!(
+        path = %replay_path.display(),
+        mode = ?mode,
+        server_version_neg = replayer.header().server_version_neg,
+        "replay mode — Stage-07 standalone replay server is not yet wired to a TCP listener; \
+         use the library API or `midas-ib-sim replay` for now"
+    );
     ExitCode::SUCCESS
 }

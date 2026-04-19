@@ -24,6 +24,7 @@ pub mod quirks;
 pub mod scenario;
 pub mod security;
 pub mod server;
+pub mod session;
 
 // ---------------------------------------------------------------------------
 // Public re-exports — kept minimal so tests can embed the crate cheaply.
@@ -45,3 +46,8 @@ pub use crate::orders::OrderSimulator;
 pub use crate::quirks::QuirkGuard;
 pub use crate::scenario::{Scenario, ScenarioError, Verb, CURRENT_VERSION};
 pub use crate::server::{start_sim, Sim, SimConfig, SimHandle};
+pub use crate::session::{
+    AnonymizeConfig, Anonymizer, CalibratedPreset, DbnEncoder, Direction, ProxyConfig, Recorder,
+    ReplayMode, Replayer, TwsPcapHeader, TwsPcapReader, TwsPcapRecord, TwsPcapWriter, PCAP_MAGIC,
+    PCAP_VERSION,
+};
