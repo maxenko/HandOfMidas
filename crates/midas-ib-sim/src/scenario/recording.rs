@@ -26,7 +26,10 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 
-use super::mock_engine::{MockCmd, MockEngine};
+use super::engine_adapter::ScenarioEngine;
+use super::mock_engine::MockCmd;
+#[cfg(test)]
+use super::mock_engine::MockEngine;
 
 /// I/O + diff diagnostics.
 #[derive(Debug, thiserror::Error)]
@@ -46,8 +49,9 @@ pub enum RecordingError {
 }
 
 /// Persist the engine's current outgoing-command log to `path`. Overwrites
-/// any existing file.
-pub fn save(engine: &MockEngine, path: impl AsRef<Path>) -> Result<(), RecordingError> {
+/// any existing file. Works for any [`ScenarioEngine`] — Wave 3 uses this
+/// against both [`MockEngine`] and the real-engine adapter.
+pub fn save(engine: &dyn ScenarioEngine, path: impl AsRef<Path>) -> Result<(), RecordingError> {
     let path = path.as_ref();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -77,7 +81,10 @@ pub fn load(path: impl AsRef<Path>) -> Result<Vec<MockCmd>, RecordingError> {
 
 /// Assert the engine's captured command sequence matches `expected`, command-
 /// by-command. Emits a [`RecordingError::Mismatch`] on the first divergence.
-pub fn assert_matches(engine: &MockEngine, expected: &[MockCmd]) -> Result<(), RecordingError> {
+pub fn assert_matches(
+    engine: &dyn ScenarioEngine,
+    expected: &[MockCmd],
+) -> Result<(), RecordingError> {
     let actual = engine.outgoing();
     if actual.len() != expected.len() {
         return Err(RecordingError::LengthMismatch {
