@@ -1,0 +1,5 @@
+{"cmd":"subscribe_market_data","symbol":"AAPL","mode":"streaming_l1"}
+{"cmd":"subscribe_market_data","symbol":"SPY","mode":"streaming_l1"}
+{"cmd":"subscribe_market_data","symbol":"MSFT","mode":"streaming_l1"}
+{"cmd":"assert","cond":"session[0].connected","passed":true,"message":"session stays connected even after line-limit overflow"}
+{"cmd":"scenario_completed"}

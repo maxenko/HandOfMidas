@@ -1,0 +1,7 @@
+{"cmd":"subscribe_market_data","symbol":"AAPL","mode":"streaming_l1"}
+{"cmd":"place_order","order_ref":"DU1234567/1000","symbol":"AAPL","side":"buy","quantity":100.0,"order_kind":"market"}
+{"cmd":"inject_daily_restart"}
+{"cmd":"assert","cond":"orders[smoke-1].status == Filled","passed":true,"message":"entry fills within 5s under default params"}
+{"cmd":"assert","cond":"all_orders_have_terminal_status","passed":true,"message":"no dangling orders at session end"}
+{"cmd":"assert","cond":"session_duration <= 5min","passed":true,"message":null}
+{"cmd":"scenario_completed"}

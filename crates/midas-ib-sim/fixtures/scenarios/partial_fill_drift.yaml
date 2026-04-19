@@ -1,0 +1,57 @@
+# Canonical partial-fill-drift scenario.
+#
+# Intent: large market order + simulated mid drift. Against the mock the
+# order fills in one shot; the scenario captures the command sequence
+# (the real engine in Stages 03/04 will drive the multi-fill shape).
+
+version: 1
+name: "partial_fill_drift"
+description: "Large market order with mid drift (price jumps while inflight)."
+seed: 17
+clock: virtual
+duration: 1min
+
+symbols:
+  - symbol: AAPL
+    initial_price: 175.00
+
+accounts:
+  - acct_code: "DU1"
+    starting_cash: 500000.00
+
+events:
+  - at: "00:00:02"
+    do: subscribe_market_data
+    args:
+      symbol: AAPL
+      subscription: streaming_l1
+
+  - at: "00:00:05"
+    do: accept_order
+    args:
+      order_kind: single
+      side: buy
+      quantity: 1000
+      entry: market
+      symbol: AAPL
+      account: DU1
+      order_ref: pfd-1
+
+  # Simulate the market moving while the order is inflight.
+  - at: "00:00:06"
+    do: inject_price_jump
+    args:
+      symbol: AAPL
+      magnitude_pct: 0.5
+
+  - at: "00:00:07"
+    do: inject_price_jump
+    args:
+      symbol: AAPL
+      magnitude_pct: 0.3
+
+asserts:
+  - cond: "orders[pfd-1].status == Filled"
+    message: "large market order fills"
+  - cond: "sum(orders[*].filled_qty) == 1000"
+    message: "aggregate filled qty matches"

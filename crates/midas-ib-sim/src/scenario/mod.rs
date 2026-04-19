@@ -7,18 +7,28 @@
 //! - [`migrations`] carries the version-to-version upgrade chain.
 //! - [`json_schema`] exports a JSON Schema derived from the Rust types for
 //!   editor tooling.
-//!
-//! Wave-2 runner + expression-interpreter code will live alongside these
-//! modules; the types here stay stable so scenarios written today keep
-//! working when the runner arrives.
+//! - [`expr`] — parser + interpreter + `ScenarioQuery` trait for the
+//!   `when:` / `assert` predicate language.
+//! - [`mock_engine`] — minimum-viable stand-in that satisfies [`expr::ScenarioQuery`]
+//!   and consumes [`crate::engine::types::EngineCmd`]s. Used by the runner
+//!   until the real engine stages land.
+//! - [`runner`] — executes a loaded scenario against an engine (mock or
+//!   real) under a chosen clock.
+//! - [`recording`] — persist and compare `.expected.jsonl` command logs.
+//! - [`injector`] — verb → `EngineCmd` translation.
 
+pub mod expr;
 pub mod injector;
 pub mod json_schema;
 pub mod loader;
 pub mod migrations;
+pub mod mock_engine;
+pub mod recording;
+pub mod runner;
 pub mod schema;
 
 pub use self::loader::{load, load_from_str, ScenarioError};
+pub use self::runner::{RunnerError, ScenarioResult, ScenarioRunner};
 pub use self::schema::{
     AcceptOrderArgs, AccountConfig, AssertArgs, AssertClientEventOrderArgs,
     AssertClientReceivedArgs, CancelOrderArgs, ClockMode, EntryType, Expression, FarmCodeArgs,

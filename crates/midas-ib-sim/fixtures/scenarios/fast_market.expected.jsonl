@@ -1,0 +1,6 @@
+{"cmd":"subscribe_market_data","symbol":"SPY","mode":"streaming_l1"}
+{"cmd":"inject_burst","symbols":["SPY","AAPL"],"multiplier":10.0,"duration":"10000ms"}
+{"cmd":"place_order","order_ref":"DU1/1000","symbol":"SPY","side":"buy","quantity":200.0,"order_kind":"market"}
+{"cmd":"assert","cond":"orders[fm-1].status == Filled","passed":true,"message":"market order fills under burst"}
+{"cmd":"assert","cond":"positions[SPY].quantity == 200","passed":true,"message":"position reflects fill"}
+{"cmd":"scenario_completed"}

@@ -1,0 +1,36 @@
+# Canonical pacing-violation scenario.
+#
+# Intent: sim emits error 100 at a fixed time and disconnects session 0.
+# Scenario asserts the session went offline.
+
+version: 1
+name: "pacing_violation"
+description: "Inject pacing violation; verify session disconnects."
+seed: 1
+clock: virtual
+duration: 1min
+
+symbols:
+  - symbol: SPY
+    preset: Liquid
+    initial_price: 450.00
+
+quirks:
+  msg_rate:
+    limit_per_sec: 50
+
+events:
+  - at: "00:00:01"
+    do: subscribe_market_data
+    args:
+      symbol: SPY
+      subscription: streaming_l1
+
+  - at: "00:00:05"
+    do: inject_pacing_violation
+    args:
+      session_id: 0
+
+asserts:
+  - cond: "session[0].connected == false"
+    message: "session 0 must be disconnected after pacing violation"

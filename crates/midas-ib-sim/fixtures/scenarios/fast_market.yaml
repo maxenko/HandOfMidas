@@ -1,0 +1,50 @@
+# Canonical fast-market scenario.
+#
+# Intent: kick the market-data rate up with inject_burst, place a market
+# order, verify fill arrives. Against the mock engine the burst is a no-op
+# but the command sequence is captured for regression comparison.
+
+version: 1
+name: "fast_market"
+description: "Burst-on market data; market order fills under load."
+seed: 3
+clock: virtual
+duration: 1min
+
+symbols:
+  - symbol: SPY
+    initial_price: 450.00
+  - symbol: AAPL
+    initial_price: 175.00
+
+events:
+  - at: "00:00:01"
+    do: subscribe_market_data
+    args:
+      symbol: SPY
+      subscription: streaming_l1
+
+  - at: "00:00:02"
+    do: inject_burst
+    args:
+      symbols: [SPY, AAPL]
+      multiplier: 10.0
+      duration: 10s
+
+  - at: "00:00:05"
+    named: mkt_order
+    do: accept_order
+    args:
+      order_kind: single
+      side: buy
+      quantity: 200
+      entry: market
+      symbol: SPY
+      account: DU1
+      order_ref: fm-1
+
+asserts:
+  - cond: "orders[fm-1].status == Filled"
+    message: "market order fills under burst"
+  - cond: "positions[SPY].quantity == 200"
+    message: "position reflects fill"
