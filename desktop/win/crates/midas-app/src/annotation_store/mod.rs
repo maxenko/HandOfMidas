@@ -21,7 +21,13 @@ use serde::{Deserialize, Serialize};
 /// with other strings. Normalizes to uppercase on construction.
 /// Implements `Borrow<str>` so `HashMap::get("AAPL")` works without
 /// allocating.
+///
+/// Serializes transparently as a plain string so on-disk representation
+/// is just `"AAPL"`, not a tagged newtype. This keeps redb/TOML payloads
+/// stable even if callers stop deriving `Serialize` via serde's newtype
+/// shim in the future.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct SymbolKey(String);
 
 impl SymbolKey {
