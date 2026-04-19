@@ -1349,7 +1349,10 @@ impl MidasApp {
             // (which still has COL_DRAG at index 0), so we offset by +1
             // to account for the DRAG column we no longer render.
             let resize = (i < col_defs.len() - 1).then(|| ResizeHandle {
-                on_press: Message::WatchlistColumnResizeStart(wl_id, i + 1, 0.0),
+                on_press: Message::ColumnResize(crate::column_resize::ColumnResizeEvent::Begin(
+                    crate::column_resize::ColumnResizeTarget::Watchlist(wl_id),
+                    i + 1,
+                )),
                 height: 26.0,
             });
             header_cells.push(grid_header_cell(
@@ -1506,10 +1509,10 @@ impl MidasApp {
         .into();
 
         // Wrap in stack only when overlays are needed (resize or link picker).
-        let needs_resize_overlay = self
-            .resizing_column
-            .map(|(id, _, _, _)| id == wl_id)
-            .unwrap_or(false);
+        let needs_resize_overlay = matches!(
+            self.resizing_column.map(|s| s.target),
+            Some(crate::column_resize::ColumnResizeTarget::Watchlist(id)) if id == wl_id
+        );
 
         let needs_link_picker = matches!(
             self.link_picker_open,
@@ -1527,8 +1530,12 @@ impl MidasApp {
             body_layers.push(
                 iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
                     .interaction(iced::mouse::Interaction::ResizingHorizontally)
-                    .on_move(|point| Message::WatchlistColumnResizing(point.x))
-                    .on_release(Message::WatchlistColumnResizeEnd)
+                    .on_move(|point| {
+                        Message::ColumnResize(crate::column_resize::ColumnResizeEvent::Move(point.x))
+                    })
+                    .on_release(Message::ColumnResize(
+                        crate::column_resize::ColumnResizeEvent::End,
+                    ))
                     .into(),
             );
         }
@@ -2598,7 +2605,10 @@ impl MidasApp {
                 )
             });
             let resize = (i < last_idx).then(|| ResizeHandle {
-                on_press: Message::AccountOrdersColumnResizeStart(account_id, all_col_idx),
+                on_press: Message::ColumnResize(crate::column_resize::ColumnResizeEvent::Begin(
+                    crate::column_resize::ColumnResizeTarget::AccountOrders(account_id),
+                    all_col_idx,
+                )),
                 height: 26.0,
             });
             header_cells.push(grid_header_cell(
@@ -2746,10 +2756,10 @@ impl MidasApp {
         // so it works across all tabs, not just Orders. Here we only
         // handle the two Orders-specific overlays: column-resize drag
         // and column-visibility popup.
-        let needs_resize_overlay = self
-            .resizing_account_column
-            .map(|(id, _, _, _)| id == account_id)
-            .unwrap_or(false);
+        let needs_resize_overlay = matches!(
+            self.resizing_column.map(|s| s.target),
+            Some(crate::column_resize::ColumnResizeTarget::AccountOrders(id)) if id == account_id
+        );
         let needs_column_selector = self.account_column_selector_open == Some(account_id);
 
         if !needs_resize_overlay && !needs_column_selector {
@@ -2762,8 +2772,12 @@ impl MidasApp {
             layers.push(
                 iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
                     .interaction(iced::mouse::Interaction::ResizingHorizontally)
-                    .on_move(|point| Message::AccountOrdersColumnResizing(point.x))
-                    .on_release(Message::AccountOrdersColumnResizeEnd)
+                    .on_move(|point| {
+                        Message::ColumnResize(crate::column_resize::ColumnResizeEvent::Move(point.x))
+                    })
+                    .on_release(Message::ColumnResize(
+                        crate::column_resize::ColumnResizeEvent::End,
+                    ))
                     .into(),
             );
         }
@@ -2857,7 +2871,10 @@ impl MidasApp {
             let width = history.grid_state.column_width(col.id());
             // No sort in v1 — pass `None` and leave the indicator empty.
             let resize = (i < last_idx).then(|| ResizeHandle {
-                on_press: Message::AccountHistoryColumnResizeStart(account_id, i),
+                on_press: Message::ColumnResize(crate::column_resize::ColumnResizeEvent::Begin(
+                    crate::column_resize::ColumnResizeTarget::AccountHistory(account_id),
+                    i,
+                )),
                 height: 26.0,
             });
             header_cells.push(grid_header_cell(
@@ -2904,10 +2921,10 @@ impl MidasApp {
                 .into();
 
         // ── Resize overlay ────────────────────────────────────────
-        let needs_resize_overlay = self
-            .resizing_account_history_column
-            .map(|(id, _, _, _)| id == account_id)
-            .unwrap_or(false);
+        let needs_resize_overlay = matches!(
+            self.resizing_column.map(|s| s.target),
+            Some(crate::column_resize::ColumnResizeTarget::AccountHistory(id)) if id == account_id
+        );
 
         if !needs_resize_overlay {
             return main_content;
@@ -2917,8 +2934,12 @@ impl MidasApp {
         layers.push(
             iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
                 .interaction(iced::mouse::Interaction::ResizingHorizontally)
-                .on_move(|point| Message::AccountHistoryColumnResizing(point.x))
-                .on_release(Message::AccountHistoryColumnResizeEnd)
+                .on_move(|point| {
+                    Message::ColumnResize(crate::column_resize::ColumnResizeEvent::Move(point.x))
+                })
+                .on_release(Message::ColumnResize(
+                    crate::column_resize::ColumnResizeEvent::End,
+                ))
                 .into(),
         );
         stack(layers).width(Fill).height(Fill).into()
@@ -2980,7 +3001,10 @@ impl MidasApp {
         for (i, &(col_id, label)) in col_defs.iter().enumerate() {
             let width = recents.grid_state.column_width(col_id);
             let resize = (i < last_idx).then(|| ResizeHandle {
-                on_press: Message::AccountRecentsColumnResizeStart(account_id, i),
+                on_press: Message::ColumnResize(crate::column_resize::ColumnResizeEvent::Begin(
+                    crate::column_resize::ColumnResizeTarget::AccountRecents(account_id),
+                    i,
+                )),
                 height: 26.0,
             });
             header_cells.push(grid_header_cell(
@@ -3036,10 +3060,10 @@ impl MidasApp {
                 .into();
 
         // ── Resize overlay ────────────────────────────────────────
-        let needs_resize_overlay = self
-            .resizing_account_recents_column
-            .map(|(id, _, _, _)| id == account_id)
-            .unwrap_or(false);
+        let needs_resize_overlay = matches!(
+            self.resizing_column.map(|s| s.target),
+            Some(crate::column_resize::ColumnResizeTarget::AccountRecents(id)) if id == account_id
+        );
         if !needs_resize_overlay {
             return main_content;
         }
@@ -3048,8 +3072,12 @@ impl MidasApp {
         layers.push(
             iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
                 .interaction(iced::mouse::Interaction::ResizingHorizontally)
-                .on_move(|point| Message::AccountRecentsColumnResizing(point.x))
-                .on_release(Message::AccountRecentsColumnResizeEnd)
+                .on_move(|point| {
+                    Message::ColumnResize(crate::column_resize::ColumnResizeEvent::Move(point.x))
+                })
+                .on_release(Message::ColumnResize(
+                    crate::column_resize::ColumnResizeEvent::End,
+                ))
                 .into(),
         );
         stack(layers).width(Fill).height(Fill).into()

@@ -308,18 +308,13 @@ pub struct MidasApp {
     pub dragging_ticker: Option<DragTickerState>,
     /// Which link picker dropdown is currently open, if any.
     pub link_picker_open: Option<(PickerTarget, LinkDimension)>,
-    /// Active column resize: (watchlist_id, column_index, start_x, original_width).
-    pub resizing_column: Option<(WatchlistId, usize, f32, f32)>,
-    /// Active Account-pane Orders-tab column resize:
-    /// (account_panel_id, column_index, start_x, original_width).
-    pub resizing_account_column: Option<(AccountPanelId, usize, f32, f32)>,
-    /// Active Account-pane History-tab column resize.
-    /// Same shape as `resizing_account_column` but targets the History
-    /// tab's `GridState` instead of Orders'.
-    pub resizing_account_history_column: Option<(AccountPanelId, usize, f32, f32)>,
-    /// Active Account-pane Recents-tab column resize. Two-column grid
-    /// (ticker + last-seen); same shape otherwise.
-    pub resizing_account_recents_column: Option<(AccountPanelId, usize, f32, f32)>,
+    /// Active column resize drag, unified across all grid surfaces
+    /// (Watchlist, Account Orders/History/Recents). The `target` field
+    /// routes grid-state lookup in `handle_column_resize`.
+    ///
+    /// Replaces the four parallel `resizing_*_column` fields from the
+    /// pre-collapse shape (audit Re-audit 2026-04-18 Round 2 P1).
+    pub resizing_column: Option<crate::column_resize::ColumnResizeState>,
     /// Which Account-pane's Orders-tab column-selector popup is open, if any.
     pub account_column_selector_open: Option<AccountPanelId>,
     /// Dockable order panels keyed by stable OrderPanelId.
@@ -617,12 +612,6 @@ pub enum Message {
     WatchlistTickerSelected(WatchlistId, String),
     /// Set the symbol link mode for a watchlist panel.
     WatchlistSetSymbolLink(WatchlistId, LinkMode),
-    /// User started dragging a column divider in a watchlist header.
-    WatchlistColumnResizeStart(WatchlistId, usize, f32),
-    /// User is dragging a column divider — cursor at this x position.
-    WatchlistColumnResizing(f32),
-    /// User released the column divider drag.
-    WatchlistColumnResizeEnd,
     /// Grid chrome event from a watchlist.
     WatchlistGrid(WatchlistId, midas_grid::GridMessage),
 
@@ -658,34 +647,17 @@ pub enum Message {
     AccountOrdersRowSelected(AccountPanelId, uuid::Uuid, String),
     /// Change the Account panel's Orders-tab symbol-link colour group.
     AccountOrdersSetSymbolLink(AccountPanelId, LinkMode),
-    /// Begin a column-resize drag on the Orders tab. `col_idx` indexes
-    /// into `OrderBlotterColumn::ALL` (schema reused for wire-compat).
-    AccountOrdersColumnResizeStart(AccountPanelId, usize),
-    /// Cursor-move while a column resize is active (x in logical pixels).
-    AccountOrdersColumnResizing(f32),
-    /// Drag released — commit width + mark config dirty.
-    AccountOrdersColumnResizeEnd,
     /// Open the column-selector popup for an Account pane's Orders tab.
     AccountOrdersOpenColumnSelector(AccountPanelId),
     /// Dismiss the column-selector popup.
     AccountOrdersDismissColumnSelector,
     /// Toggle visibility of a single column in the given Account pane.
     AccountOrdersToggleColumn(AccountPanelId, midas_grid::ColumnId),
-    /// Begin a column-resize drag on the Trade History tab. `col_idx`
-    /// indexes into `HistoryColumn::ALL`. Widths are runtime-only in v1
-    /// (no config persistence) per plan Decision 4.
-    AccountHistoryColumnResizeStart(AccountPanelId, usize),
-    /// Cursor-move while a History-tab column resize is active.
-    AccountHistoryColumnResizing(f32),
-    /// Drag released — commit width.
-    AccountHistoryColumnResizeEnd,
-    /// Begin a column-resize drag on the Recents tab. `col_idx` indexes
-    /// into the Recents column list (0 = ticker, 1 = last-seen).
-    AccountRecentsColumnResizeStart(AccountPanelId, usize),
-    /// Cursor-move while a Recents-tab column resize is active.
-    AccountRecentsColumnResizing(f32),
-    /// Drag released — commit width.
-    AccountRecentsColumnResizeEnd,
+    /// Unified column-resize drag lifecycle across Watchlist and Account
+    /// tabs (Orders/History/Recents). Replaces the four parallel
+    /// `*ColumnResizeStart/ing/End` Message triples. See
+    /// [`crate::column_resize`] for the target enum + routing.
+    ColumnResize(crate::column_resize::ColumnResizeEvent),
     /// Coalesced batch of position updates from the broker subscription.
     /// App-wide (not per-panel) because the `PositionStore` is shared
     /// across every open Account pane.
@@ -1335,9 +1307,6 @@ impl MidasApp {
             dragging_ticker: None,
             link_picker_open: None,
             resizing_column: None,
-            resizing_account_column: None,
-            resizing_account_history_column: None,
-            resizing_account_recents_column: None,
             account_column_selector_open: None,
             order_panels: restored_order_panels,
             account_panels: restored_account_panels,
@@ -2684,19 +2653,13 @@ impl MidasApp {
             | Message::Account(..)
             | Message::AccountOrdersRowSelected(..)
             | Message::AccountOrdersSetSymbolLink(..)
-            | Message::AccountOrdersColumnResizeStart(..)
-            | Message::AccountOrdersColumnResizing(..)
-            | Message::AccountOrdersColumnResizeEnd
             | Message::AccountOrdersOpenColumnSelector(..)
             | Message::AccountOrdersDismissColumnSelector
             | Message::AccountOrdersToggleColumn(..)
-            | Message::AccountHistoryColumnResizeStart(..)
-            | Message::AccountHistoryColumnResizing(..)
-            | Message::AccountHistoryColumnResizeEnd
-            | Message::AccountRecentsColumnResizeStart(..)
-            | Message::AccountRecentsColumnResizing(..)
-            | Message::AccountRecentsColumnResizeEnd
             | Message::AccountPositionsBatch(..) => self.handle_account_panel_msg(message),
+
+            // -- Column resize (all grid surfaces) --
+            Message::ColumnResize(ev) => self.handle_column_resize(ev),
 
             // -- Watchlist --
             Message::AddWatchlist
@@ -2711,9 +2674,6 @@ impl MidasApp {
             | Message::DragMouseUp
             | Message::WatchlistTickerSelected(..)
             | Message::WatchlistSetSymbolLink(..)
-            | Message::WatchlistColumnResizeStart(..)
-            | Message::WatchlistColumnResizing(..)
-            | Message::WatchlistColumnResizeEnd
             | Message::WatchlistGrid(..) => self.handle_watchlist_msg(message),
 
             // -- Market data cache --
