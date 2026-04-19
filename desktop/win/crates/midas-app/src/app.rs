@@ -247,6 +247,49 @@ impl ChartPanel {
     }
 }
 
+/// Shared mutation that swaps the ticker symbol shown by a chart panel.
+///
+/// Extracted out of `broadcast_symbol_to_link_group`'s floating-chart
+/// loop so docked and floating paths now share one inline mutator.
+/// Docked charts normally go through `bind_chart_to_symbol` which also
+/// resets `load_generation` + clears `data`; this helper performs the
+/// thin subset used by link-group broadcasts and floating-chart
+/// `SetSymbolLink` (which both follow up with an async load that
+/// eventually refreshes the rest of the panel state).
+pub(crate) fn apply_symbol_to_panel(
+    panel: &mut ChartPanel,
+    symbol: &str,
+    sym_key: crate::annotation_store::SymbolKey,
+) {
+    panel.bound_symbol = Some(sym_key);
+    panel.symbol = symbol.to_owned();
+    panel.symbol_input = symbol.to_owned();
+    panel.load_state = LoadState::Loading;
+    panel.chart_state.dirty.mark_data();
+}
+
+// ── Chart handle ───────────────────────────────────────────────────────
+
+/// Identifies a chart panel regardless of whether it lives in the
+/// docked [`MidasApp::charts`] map (keyed by [`ChartId`]) or the
+/// floating [`MidasApp::floating_charts`] map (keyed by iced's
+/// `window::Id`).
+///
+/// This is **not** a HashMap key. The two storage maps stay distinct —
+/// iced 0.14 dispatches window lifecycle events natively keyed on
+/// `window::Id`, and using `ChartHandle` as a key would force a
+/// wrap/unwrap on every window-event path. Instead, `ChartHandle`
+/// shows up in iterator items (see [`MidasApp::all_chart_panels`])
+/// and in collapsed Link-message variants so handlers that don't
+/// care about the docked/floating distinction can stay generic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ChartHandle {
+    /// A chart panel docked inside the main window's pane grid.
+    Docked(ChartId),
+    /// A chart panel that lives in its own OS window (pop-out).
+    Floating(window::Id),
+}
+
 // ── Application state ─────────────────────────────────────────────────
 
 /// Top-level application state. Owns all chart panels and layout.
@@ -627,14 +670,15 @@ pub enum Message {
     WatchlistGrid(WatchlistId, midas_grid::GridMessage),
 
     // -- Chart linking --
-    /// Set the symbol link mode for a docked chart.
-    SetSymbolLink(ChartId, LinkMode),
-    /// Set the timeframe link mode for a docked chart.
-    SetTimeframeLink(ChartId, LinkMode),
-    /// Set the symbol link mode for a floating chart.
-    FloatingSetSymbolLink(window::Id, LinkMode),
-    /// Set the timeframe link mode for a floating chart.
-    FloatingSetTimeframeLink(window::Id, LinkMode),
+    /// Set the symbol link mode for a chart (docked or floating).
+    ///
+    /// Collapses the previous `SetSymbolLink(ChartId, ..)` +
+    /// `FloatingSetSymbolLink(window::Id, ..)` pair; the handler
+    /// matches on [`ChartHandle`] to route to the correct storage map.
+    /// See round-2 P2 in `plan/architecture-audit.md`.
+    SetSymbolLink(ChartHandle, LinkMode),
+    /// Set the timeframe link mode for a chart (docked or floating).
+    SetTimeframeLink(ChartHandle, LinkMode),
     /// Toggle the link color picker for any panel.
     ToggleLinkPicker(PickerTarget, LinkDimension),
     /// Dismiss any open link picker.
@@ -969,8 +1013,11 @@ impl MidasApp {
             ..window::Settings::default()
         });
 
-        let open_task = open_task
-            .map(|id| Message::Window(crate::window_geometry::WindowGeometryMsg::MainWindowOpened(id)));
+        let open_task = open_task.map(|id| {
+            Message::Window(crate::window_geometry::WindowGeometryMsg::MainWindowOpened(
+                id,
+            ))
+        });
 
         // Build workspace, charts, watchlists, and order/account panels from config.
         let (
@@ -1312,13 +1359,17 @@ impl MidasApp {
             last_config_save: Instant::now(),
             current_time,
             window: {
-                let mut g =
-                    crate::window_geometry::WindowGeometry::from_config(&config.window, initial_size);
+                let mut g = crate::window_geometry::WindowGeometry::from_config(
+                    &config.window,
+                    initial_size,
+                );
                 // The runtime `main_window` id is the iced-assigned one
                 // for this launch — feed it in once. Effects from this
                 // synthetic Open are discarded; the parent will spawn
                 // its own monitor-size query right after `new` returns.
-                let _ = g.update(crate::window_geometry::WindowGeometryMsg::MainWindowOpened(main_id));
+                let _ = g.update(crate::window_geometry::WindowGeometryMsg::MainWindowOpened(
+                    main_id,
+                ));
                 g
             },
             floating_charts: HashMap::new(),
@@ -1806,6 +1857,47 @@ impl MidasApp {
             camera_restored_pending: false,
             load_generation: 0,
         }
+    }
+
+    /// Iterate every chart panel — docked first, then floating —
+    /// tagging each item with a [`ChartHandle`] that identifies which
+    /// storage map it came from.
+    ///
+    /// Use this when you want to treat docked + floating charts
+    /// uniformly (link-group fan-out, symbol broadcast, cursor sync…);
+    /// reach directly into `charts` / `floating_charts` only where the
+    /// distinction matters (persistence, window-event routing).
+    pub(crate) fn all_chart_panels(&self) -> impl Iterator<Item = (ChartHandle, &ChartPanel)> {
+        self.charts
+            .iter()
+            .map(|(id, p)| (ChartHandle::Docked(*id), p))
+            .chain(
+                self.floating_charts
+                    .iter()
+                    .map(|(wid, p)| (ChartHandle::Floating(*wid), p)),
+            )
+    }
+
+    /// Mutable companion to [`all_chart_panels`]. The two underlying
+    /// `HashMap`s are disjoint fields so the borrow checker accepts a
+    /// combined `iter_mut` chain without special handling.
+    ///
+    /// Unused today — the prep step in audit P2a collapses only the
+    /// link handlers, which can do with the shared-ref iterator plus
+    /// targeted `get_mut` fix-ups. Kept for the next caller that
+    /// genuinely needs a single mutable pass across both maps.
+    #[allow(dead_code)]
+    pub(crate) fn all_chart_panels_mut(
+        &mut self,
+    ) -> impl Iterator<Item = (ChartHandle, &mut ChartPanel)> {
+        self.charts
+            .iter_mut()
+            .map(|(id, p)| (ChartHandle::Docked(*id), p))
+            .chain(
+                self.floating_charts
+                    .iter_mut()
+                    .map(|(wid, p)| (ChartHandle::Floating(*wid), p)),
+            )
     }
 
     /// Resolve the ticker symbol for a chart ID.
@@ -2724,8 +2816,6 @@ impl MidasApp {
             // -- Chart linking --
             Message::SetSymbolLink(..)
             | Message::SetTimeframeLink(..)
-            | Message::FloatingSetSymbolLink(..)
-            | Message::FloatingSetTimeframeLink(..)
             | Message::ToggleLinkPicker(..)
             | Message::DismissLinkPicker => self.handle_link_msg(message),
 

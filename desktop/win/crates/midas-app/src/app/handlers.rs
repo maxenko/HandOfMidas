@@ -459,9 +459,7 @@ impl MidasApp {
             ChartAction::Pan { dx, dy } => {
                 self.focus_chart(chart_id);
                 if let Some(chart) = self.charts.get_mut(&chart_id) {
-                    chart
-                        .chart_state
-                        .apply_action(&ChartAction::Pan { dx, dy });
+                    chart.chart_state.apply_action(&ChartAction::Pan { dx, dy });
                     chart.camera_restored_pending = false;
                 }
                 self.save_camera_for_chart(chart_id);
@@ -498,9 +496,7 @@ impl MidasApp {
                 self.mark_config_dirty();
                 Task::none()
             }
-            ChartAction::SetCrosshair { x, y } => {
-                self.apply_crosshair(chart_id, Some((x, y)))
-            }
+            ChartAction::SetCrosshair { x, y } => self.apply_crosshair(chart_id, Some((x, y))),
             ChartAction::ClearCrosshair => self.apply_crosshair(chart_id, None),
             ChartAction::CreateLevel { price } => {
                 self.focus_chart(chart_id);
@@ -661,9 +657,7 @@ impl MidasApp {
                         self.handle_chart_bracket_submit(chart_id, annotation_id)
                     }
                     DecoratorAction::Save => self.handle_chart_bracket_save(annotation_id),
-                    DecoratorAction::TogglePin => {
-                        self.handle_chart_bracket_toggle_pin(chart_id)
-                    }
+                    DecoratorAction::TogglePin => self.handle_chart_bracket_toggle_pin(chart_id),
                     DecoratorAction::CreateTakeProfit
                     | DecoratorAction::CycleEntryType
                     | DecoratorAction::EditQuantity
@@ -688,11 +682,7 @@ impl MidasApp {
     /// `ChartAction::SetCrosshair` and `ChartAction::ClearCrosshair`
     /// because both fold into a single `Option<(f32,f32)>` mutation
     /// + the cross-chart sync update.
-    fn apply_crosshair(
-        &mut self,
-        chart_id: ChartId,
-        pos: Option<(f32, f32)>,
-    ) -> Task<Message> {
+    fn apply_crosshair(&mut self, chart_id: ChartId, pos: Option<(f32, f32)>) -> Task<Message> {
         if pos.is_some() {
             self.focus_chart(chart_id);
         }
@@ -714,8 +704,8 @@ impl MidasApp {
                         let cam = &chart.chart_state.camera;
                         let ts = if chart.chart_state.collapse_gaps {
                             let idx_f = cam.x_to_time(x);
-                            let idx = (idx_f.round().max(0.0) as usize)
-                                .min(data.len().saturating_sub(1));
+                            let idx =
+                                (idx_f.round().max(0.0) as usize).min(data.len().saturating_sub(1));
                             data.timestamps[idx]
                         } else {
                             let cursor_time = cam.x_to_time(x);
@@ -723,8 +713,7 @@ impl MidasApp {
                             data.timestamps[idx]
                         };
                         let price = cam.y_to_price(y);
-                        self.crosshair_sync =
-                            Some((chart_id, ts, price, chart.symbol.clone()));
+                        self.crosshair_sync = Some((chart_id, ts, price, chart.symbol.clone()));
                     }
                 }
             }
@@ -2559,183 +2548,161 @@ impl MidasApp {
     pub(crate) fn handle_link_msg(&mut self, message: Message) -> Task<Message> {
         match message {
             // -- Chart linking --
-            Message::SetSymbolLink(chart_id, mode) => {
+            Message::SetSymbolLink(handle, mode) => {
                 self.link_picker_open = None;
-                if let Some(chart) = self.charts.get_mut(&chart_id) {
-                    chart.symbol_link = mode;
+
+                // Write the new mode into the right storage map.
+                match handle {
+                    crate::app::ChartHandle::Docked(id) => {
+                        if let Some(chart) = self.charts.get_mut(&id) {
+                            chart.symbol_link = mode;
+                        }
+                    }
+                    crate::app::ChartHandle::Floating(wid) => {
+                        if let Some(chart) = self.floating_charts.get_mut(&wid) {
+                            chart.symbol_link = mode;
+                        }
+                    }
                 }
-                // Adopt group symbol when joining a link group.
-                let mut adopt_task = Task::none();
-                let siblings = || {
-                    self.charts
-                        .iter()
-                        .filter(|(id, _)| **id != chart_id)
-                        .map(|(_, panel)| panel)
-                        .chain(self.floating_charts.values())
-                };
-                if let LinkMode::Color(color) = mode {
-                    let group_symbol = siblings()
+
+                // Adopt group symbol when joining a link group. The
+                // scan sees every other chart panel (docked + floating)
+                // regardless of which map this panel lives in.
+                let group_symbol = match mode {
+                    LinkMode::Color(color) => self
+                        .all_chart_panels()
+                        .filter(|(h, _)| *h != handle)
+                        .map(|(_, p)| p)
                         .find(|p| {
                             matches!(p.symbol_link, LinkMode::Color(c) if c == color)
                                 && !p.symbol.is_empty()
                         })
-                        .map(|p| p.symbol.clone());
-                    if let Some(symbol) = group_symbol {
-                        adopt_task = self.load_symbol_for_chart(chart_id, &symbol);
-                    }
-                } else if mode == LinkMode::ListenAll {
-                    let group_symbol = siblings()
+                        .map(|p| p.symbol.clone()),
+                    LinkMode::ListenAll => self
+                        .all_chart_panels()
+                        .filter(|(h, _)| *h != handle)
+                        .map(|(_, p)| p)
                         .find(|p| {
                             matches!(p.symbol_link, LinkMode::Color(_)) && !p.symbol.is_empty()
                         })
-                        .map(|p| p.symbol.clone());
-                    if let Some(symbol) = group_symbol {
-                        adopt_task = self.load_symbol_for_chart(chart_id, &symbol);
+                        .map(|p| p.symbol.clone()),
+                    LinkMode::Unlinked => None,
+                };
+
+                // Docked charts fully re-bind through
+                // `load_symbol_for_chart` (which resets load_generation,
+                // clears data, rebinds TickerState). Floating charts
+                // use the thinner mutation via `apply_symbol_to_panel`
+                // and a direct async load.
+                let adopt_task = match (handle, group_symbol) {
+                    (crate::app::ChartHandle::Docked(id), Some(symbol)) => {
+                        self.load_symbol_for_chart(id, &symbol)
                     }
+                    (crate::app::ChartHandle::Floating(wid), Some(symbol)) => {
+                        let tf = self
+                            .floating_charts
+                            .get(&wid)
+                            .map(|c| c.timeframe)
+                            .unwrap_or(Timeframe::D1);
+                        let sym_key = crate::annotation_store::SymbolKey::new(&symbol);
+                        if let Some(chart) = self.floating_charts.get_mut(&wid) {
+                            crate::app::apply_symbol_to_panel(chart, &symbol, sym_key);
+                        }
+                        self.load_floating_chart_async(wid, &symbol, tf)
+                    }
+                    (_, None) => Task::none(),
+                };
+
+                // Only docked charts persist; floating layout is not
+                // saved to disk.
+                if matches!(handle, crate::app::ChartHandle::Docked(_)) {
+                    self.mark_config_dirty();
                 }
-                self.mark_config_dirty();
                 adopt_task
             }
 
-            Message::SetTimeframeLink(chart_id, mode) => {
+            Message::SetTimeframeLink(handle, mode) => {
                 self.link_picker_open = None;
-                if let Some(chart) = self.charts.get_mut(&chart_id) {
-                    chart.timeframe_link = mode;
-                }
-                // Adopt group timeframe when joining a link group.
-                let siblings = || {
-                    self.charts
-                        .iter()
-                        .filter(|(id, _)| **id != chart_id)
-                        .map(|(_, panel)| panel)
-                        .chain(self.floating_charts.values())
-                };
-                let group_tf = if let LinkMode::Color(color) = mode {
-                    siblings()
-                        .find(|p| matches!(p.timeframe_link, LinkMode::Color(c) if c == color))
-                        .map(|p| p.timeframe)
-                } else if mode == LinkMode::ListenAll {
-                    siblings()
-                        .find(|p| matches!(p.timeframe_link, LinkMode::Color(_)))
-                        .map(|p| p.timeframe)
-                } else {
-                    None
-                };
-                if let Some(tf) = group_tf {
-                    let symbol = self
-                        .charts
-                        .get(&chart_id)
-                        .map(|c| c.symbol.clone())
-                        .unwrap_or_default();
-                    if let Some(chart) = self.charts.get_mut(&chart_id) {
-                        chart.timeframe = tf;
-                    }
-                    if !symbol.is_empty() {
-                        if let Some(chart) = self.charts.get_mut(&chart_id) {
-                            chart.load_state = LoadState::Loading;
-                            chart.chart_state.dirty.mark_data();
+
+                // Write the new mode into the right storage map.
+                match handle {
+                    crate::app::ChartHandle::Docked(id) => {
+                        if let Some(chart) = self.charts.get_mut(&id) {
+                            chart.timeframe_link = mode;
                         }
-                        self.mark_config_dirty();
-                        return self.load_chart_async(chart_id, &symbol, tf);
                     }
-                }
-                self.mark_config_dirty();
-                Task::none()
-            }
-
-            Message::FloatingSetSymbolLink(wid, mode) => {
-                self.link_picker_open = None;
-                if let Some(chart) = self.floating_charts.get_mut(&wid) {
-                    chart.symbol_link = mode;
-                }
-                // Adopt group symbol when joining a link group.
-                let siblings = || {
-                    self.charts.values().chain(
-                        self.floating_charts
-                            .iter()
-                            .filter(|(id, _)| **id != wid)
-                            .map(|(_, p)| p),
-                    )
-                };
-                let group_symbol = if let LinkMode::Color(color) = mode {
-                    siblings()
-                        .find(|p| {
-                            matches!(p.symbol_link, LinkMode::Color(c) if c == color)
-                                && !p.symbol.is_empty()
-                        })
-                        .map(|p| p.symbol.clone())
-                } else if mode == LinkMode::ListenAll {
-                    siblings()
-                        .find(|p| {
-                            matches!(p.symbol_link, LinkMode::Color(_)) && !p.symbol.is_empty()
-                        })
-                        .map(|p| p.symbol.clone())
-                } else {
-                    None
-                };
-                if let Some(symbol) = group_symbol {
-                    let tf = self
-                        .floating_charts
-                        .get(&wid)
-                        .map(|c| c.timeframe)
-                        .unwrap_or(Timeframe::D1);
-                    let fkey = crate::annotation_store::SymbolKey::new(&symbol);
-                    if let Some(chart) = self.floating_charts.get_mut(&wid) {
-                        chart.bound_symbol = Some(fkey);
-                        chart.symbol = symbol.clone();
-                        chart.symbol_input = symbol.clone();
-                        chart.load_state = LoadState::Loading;
-                        chart.chart_state.dirty.mark_data();
-                    }
-                    return self.load_floating_chart_async(wid, &symbol, tf);
-                }
-                // Floating charts are not persisted — no mark_config_dirty needed.
-                Task::none()
-            }
-
-            Message::FloatingSetTimeframeLink(wid, mode) => {
-                self.link_picker_open = None;
-                if let Some(chart) = self.floating_charts.get_mut(&wid) {
-                    chart.timeframe_link = mode;
-                }
-                // Adopt group timeframe when joining a link group.
-                let siblings = || {
-                    self.charts.values().chain(
-                        self.floating_charts
-                            .iter()
-                            .filter(|(id, _)| **id != wid)
-                            .map(|(_, p)| p),
-                    )
-                };
-                let group_tf = if let LinkMode::Color(color) = mode {
-                    siblings()
-                        .find(|p| matches!(p.timeframe_link, LinkMode::Color(c) if c == color))
-                        .map(|p| p.timeframe)
-                } else if mode == LinkMode::ListenAll {
-                    siblings()
-                        .find(|p| matches!(p.timeframe_link, LinkMode::Color(_)))
-                        .map(|p| p.timeframe)
-                } else {
-                    None
-                };
-                if let Some(tf) = group_tf {
-                    let symbol = self
-                        .floating_charts
-                        .get(&wid)
-                        .map(|c| c.symbol.clone())
-                        .unwrap_or_default();
-                    if let Some(chart) = self.floating_charts.get_mut(&wid) {
-                        chart.timeframe = tf;
-                    }
-                    if !symbol.is_empty() {
+                    crate::app::ChartHandle::Floating(wid) => {
                         if let Some(chart) = self.floating_charts.get_mut(&wid) {
-                            chart.load_state = LoadState::Loading;
-                            chart.chart_state.dirty.mark_data();
+                            chart.timeframe_link = mode;
                         }
-                        return self.load_floating_chart_async(wid, &symbol, tf);
                     }
                 }
-                // Floating charts are not persisted — no mark_config_dirty needed.
+
+                // Adopt group timeframe when joining a link group.
+                let group_tf = match mode {
+                    LinkMode::Color(color) => self
+                        .all_chart_panels()
+                        .filter(|(h, _)| *h != handle)
+                        .map(|(_, p)| p)
+                        .find(|p| matches!(p.timeframe_link, LinkMode::Color(c) if c == color))
+                        .map(|p| p.timeframe),
+                    LinkMode::ListenAll => self
+                        .all_chart_panels()
+                        .filter(|(h, _)| *h != handle)
+                        .map(|(_, p)| p)
+                        .find(|p| matches!(p.timeframe_link, LinkMode::Color(_)))
+                        .map(|p| p.timeframe),
+                    LinkMode::Unlinked => None,
+                };
+
+                if let Some(tf) = group_tf {
+                    // Fetch current symbol + apply the new timeframe to
+                    // whichever map owns this panel, then fire the
+                    // matching async loader.
+                    let symbol = match handle {
+                        crate::app::ChartHandle::Docked(id) => self
+                            .charts
+                            .get(&id)
+                            .map(|c| c.symbol.clone())
+                            .unwrap_or_default(),
+                        crate::app::ChartHandle::Floating(wid) => self
+                            .floating_charts
+                            .get(&wid)
+                            .map(|c| c.symbol.clone())
+                            .unwrap_or_default(),
+                    };
+                    match handle {
+                        crate::app::ChartHandle::Docked(id) => {
+                            if let Some(chart) = self.charts.get_mut(&id) {
+                                chart.timeframe = tf;
+                            }
+                            if !symbol.is_empty() {
+                                if let Some(chart) = self.charts.get_mut(&id) {
+                                    chart.load_state = LoadState::Loading;
+                                    chart.chart_state.dirty.mark_data();
+                                }
+                                self.mark_config_dirty();
+                                return self.load_chart_async(id, &symbol, tf);
+                            }
+                        }
+                        crate::app::ChartHandle::Floating(wid) => {
+                            if let Some(chart) = self.floating_charts.get_mut(&wid) {
+                                chart.timeframe = tf;
+                            }
+                            if !symbol.is_empty() {
+                                if let Some(chart) = self.floating_charts.get_mut(&wid) {
+                                    chart.load_state = LoadState::Loading;
+                                    chart.chart_state.dirty.mark_data();
+                                }
+                                return self.load_floating_chart_async(wid, &symbol, tf);
+                            }
+                        }
+                    }
+                }
+
+                if matches!(handle, crate::app::ChartHandle::Docked(_)) {
+                    self.mark_config_dirty();
+                }
                 Task::none()
             }
 
@@ -2848,7 +2815,10 @@ impl MidasApp {
         &mut self,
         msg: crate::window_geometry::WindowGeometryMsg,
     ) -> Task<Message> {
-        if matches!(msg, crate::window_geometry::WindowGeometryMsg::MainWindowOpened(_)) {
+        if matches!(
+            msg,
+            crate::window_geometry::WindowGeometryMsg::MainWindowOpened(_)
+        ) {
             tracing::info!("Main window opened (routed via WindowGeometry)");
         }
         let effects = self.window.update(msg);
@@ -3025,9 +2995,8 @@ impl MidasApp {
                 "Bracket drawn on chart: {annotation_id} for {ticker} \
                  ({side:?} entry={entry:.2} tp={tp:.2} sl={sl:.2})"
             );
-            self.status_message = format!(
-                "Bracket placed on {ticker} ({side:?} E={entry:.2} TP={tp:.2} SL={sl:.2})"
-            );
+            self.status_message =
+                format!("Bracket placed on {ticker} ({side:?} E={entry:.2} TP={tp:.2} SL={sl:.2})");
         }
         Task::none()
     }
@@ -3055,12 +3024,8 @@ impl MidasApp {
                     .values()
                     .find(|link| link.annotation_id == annotation_id.0)
                     .and_then(|link| match leg {
-                        midas_chart::widget::order_bracket::LegRole::TakeProfit => {
-                            link.tp_order_id
-                        }
-                        midas_chart::widget::order_bracket::LegRole::StopLoss => {
-                            link.sl_order_id
-                        }
+                        midas_chart::widget::order_bracket::LegRole::TakeProfit => link.tp_order_id,
+                        midas_chart::widget::order_bracket::LegRole::StopLoss => link.sl_order_id,
                         _ => None,
                     });
                 if let Some(order_id) = order_id {
@@ -3107,9 +3072,7 @@ impl MidasApp {
             .iter()
             .find(|a| a.id == ann_id)
             .and_then(|a| match &a.kind {
-                midas_chart::widget::AnnotationKind::OrderBracket(b) => {
-                    Some(b.stop_loss.is_some())
-                }
+                midas_chart::widget::AnnotationKind::OrderBracket(b) => Some(b.stop_loss.is_some()),
                 _ => None,
             })
             .unwrap_or(false);
@@ -3199,9 +3162,7 @@ impl MidasApp {
             .iter()
             .find(|a| a.id == ann_id)
             .and_then(|a| match &a.kind {
-                midas_chart::widget::AnnotationKind::OrderBracket(b) => {
-                    Some(b.as_ref().clone())
-                }
+                midas_chart::widget::AnnotationKind::OrderBracket(b) => Some(b.as_ref().clone()),
                 _ => None,
             });
 
@@ -3234,12 +3195,8 @@ impl MidasApp {
             midas_chart::widget::order_bracket::EntryType::Market => {
                 midas_broker::OrderKind::Market
             }
-            midas_chart::widget::order_bracket::EntryType::Limit => {
-                midas_broker::OrderKind::Limit
-            }
-            midas_chart::widget::order_bracket::EntryType::Stop => {
-                midas_broker::OrderKind::Stop
-            }
+            midas_chart::widget::order_bracket::EntryType::Limit => midas_broker::OrderKind::Limit,
+            midas_chart::widget::order_bracket::EntryType::Stop => midas_broker::OrderKind::Stop,
             midas_chart::widget::order_bracket::EntryType::StopLimit => {
                 midas_broker::OrderKind::StopLimit
             }
@@ -3259,9 +3216,7 @@ impl MidasApp {
         };
 
         let action = match bracket.side {
-            midas_chart::widget::order_bracket::BracketSide::Long => {
-                midas_broker::OrderAction::Buy
-            }
+            midas_chart::widget::order_bracket::BracketSide::Long => midas_broker::OrderAction::Buy,
             midas_chart::widget::order_bracket::BracketSide::Short => {
                 midas_broker::OrderAction::Sell
             }
@@ -3285,13 +3240,12 @@ impl MidasApp {
                 action,
                 quantity,
                 outside_rth: false,
-                take_profit: bracket
-                    .take_profit
-                    .as_ref()
-                    .map(|tp| midas_broker::TakeProfitParams {
+                take_profit: bracket.take_profit.as_ref().map(|tp| {
+                    midas_broker::TakeProfitParams {
                         price: tp.line.price,
                         tif: None,
-                    }),
+                    }
+                }),
                 stop_loss: bracket
                     .stop_loss
                     .as_ref()
@@ -3327,8 +3281,7 @@ impl MidasApp {
                     }
                     if let Some(pid) = panel_id {
                         if let Some(p) = self.order_panels.get_mut(&pid) {
-                            p.state.errors =
-                                vec![("broker".into(), format!("Broker error: {e}"))];
+                            p.state.errors = vec![("broker".into(), format!("Broker error: {e}"))];
                         }
                     }
                     self.mark_levels_dirty_for_ticker(&symbol);
@@ -3775,10 +3728,7 @@ impl MidasApp {
     /// Collapse a [`crate::toast::Effect`] vector into a single
     /// `Task<Message>`. Pulled out so [`Self::dispatch_toast`] and the
     /// `Tick` handler share one interpretation site.
-    fn consume_toast_effects(
-        &mut self,
-        effects: Vec<crate::toast::Effect>,
-    ) -> Task<Message> {
+    fn consume_toast_effects(&mut self, effects: Vec<crate::toast::Effect>) -> Task<Message> {
         let mut tasks: Vec<Task<Message>> = Vec::new();
         for eff in effects {
             match eff {
@@ -3865,35 +3815,33 @@ impl MidasApp {
         use crate::link::find_link_targets;
         let mut tasks = Vec::new();
 
-        let chart_targets: Vec<ChartId> = find_link_targets(
+        // Collect every chart panel whose link mode matches, then
+        // dispatch per-variant: docked charts go through
+        // `load_symbol_for_chart` (full rebind); floating charts use
+        // `apply_symbol_to_panel` + `load_floating_chart_async`.
+        let chart_targets: Vec<crate::app::ChartHandle> = find_link_targets(
             source_link,
-            self.charts.iter().map(|(id, p)| (*id, p.symbol_link)),
-        );
-        for id in chart_targets {
-            tasks.push(self.load_symbol_for_chart(id, symbol));
-        }
-
-        let floating_targets: Vec<window::Id> = find_link_targets(
-            source_link,
-            self.floating_charts
-                .iter()
-                .map(|(wid, p)| (*wid, p.symbol_link)),
+            self.all_chart_panels()
+                .map(|(handle, p)| (handle, p.symbol_link)),
         );
         let sym_key = crate::annotation_store::SymbolKey::new(symbol);
-        for wid in floating_targets {
-            let tf = self
-                .floating_charts
-                .get(&wid)
-                .map(|c| c.timeframe)
-                .unwrap_or(Timeframe::D1);
-            if let Some(chart) = self.floating_charts.get_mut(&wid) {
-                chart.bound_symbol = Some(sym_key.clone());
-                chart.symbol = symbol.to_owned();
-                chart.symbol_input = symbol.to_owned();
-                chart.load_state = LoadState::Loading;
-                chart.chart_state.dirty.mark_data();
+        for handle in chart_targets {
+            match handle {
+                crate::app::ChartHandle::Docked(id) => {
+                    tasks.push(self.load_symbol_for_chart(id, symbol));
+                }
+                crate::app::ChartHandle::Floating(wid) => {
+                    let tf = self
+                        .floating_charts
+                        .get(&wid)
+                        .map(|c| c.timeframe)
+                        .unwrap_or(Timeframe::D1);
+                    if let Some(chart) = self.floating_charts.get_mut(&wid) {
+                        crate::app::apply_symbol_to_panel(chart, symbol, sym_key.clone());
+                    }
+                    tasks.push(self.load_floating_chart_async(wid, symbol, tf));
+                }
             }
-            tasks.push(self.load_floating_chart_async(wid, symbol, tf));
         }
 
         let order_targets: Vec<OrderPanelId> = find_link_targets(
