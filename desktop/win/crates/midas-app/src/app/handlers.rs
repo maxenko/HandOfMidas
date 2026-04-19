@@ -627,30 +627,19 @@ impl MidasApp {
                 annotation_id,
                 leg,
                 new_price,
-            } => self.update(Message::ChartDragBracketLeg(
-                chart_id,
-                annotation_id.0,
-                leg,
-                new_price,
-            )),
+            } => self.handle_chart_bracket_drag_leg(chart_id, annotation_id, leg, new_price),
             ChartAction::RightClickBracketLeg {
                 annotation_id,
                 leg,
                 x,
                 y,
-            } => self.update(Message::ChartBracketContextMenu(
-                chart_id,
-                annotation_id.0,
-                leg,
-                x,
-                y,
-            )),
+            } => self.handle_chart_bracket_context_menu(chart_id, annotation_id, leg, x, y),
             ChartAction::CreateBracket {
                 entry,
                 tp,
                 sl,
                 side,
-            } => self.update(Message::ChartCreateBracket(chart_id, entry, tp, sl, side)),
+            } => self.handle_chart_create_bracket(chart_id, entry, tp, sl, side),
             ChartAction::DecoratorClick {
                 annotation_id,
                 group_id: _,
@@ -658,35 +647,29 @@ impl MidasApp {
                 action,
             } => {
                 use midas_chart::widget::decorator::DecoratorAction;
-                let legacy = match action {
+                match action {
                     DecoratorAction::CloseAnnotation => {
-                        Some(Message::ChartBracketCancel(chart_id, annotation_id))
+                        self.handle_chart_bracket_cancel(chart_id, annotation_id)
                     }
                     DecoratorAction::RemoveStopLoss => {
-                        Some(Message::ChartBracketCancelSL(chart_id, annotation_id))
+                        self.handle_chart_bracket_cancel_sl(chart_id, annotation_id)
                     }
                     DecoratorAction::CreateStopLoss => {
-                        Some(Message::ChartBracketToggleSL(chart_id, annotation_id))
+                        self.handle_chart_bracket_toggle_sl(chart_id, annotation_id)
                     }
                     DecoratorAction::Submit => {
-                        Some(Message::ChartBracketSubmit(chart_id, annotation_id))
+                        self.handle_chart_bracket_submit(chart_id, annotation_id)
                     }
-                    DecoratorAction::Save => {
-                        Some(Message::ChartBracketSave(chart_id, annotation_id))
-                    }
+                    DecoratorAction::Save => self.handle_chart_bracket_save(annotation_id),
                     DecoratorAction::TogglePin => {
-                        Some(Message::ChartBracketTogglePin(chart_id, annotation_id))
+                        self.handle_chart_bracket_toggle_pin(chart_id)
                     }
                     DecoratorAction::CreateTakeProfit
                     | DecoratorAction::CycleEntryType
                     | DecoratorAction::EditQuantity
                     | DecoratorAction::EditPrice
                     | DecoratorAction::ToggleLocked
-                    | DecoratorAction::Custom(_) => None,
-                };
-                match legacy {
-                    Some(m) => self.update(m),
-                    None => Task::none(),
+                    | DecoratorAction::Custom(_) => Task::none(),
                 }
             }
             // Variants the chart core can emit but the app layer
@@ -2934,420 +2917,13 @@ impl MidasApp {
     pub(crate) fn handle_bracket_msg(&mut self, message: Message) -> Task<Message> {
         match message {
             // -- Bracket creation from drawing tool --
-            Message::ChartCreateBracket(chart_id, entry, tp, sl, side) => {
-                let ticker = self.chart_ticker(chart_id).map(str::to_owned);
-                if let Some(ticker) = ticker {
-                    use midas_chart::widget::level::LineStyle;
-                    use midas_chart::widget::order_bracket::*;
+            // Bracket arms migrated to dedicated handle_chart_bracket_*
+            // methods (audit P2 #4 batch 3) — the Message::ChartBracket*
+            // wrapper variants are deleted; dispatch_chart_action calls
+            // the methods directly when DecoratorClick / RightClickBracketLeg
+            // / CreateBracket / DragBracketLeg actions arrive.
 
-                    let make_leg = |price: f64| BracketLeg {
-                        line: midas_chart::widget::PriceLine {
-                            price,
-                            extent: midas_chart::widget::LineExtent::FullWidth,
-                            stroke: midas_chart::widget::LineStroke {
-                                color: [0.0, 0.0, 0.0, 1.0],
-                                width: 1.5,
-                                style: LineStyle::Solid,
-                            },
-                        },
-                        role: LegRole::Entry,
-                        projected_pnl: None,
-                        projected_pnl_pct: None,
-                    };
-                    // Drawing tool doesn't capture quantity — use None so labels
-                    // show clean "▲ 185.50" instead of misleading "▲ 185.50  0sh".
-                    let bracket = OrderBracket {
-                        entry: make_leg(entry),
-                        take_profit: Some(make_leg(tp)),
-                        stop_loss: Some(make_leg(sl)),
-                        side,
-                        status: BracketStatus::Draft,
-                        quantity: None,
-                        saved: false,
-                        filled_qty: None,
-                        entry_type: midas_chart::widget::order_bracket::EntryType::Market,
-                        entry_stop_price: None,
-                        wrong_side_warning: false,
-                    };
-                    let annotation_id = self.annotation_store.add(
-                        &ticker,
-                        midas_chart::widget::AnnotationKind::OrderBracket(Box::new(bracket)),
-                    );
-                    self.mark_levels_dirty_for_ticker(&ticker);
-                    tracing::info!(
-                        "Bracket drawn on chart: {annotation_id} for {ticker} \
-                         ({side:?} entry={entry:.2} tp={tp:.2} sl={sl:.2})"
-                    );
-                    self.status_message = format!(
-                        "Bracket placed on {ticker} ({side:?} E={entry:.2} TP={tp:.2} SL={sl:.2})"
-                    );
-                }
-                Task::none()
-            }
-
-            // -- Bracket drag --
-            Message::ChartDragBracketLeg(chart_id, annotation_id, leg, new_price) => {
-                let ann_id = AnnotationId(annotation_id);
-                let ticker = self.chart_ticker(chart_id).map(str::to_owned);
-                if let Some(ref ticker) = ticker {
-                    let sym_key = crate::annotation_store::SymbolKey::new(ticker);
-                    // Route the drag through TickerState. The effect handler
-                    // projects the bracket into annotation_store and syncs
-                    // panels automatically.
-                    let _ = self.update(Message::Ticker(
-                        sym_key,
-                        crate::ticker_state::TickerMsg::DragLeg {
-                            role: leg,
-                            new_price,
-                        },
-                    ));
-
-                    // Send price modification to broker engine (kept in
-                    // app.rs because broker_bridge is not in TickerState).
-                    if let Some(ref bridge) = self.broker_bridge {
-                        let order_id = self
-                            .order_annotation_links
-                            .values()
-                            .find(|link| link.annotation_id == annotation_id)
-                            .and_then(|link| match leg {
-                                midas_chart::widget::order_bracket::LegRole::TakeProfit => {
-                                    link.tp_order_id
-                                }
-                                midas_chart::widget::order_bracket::LegRole::StopLoss => {
-                                    link.sl_order_id
-                                }
-                                _ => None,
-                            });
-                        if let Some(order_id) = order_id {
-                            if let Err(e) = bridge.modify_bracket_leg(order_id, new_price) {
-                                tracing::error!("Failed to send ModifyBracketLeg to broker: {e}");
-                            }
-                        }
-                    }
-                }
-                // Slice 3: route the post-drag bracket state through
-                // the ticker-intent reducer.
-                if let Some(symbol_at_drag_start) = ticker {
-                    self.sync_drag_to_intent(symbol_at_drag_start, ann_id);
-                }
-                Task::none()
-            }
-
-            // -- Bracket action buttons (from chart hit zones) --
-            Message::ChartBracketToggleSL(chart_id, ann_id) => {
-                let symbol = self
-                    .charts
-                    .get(&chart_id)
-                    .map(|c| c.symbol.clone())
-                    .unwrap_or_default();
-                if symbol.is_empty() {
-                    return Task::none();
-                }
-                // Read current SL state to determine toggle direction.
-                let has_sl = self
-                    .annotation_store
-                    .get(&symbol)
-                    .iter()
-                    .find(|a| a.id == ann_id)
-                    .and_then(|a| match &a.kind {
-                        midas_chart::widget::AnnotationKind::OrderBracket(b) => {
-                            Some(b.stop_loss.is_some())
-                        }
-                        _ => None,
-                    })
-                    .unwrap_or(false);
-                let sym_key = crate::annotation_store::SymbolKey::new(&symbol);
-                self.update(Message::Ticker(
-                    sym_key,
-                    crate::ticker_state::TickerMsg::SetSlEnabled(!has_sl),
-                ))
-            }
-
-            Message::ChartBracketCancelSL(chart_id, _ann_id) => {
-                let symbol = self
-                    .charts
-                    .get(&chart_id)
-                    .map(|c| c.symbol.clone())
-                    .unwrap_or_default();
-                if symbol.is_empty() {
-                    return Task::none();
-                }
-                let sym_key = crate::annotation_store::SymbolKey::new(&symbol);
-                self.update(Message::Ticker(
-                    sym_key,
-                    crate::ticker_state::TickerMsg::SetSlEnabled(false),
-                ))
-            }
-
-            Message::ChartBracketTogglePin(chart_id, _ann_id) => {
-                // Resolve the chart's symbol and route through the
-                // ticker-intent reducer — the intent is the single
-                // source of truth for `pinned`.
-                let symbol = self
-                    .charts
-                    .get(&chart_id)
-                    .map(|c| c.symbol.clone())
-                    .unwrap_or_default();
-                if symbol.is_empty() {
-                    return Task::none();
-                }
-                let key = crate::annotation_store::SymbolKey::new(&symbol);
-                self.update(Message::Ticker(
-                    key,
-                    crate::ticker_state::TickerMsg::TogglePin,
-                ))
-            }
-
-            Message::ChartBracketSave(_chart_id, ann_id) => {
-                // Find the symbol from whichever panel owns this bracket.
-                let symbol = self
-                    .order_panels
-                    .iter()
-                    .find(|(_, p)| p.state.bracket_annotation_id == Some(ann_id))
-                    .map(|(_id, p)| p.state.symbol.clone());
-
-                if let Some(symbol) = symbol {
-                    let sym_key = crate::annotation_store::SymbolKey::new(&symbol);
-                    return self.update(Message::Ticker(
-                        sym_key,
-                        crate::ticker_state::TickerMsg::SaveBracket,
-                    ));
-                }
-                Task::none()
-            }
-
-            Message::ChartBracketSubmit(chart_id, ann_id) => {
-                let symbol = self
-                    .charts
-                    .get(&chart_id)
-                    .map(|c| c.symbol.clone())
-                    .unwrap_or_default();
-                if symbol.is_empty() {
-                    return Task::none();
-                }
-
-                // Find which panel owns this bracket.
-                let panel_id = self
-                    .order_panels
-                    .iter()
-                    .find(|(_, p)| p.state.bracket_annotation_id == Some(ann_id))
-                    .map(|(id, _)| *id);
-
-                // Read bracket data for validation.
-                let bracket_data = self
-                    .annotation_store
-                    .get(&symbol)
-                    .iter()
-                    .find(|a| a.id == ann_id)
-                    .and_then(|a| match &a.kind {
-                        midas_chart::widget::AnnotationKind::OrderBracket(b) => {
-                            Some(b.as_ref().clone())
-                        }
-                        _ => None,
-                    });
-
-                let Some(bracket) = bracket_data else {
-                    return Task::none();
-                };
-
-                // Resolve quantity: bracket.quantity > panel.quantity > error.
-                let quantity: f64 = if let Some(q) = bracket.quantity {
-                    q
-                } else if let Some(pid) = panel_id {
-                    self.order_panels
-                        .get(&pid)
-                        .and_then(|p| p.state.quantity.parse::<f64>().ok())
-                        .unwrap_or(0.0)
-                } else {
-                    0.0
-                };
-
-                // Validate.
-                let errors = crate::order_panel::validate_bracket(&bracket, quantity);
-                if !errors.is_empty() {
-                    if let Some(pid) = panel_id {
-                        if let Some(p) = self.order_panels.get_mut(&pid) {
-                            p.state.errors = errors;
-                        }
-                    }
-                    return Task::none();
-                }
-
-                // Map chart EntryType → desktop EntryKind for broker params.
-                let entry_kind = match bracket.entry_type {
-                    midas_chart::widget::order_bracket::EntryType::Market => {
-                        midas_broker::OrderKind::Market
-                    }
-                    midas_chart::widget::order_bracket::EntryType::Limit => {
-                        midas_broker::OrderKind::Limit
-                    }
-                    midas_chart::widget::order_bracket::EntryType::Stop => {
-                        midas_broker::OrderKind::Stop
-                    }
-                    midas_chart::widget::order_bracket::EntryType::StopLimit => {
-                        midas_broker::OrderKind::StopLimit
-                    }
-                };
-
-                // Entry type → broker BracketParams field mapping:
-                //   Market:    entry_price = None,                entry_stop_price = None
-                //   Limit:     entry_price = Some(limit_price),   entry_stop_price = None
-                //   Stop:      entry_price = None,                entry_stop_price = Some(stop_price)
-                //   StopLimit: entry_price = Some(limit_price),   entry_stop_price = Some(stop_price)
-                let (entry_price, entry_stop_price) = match bracket.entry_type {
-                    midas_chart::widget::order_bracket::EntryType::Market => (None, None),
-                    midas_chart::widget::order_bracket::EntryType::Limit => {
-                        (Some(bracket.entry.line.price), None)
-                    }
-                    midas_chart::widget::order_bracket::EntryType::Stop => {
-                        (None, Some(bracket.entry.line.price))
-                    }
-                    midas_chart::widget::order_bracket::EntryType::StopLimit => {
-                        (Some(bracket.entry.line.price), bracket.entry_stop_price)
-                    }
-                };
-
-                let action = match bracket.side {
-                    midas_chart::widget::order_bracket::BracketSide::Long => {
-                        midas_broker::OrderAction::Buy
-                    }
-                    midas_chart::widget::order_bracket::BracketSide::Short => {
-                        midas_broker::OrderAction::Sell
-                    }
-                };
-
-                // Transition bracket to Pending via TickerState.
-                {
-                    let sym_key = crate::annotation_store::SymbolKey::new(&symbol);
-                    let _ = self.update(Message::Ticker(
-                        sym_key,
-                        crate::ticker_state::TickerMsg::SubmitOrder,
-                    ));
-                }
-
-                // Send to broker engine.
-                if let Some(ref bridge) = self.broker_bridge {
-                    let broker_params = midas_broker::BracketParams {
-                        symbol: symbol.clone(),
-                        con_id: None,
-                        sec_type: midas_broker::SecurityType::Stock,
-                        exchange: "SMART".to_string(),
-                        currency: "USD".to_string(),
-                        action,
-                        quantity,
-                        outside_rth: false,
-                        take_profit: bracket.take_profit.as_ref().map(|tp| {
-                            midas_broker::TakeProfitParams {
-                                price: tp.line.price,
-                                tif: None,
-                            }
-                        }),
-                        stop_loss: bracket.stop_loss.as_ref().map(|sl| {
-                            midas_broker::StopLossParams {
-                                stop_price: sl.line.price,
-                                limit_price: None,
-                                tif: None,
-                            }
-                        }),
-                        reference_price: Some(bracket.entry.line.price),
-                        strategy: None,
-                        tags: Vec::new(),
-                        entry_kind,
-                        entry_price,
-                        entry_stop_price,
-                    };
-                    match bridge.create_bracket(broker_params) {
-                        Ok(()) => {
-                            tracing::info!(
-                                "CreateBracket sent: chart={chart_id:?} ann={ann_id} \
-                                 symbol={symbol} qty={quantity} type={entry_kind:?}"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to send bracket to broker: {e}");
-                            // Revert to Draft via TickerState.
-                            {
-                                let sym_key = crate::annotation_store::SymbolKey::new(&symbol);
-                                let _ = self.update(Message::Ticker(
-                                    sym_key,
-                                    crate::ticker_state::TickerMsg::OrderRejected {
-                                        reason: e.to_string(),
-                                    },
-                                ));
-                            }
-                            if let Some(pid) = panel_id {
-                                if let Some(p) = self.order_panels.get_mut(&pid) {
-                                    p.state.errors =
-                                        vec![("broker".into(), format!("Broker error: {e}"))];
-                                }
-                            }
-                            self.mark_levels_dirty_for_ticker(&symbol);
-                            return Task::none();
-                        }
-                    }
-                } else {
-                    tracing::info!(
-                        "Bracket submitted (no broker bridge): \
-                         chart={chart_id:?} ann={ann_id} symbol={symbol} qty={quantity}"
-                    );
-                }
-
-                // Clear panel bracket ownership via TickerState.
-                {
-                    let sym_key = crate::annotation_store::SymbolKey::new(&symbol);
-                    let _ = self.update(Message::Ticker(
-                        sym_key,
-                        crate::ticker_state::TickerMsg::SetBracketMode(None),
-                    ));
-                }
-                if let Some(pid) = panel_id {
-                    if let Some(p) = self.order_panels.get_mut(&pid) {
-                        p.state.bracket_annotation_id = None;
-                    }
-                }
-                self.mark_levels_dirty_for_ticker(&symbol);
-                Task::none()
-            }
-
-            Message::ChartBracketCancel(chart_id, ann_id) => {
-                let symbol = self
-                    .charts
-                    .get(&chart_id)
-                    .map(|c| c.symbol.clone())
-                    .unwrap_or_default();
-                if symbol.is_empty() {
-                    return Task::none();
-                }
-
-                // Find which panel owns this bracket.
-                let panel_id = self
-                    .order_panels
-                    .iter()
-                    .find(|(_, p)| p.state.bracket_annotation_id == Some(ann_id))
-                    .map(|(id, _)| *id);
-
-                // Route through TickerState: SetBracketMode(None)
-                // cancels the bracket and resets bracket_mode.
-                let sym_key = crate::annotation_store::SymbolKey::new(&symbol);
-                let _ = self.update(Message::Ticker(
-                    sym_key,
-                    crate::ticker_state::TickerMsg::SetBracketMode(None),
-                ));
-
-                if let Some(pid) = panel_id {
-                    if let Some(p) = self.order_panels.get_mut(&pid) {
-                        p.state.bracket_annotation_id = None;
-                    }
-                }
-                self.mark_levels_dirty_for_ticker(&symbol);
-                Task::none()
-            }
-
-            // -- Bracket context menu --
-            Message::ChartBracketContextMenu(chart_id, ann_id, leg, x, y) => {
-                self.bracket_context_menu = Some((chart_id, ann_id, leg, x, y));
-                Task::none()
-            }
+            // -- Bracket context menu (these still re-dispatch elsewhere) --
             Message::BracketContextCancel(parent_id) => {
                 self.bracket_context_menu = None;
 
@@ -3388,6 +2964,430 @@ impl MidasApp {
 
             _ => unreachable!(),
         }
+    }
+
+    // ── Bracket action handlers (audit P2 #4 batch 3) ────────────────
+    //
+    // Each method here used to live as a `Message::ChartBracket*` arm
+    // inside `handle_bracket_msg`. The legacy variants are gone;
+    // `dispatch_chart_action` calls these methods directly when the
+    // matching `ChartAction` variant arrives.
+
+    pub(crate) fn handle_chart_create_bracket(
+        &mut self,
+        chart_id: ChartId,
+        entry: f64,
+        tp: f64,
+        sl: f64,
+        side: midas_chart::widget::order_bracket::BracketSide,
+    ) -> Task<Message> {
+        let ticker = self.chart_ticker(chart_id).map(str::to_owned);
+        if let Some(ticker) = ticker {
+            use midas_chart::widget::level::LineStyle;
+            use midas_chart::widget::order_bracket::*;
+
+            let make_leg = |price: f64| BracketLeg {
+                line: midas_chart::widget::PriceLine {
+                    price,
+                    extent: midas_chart::widget::LineExtent::FullWidth,
+                    stroke: midas_chart::widget::LineStroke {
+                        color: [0.0, 0.0, 0.0, 1.0],
+                        width: 1.5,
+                        style: LineStyle::Solid,
+                    },
+                },
+                role: LegRole::Entry,
+                projected_pnl: None,
+                projected_pnl_pct: None,
+            };
+            let bracket = OrderBracket {
+                entry: make_leg(entry),
+                take_profit: Some(make_leg(tp)),
+                stop_loss: Some(make_leg(sl)),
+                side,
+                status: BracketStatus::Draft,
+                quantity: None,
+                saved: false,
+                filled_qty: None,
+                entry_type: midas_chart::widget::order_bracket::EntryType::Market,
+                entry_stop_price: None,
+                wrong_side_warning: false,
+            };
+            let annotation_id = self.annotation_store.add(
+                &ticker,
+                midas_chart::widget::AnnotationKind::OrderBracket(Box::new(bracket)),
+            );
+            self.mark_levels_dirty_for_ticker(&ticker);
+            tracing::info!(
+                "Bracket drawn on chart: {annotation_id} for {ticker} \
+                 ({side:?} entry={entry:.2} tp={tp:.2} sl={sl:.2})"
+            );
+            self.status_message = format!(
+                "Bracket placed on {ticker} ({side:?} E={entry:.2} TP={tp:.2} SL={sl:.2})"
+            );
+        }
+        Task::none()
+    }
+
+    pub(crate) fn handle_chart_bracket_drag_leg(
+        &mut self,
+        chart_id: ChartId,
+        annotation_id: AnnotationId,
+        leg: midas_chart::widget::order_bracket::LegRole,
+        new_price: f64,
+    ) -> Task<Message> {
+        let ticker = self.chart_ticker(chart_id).map(str::to_owned);
+        if let Some(ref ticker) = ticker {
+            let sym_key = crate::annotation_store::SymbolKey::new(ticker);
+            let _ = self.update(Message::Ticker(
+                sym_key,
+                crate::ticker_state::TickerMsg::DragLeg {
+                    role: leg,
+                    new_price,
+                },
+            ));
+            if let Some(ref bridge) = self.broker_bridge {
+                let order_id = self
+                    .order_annotation_links
+                    .values()
+                    .find(|link| link.annotation_id == annotation_id.0)
+                    .and_then(|link| match leg {
+                        midas_chart::widget::order_bracket::LegRole::TakeProfit => {
+                            link.tp_order_id
+                        }
+                        midas_chart::widget::order_bracket::LegRole::StopLoss => {
+                            link.sl_order_id
+                        }
+                        _ => None,
+                    });
+                if let Some(order_id) = order_id {
+                    if let Err(e) = bridge.modify_bracket_leg(order_id, new_price) {
+                        tracing::error!("Failed to send ModifyBracketLeg to broker: {e}");
+                    }
+                }
+            }
+        }
+        if let Some(symbol_at_drag_start) = ticker {
+            self.sync_drag_to_intent(symbol_at_drag_start, annotation_id);
+        }
+        Task::none()
+    }
+
+    pub(crate) fn handle_chart_bracket_context_menu(
+        &mut self,
+        chart_id: ChartId,
+        annotation_id: AnnotationId,
+        leg: midas_chart::widget::order_bracket::LegRole,
+        x: f32,
+        y: f32,
+    ) -> Task<Message> {
+        self.bracket_context_menu = Some((chart_id, annotation_id.0, leg, x, y));
+        Task::none()
+    }
+
+    pub(crate) fn handle_chart_bracket_toggle_sl(
+        &mut self,
+        chart_id: ChartId,
+        ann_id: AnnotationId,
+    ) -> Task<Message> {
+        let symbol = self
+            .charts
+            .get(&chart_id)
+            .map(|c| c.symbol.clone())
+            .unwrap_or_default();
+        if symbol.is_empty() {
+            return Task::none();
+        }
+        let has_sl = self
+            .annotation_store
+            .get(&symbol)
+            .iter()
+            .find(|a| a.id == ann_id)
+            .and_then(|a| match &a.kind {
+                midas_chart::widget::AnnotationKind::OrderBracket(b) => {
+                    Some(b.stop_loss.is_some())
+                }
+                _ => None,
+            })
+            .unwrap_or(false);
+        let sym_key = crate::annotation_store::SymbolKey::new(&symbol);
+        self.update(Message::Ticker(
+            sym_key,
+            crate::ticker_state::TickerMsg::SetSlEnabled(!has_sl),
+        ))
+    }
+
+    pub(crate) fn handle_chart_bracket_cancel_sl(
+        &mut self,
+        chart_id: ChartId,
+        _ann_id: AnnotationId,
+    ) -> Task<Message> {
+        let symbol = self
+            .charts
+            .get(&chart_id)
+            .map(|c| c.symbol.clone())
+            .unwrap_or_default();
+        if symbol.is_empty() {
+            return Task::none();
+        }
+        let sym_key = crate::annotation_store::SymbolKey::new(&symbol);
+        self.update(Message::Ticker(
+            sym_key,
+            crate::ticker_state::TickerMsg::SetSlEnabled(false),
+        ))
+    }
+
+    pub(crate) fn handle_chart_bracket_toggle_pin(&mut self, chart_id: ChartId) -> Task<Message> {
+        let symbol = self
+            .charts
+            .get(&chart_id)
+            .map(|c| c.symbol.clone())
+            .unwrap_or_default();
+        if symbol.is_empty() {
+            return Task::none();
+        }
+        let key = crate::annotation_store::SymbolKey::new(&symbol);
+        self.update(Message::Ticker(
+            key,
+            crate::ticker_state::TickerMsg::TogglePin,
+        ))
+    }
+
+    pub(crate) fn handle_chart_bracket_save(&mut self, ann_id: AnnotationId) -> Task<Message> {
+        let symbol = self
+            .order_panels
+            .iter()
+            .find(|(_, p)| p.state.bracket_annotation_id == Some(ann_id))
+            .map(|(_id, p)| p.state.symbol.clone());
+
+        if let Some(symbol) = symbol {
+            let sym_key = crate::annotation_store::SymbolKey::new(&symbol);
+            return self.update(Message::Ticker(
+                sym_key,
+                crate::ticker_state::TickerMsg::SaveBracket,
+            ));
+        }
+        Task::none()
+    }
+
+    pub(crate) fn handle_chart_bracket_submit(
+        &mut self,
+        chart_id: ChartId,
+        ann_id: AnnotationId,
+    ) -> Task<Message> {
+        let symbol = self
+            .charts
+            .get(&chart_id)
+            .map(|c| c.symbol.clone())
+            .unwrap_or_default();
+        if symbol.is_empty() {
+            return Task::none();
+        }
+
+        let panel_id = self
+            .order_panels
+            .iter()
+            .find(|(_, p)| p.state.bracket_annotation_id == Some(ann_id))
+            .map(|(id, _)| *id);
+
+        let bracket_data = self
+            .annotation_store
+            .get(&symbol)
+            .iter()
+            .find(|a| a.id == ann_id)
+            .and_then(|a| match &a.kind {
+                midas_chart::widget::AnnotationKind::OrderBracket(b) => {
+                    Some(b.as_ref().clone())
+                }
+                _ => None,
+            });
+
+        let Some(bracket) = bracket_data else {
+            return Task::none();
+        };
+
+        let quantity: f64 = if let Some(q) = bracket.quantity {
+            q
+        } else if let Some(pid) = panel_id {
+            self.order_panels
+                .get(&pid)
+                .and_then(|p| p.state.quantity.parse::<f64>().ok())
+                .unwrap_or(0.0)
+        } else {
+            0.0
+        };
+
+        let errors = crate::order_panel::validate_bracket(&bracket, quantity);
+        if !errors.is_empty() {
+            if let Some(pid) = panel_id {
+                if let Some(p) = self.order_panels.get_mut(&pid) {
+                    p.state.errors = errors;
+                }
+            }
+            return Task::none();
+        }
+
+        let entry_kind = match bracket.entry_type {
+            midas_chart::widget::order_bracket::EntryType::Market => {
+                midas_broker::OrderKind::Market
+            }
+            midas_chart::widget::order_bracket::EntryType::Limit => {
+                midas_broker::OrderKind::Limit
+            }
+            midas_chart::widget::order_bracket::EntryType::Stop => {
+                midas_broker::OrderKind::Stop
+            }
+            midas_chart::widget::order_bracket::EntryType::StopLimit => {
+                midas_broker::OrderKind::StopLimit
+            }
+        };
+
+        let (entry_price, entry_stop_price) = match bracket.entry_type {
+            midas_chart::widget::order_bracket::EntryType::Market => (None, None),
+            midas_chart::widget::order_bracket::EntryType::Limit => {
+                (Some(bracket.entry.line.price), None)
+            }
+            midas_chart::widget::order_bracket::EntryType::Stop => {
+                (None, Some(bracket.entry.line.price))
+            }
+            midas_chart::widget::order_bracket::EntryType::StopLimit => {
+                (Some(bracket.entry.line.price), bracket.entry_stop_price)
+            }
+        };
+
+        let action = match bracket.side {
+            midas_chart::widget::order_bracket::BracketSide::Long => {
+                midas_broker::OrderAction::Buy
+            }
+            midas_chart::widget::order_bracket::BracketSide::Short => {
+                midas_broker::OrderAction::Sell
+            }
+        };
+
+        {
+            let sym_key = crate::annotation_store::SymbolKey::new(&symbol);
+            let _ = self.update(Message::Ticker(
+                sym_key,
+                crate::ticker_state::TickerMsg::SubmitOrder,
+            ));
+        }
+
+        if let Some(ref bridge) = self.broker_bridge {
+            let broker_params = midas_broker::BracketParams {
+                symbol: symbol.clone(),
+                con_id: None,
+                sec_type: midas_broker::SecurityType::Stock,
+                exchange: "SMART".to_string(),
+                currency: "USD".to_string(),
+                action,
+                quantity,
+                outside_rth: false,
+                take_profit: bracket
+                    .take_profit
+                    .as_ref()
+                    .map(|tp| midas_broker::TakeProfitParams {
+                        price: tp.line.price,
+                        tif: None,
+                    }),
+                stop_loss: bracket
+                    .stop_loss
+                    .as_ref()
+                    .map(|sl| midas_broker::StopLossParams {
+                        stop_price: sl.line.price,
+                        limit_price: None,
+                        tif: None,
+                    }),
+                reference_price: Some(bracket.entry.line.price),
+                strategy: None,
+                tags: Vec::new(),
+                entry_kind,
+                entry_price,
+                entry_stop_price,
+            };
+            match bridge.create_bracket(broker_params) {
+                Ok(()) => {
+                    tracing::info!(
+                        "CreateBracket sent: chart={chart_id:?} ann={ann_id} \
+                         symbol={symbol} qty={quantity} type={entry_kind:?}"
+                    );
+                }
+                Err(e) => {
+                    tracing::error!("Failed to send bracket to broker: {e}");
+                    {
+                        let sym_key = crate::annotation_store::SymbolKey::new(&symbol);
+                        let _ = self.update(Message::Ticker(
+                            sym_key,
+                            crate::ticker_state::TickerMsg::OrderRejected {
+                                reason: e.to_string(),
+                            },
+                        ));
+                    }
+                    if let Some(pid) = panel_id {
+                        if let Some(p) = self.order_panels.get_mut(&pid) {
+                            p.state.errors =
+                                vec![("broker".into(), format!("Broker error: {e}"))];
+                        }
+                    }
+                    self.mark_levels_dirty_for_ticker(&symbol);
+                    return Task::none();
+                }
+            }
+        } else {
+            tracing::info!(
+                "Bracket submitted (no broker bridge): \
+                 chart={chart_id:?} ann={ann_id} symbol={symbol} qty={quantity}"
+            );
+        }
+
+        {
+            let sym_key = crate::annotation_store::SymbolKey::new(&symbol);
+            let _ = self.update(Message::Ticker(
+                sym_key,
+                crate::ticker_state::TickerMsg::SetBracketMode(None),
+            ));
+        }
+        if let Some(pid) = panel_id {
+            if let Some(p) = self.order_panels.get_mut(&pid) {
+                p.state.bracket_annotation_id = None;
+            }
+        }
+        self.mark_levels_dirty_for_ticker(&symbol);
+        Task::none()
+    }
+
+    pub(crate) fn handle_chart_bracket_cancel(
+        &mut self,
+        chart_id: ChartId,
+        ann_id: AnnotationId,
+    ) -> Task<Message> {
+        let symbol = self
+            .charts
+            .get(&chart_id)
+            .map(|c| c.symbol.clone())
+            .unwrap_or_default();
+        if symbol.is_empty() {
+            return Task::none();
+        }
+
+        let panel_id = self
+            .order_panels
+            .iter()
+            .find(|(_, p)| p.state.bracket_annotation_id == Some(ann_id))
+            .map(|(id, _)| *id);
+
+        let sym_key = crate::annotation_store::SymbolKey::new(&symbol);
+        let _ = self.update(Message::Ticker(
+            sym_key,
+            crate::ticker_state::TickerMsg::SetBracketMode(None),
+        ));
+
+        if let Some(pid) = panel_id {
+            if let Some(p) = self.order_panels.get_mut(&pid) {
+                p.state.bracket_annotation_id = None;
+            }
+        }
+        self.mark_levels_dirty_for_ticker(&symbol);
+        Task::none()
     }
 }
 

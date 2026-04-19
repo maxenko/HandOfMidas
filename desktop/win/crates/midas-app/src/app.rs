@@ -702,50 +702,14 @@ pub enum Message {
     /// Mouse left the G.ATR badge — deactivate candle dimming.
     GatrHoverLeave(ChartId),
 
-    // -- Bracket creation from drawing tool --
-    /// Bracket tool completed a 3-click bracket on a chart.
-    ChartCreateBracket(
-        ChartId,
-        f64,
-        f64,
-        f64,
-        midas_chart::widget::order_bracket::BracketSide,
-    ),
-
-    // -- Bracket drag --
-    /// A bracket leg was dragged on a chart.
-    ChartDragBracketLeg(
-        ChartId,
-        u64,
-        midas_chart::widget::order_bracket::LegRole,
-        f64,
-    ),
-
-    // -- Bracket action buttons (from chart hit zones) --
-    /// Submit bracket from chart button.
-    ChartBracketSubmit(ChartId, AnnotationId),
-    /// Save bracket from chart button.
-    ChartBracketSave(ChartId, AnnotationId),
-    /// Toggle SL from chart button.
-    ChartBracketToggleSL(ChartId, AnnotationId),
-    /// Cancel bracket from chart button.
-    ChartBracketCancel(ChartId, AnnotationId),
-    /// Cancel SL from chart button.
-    ChartBracketCancelSL(ChartId, AnnotationId),
-    /// Toggle the pin state on the symbol whose bracket this chart
-    /// annotation belongs to. Added in Slice 4 to wire the PinToggle
-    /// decorator click into `OrderIntentAppMsg::TogglePin`.
-    ChartBracketTogglePin(ChartId, AnnotationId),
-
     // -- Bracket context menu --
-    /// Right-click on a bracket leg — show context menu.
-    ChartBracketContextMenu(
-        ChartId,
-        u64,
-        midas_chart::widget::order_bracket::LegRole,
-        f32,
-        f32,
-    ),
+    // Bracket creation, drag, action buttons, and context-menu open
+    // were collapsed into Message::Chart(ChartId, ChartAction)
+    // (audit P2 #4 batch 3). Decorator-action and bracket-leg drag
+    // are routed by `dispatch_chart_action` to the matching
+    // `handle_chart_bracket_*` methods. Only context-menu lifecycle
+    // (Cancel/Dismiss) remains as top-level variants because those
+    // come from the popup widget, not the chart-action stream.
     /// Cancel a bracket from the context menu.
     BracketContextCancel(uuid::Uuid),
     /// Dismiss the bracket context menu.
@@ -2736,18 +2700,12 @@ impl MidasApp {
                 self.handle_gatr_hover_msg(message)
             }
 
-            // -- Bracket (drawing tool, drag, action buttons, context menu) --
-            Message::ChartCreateBracket(..)
-            | Message::ChartDragBracketLeg(..)
-            | Message::ChartBracketToggleSL(..)
-            | Message::ChartBracketCancelSL(..)
-            | Message::ChartBracketTogglePin(..)
-            | Message::ChartBracketSave(..)
-            | Message::ChartBracketSubmit(..)
-            | Message::ChartBracketCancel(..)
-            | Message::ChartBracketContextMenu(..)
-            | Message::BracketContextCancel(..)
-            | Message::BracketContextDismiss => self.handle_bracket_msg(message),
+            // -- Bracket context menu --
+            // Bracket creation/drag/action buttons collapsed into
+            // Message::Chart(...) — see audit P2 #4 batch 3.
+            Message::BracketContextCancel(..) | Message::BracketContextDismiss => {
+                self.handle_bracket_msg(message)
+            }
 
             // -- Broker events --
             Message::BrokerBracketCreated { .. }
