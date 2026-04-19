@@ -42,44 +42,12 @@ use crate::link::{LinkDimension, PickerTarget};
 use crate::order_panel::OrderSide;
 use crate::watchlist::WatchlistPanel;
 
-// ── Toast state ───────────────────────────────────────────────────────
-
-/// Floating toast notification state.
-///
-/// Owned by [`MidasApp::toast`]. Shown by
-/// `app/views.rs::view_toast_overlay`, auto-dismissed by the `Tick`
-/// handler after `TOAST_TTL_SECS` seconds, and manually dismissed on
-/// click or when the action button is pressed.
-#[derive(Clone, Debug)]
-pub struct ToastState {
-    /// The human-readable message rendered in the toast body.
-    pub message: String,
-    /// When the toast appeared. Compared against `Instant::now()` in
-    /// the `Tick` handler to fire the auto-dismiss path.
-    pub created_at: Instant,
-    /// Optional action button. When set, the toast renders an extra
-    /// clickable region that emits the embedded message before
-    /// dismissing. Used by the GATR-snap toast for its `Undo` hook.
-    pub action: Option<ToastAction>,
-}
-
-/// An action button embedded inside a [`ToastState`].
-///
-/// The `on_click` field is boxed so the action can own any `Message`
-/// variant (including ones that carry allocations like `OrderIntent`)
-/// without enlarging the outer enum.
-#[derive(Clone, Debug)]
-pub struct ToastAction {
-    /// Button label. Example: `"Undo"`.
-    pub label: String,
-    /// Message emitted when the button is clicked. Delivered verbatim
-    /// by the [`Message::ToastActionClicked`] handler, which also
-    /// clears the toast.
-    pub on_click: Box<Message>,
-}
-
-/// Seconds a toast remains visible before auto-dismiss.
-pub const TOAST_TTL_SECS: u64 = 4;
+// Toast state moved to `crate::toast` — see midasapp-split.md.
+// `ToastAction` is re-exported because `Message::Ticker` plumbing
+// references it inside `TickerEffect::Toast`. Other toast types
+// (`ToastState`, `ToastMsg`, `Effect`, `TOAST_TTL_SECS`) live on
+// `crate::toast` directly; reach there through the controller.
+pub use crate::toast::ToastAction;
 
 // ── Recent instruments (MRU) ──────────────────────────────────────────
 
@@ -393,11 +361,11 @@ pub struct MidasApp {
     pub order_annotation_links: HashMap<uuid::Uuid, crate::order_panel::OrderAnnotationLink>,
     /// Floating toast notification state. `None` when no toast is
     /// currently visible. Replaces the previous
-    /// `(toast_message, toast_created_at)` pair — the message, the TTL
-    /// marker and the optional Undo-style action button all live in
-    /// one struct so every site that sets a toast picks up the action
-    /// hook by default.
-    pub toast: Option<ToastState>,
+    /// Toast notification controller. State + auto-dismiss + view all
+    /// live behind [`crate::toast::ToastController`]; `MidasApp` only
+    /// routes [`Message::Toast`] into it and interprets the resulting
+    /// effects.
+    pub toasts: crate::toast::ToastController,
     /// Bracket context menu state: (chart_id, annotation_id, leg_role, screen_x, screen_y).
     pub bracket_context_menu: Option<(
         ChartId,
@@ -826,25 +794,9 @@ pub enum Message {
     BrokerConnectionChanged(String),
 
     // -- Toast notifications --
-    /// Show a toast notification.
-    ///
-    /// Struct variant so an optional action button can be attached
-    /// without every call site having to construct a wrapping enum.
-    /// Every legacy call site migrates to `ShowToast { message: ...,
-    /// action: None }`; the GATR-snap handler is the first caller to
-    /// set `action = Some(...)` for its `Undo` hook.
-    ShowToast {
-        /// Text to display.
-        message: String,
-        /// Optional action button. `None` means a plain text toast.
-        action: Option<ToastAction>,
-    },
-    /// Dismiss the current toast (auto or manual).
-    DismissToast,
-    /// The action button on the current toast was clicked. Fires the
-    /// stored `on_click` message and then clears the toast. Safe to
-    /// emit even when no toast is visible (the handler is idempotent).
-    ToastActionClicked,
+    /// All toast traffic routes through one wrapper variant.
+    /// [`crate::toast::ToastMsg`] is the controller-local enum.
+    Toast(crate::toast::ToastMsg),
 
     // -- Market data cache --
     /// Market data snapshot loaded for a watchlist symbol (D1 candles).
@@ -1410,7 +1362,7 @@ impl MidasApp {
             order_blotter,
             order_history_persist,
             order_annotation_links: HashMap::new(),
-            toast: None,
+            toasts: crate::toast::ToastController::new(),
             bracket_context_menu: None,
             annotation_store: AnnotationStore::new(),
             market_cache: crate::market_cache::MarketDataCache::default(),
@@ -2633,16 +2585,15 @@ impl MidasApp {
     /// symbol has already been evaluated this session.
     /// Set a plain (no-action) toast, replacing any existing one.
     ///
-    /// This is the single mutation point for the toast state used by
-    /// the legacy call sites that were migrated from the previous
-    /// `toast_message: Option<String>` shape. Callers that need an
-    /// action button should set `self.toast` directly with a fully
-    /// populated [`ToastState`], or emit
-    /// `Message::ShowToast { message, action: Some(..) }`.
+    /// Convenience wrapper around `self.toasts.update(ToastMsg::Show)`
+    /// for the many synchronous call sites that don't have a `Task`
+    /// loop handy (status messages, validation errors). Callers that
+    /// need an action button should emit
+    /// `Message::Toast(ToastMsg::Show { message, action: Some(..) })`
+    /// instead so the action survives the controller boundary.
     pub(crate) fn show_toast<S: Into<String>>(&mut self, message: S) {
-        self.toast = Some(ToastState {
+        let _ = self.toasts.update(crate::toast::ToastMsg::Show {
             message: message.into(),
-            created_at: Instant::now(),
             action: None,
         });
     }
@@ -2825,9 +2776,7 @@ impl MidasApp {
             | Message::BrokerConnectionChanged(..) => self.handle_broker_msg(message),
 
             // -- Toast notifications --
-            Message::ShowToast { .. } | Message::DismissToast | Message::ToastActionClicked => {
-                self.handle_toast_msg(message)
-            }
+            Message::Toast(m) => self.dispatch_toast(m),
 
             // -- Tick / Ticker state machine --
             Message::Tick | Message::Ticker(..) => self.handle_tick_ticker_msg(message),
@@ -2903,7 +2852,7 @@ impl MidasApp {
                 self.level_placing = false;
                 self.placing_preview = None;
                 self.bracket_context_menu = None;
-                self.toast = None;
+                self.toasts.clear();
                 self.pending_drag = None;
                 if self.dragging_ticker.is_some() {
                     self.dragging_ticker = None;

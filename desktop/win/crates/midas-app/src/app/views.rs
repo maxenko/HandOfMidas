@@ -89,72 +89,10 @@ impl MidasApp {
     /// visual consistency: a darker translucent background with a
     /// subtle rounded border.
     fn view_toast_overlay(&self) -> Option<Element<'_, Message>> {
-        let state = self.toast.as_ref()?;
-        // Toast message: always present.
-        let msg_text = text(state.message.clone()).size(13).color(Color::WHITE);
-
-        // Action button, when present. Clicking the button fires the
-        // embedded message through `Message::ToastActionClicked`,
-        // which also dismisses the toast.
-        let body: Element<'_, Message> = match state.action {
-            Some(ref action) => {
-                let action_btn = button(text(action.label.clone()).size(12).color(Color::WHITE))
-                    .padding([3, 10])
-                    .style(|_, status| button::Style {
-                        background: Some(iced::Background::Color(match status {
-                            button::Status::Hovered => Color::from_rgba(0.35, 0.50, 0.72, 1.0),
-                            _ => Color::from_rgba(0.25, 0.40, 0.62, 1.0),
-                        })),
-                        text_color: Color::WHITE,
-                        border: iced::Border {
-                            color: Color::from_rgba(0.55, 0.70, 0.90, 0.9),
-                            width: 1.0,
-                            radius: 3.0.into(),
-                        },
-                        ..Default::default()
-                    })
-                    .on_press(Message::ToastActionClicked);
-                row![
-                    msg_text,
-                    Space::new().width(Length::Fixed(12.0)),
-                    action_btn,
-                ]
-                .align_y(iced::Alignment::Center)
-                .into()
-            }
-            None => msg_text.into(),
-        };
-
-        // The toast container — styled to match the existing badge
-        // palette. Clicking anywhere on it dismisses the toast via
-        // `Message::DismissToast`; the inner button handles its own
-        // press so its event does not reach the outer dismiss handler.
-        let toast_container = container(body)
-            .padding([8, 14])
-            .style(|_| container::Style {
-                background: Some(iced::Background::Color(Color::from_rgba(
-                    0.12, 0.14, 0.18, 0.94,
-                ))),
-                text_color: Some(Color::WHITE),
-                border: iced::Border {
-                    color: Color::from_rgba(0.30, 0.35, 0.45, 0.95),
-                    width: 1.0,
-                    radius: 4.0.into(),
-                },
-                ..Default::default()
-            });
-
-        // Anchor bottom-right: use a full-size container with max
-        // padding and Shrink sizing so the toast sits in the corner
-        // while leaving the rest of the overlay transparent and
-        // click-through.
-        let positioned = container(toast_container)
-            .width(Fill)
-            .height(Fill)
-            .align_x(iced::alignment::Horizontal::Right)
-            .align_y(iced::alignment::Vertical::Bottom)
-            .padding(16);
-        Some(positioned.into())
+        // Delegate to the toast controller; wrap its `ToastMsg` in
+        // `Message::Toast` here so the controller stays parent-agnostic.
+        // This is the SOLE wrapping site for `Message::Toast` in views.
+        self.toasts.view().map(|el| el.map(Message::Toast))
     }
 
     /// Build the view for a floating (pop-out) chart window.

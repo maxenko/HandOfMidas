@@ -10,14 +10,12 @@
 //! - `TickerState` lazy-factory (`ticker_mut`)
 //! - effect handler (`handle_ticker_effects`)
 
-use std::time::Instant;
-
 use iced::Task;
 
 use midas_chart::AnnotationId;
 use midas_core::{ChartId, LinkMode, OrderPanelId};
 
-use super::{Message, MidasApp, ToastState};
+use super::{Message, MidasApp};
 use crate::annotation_store::SymbolKey;
 
 impl MidasApp {
@@ -394,9 +392,12 @@ impl MidasApp {
                     self.mark_levels_dirty_for_ticker(sym.as_str());
                 }
                 crate::ticker_state::TickerEffect::Toast { message, action } => {
-                    self.toast = Some(ToastState {
+                    // Route through the controller so all toast
+                    // mutations land in one place (effects ignored —
+                    // a synchronous Show produces no parent-visible
+                    // effects).
+                    let _ = self.toasts.update(crate::toast::ToastMsg::Show {
                         message,
-                        created_at: Instant::now(),
                         action,
                     });
                 }

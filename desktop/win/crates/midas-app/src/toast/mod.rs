@@ -73,6 +73,7 @@ pub struct ToastAction {
 /// outer `Message` type except via the opaque [`Effect::FireParentMsg`]
 /// payload.
 #[derive(Clone, Debug)]
+#[allow(dead_code)] // `Dismiss` is exposed for future click-outside affordance.
 pub enum ToastMsg {
     /// Replace the current toast (if any) with a new one.
     Show {
@@ -134,6 +135,7 @@ impl ToastController {
 
     /// Read-only access for callers that need to inspect toast state
     /// (e.g. global Escape-key handler that clears every popover).
+    #[allow(dead_code)] // exposed for callers outside the module + tests.
     pub fn state(&self) -> Option<&ToastState> {
         self.state.as_ref()
     }

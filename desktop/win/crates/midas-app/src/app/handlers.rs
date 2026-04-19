@@ -3688,35 +3688,40 @@ impl MidasApp {
 
 impl MidasApp {
     /// Handle show/dismiss/action toast messages.
-    pub(crate) fn handle_toast_msg(&mut self, message: Message) -> Task<Message> {
-        match message {
-            // -- Toast notifications --
-            Message::ShowToast { message, action } => {
-                self.toast = Some(ToastState {
-                    message,
-                    created_at: Instant::now(),
-                    action,
-                });
-                Task::none()
-            }
-            Message::DismissToast => {
-                self.toast = None;
-                Task::none()
-            }
-            Message::ToastActionClicked => {
-                // Pull the action out and fire its embedded message.
-                // Dismissing first mirrors the "single click" UX —
-                // the user should not see the toast after they
-                // engaged its action.
-                if let Some(state) = self.toast.take() {
-                    if let Some(action) = state.action {
-                        return self.update(*action.on_click);
-                    }
-                }
-                Task::none()
-            }
+    /// Route a `ToastMsg` to the controller and translate any returned
+    /// effects back into a parent `Task<Message>`.
+    ///
+    /// This is the single bridge between the controller's local
+    /// message + effect vocabulary and the parent's god-`Message`. The
+    /// only mapping site for `Message::Toast` / `.map(Message::Toast)`
+    /// in the codebase — keep it that way.
+    pub(crate) fn dispatch_toast(&mut self, msg: crate::toast::ToastMsg) -> Task<Message> {
+        let effects = self.toasts.update(msg);
+        self.consume_toast_effects(effects)
+    }
 
-            _ => unreachable!(),
+    /// Collapse a [`crate::toast::Effect`] vector into a single
+    /// `Task<Message>`. Pulled out so [`Self::dispatch_toast`] and the
+    /// `Tick` handler share one interpretation site.
+    fn consume_toast_effects(
+        &mut self,
+        effects: Vec<crate::toast::Effect>,
+    ) -> Task<Message> {
+        let mut tasks: Vec<Task<Message>> = Vec::new();
+        for eff in effects {
+            match eff {
+                crate::toast::Effect::Spawn(task) => tasks.push(task.map(Message::Toast)),
+                crate::toast::Effect::FireParentMsg(boxed) => {
+                    // Re-dispatch the embedded message synchronously so
+                    // the toast-action UX stays single-tick.
+                    tasks.push(self.update(*boxed));
+                }
+            }
+        }
+        if tasks.is_empty() {
+            Task::none()
+        } else {
+            Task::batch(tasks)
         }
     }
 }
@@ -3730,12 +3735,9 @@ impl MidasApp {
         match message {
             Message::Tick => {
                 // Auto-dismiss toast after TOAST_TTL_SECS seconds.
-                if let Some(ref state) = self.toast {
-                    if state.created_at.elapsed() > std::time::Duration::from_secs(TOAST_TTL_SECS) {
-                        self.toast = None;
-                    }
-                }
-                self.maybe_save_config()
+                let effects = self.toasts.tick(Instant::now());
+                let toast_task = self.consume_toast_effects(effects);
+                Task::batch([toast_task, self.maybe_save_config()])
             }
 
             Message::Ticker(sym, msg) => {
