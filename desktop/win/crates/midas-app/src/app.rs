@@ -520,39 +520,21 @@ pub enum Message {
 
     /// Viewport dimensions changed (old_w, old_h, new_w, new_h).
     /// Adjusts camera data range to preserve candle scale.
+    /// Stays as a top-level variant: emitted by the iced shader
+    /// widget directly when its bounds change, not via
+    /// `action_to_message`, so it has no `ChartAction` analog.
     ChartViewportChanged(ChartId, u32, u32, u32, u32),
-    /// Set or clear the crosshair position.
-    ChartCrosshair(ChartId, Option<(f32, f32)>),
-    /// Create a new horizontal price level.
-    ChartCreateLevel(ChartId, f64),
-    /// Drag a level to a new price.
-    ChartDragLevel(ChartId, u64, f64),
     /// Emitted once when a chart widget exits its
     /// `InteractionMode::DraggingAnnotation` — clears the app-level
     /// `dragging_annotation` so sibling charts stop drawing the level
-    /// in their drag-pass z-layer. Paired with `ChartDragLevel`, which
-    /// sets the flag on every mouse-move during the drag.
+    /// in their drag-pass z-layer. Paired with `ChartAction::DragLevel`,
+    /// which sets the flag on every mouse-move during the drag.
     ChartDragLevelEnd(ChartId),
-    /// Select a level.
-    ChartSelectLevel(ChartId, u64),
-    /// Deselect any selected level.
-    ChartDeselectLevel(ChartId),
-    /// Delete the currently selected level.
-    ChartDeleteSelectedLevel(ChartId),
-    /// Clear all levels from a chart.
+    /// Clear all levels from a chart (toolbar/keyboard, not from
+    /// chart-interaction widget — has no `ChartAction` equivalent).
     ChartClearAllLevels(ChartId),
-    /// Cancel level placement mode (from widget Escape/right-click).
-    ChartCancelPlacing(ChartId),
-    /// Report cursor position during level placement (for ghost preview).
-    PlacingCursorMoved(ChartId, f64),
-    /// Set the timeline border position for a chart.
-    ChartSetTimelineBorderRatio(ChartId, f64),
-    /// Set the volume bar height multiplier for a chart.
-    ChartSetVolumeScale(ChartId, f64),
 
     // -- Level editing --
-    /// Right-click on a level — open the level editor popup.
-    ChartRightClickLevel(ChartId, u64, f32, f32),
     /// Close the level editor popup.
     ChartCloseLevelEditor(ChartId),
     /// Delete a specific level by ID.
@@ -2663,19 +2645,8 @@ impl MidasApp {
             // -- Chart interaction (viewport, pan, zoom, crosshair,
             //    levels, level editor, toggles, reset, batch) --
             Message::ChartViewportChanged(..)
-            | Message::ChartCrosshair(..)
-            | Message::ChartCreateLevel(..)
-            | Message::ChartDragLevel(..)
             | Message::ChartDragLevelEnd(..)
-            | Message::ChartSelectLevel(..)
-            | Message::ChartDeselectLevel(..)
-            | Message::ChartDeleteSelectedLevel(..)
             | Message::ChartClearAllLevels(..)
-            | Message::ChartCancelPlacing(..)
-            | Message::PlacingCursorMoved(..)
-            | Message::ChartSetTimelineBorderRatio(..)
-            | Message::ChartSetVolumeScale(..)
-            | Message::ChartRightClickLevel(..)
             | Message::ChartCloseLevelEditor(..)
             | Message::ChartDeleteLevel(..)
             | Message::LevelEditorPriceChanged(..)

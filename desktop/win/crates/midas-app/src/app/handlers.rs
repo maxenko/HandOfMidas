@@ -498,40 +498,130 @@ impl MidasApp {
                 self.mark_config_dirty();
                 Task::none()
             }
-            // Variants below still re-dispatch to legacy `Message::Chart*`
-            // arms in `handle_chart_interaction_msg` / `handle_bracket_msg`.
-            // They migrate in subsequent passes (camera batch was inlined
-            // first because it was the cleanest seam: 3 arms, no
-            // shared helpers, exclusively chart-widget-emitted).
             ChartAction::SetCrosshair { x, y } => {
-                self.update(Message::ChartCrosshair(chart_id, Some((x, y))))
+                self.apply_crosshair(chart_id, Some((x, y)))
             }
-            ChartAction::ClearCrosshair => self.update(Message::ChartCrosshair(chart_id, None)),
+            ChartAction::ClearCrosshair => self.apply_crosshair(chart_id, None),
             ChartAction::CreateLevel { price } => {
-                self.update(Message::ChartCreateLevel(chart_id, price))
+                self.focus_chart(chart_id);
+                let ticker = self.chart_ticker(chart_id).map(str::to_owned);
+                if let Some(ticker) = ticker {
+                    let level_id = self.level_store.alloc_id();
+                    self.level_store.add_level(
+                        &ticker,
+                        crate::level_store::StoredLevel {
+                            level: midas_chart::levels::HorizontalLevel {
+                                id: level_id,
+                                line: midas_chart::widget::price_line::PriceLine {
+                                    price,
+                                    extent: midas_chart::widget::price_line::LineExtent::default(),
+                                    stroke: midas_chart::widget::price_line::LineStroke {
+                                        color: [0.85, 0.85, 0.85, 0.8],
+                                        width: 1.0,
+                                        style: midas_chart::widget::LineStyle::default(),
+                                    },
+                                },
+                                label: None,
+                                icon: midas_chart::LevelIcon::None,
+                            },
+                            locked: false,
+                        },
+                    );
+                    self.mark_levels_dirty_for_ticker(&ticker);
+                    self.level_placing = false;
+                    self.placing_preview = None;
+                    self.mark_config_dirty();
+                }
+                Task::none()
             }
             ChartAction::SetTimelineBorderRatio { ratio } => {
-                self.update(Message::ChartSetTimelineBorderRatio(chart_id, ratio))
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    chart.chart_state.timeline_border_ratio = ratio as f32;
+                    chart.chart_state.dirty.mark_data();
+                }
+                self.mark_config_dirty();
+                Task::none()
             }
             ChartAction::SetVolumeScale { scale } => {
-                self.update(Message::ChartSetVolumeScale(chart_id, scale))
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    chart.chart_state.volume_scale = scale as f32;
+                    chart.chart_state.dirty.mark_data();
+                }
+                self.mark_config_dirty();
+                Task::none()
             }
             ChartAction::RightClickLevel { id, x, y } => {
-                self.update(Message::ChartRightClickLevel(chart_id, id.0, x, y))
+                self.focus_chart(chart_id);
+                let price_str = self
+                    .level_store
+                    .find_level(id.0)
+                    .map(|(_, l)| midas_chart::format_price(l.line.price));
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    chart.editing_level_id = Some(id.0);
+                    chart.editing_level_screen_pos = Some((x, y));
+                    if let Some(ps) = price_str {
+                        chart.level_editor_price_input = ps;
+                    }
+                    chart.chart_state.selected_level = Some(id);
+                    chart.chart_state.dirty.mark_levels();
+                }
+                Task::none()
             }
             ChartAction::DragLevel { id, new_price } => {
-                self.update(Message::ChartDragLevel(chart_id, id.0, new_price))
+                let ticker = self.chart_ticker(chart_id).map(str::to_owned);
+                if let Some(ticker) = ticker {
+                    if let Some(level) = self.level_store.find_level_mut(&ticker, id.0) {
+                        level.line.price = new_price;
+                    }
+                    self.mark_levels_dirty_for_ticker(&ticker);
+                    self.mark_config_dirty();
+                }
+                self.dragging_annotation = Some(id);
+                Task::none()
             }
             ChartAction::SelectLevel { id } => {
-                self.update(Message::ChartSelectLevel(chart_id, id.0))
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    chart.chart_state.selected_level = Some(id);
+                    chart.chart_state.dirty.mark_levels();
+                }
+                Task::none()
             }
-            ChartAction::DeselectLevel => self.update(Message::ChartDeselectLevel(chart_id)),
+            ChartAction::DeselectLevel => {
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    chart.chart_state.selected_level = None;
+                    chart.chart_state.dirty.mark_levels();
+                }
+                Task::none()
+            }
             ChartAction::DeleteSelectedLevel => {
-                self.update(Message::ChartDeleteSelectedLevel(chart_id))
+                let ticker = self.chart_ticker(chart_id).map(str::to_owned);
+                if let (Some(ticker), Some(chart)) = (ticker, self.charts.get_mut(&chart_id)) {
+                    if let Some(sel_id) = chart.chart_state.selected_level {
+                        let is_locked = self
+                            .level_store
+                            .levels_for(&ticker)
+                            .iter()
+                            .any(|l| l.id == sel_id.0 && l.locked);
+                        if !is_locked {
+                            chart.chart_state.selected_level = None;
+                            self.level_store.remove_level(&ticker, sel_id.0);
+                            self.mark_levels_dirty_for_ticker(&ticker);
+                            self.mark_config_dirty();
+                        }
+                    }
+                }
+                Task::none()
             }
-            ChartAction::CancelPlacing => self.update(Message::ChartCancelPlacing(chart_id)),
+            ChartAction::CancelPlacing => {
+                self.level_placing = false;
+                self.placing_preview = None;
+                Task::none()
+            }
             ChartAction::PlacingPreview { price } => {
-                self.update(Message::PlacingCursorMoved(chart_id, price))
+                if let Some(ticker) = self.chart_ticker(chart_id) {
+                    self.placing_preview = Some((chart_id, ticker.to_owned(), price));
+                }
+                Task::none()
             }
             ChartAction::DragBracketLeg {
                 annotation_id,
@@ -611,6 +701,63 @@ impl MidasApp {
         }
     }
 
+    /// Apply a crosshair set/clear. Body shared between
+    /// `ChartAction::SetCrosshair` and `ChartAction::ClearCrosshair`
+    /// because both fold into a single `Option<(f32,f32)>` mutation
+    /// + the cross-chart sync update.
+    fn apply_crosshair(
+        &mut self,
+        chart_id: ChartId,
+        pos: Option<(f32, f32)>,
+    ) -> Task<Message> {
+        if pos.is_some() {
+            self.focus_chart(chart_id);
+        }
+        if let Some(chart) = self.charts.get_mut(&chart_id) {
+            match pos {
+                Some((x, y)) => chart.chart_state.crosshair.set_pos(x, y),
+                None => chart.chart_state.crosshair.force_hide(),
+            }
+            #[allow(deprecated)]
+            {
+                chart.chart_state.crosshair_pos = pos;
+            }
+            chart.chart_state.dirty.mark_crosshair();
+        }
+        match pos {
+            Some((x, y)) => {
+                if let Some(chart) = self.charts.get(&chart_id) {
+                    if let Some(ref data) = chart.data {
+                        let cam = &chart.chart_state.camera;
+                        let ts = if chart.chart_state.collapse_gaps {
+                            let idx_f = cam.x_to_time(x);
+                            let idx = (idx_f.round().max(0.0) as usize)
+                                .min(data.len().saturating_sub(1));
+                            data.timestamps[idx]
+                        } else {
+                            let cursor_time = cam.x_to_time(x);
+                            let idx = data.find_index_by_time(cursor_time as i64);
+                            data.timestamps[idx]
+                        };
+                        let price = cam.y_to_price(y);
+                        self.crosshair_sync =
+                            Some((chart_id, ts, price, chart.symbol.clone()));
+                    }
+                }
+            }
+            None => {
+                if self
+                    .crosshair_sync
+                    .as_ref()
+                    .is_some_and(|(src, _, _, _)| *src == chart_id)
+                {
+                    self.crosshair_sync = None;
+                }
+            }
+        }
+        Task::none()
+    }
+
     /// Handle chart viewport, pan, zoom, crosshair, levels, toggles,
     /// level editor, and batch messages.
     pub(crate) fn handle_chart_interaction_msg(&mut self, message: Message) -> Task<Message> {
@@ -648,159 +795,11 @@ impl MidasApp {
                 Task::none()
             }
 
-            Message::ChartCrosshair(chart_id, pos) => {
-                // Only focus on crosshair set (user actively interacting),
-                // not on clear (housekeeping from release/leave). ButtonReleased
-                // is delivered to ALL shader widgets, so inactive charts emit
-                // ClearCrosshair — focusing on None would steal focus back.
-                if pos.is_some() {
-                    self.focus_chart(chart_id);
-                }
-                if let Some(chart) = self.charts.get_mut(&chart_id) {
-                    match pos {
-                        Some((x, y)) => chart.chart_state.crosshair.set_pos(x, y),
-                        None => chart.chart_state.crosshair.force_hide(),
-                    }
-                    #[allow(deprecated)]
-                    {
-                        chart.chart_state.crosshair_pos = pos;
-                    }
-                    chart.chart_state.dirty.mark_crosshair();
-                }
-                // Cross-chart crosshair sync: compute snapped timestamp + price.
-                match pos {
-                    Some((x, y)) => {
-                        if let Some(chart) = self.charts.get(&chart_id) {
-                            if let Some(ref data) = chart.data {
-                                let cam = &chart.chart_state.camera;
-                                let ts = if chart.chart_state.collapse_gaps {
-                                    let idx_f = cam.x_to_time(x);
-                                    let idx = (idx_f.round().max(0.0) as usize)
-                                        .min(data.len().saturating_sub(1));
-                                    data.timestamps[idx]
-                                } else {
-                                    let cursor_time = cam.x_to_time(x);
-                                    let idx = data.find_index_by_time(cursor_time as i64);
-                                    data.timestamps[idx]
-                                };
-                                let price = cam.y_to_price(y);
-                                self.crosshair_sync =
-                                    Some((chart_id, ts, price, chart.symbol.clone()));
-                            }
-                        }
-                    }
-                    None => {
-                        // Clear sync only if this chart was the source.
-                        if self
-                            .crosshair_sync
-                            .as_ref()
-                            .is_some_and(|(src, _, _, _)| *src == chart_id)
-                        {
-                            self.crosshair_sync = None;
-                        }
-                    }
-                }
-                Task::none()
-            }
-
-            Message::ChartCreateLevel(chart_id, price) => {
-                self.focus_chart(chart_id);
-                let ticker = self.chart_ticker(chart_id).map(str::to_owned);
-                if let Some(ref ticker) = ticker {
-                    tracing::info!(
-                        "CreateLevel: ticker={ticker:?}, price={price}, store_count_before={}",
-                        self.level_store.levels_for(ticker).len()
-                    );
-                }
-                if let Some(ticker) = ticker {
-                    // Price is already snapped by the interaction layer.
-                    let level_id = self.level_store.alloc_id();
-                    self.level_store.add_level(
-                        &ticker,
-                        crate::level_store::StoredLevel {
-                            level: midas_chart::levels::HorizontalLevel {
-                                id: level_id,
-                                line: midas_chart::widget::price_line::PriceLine {
-                                    price,
-                                    extent: midas_chart::widget::price_line::LineExtent::default(),
-                                    stroke: midas_chart::widget::price_line::LineStroke {
-                                        color: [0.85, 0.85, 0.85, 0.8],
-                                        width: 1.0,
-                                        style: midas_chart::widget::LineStyle::default(),
-                                    },
-                                },
-                                label: None,
-                                icon: midas_chart::LevelIcon::None,
-                            },
-                            locked: false,
-                        },
-                    );
-                    tracing::info!(
-                        "CreateLevel: added id={level_id}, store_count_after={}",
-                        self.level_store.levels_for(&ticker).len()
-                    );
-                    self.mark_levels_dirty_for_ticker(&ticker);
-                    self.level_placing = false;
-                    self.placing_preview = None;
-                    self.mark_config_dirty();
-                }
-                Task::none()
-            }
-
-            Message::ChartDragLevel(chart_id, level_id, new_price) => {
-                let ticker = self.chart_ticker(chart_id).map(str::to_owned);
-                if let Some(ticker) = ticker {
-                    if let Some(level) = self.level_store.find_level_mut(&ticker, level_id) {
-                        level.line.price = new_price;
-                    }
-                    self.mark_levels_dirty_for_ticker(&ticker);
-                    self.mark_config_dirty();
-                }
-                // Tag the active drag app-wide so sibling charts
-                // showing the same symbol also promote this level into
-                // their drag-pass z-layer (cleared on ChartDragLevelEnd).
-                self.dragging_annotation = Some(midas_chart::widget::AnnotationId(level_id));
-                Task::none()
-            }
-
+            // ChartDragLevelEnd has no ChartAction equivalent — emitted
+            // by the widget directly (not via action_to_message), so it
+            // stays as a top-level Message variant.
             Message::ChartDragLevelEnd(_chart_id) => {
                 self.dragging_annotation = None;
-                Task::none()
-            }
-
-            Message::ChartSelectLevel(chart_id, level_id) => {
-                if let Some(chart) = self.charts.get_mut(&chart_id) {
-                    chart.chart_state.selected_level = Some(AnnotationId(level_id));
-                    chart.chart_state.dirty.mark_levels();
-                }
-                Task::none()
-            }
-
-            Message::ChartDeselectLevel(chart_id) => {
-                if let Some(chart) = self.charts.get_mut(&chart_id) {
-                    chart.chart_state.selected_level = None;
-                    chart.chart_state.dirty.mark_levels();
-                }
-                Task::none()
-            }
-
-            Message::ChartDeleteSelectedLevel(chart_id) => {
-                let ticker = self.chart_ticker(chart_id).map(str::to_owned);
-                if let (Some(ticker), Some(chart)) = (ticker, self.charts.get_mut(&chart_id)) {
-                    if let Some(sel_id) = chart.chart_state.selected_level {
-                        let is_locked = self
-                            .level_store
-                            .levels_for(&ticker)
-                            .iter()
-                            .any(|l| l.id == sel_id.0 && l.locked);
-                        if !is_locked {
-                            chart.chart_state.selected_level = None;
-                            self.level_store.remove_level(&ticker, sel_id.0);
-                            self.mark_levels_dirty_for_ticker(&ticker);
-                            self.mark_config_dirty();
-                        }
-                    }
-                }
                 Task::none()
             }
 
@@ -818,56 +817,6 @@ impl MidasApp {
                         }
                     }
                     self.mark_config_dirty();
-                }
-                Task::none()
-            }
-
-            Message::ChartCancelPlacing(_chart_id) => {
-                self.level_placing = false;
-                self.placing_preview = None;
-                Task::none()
-            }
-
-            Message::PlacingCursorMoved(chart_id, price) => {
-                if let Some(ticker) = self.chart_ticker(chart_id) {
-                    self.placing_preview = Some((chart_id, ticker.to_owned(), price));
-                }
-                Task::none()
-            }
-
-            Message::ChartSetTimelineBorderRatio(chart_id, ratio) => {
-                if let Some(chart) = self.charts.get_mut(&chart_id) {
-                    chart.chart_state.timeline_border_ratio = ratio as f32;
-                    chart.chart_state.dirty.mark_data();
-                }
-                self.mark_config_dirty();
-                Task::none()
-            }
-
-            Message::ChartSetVolumeScale(chart_id, scale) => {
-                if let Some(chart) = self.charts.get_mut(&chart_id) {
-                    chart.chart_state.volume_scale = scale as f32;
-                    chart.chart_state.dirty.mark_data();
-                }
-                self.mark_config_dirty();
-                Task::none()
-            }
-
-            Message::ChartRightClickLevel(chart_id, level_id, x, y) => {
-                self.focus_chart(chart_id);
-                // Read level price from the store (not per-chart state).
-                let price_str = self
-                    .level_store
-                    .find_level(level_id)
-                    .map(|(_, l)| midas_chart::format_price(l.line.price));
-                if let Some(chart) = self.charts.get_mut(&chart_id) {
-                    chart.editing_level_id = Some(level_id);
-                    chart.editing_level_screen_pos = Some((x, y));
-                    if let Some(ps) = price_str {
-                        chart.level_editor_price_input = ps;
-                    }
-                    chart.chart_state.selected_level = Some(AnnotationId(level_id));
-                    chart.chart_state.dirty.mark_levels();
                 }
                 Task::none()
             }
