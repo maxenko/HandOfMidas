@@ -11,48 +11,15 @@ use std::collections::HashMap;
 
 use midas_chart::widget::{Annotation, AnnotationId, AnnotationKind, Presence};
 use midas_core::Timeframe;
-use serde::{Deserialize, Serialize};
 
 // ── SymbolKey ──────────────────────────────────────────────────────
 
-/// Interned symbol key for annotation storage lookups.
-///
-/// A thin newtype over `String` to prevent mixing up symbol strings
-/// with other strings. Normalizes to uppercase on construction.
-/// Implements `Borrow<str>` so `HashMap::get("AAPL")` works without
-/// allocating.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct SymbolKey(String);
-
-impl SymbolKey {
-    /// Create a new symbol key, normalizing to uppercase.
-    pub fn new(symbol: &str) -> Self {
-        Self(symbol.to_uppercase())
-    }
-
-    /// The normalized symbol string.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::borrow::Borrow<str> for SymbolKey {
-    fn borrow(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for SymbolKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl From<&str> for SymbolKey {
-    fn from(s: &str) -> Self {
-        Self::new(s)
-    }
-}
+/// Re-exported from [`midas_core::SymbolKey`] for callsite ergonomics
+/// — every `crate::annotation_store::SymbolKey` import in the app
+/// keeps working unchanged. New code should import from `midas_core`
+/// directly. Construction now also trims (in addition to
+/// uppercasing); see the canonical type for the full contract.
+pub use midas_core::SymbolKey;
 
 // ── SymbolAnnotations ──────────────────────────────────────────────
 

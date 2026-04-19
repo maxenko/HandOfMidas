@@ -14,12 +14,6 @@ fn pane_id_equality() {
 }
 
 #[test]
-fn symbol_id_equality() {
-    assert_eq!(SymbolId::new(42), SymbolId::new(42));
-    assert_ne!(SymbolId::new(42), SymbolId::new(43));
-}
-
-#[test]
 fn chart_id_hash() {
     let mut set = HashSet::new();
     set.insert(ChartId::new(1));
@@ -38,15 +32,6 @@ fn pane_id_hash() {
 }
 
 #[test]
-fn symbol_id_hash() {
-    let mut set = HashSet::new();
-    set.insert(SymbolId::new(5));
-    set.insert(SymbolId::new(10));
-    set.insert(SymbolId::new(5)); // duplicate
-    assert_eq!(set.len(), 2);
-}
-
-#[test]
 fn chart_id_display() {
     assert_eq!(ChartId::new(7).to_string(), "Chart(7)");
 }
@@ -54,11 +39,6 @@ fn chart_id_display() {
 #[test]
 fn pane_id_display() {
     assert_eq!(PaneId::new(42).to_string(), "Pane(42)");
-}
-
-#[test]
-fn symbol_id_display() {
-    assert_eq!(SymbolId::new(99).to_string(), "Symbol(99)");
 }
 
 #[test]
@@ -105,7 +85,6 @@ fn order_panel_id_display() {
 fn ordering() {
     assert!(ChartId::new(1) < ChartId::new(2));
     assert!(PaneId::new(10) < PaneId::new(20));
-    assert!(SymbolId::new(0) < SymbolId::new(1));
     assert!(WatchlistId::new(1) < WatchlistId::new(2));
     assert!(OrderPanelId::new(1) < OrderPanelId::new(2));
 }
@@ -136,11 +115,6 @@ fn serde_roundtrip() {
     let json = serde_json::to_string(&pid).unwrap();
     let back: PaneId = serde_json::from_str(&json).unwrap();
     assert_eq!(pid, back);
-
-    let sid = SymbolId::new(7);
-    let json = serde_json::to_string(&sid).unwrap();
-    let back: SymbolId = serde_json::from_str(&json).unwrap();
-    assert_eq!(sid, back);
 
     let wid = WatchlistId::new(11);
     let json = serde_json::to_string(&wid).unwrap();

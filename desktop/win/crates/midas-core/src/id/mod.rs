@@ -1,7 +1,7 @@
 //! Newtype wrappers for domain IDs.
 //!
 //! Each ID is a thin wrapper around an integer, providing type safety so that
-//! a `ChartId` cannot accidentally be used where a `SymbolId` is expected.
+//! a `ChartId` cannot accidentally be used where a `WatchlistId` is expected.
 
 use std::fmt;
 
@@ -49,8 +49,6 @@ define_id! {
     ///
     /// Uses `u64` to accommodate composite IDs or high-throughput allocation.
     PaneId(u64)       => "Pane",
-    /// Unique identifier for a traded symbol (e.g., AAPL, MSFT).
-    SymbolId(u32)     => "Symbol",
     /// Unique identifier for a watchlist panel within the workspace layout.
     WatchlistId(u32)  => "Watchlist",
     /// Unique identifier for an order panel within the workspace layout.
