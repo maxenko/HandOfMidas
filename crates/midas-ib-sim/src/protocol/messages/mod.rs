@@ -4,6 +4,9 @@
 pub mod fields;
 pub mod incoming;
 pub mod outgoing;
+pub mod shared;
 
 pub use self::incoming::IncomingMsg;
-pub use self::outgoing::OutgoingMsg;
+pub use self::outgoing::{
+    ContractDetails, OpenOrderPayload, OutgoingMsg, PortfolioValuePayload, PositionPayload,
+};
