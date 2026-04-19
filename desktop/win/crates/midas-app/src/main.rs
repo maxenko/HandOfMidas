@@ -26,6 +26,7 @@ mod thumbnail_store;
 #[path = "thumbnail_widget.rs"]
 mod thumbnail_widget;
 mod ticker_state;
+mod toast;
 mod watchlist;
 mod watchlist_columns;
 

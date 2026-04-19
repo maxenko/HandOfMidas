@@ -1,0 +1,217 @@
+# Plan: MidasApp god-object split — proof-of-pattern (Toast slice)
+
+*Architecture audit P1 — first slice, written after 5 research + 3 critique agents.*
+
+## Overview
+
+Split the 76-field `MidasApp` god struct into per-domain controllers, each owning a slice of state and exposing `update(msg) -> Vec<Effect>` + `view(&self) -> Element<SubMsg>`. The pattern matches our existing `TickerState::apply -> Vec<TickerEffect>` (already shipped, hundreds of tests) — **deliberately the SAME shape**, not a new one, so the codebase has one mental model rather than two.
+
+This plan ships **Slice 0: Toast**. Toast was chosen over the bucket-scheme agent's Window recommendation because Window has zero shared deps and no view — it would prove the *easy* half of the pattern. Toast has ~120 LOC across handler + view + state + the interesting `Box<Message>` re-dispatch case. It exercises the questions a future Watchlist slice will hit (cross-cutting state read, view composition, parent-routed effects) without taking on drag/drop in the first slice.
+
+## Research summary
+
+Five parallel research agents covered:
+
+- **Watchlist surface inventory** — debunked the audit's "Watchlist is half-drawn" claim. `WatchlistMsg` doesn't exist; handler reaches into 14 `self.*` fields and 8 cross-domain methods; drag/drop is genuinely cross-cutting (`DragMouseUp` mutates `workspace.panes` + `charts`). Watchlist is *not* the easy first slice.
+- **TickerState pattern study** — confirmed `apply -> Vec<Effect>` works for narrow per-instance state. Hidden costs: `SubmitToBroker` interpretation has 39 LOC of translation in the handler; effect handlers reach back into `self.tickers`. Generalization risk for multi-instance shared state (drag, link).
+- **Iced 0.14 sub-controller idioms** — Halloy is the production reference. Sub-update returns `(Task<SubMsg>, Option<Event>)`; shared state stays parent-owned, passed `&mut`; subscriptions stay centralized. The `Component` trait was removed in 0.13.
+- **Message bucket scheme** — proposed 12-bucket split of the 134 variants. Recommended Window first (smallest blast radius). Critical observation: "the bucket split helps message routing, but the real architectural lever is moving the four shared stores [TickerState, AnnotationStore, OrderBlotter/PositionStore, Link bus] behind explicit `&mut`-borrowing service handles."
+- **Real-world god-struct splits** (Halloy, cosmic-files, rerun) — most common mistake is **bottom-up god-struct re-formation**. cosmic-files has 7300-LOC `app.rs` *despite* per-tab controllers. hecrj (iced maintainer) explicit: split by domain, not layer. The Message enum is the real god, not the struct.
+
+Three critique agents flagged:
+- **Factual**: should explicitly use `midas_core::config::WindowConfig` (later slice); LOC math overstated.
+- **Gaps**: shutdown race; subscription should live on controller; needs 2-commit rollback; concrete fitness function; Toast is a better pattern-proof than Window because it has a view.
+- **Design**: Window is the *wrong* first slice (avoids real coupling); the TickerState/Halloy divergence is THE call-out and we should unify on `Vec<Effect>`; defer of `SharedServices` is debt; rename `WindowChrome → WindowGeometry`; add a kill criterion.
+
+## Design decisions
+
+### Decision 1: which slice goes first
+
+**Context**: audit suggested Watchlist. Bucket-scheme agent suggested Window. Design critique pushed for something with a view that exercises real cross-cutting.
+
+**Recommendation**: **Toast**, for these reasons:
+- Single-instance state (`Option<ToastState>`) — no per-id routing complexity to muddy the slice
+- Has a real `view_toast_overlay` that exercises `Element::map(Message::Toast)` composition
+- `ToastActionClicked` re-dispatches an arbitrary `Box<Message>` — the most interesting cross-controller effect we'll see, and Toast already handles it cleanly (no broker / no link / no workspace coupling)
+- Auto-dismiss via `Tick` exercises the "subscription reads sub-state" pattern centrally
+- ~3 message variants, ~1 state field, ~120 LOC across handler + view + struct — small enough to ship safely, large enough to be a real pattern proof
+- Failure to extract Toast = pattern fundamentally doesn't fit; failure is loud and recoverable in one PR
+
+**Explicitly dropped**:
+- Window-geometry slice — too easy. Saved as Slice 1 (or later) with a clearer name (`WindowGeometry`, owning only the 4 OS-window fields).
+- Watchlist — has 14-field cross-cutting + drag/drop. Saved for after pattern proof.
+- Account / Chart — biggest payoff, biggest risk.
+
+**Confidence**: high.
+
+### Decision 2: sub-update signature
+
+**Context**: TickerState returns `Vec<TickerEffect>`. Halloy returns `(Task<Msg>, Option<Event>)`. We have to pick one shape — having two is the concrete failure mode (cosmic-files / Halloy). Design critique was emphatic.
+
+**Recommendation**: **`fn update(&mut self, msg: SubMsg) -> Vec<Effect>`**, matching TickerState exactly.
+
+`Effect` carries everything:
+- `Effect::Spawn(Task<SubMsg>)` — for async work (controller-local Tasks)
+- `Effect::FireParentMsg(Box<Message>)` — for cross-controller dispatch (Toast's case)
+- Typed events the parent interprets — domain-specific per controller
+
+**Why `Vec` not `Option`**: Halloy's `Option<Event>` cannot express "this update produced two effects" (e.g., `WindowMoved` → both `MarkConfigDirty` + `MonitorChanged`). `Vec` handles 0/1/N uniformly. Empty `Vec` is ergonomic and zero-allocation cheap.
+
+**Why no `Task<SubMsg>` return**: it'd require the parent to know the wrapping (`.map(Message::Toast)`) at every call site. By making Tasks an Effect variant the controller never knows the parent's Message type.
+
+**Confidence**: high. Cost = the Halloy research is now reference-only, not a blueprint.
+
+### Decision 3: shared state
+
+**Context**: Toast doesn't need shared state. But the design pattern has to scale.
+
+**Recommendation**: **No `SharedServices` in slice 0.** Toast's only shared concern is `ToastEffect::FireParentMsg(Box<Message>)` for ActionClicked — that's already an Effect. When slice 1 (whichever) hits its first real shared dep, introduce `SharedServices` with that one field, and migrate Toast (still requires no shared deps) for free.
+
+This is intentionally NOT the design critique's recommendation. Reasoning: introducing `SharedServices` with zero callers is YAGNI. Introducing it with one caller is YAGNI. Two callers = real abstraction. Toast is the zero-call case.
+
+**Confidence**: medium-high. Risk: slice 1 designs `SharedServices` while elbow-deep in implementation. Mitigation: kill criterion (Decision 5) catches this — if slice 1 takes >1 week, we revisit the pattern.
+
+### Decision 4: subscription ownership
+
+**Context**: `Tick` (1Hz) drives Toast auto-dismiss. Currently the central `subscription()` produces `Tick`; the central handler reads `self.toast`.
+
+**Recommendation**: **Subscriptions stay centralized for slice 0** — Toast subscribes to nothing of its own. The `Tick`-driven auto-dismiss continues to work via the existing path: `Tick` arrives → `handle_tick_ticker_msg` → it now calls `self.toast_ctrl.tick(now)` instead of inspecting `self.toast` directly.
+
+Halloy keeps subs centralized; we follow. If a future slice (e.g., Watchlist with drag) really needs its own subscription, define `SubController::subscription(&self) -> Subscription<SubMsg>` then and the parent does `Subscription::batch(...)`. Don't preemptively invent.
+
+**Confidence**: high.
+
+### Decision 5: kill criterion
+
+If slice 0 ships and:
+- Total new LOC (controller + tests + wiring) > 4× the LOC moved out of `MidasApp`, OR
+- The controller's public API has > (Effect variants + 1) public methods beyond `new`/`update`/`view`, OR
+- The integration on the parent side requires reaching back into the controller's private state
+
+…then the per-controller pattern is the wrong decomposition for this codebase. Stop after slice 0; revisit with a different shape (e.g., extract by lifecycle phase, or just trim the Message enum in place via newtypes).
+
+**Concrete numeric**: Toast moves ~120 LOC out of `app.rs` + `handlers.rs` + `views.rs`. Budget for the controller is ~480 LOC of new code (4× ratio). Beyond that, abandon.
+
+## Implementation plan
+
+### Slice 0: Toast controller
+
+**Goal**: prove the controller pattern with a real subsystem (state + view + cross-cutting effect) at minimum LOC.
+
+**Depends on**: nothing.
+
+**Files to create**:
+- `crates/midas-app/src/toast/mod.rs` — `pub struct ToastController`, `pub enum ToastMsg`, `pub enum ToastEffect`, `pub struct ToastState` (moved from app.rs), `pub struct ToastAction` (moved from app.rs), `impl ToastController { fn new, update, view, tick }`
+- `crates/midas-app/src/toast/tests.rs` — characterization tests
+
+**Files to modify**:
+- `crates/midas-app/src/app.rs`:
+  - Remove the `ToastState` and `ToastAction` struct definitions (move to `toast/mod.rs`)
+  - Replace `pub toast: Option<ToastState>` with `pub toasts: ToastController`
+  - Replace `Message::ShowToast`, `Message::DismissToast`, `Message::ToastActionClicked` with single `Message::Toast(ToastMsg)`
+  - Update dispatcher arm: `Message::Toast(m) => self.dispatch_toast(m)`
+- `crates/midas-app/src/app/handlers.rs`:
+  - Delete `handle_toast_msg` (3 arms gone)
+  - Add `dispatch_toast(&mut self, msg: ToastMsg) -> Task<Message>` — calls `self.toasts.update(msg)`, interprets `Vec<ToastEffect>` (translates `Effect::FireParentMsg(boxed) → self.update(*boxed)`, `Effect::Spawn(task) → task.map(Message::Toast)`)
+  - In `handle_tick_ticker_msg` (the Tick handler), replace `self.toast`-inspection auto-dismiss with `self.toasts.tick(now)` — returns same `Vec<ToastEffect>` interpreted the same way
+  - In every other site that fires `Message::ShowToast { ... }`, change to `Message::Toast(ToastMsg::Show { message, action })`
+- `crates/midas-app/src/app/views.rs`:
+  - `view_toast_overlay` either (a) moves to `ToastController::view` returning `Element<ToastMsg>` and the call site does `.map(Message::Toast)`, or (b) becomes a thin wrapper that calls into the controller. **Recommendation: (a)** — that's the whole point of the slice.
+- All emit-sites of `Message::ShowToast` / `Message::DismissToast`: search-and-replace to `Message::Toast(ToastMsg::Show {...})` etc.
+
+**Key implementation details**:
+
+- `ToastController::update(&mut self, msg: ToastMsg) -> Vec<ToastEffect>`:
+  - `ToastMsg::Show { message, action }` → set `self.state = Some(...)`, return `vec![]`
+  - `ToastMsg::Dismiss` → clear `self.state`, return `vec![]`
+  - `ToastMsg::ActionClicked` → take state, if action present, return `vec![ToastEffect::FireParentMsg(action.on_click)]`
+- `ToastController::tick(&mut self, now: Instant) -> Vec<ToastEffect>`:
+  - if state exists and elapsed > timeout, clear it, return `vec![]`
+  - otherwise return `vec![]`
+- `ToastEffect`:
+  ```rust
+  pub enum ToastEffect {
+      /// Async task spawned by the controller. Parent maps to top-level Message.
+      Spawn(iced::Task<ToastMsg>),
+      /// Fire an arbitrary parent message — the only path Toast has to talk
+      /// to other controllers (used by ActionClicked re-dispatch).
+      FireParentMsg(Box<crate::app::Message>),
+  }
+  ```
+- `ToastController::view(&self) -> Option<Element<'_, ToastMsg>>` — returns `None` if no toast; the call site decides whether to render in the stack.
+
+**Two-commit shape** (per gaps critique #6):
+1. **Commit A**: introduce `toast/` module + tests + the `ToastController` type. NOT YET wired into MidasApp. `cargo test` passes.
+2. **Commit B**: wire it in (delete old struct/handler/view code, add controller field, replace Message variants, redirect emit sites). `cargo test` passes.
+   
+Revert by `git revert <B>`. Slice 0 ships as PR with both commits.
+
+**Testing**:
+- Pure unit tests on `ToastController` (no `MidasApp`). Cover:
+  - `new()` produces empty state
+  - `update(ToastMsg::Show{...})` sets state, returns `vec![]`
+  - `update(ToastMsg::Dismiss)` clears state, returns `vec![]`
+  - `update(ToastMsg::ActionClicked)` with action present → returns `vec![FireParentMsg(boxed)]`, clears state
+  - `update(ToastMsg::ActionClicked)` with no action → no effect, clears state
+  - `tick(now)` past timeout clears state
+  - `tick(now)` before timeout preserves state
+  - `view()` returns `None` when empty, `Some(_)` when present
+- **Variant-count fitness function** (per gaps critique #7) — a `compile_fail` doctest or `const _: () = assert!(...)` that pins:
+  ```rust
+  // Forces re-evaluation if anyone adds an Effect variant — the Effect enum
+  // is the most-likely place for hidden god-state to creep in. Bump
+  // deliberately when justified; don't auto-bump.
+  const _: () = assert!(std::mem::variant_count::<ToastEffect>() <= 2);
+  ```
+- **Integration test** (per gaps critique #3) — small test that constructs a minimal MidasApp, fires `Message::Toast(ToastMsg::Show { ... })`, asserts toast appears, fires `Message::Toast(ToastMsg::ActionClicked)`, asserts the embedded message was dispatched. This covers the `dispatch_toast` translation path.
+
+**Done when** (per gaps critique #3):
+- `cargo test --workspace` green (currently 1205 passing — must remain green)
+- `cargo clippy --workspace --all-targets --features dev_harness -- -D warnings` green
+- `cargo doc --workspace --no-deps` builds (controller introduces `pub` types — all need `///` per project rule)
+- Devloop fixture replay still works: `tools/devloop-smoke.sh` exits 0
+- Saved `data/config.toml` is byte-identical (Toast is session-only state — no persistence change should leak)
+- `MidasApp` struct: `toast: Option<ToastState>` field gone, `toasts: ToastController` field added (-1 +1 = 0 net, but the *type* is now opaque)
+- `Message` enum: `ShowToast`, `DismissToast`, `ToastActionClicked` gone, `Toast(ToastMsg)` added (-3 +1 = -2 variants)
+- `app/handlers.rs`: `handle_toast_msg` gone (~26 LOC)
+- `app/views.rs`: `view_toast_overlay` gone (~70 LOC); replaced by 3-line `.map(Message::Toast)` wrapper at the call site
+- LOC delta on `MidasApp` files (`app.rs` + `app/*.rs`): -120 ± 20
+- New `toast/` module: target ≤480 LOC including tests (kill-criterion budget)
+
+### Dependency summary
+
+Slice 0 is independent. Outcomes feed into the slice-1 decision:
+- If pattern feels ergonomic → next: `WindowGeometry` (4 OS-window fields, audit's #1 finding sub-piece) for 1-day mechanical practice
+- If pattern feels heavy → kill criterion fires, document "decomposition pattern not adopted; trim Message variants in place instead"
+
+## Risks & unknowns
+
+- **Risk: `Box<Message>` back-reference is gross.** ToastController has to carry `Box<Message>` (or via `ToastAction`) to re-dispatch on ActionClicked. This is a back-edge from sub to parent type. Mitigation: it already exists today (`ToastAction.on_click: Box<Message>` lives in app.rs); we're not making it worse, just relocating. Future cleanup might introduce a generic `ActionToken<M>` if a second controller needs the same shape, but slice 0 doesn't.
+- **Risk: every `ShowToast` emit site has to change.** Search-and-replace; find them all via `grep -rn "Message::ShowToast"`. Compiler catches misses.
+- **Risk: `ToastMsg` shape becomes the new design tax for every emit site.** The new variant `Message::Toast(ToastMsg::Show { ... })` is more verbose than the old `Message::ShowToast { ... }`. Acceptable tax; mitigated by inline `impl From<ToastMsg> for Message` if it gets old.
+- **Risk: integration test is the load-bearing one.** Pure unit tests don't catch wiring bugs in `dispatch_toast`. The integration test (single test on minimal `MidasApp`) is the canary. If we can't get a minimal MidasApp standing in tests, that itself is a finding (testability of the god struct).
+- **Unknown: emit-site count.** `grep -c "Message::ShowToast"` will produce the actual blast-radius number. Plan assumes <20 sites; if it's >50, slice 0 grows beyond budget and the kill criterion gets closer to firing.
+
+## Testing strategy
+
+- **Pure unit tests**: 7–9 covering every `ToastMsg` variant + `tick()` boundary + `view()` empty/present.
+- **Variant-count fitness**: `const _: () = assert!(variant_count::<ToastEffect>() <= 2);`
+- **Integration test**: 1 test exercises `dispatch_toast` with `FireParentMsg` re-dispatch end-to-end.
+- **Existing tests** (1205) re-run unchanged.
+- **Manual smoke**: launch app, trigger any toast (e.g., GATR snap to fire `TickerEffect::Toast` path), confirm appears + auto-dismisses.
+
+## Non-goals / Out of scope
+
+- Splitting any other bucket. Slice 0 is exploratory; subsequent slices depend on outcome.
+- Introducing `SharedServices`. Slice 0 doesn't need it.
+- View-models (audit P1 #3). Independent.
+- Collapsing `Message::Chart*` (audit P2 #4). Independent.
+- Subscriptions per controller. Halloy proves centralized works; revisit if a slice genuinely needs it.
+- `Arc<Mutex<_>>`. Not idiomatic in iced 0.14.
+- Forcing slice 1 to follow the pattern. Slice 0 outcome decides.
+
+## Review notes
+
+The design critique correctly identified that this plan is more "trying the pattern" than "executing the pattern". That's deliberate — the cost of one slice we might revert is much lower than the cost of committing to a 12-slice refactor before learning whether the pattern fits. The kill criterion (Decision 5) is the explicit acknowledgment.
+
+If slice 0 succeeds, the audit's TL;DR ranking (Watchlist → Account → …) holds. If it fails, the TL;DR has to be re-visited with a different decomposition strategy.
