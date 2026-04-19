@@ -377,30 +377,9 @@ pub struct MidasApp {
     pub broker_bridge: Option<Arc<crate::broker_bridge::BrokerBridge>>,
     /// Current broker connection state display string.
     pub broker_connection_display: String,
-    /// Symbols for which the GATR snap rule has already been evaluated
-    /// once in the current session. Populated by the
-    /// `MaybeSnapToGatr` path (startup + chart-activation hook) to
-    /// avoid a second snap firing when the user tab-cycles back to a
-    /// ticker they already looked at. Deliberately not persisted — a
-    /// crash-and-relaunch resets it.
-    pub snapped_this_session: std::collections::HashSet<crate::annotation_store::SymbolKey>,
-    /// Discoverability-toast guard: symbols for which the one-shot
-    /// "bracket location recorded" toast has already been emitted this
-    /// session. Prevents the toast from re-firing on every subsequent
-    /// panel edit for the same anchor seed.
-    #[allow(dead_code)] // used by future snap toast deduplication
-    pub anchor_seed_toasts_shown: std::collections::HashSet<crate::annotation_store::SymbolKey>,
-    /// Pre-snap undo slot, populated when the GATR snap rule fires
-    /// and drained when the user clicks the `Undo` action button on
-    /// the snap toast. 30-second session-bounded TTL enforced at
-    /// drain time — stale entries are silently discarded. Keyed by
-    /// symbol so a second snap on the same ticker replaces the prior
-    /// undo slot instead of stacking.
-    #[allow(dead_code)] // used by future undo-snap UI path
-    pub gatr_undo_slots: std::collections::HashMap<
-        crate::annotation_store::SymbolKey,
-        crate::ticker_state::PreSnapState,
-    >,
+    // Session-scoped per-symbol flags (GATR snap-once guard, anchor-seed
+    // toast dedup, pre-snap undo slot) live on `TickerState` via
+    // `TickerSessionFlags`. See audit round-2 P3b.
     /// Per-(symbol, timeframe) chart view settings. Single authority
     /// for camera positioning on data load (zoom level, positioning).
     pub chart_views: crate::chart_view::ChartViewStore,
@@ -1800,9 +1779,6 @@ impl MidasApp {
             market_cache: crate::market_cache::MarketDataCache::default(),
             broker_bridge: broker_bridge.clone(),
             broker_connection_display: "Disconnected".to_string(),
-            snapped_this_session: std::collections::HashSet::new(),
-            anchor_seed_toasts_shown: std::collections::HashSet::new(),
-            gatr_undo_slots: std::collections::HashMap::new(),
             chart_views: crate::chart_view::ChartViewStore::default(),
             thumbnail_store: crate::thumbnail_store::ThumbnailStore::default(),
             thumbnail_data: crate::thumbnail_data::ThumbnailDataStore::default(),

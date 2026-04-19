@@ -2507,8 +2507,18 @@ impl MidasApp {
                     }
                 }
 
-                if !self.snapped_this_session.contains(&key) {
-                    self.snapped_this_session.insert(key.clone());
+                let already_snapped = self
+                    .tickers
+                    .get(&key)
+                    .is_some_and(|ts| ts.is_snapped_this_session());
+                if !already_snapped {
+                    // Mark the flag up front; the ensuing MaybeSnap dispatch
+                    // runs regardless of whether the market cache has a
+                    // price yet, matching the pre-refactor semantics.
+                    let _ = self.update(Message::Ticker(
+                        key.clone(),
+                        crate::ticker_state::TickerMsg::MarkSnappedThisSession,
+                    ));
                     let snap = self.market_cache.get(key.as_str());
                     if let Some(price) = snap.as_ref().and_then(|s| s.last_price) {
                         let gatr_abs = snap.as_ref().and_then(|s| s.gatr_abs);
