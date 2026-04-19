@@ -439,6 +439,11 @@ pub struct MidasApp {
     /// Set to `true` while processing effects; asserted `false` at
     /// entry to prevent feedback loops.
     pub ticker_dispatch_active: bool,
+    /// Running IB-simulator child process, when the devloop
+    /// `SpawnSim` command has been issued and not yet torn down.
+    /// Only populated under the `dev_harness` feature.
+    #[cfg(feature = "dev_harness")]
+    pub sim_child: Option<crate::dev_harness::sim_child::SimChildHandle>,
 }
 
 /// Pending drag: press started but hold threshold not yet reached.
@@ -795,6 +800,15 @@ pub enum Message {
     DevHarnessScreenshotReady {
         screenshot: iced::window::Screenshot,
         out_path: std::path::PathBuf,
+        responder: crate::dev_harness::Responder,
+    },
+
+    /// A [`midas_devloop_proto::Command::SpawnSim`] task finished: the
+    /// sim binary is up and the control plane is healthy. Stash the
+    /// child handle on the app and fire the pending responder.
+    #[cfg(feature = "dev_harness")]
+    DevHarnessSimSpawned {
+        handle: crate::dev_harness::sim_child::SimChildHandle,
         responder: crate::dev_harness::Responder,
     },
 }
@@ -1835,6 +1849,8 @@ impl MidasApp {
             tickers,
             ticker_persist,
             ticker_dispatch_active: false,
+            #[cfg(feature = "dev_harness")]
+            sim_child: None,
         };
 
         // Register broker bridge in provider registry.
@@ -3300,6 +3316,11 @@ impl MidasApp {
                 responder,
             } => {
                 crate::dev_harness::handle_screenshot_ready(screenshot, out_path, responder);
+                Task::none()
+            }
+            #[cfg(feature = "dev_harness")]
+            Message::DevHarnessSimSpawned { handle, responder } => {
+                crate::dev_harness::handle_sim_spawned(self, handle, responder);
                 Task::none()
             }
         }

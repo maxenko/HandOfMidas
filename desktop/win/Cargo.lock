@@ -2991,7 +2991,9 @@ dependencies = [
  "midas-chart",
  "midas-core",
  "midas-data",
+ "midas-devloop-proto",
  "midas-feed",
+ "serde_json",
  "tempfile",
 ]
 

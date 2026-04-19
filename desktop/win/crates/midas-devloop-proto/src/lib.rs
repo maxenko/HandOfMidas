@@ -134,6 +134,76 @@ pub enum Command {
     /// `tab` is one of `"positions" | "orders" | "trade-history" |
     /// "recents"` (kebab-case, matching `AccountTab` serde).
     SetAccountTab { tab: String },
+
+    // -- IB simulator child-process lifecycle (Stage 09B) --
+    /// Spawn `midas-ib-sim-server` as a child process bound to `port`
+    /// (TWS wire-protocol) and `control_port` (HTTP control plane).
+    ///
+    /// The harness blocks until the sim's `/control/health` endpoint
+    /// responds `200 OK`, then records the child's PID under
+    /// `.devloop/sim.<port>.pid` and reads the bearer token the sim
+    /// wrote to disk. Subsequent [`InjectSimFault`] calls reuse that
+    /// token against the same control port.
+    ///
+    /// `scenario` is forwarded as `--scenario <path>` when set.
+    /// `seed` is forwarded as `--seed <n>` when set; otherwise the sim
+    /// uses its own default (12345).
+    SpawnSim {
+        port: u16,
+        control_port: u16,
+        scenario: Option<String>,
+        seed: Option<u64>,
+    },
+    /// SIGTERM the running sim child process, with a 5s grace period
+    /// before falling back to SIGKILL. No-op if no sim was spawned.
+    ShutdownSim,
+    /// Forward a fault-injection request to the running sim's control
+    /// plane (`POST /control/inject`). The harness supplies the bearer
+    /// token read at [`SpawnSim`] time. Body is serialised to the same
+    /// `{"type": "...", ...}` shape the sim accepts.
+    InjectSimFault { fault: SimFault },
+}
+
+/// Fault-injection payloads forwarded to the sim control plane. Wire
+/// format is internally-tagged JSON with the variant name in `type`.
+///
+/// Variants are intentionally shape-compatible with the engine's
+/// `InjectDisconnect` / `InjectPacingViolation` / `InjectFarmOutage` /
+/// `InjectFarmRestore` / `InjectPriceJump` / `InjectGap` / `InjectHalt` /
+/// `InjectBurst` commands — the sim deserialises, builds the
+/// corresponding `EngineCmd`, and pushes it onto the engine inbox.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SimFault {
+    /// Force a disconnect of every active TWS session. Mirrors the
+    /// scenario DSL `inject_disconnect` verb with no session filter.
+    Disconnect,
+    /// Trigger a pacing-violation (error 100 + disconnect) on the
+    /// active session.
+    PacingViolation,
+    /// Emit a farm-outage bulletin for the named farms. Names match the
+    /// IB convention (e.g. `usfarm`, `usfuture`, `cashfarm`).
+    FarmOutage { farms: Vec<String> },
+    /// Emit a farm-restore bulletin. `data_lost` mirrors real IB's
+    /// 1101/1102 distinction — `true` means subscribers must re-request
+    /// market data (code 1101), `false` means no data was lost (1102).
+    FarmRestore { farms: Vec<String>, data_lost: bool },
+    /// Jump the quoted mid-price of `symbol` by `magnitude_pct` over a
+    /// single tick. Positive values move the price up.
+    PriceJump { symbol: String, magnitude_pct: f64 },
+    /// Splice a price gap ending at `to` into the quote stream for
+    /// `symbol`. The from-price is whatever the engine last quoted.
+    Gap { symbol: String, to: f64 },
+    /// Halt quoting on `symbol` for `duration_ms` milliseconds.
+    Halt { symbol: String, duration_ms: u64 },
+    /// Scale emission rate for every listed symbol by `multiplier` for
+    /// the next `duration_ms` milliseconds. Used to stress the UI's
+    /// tick-coalescing path.
+    Burst {
+        symbols: Vec<String>,
+        multiplier: f64,
+        duration_ms: u64,
+    },
 }
 
 // ── Responses ─────────────────────────────────────────────────────────
@@ -179,6 +249,12 @@ pub enum ErrorKind {
     /// Panic hook caught a panic during command handling; process is in
     /// an unstable state, client should shut down.
     HarnessPanic,
+    /// [`Command::InjectSimFault`] / [`Command::ShutdownSim`] invoked
+    /// before a successful [`Command::SpawnSim`].
+    SimNotRunning,
+    /// [`Command::SpawnSim`] failed to launch the sim binary, bind the
+    /// control plane, or observe a healthy `/control/health` response.
+    SimSpawnFailed,
     /// Catch-all with a message payload.
     Internal,
 }
@@ -357,6 +433,164 @@ mod tests {
     }
 
     #[test]
+    fn spawn_sim_roundtrips() {
+        let cmd = Command::SpawnSim {
+            port: 7497,
+            control_port: 9497,
+            scenario: Some("fixtures/bracket_happy.yaml".to_owned()),
+            seed: Some(42),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains(r#""cmd":"spawn_sim""#));
+        assert!(json.contains(r#""port":7497"#));
+        assert!(json.contains(r#""control_port":9497"#));
+        assert!(json.contains(r#""seed":42"#));
+        let back: Command = serde_json::from_str(&json).unwrap();
+        match back {
+            Command::SpawnSim {
+                port,
+                control_port,
+                scenario,
+                seed,
+            } => {
+                assert_eq!(port, 7497);
+                assert_eq!(control_port, 9497);
+                assert_eq!(scenario.as_deref(), Some("fixtures/bracket_happy.yaml"));
+                assert_eq!(seed, Some(42));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn spawn_sim_optional_fields_omit() {
+        let cmd = Command::SpawnSim {
+            port: 7497,
+            control_port: 9497,
+            scenario: None,
+            seed: None,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        // None fields serialise as JSON null (serde default); ensure
+        // deserialisation accepts both absent and null forms.
+        let _back: Command = serde_json::from_str(&json).unwrap();
+        let _back2: Command =
+            serde_json::from_str(r#"{"cmd":"spawn_sim","port":7497,"control_port":9497}"#).unwrap();
+    }
+
+    #[test]
+    fn shutdown_sim_roundtrips() {
+        let cmd = Command::ShutdownSim;
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert_eq!(json, r#"{"cmd":"shutdown_sim"}"#);
+        let _back: Command = serde_json::from_str(&json).unwrap();
+    }
+
+    #[test]
+    fn sim_fault_disconnect_roundtrips() {
+        let fault = SimFault::Disconnect;
+        let json = serde_json::to_string(&fault).unwrap();
+        assert_eq!(json, r#"{"type":"disconnect"}"#);
+        let back: SimFault = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, SimFault::Disconnect);
+    }
+
+    #[test]
+    fn sim_fault_pacing_violation_roundtrips() {
+        let fault = SimFault::PacingViolation;
+        let json = serde_json::to_string(&fault).unwrap();
+        assert_eq!(json, r#"{"type":"pacing_violation"}"#);
+        let _back: SimFault = serde_json::from_str(&json).unwrap();
+    }
+
+    #[test]
+    fn sim_fault_farm_outage_roundtrips() {
+        let fault = SimFault::FarmOutage {
+            farms: vec!["usfarm".to_owned(), "cashfarm".to_owned()],
+        };
+        let json = serde_json::to_string(&fault).unwrap();
+        assert!(json.contains(r#""type":"farm_outage""#));
+        assert!(json.contains(r#""farms":["usfarm","cashfarm"]"#));
+        let back: SimFault = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back,
+            SimFault::FarmOutage {
+                farms: vec!["usfarm".to_owned(), "cashfarm".to_owned()]
+            }
+        );
+    }
+
+    #[test]
+    fn sim_fault_farm_restore_tracks_data_lost() {
+        let fault = SimFault::FarmRestore {
+            farms: vec!["usfarm".to_owned()],
+            data_lost: true,
+        };
+        let json = serde_json::to_string(&fault).unwrap();
+        assert!(json.contains(r#""type":"farm_restore""#));
+        assert!(json.contains(r#""data_lost":true"#));
+        let _back: SimFault = serde_json::from_str(&json).unwrap();
+    }
+
+    #[test]
+    fn sim_fault_price_jump_roundtrips() {
+        let fault = SimFault::PriceJump {
+            symbol: "AAPL".to_owned(),
+            magnitude_pct: -5.0,
+        };
+        let json = serde_json::to_string(&fault).unwrap();
+        assert!(json.contains(r#""type":"price_jump""#));
+        assert!(json.contains(r#""symbol":"AAPL""#));
+        let _back: SimFault = serde_json::from_str(&json).unwrap();
+    }
+
+    #[test]
+    fn sim_fault_gap_roundtrips() {
+        let fault = SimFault::Gap {
+            symbol: "AAPL".to_owned(),
+            to: 150.25,
+        };
+        let json = serde_json::to_string(&fault).unwrap();
+        assert!(json.contains(r#""type":"gap""#));
+        let _back: SimFault = serde_json::from_str(&json).unwrap();
+    }
+
+    #[test]
+    fn sim_fault_halt_roundtrips() {
+        let fault = SimFault::Halt {
+            symbol: "AAPL".to_owned(),
+            duration_ms: 60_000,
+        };
+        let json = serde_json::to_string(&fault).unwrap();
+        assert!(json.contains(r#""type":"halt""#));
+        assert!(json.contains(r#""duration_ms":60000"#));
+        let _back: SimFault = serde_json::from_str(&json).unwrap();
+    }
+
+    #[test]
+    fn sim_fault_burst_roundtrips() {
+        let fault = SimFault::Burst {
+            symbols: vec!["AAPL".to_owned(), "MSFT".to_owned()],
+            multiplier: 10.0,
+            duration_ms: 1_000,
+        };
+        let json = serde_json::to_string(&fault).unwrap();
+        assert!(json.contains(r#""type":"burst""#));
+        let _back: SimFault = serde_json::from_str(&json).unwrap();
+    }
+
+    #[test]
+    fn inject_sim_fault_command_roundtrips() {
+        let cmd = Command::InjectSimFault {
+            fault: SimFault::PacingViolation,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains(r#""cmd":"inject_sim_fault""#));
+        assert!(json.contains(r#""type":"pacing_violation""#));
+        let _back: Command = serde_json::from_str(&json).unwrap();
+    }
+
+    #[test]
     fn error_kind_wire_names_stable() {
         // Lock the JSON representations — drivers depend on these.
         let cases = [
@@ -370,6 +604,8 @@ mod tests {
             ),
             (ErrorKind::Timeout, "timeout"),
             (ErrorKind::HarnessPanic, "harness_panic"),
+            (ErrorKind::SimNotRunning, "sim_not_running"),
+            (ErrorKind::SimSpawnFailed, "sim_spawn_failed"),
             (ErrorKind::Internal, "internal"),
         ];
         for (kind, expected) in cases {

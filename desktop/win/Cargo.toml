@@ -34,6 +34,11 @@ glam        = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+# `app_sim_e2e` integration test drives midas-app via the devloop
+# TCP protocol. The test itself is `#[ignore]` by default; the deps
+# here exist only for `cargo test --test app_sim_e2e -- --ignored`.
+midas-devloop-proto = { path = "crates/midas-devloop-proto" }
+serde_json = { workspace = true }
 
 # ─── Workspace-wide dependency versions ───────────────────────────────
 # Crates reference these via: dep = { workspace = true }

@@ -200,6 +200,24 @@ pub enum Command {
 
     // -- Fast path: bypass input wiring, hit the domain directly --
     InjectTickerMsg { symbol: String, msg_json: serde_json::Value },
+
+    // -- IB simulator child-process lifecycle (Stage 09) --
+    SpawnSim { port: u16, control_port: u16, scenario: Option<String>, seed: Option<u64> },
+    ShutdownSim,
+    InjectSimFault { fault: SimFault },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SimFault {
+    Disconnect,
+    PacingViolation,
+    FarmOutage { farms: Vec<String> },
+    FarmRestore { farms: Vec<String>, data_lost: bool },
+    PriceJump { symbol: String, magnitude_pct: f64 },
+    Gap { symbol: String, to: f64 },
+    Halt { symbol: String, duration_ms: u64 },
+    Burst { symbols: Vec<String>, multiplier: f64, duration_ms: u64 },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -218,6 +236,8 @@ pub enum Response {
 - `UnknownCommand` — command variant not recognised.
 - `SymbolNotBound` — `click_price` / `inject_ticker_msg` references a symbol
   with no chart panel.
+- `SimNotRunning` — `InjectSimFault` / `ShutdownSim` invoked with no prior `SpawnSim`.
+- `SimSpawnFailed` — `SpawnSim` could not launch the binary or observe a healthy control plane.
 - `FixtureNotFound` — named fixture does not exist on disk.
 - `FixtureVersionMismatch` — `devloop_fixture_version` or
   `ticker_state_version` disagrees with the current build.
@@ -628,6 +648,94 @@ Keeping these on the map for when v1 proves valuable:
   string-ID-by-convention painful.
 - **Fixture migration tooling** — if `TickerState` schema bumps end up killing
   expensive-to-record fixtures enough times to be annoying.
+
+---
+
+## IB simulator integration (Stage 09B)
+
+The dev harness doubles as the entry point for orchestrating
+`midas-ib-sim-server` alongside the app. Three commands cover the
+child-process lifecycle and fault injection:
+
+### `spawn_sim`
+
+```json
+{"cmd":"spawn_sim","port":7497,"control_port":9497,"scenario":"fixtures/bracket_happy.yaml","seed":42}
+```
+
+Forks `midas-ib-sim-server` as a child process bound to `port` (TWS
+wire protocol) and `control_port` (HTTP control plane). Resolution
+order for the binary:
+
+1. `MIDAS_IB_SIM_BIN` env var (CI override).
+2. `midas-ib-sim-server[.exe]` sibling of the running `midas-app`.
+3. Fall back to `$PATH` lookup.
+
+The harness blocks until `/control/health` returns `200 OK`, reads the
+bearer token the sim wrote to `.devloop/sim.<port>.token`, and writes
+the child PID to `.devloop/sim.<port>.pid` for supervisor reaping.
+
+Per-port file naming lets parallel `DEVLOOP_PORT` instances each
+manage their own sim without stomping on each other's token/pid files.
+
+`scenario` and `seed` are optional and map to the sim's `--scenario`
+and `--seed` CLI flags.
+
+### `shutdown_sim`
+
+```json
+{"cmd":"shutdown_sim"}
+```
+
+On Unix: `kill -TERM <pid>` with a 5 s grace period before falling
+back to `kill -KILL`. On Windows: `TerminateProcess` via
+`tokio::process::Child::kill`. The token + PID files are removed on
+successful shutdown. No-op with `SimNotRunning` error if no sim
+child was spawned.
+
+### `inject_sim_fault`
+
+```json
+{"cmd":"inject_sim_fault","fault":{"type":"pacing_violation"}}
+{"cmd":"inject_sim_fault","fault":{"type":"farm_outage","farms":["usfarm"]}}
+{"cmd":"inject_sim_fault","fault":{"type":"price_jump","symbol":"AAPL","magnitude_pct":-5.0}}
+```
+
+Forwards the fault to the sim's `POST /control/inject` endpoint with
+the stored bearer token. The sim routes the fault to one or more
+`EngineCmd` variants:
+
+| `SimFault` variant              | Engine command(s)                                              |
+|----------------------------------|---------------------------------------------------------------|
+| `disconnect`                    | `InjectDisconnect` for every active session                   |
+| `pacing_violation`              | `InjectPacingViolation` for every active session              |
+| `farm_outage { farms }`         | `InjectFarmOutage { code: 2103, farms }`                      |
+| `farm_restore { farms, data_lost }` | `InjectFarmRestore { code: 1101 \| 1102, farms }`         |
+| `price_jump { symbol, magnitude_pct }` | `InjectPriceJump { symbol, magnitude_pct }`           |
+| `gap { symbol, to }`            | `InjectGap { symbol, from: last_quote, to }`                  |
+| `halt { symbol, duration_ms }`  | `InjectHalt { symbol, duration }`                             |
+| `burst { symbols, multiplier, duration_ms }` | `InjectBurst { symbols, multiplier, duration }`  |
+
+### Supervisor reap
+
+`tokio::process::Command` is configured with `kill_on_drop(true)`, so
+a crash in `midas-app` (panic, signal-kill) takes the sim child with
+it via the runtime's drop path. The panic hook (see the crash
+handling section above) fires first and flushes `panic.txt` before
+drop — no extra teardown needed.
+
+### Example end-to-end journey
+
+```
+{"cmd":"spawn_sim","port":7497,"control_port":9497}
+{"cmd":"inject_broker_event","event_json":{"type":"Connected", ...}}
+{"cmd":"wait_for_event","event_type":"BrokerConnected","timeout_ms":5000}
+{"cmd":"screenshot","out_path":".devloop/shots/connected.png"}
+{"cmd":"inject_sim_fault","fault":{"type":"pacing_violation"}}
+{"cmd":"wait_for_event","event_type":"BrokerDisconnected","timeout_ms":5000}
+{"cmd":"screenshot","out_path":".devloop/shots/disconnected.png"}
+{"cmd":"shutdown_sim"}
+```
 
 ---
 
