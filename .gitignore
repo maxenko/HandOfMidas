@@ -51,3 +51,9 @@ flamegraph.svg
 
 # ── Claude Code ────────────────────────────────────────────────────
 .claude/
+
+# ── IB-sim session captures ────────────────────────────────────────
+# Raw (un-anonymized) wire captures. See plan/ib-sim/07-session-recording.md
+# §"Data Lifecycle" for the policy. These MUST NEVER be committed.
+crates/midas-ib-sim/fixtures/sessions/raw/
+crates/midas-ib-sim/fixtures/sessions/**/raw/

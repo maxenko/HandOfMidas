@@ -1,0 +1,20 @@
+# midas-ib-sim anonymization config.
+# Reviewed via PR when patterns change. See plan/ib-sim/07-session-recording.md
+# §"Anonymization" for the specification. Synthetic account codes fall in the
+# reserved DU0000000..DU0000999 range so the pass is idempotent.
+#
+# The salt below is committed to git intentionally — determinism is the goal,
+# NOT secrecy. Attackers with this file gain nothing beyond the ability to
+# reproduce our synthetic codes, which are already public in the shipped
+# fixtures.
+
+salt: "midas-ib-sim/stage-07/v1/public-anonymize-salt"
+
+# Optional explicit mappings. Fill in after spot-checking a capture to pin a
+# particular real account / exec id to a known synthetic equivalent.
+account_map: {}
+exec_id_map: {}
+
+# Default false — preserving order IDs keeps replays deterministic. Only set
+# true for pure-archive captures where no further replay is expected.
+strip_order_ids: false

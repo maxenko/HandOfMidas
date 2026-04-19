@@ -11,6 +11,10 @@ path = "src/lib.rs"
 name = "midas-ib-sim-server"
 path = "src/bin/server.rs"
 
+[[bin]]
+name = "midas-ib-sim"
+path = "src/bin/tools.rs"
+
 [dependencies]
 midas-broker-core = { path = "../midas-broker-core" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
@@ -30,6 +34,8 @@ statrs = "0.17"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 dbn = "0.19"
+zstd = "0.13"
+sha2 = "0.10"
 axum = "0.7"
 clap = { version = "4", features = ["derive"] }
 dirs = "5"
