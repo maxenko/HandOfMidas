@@ -1,0 +1,65 @@
+# Canonical smoke scenario — Stage 06 skeleton regression target.
+#
+# Intent: exercise every high-level scenario shape (symbols, accounts,
+# quirks, fixed-time event, named anchor, after-anchor event, pattern-
+# triggered assert, end-of-run assert) in one minimal document.
+#
+# Wave 2's runner will execute this; Stage 06-skeleton only asserts
+# that the loader accepts it without error.
+
+version: 1
+name: "smoke"
+description: "Connect, subscribe, place one order, disconnect cleanly."
+seed: 42
+clock: virtual
+duration: 5min
+
+symbols:
+  - symbol: AAPL
+    preset: MidCap
+    initial_price: 175.00
+
+accounts:
+  - acct_code: "DU1234567"
+    starting_cash: 100000.00
+    currency: USD
+
+quirks:
+  msg_rate:
+    limit_per_sec: 50
+  line_limit:
+    max_l1_lines: 100
+
+events:
+  - at: "00:00:05"
+    do: subscribe_market_data
+    args:
+      symbol: AAPL
+      subscription: streaming_l1
+
+  - at: "00:00:10"
+    named: place
+    do: accept_order
+    args:
+      order_kind: single
+      side: buy
+      quantity: 100
+      entry: market
+      symbol: AAPL
+      account: DU1234567
+      order_ref: smoke-1
+
+  - after: place
+    delay: 5s
+    do: assert
+    args:
+      cond: "orders[smoke-1].status == Filled"
+      message: "entry fills within 5s under default params"
+
+  - when: "orders[smoke-1].status == Filled"
+    do: inject_daily_restart
+
+asserts:
+  - cond: "all_orders_have_terminal_status"
+    message: "no dangling orders at session end"
+  - cond: "session_duration <= 5min"

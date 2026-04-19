@@ -41,5 +41,5 @@ pub use crate::engine::types::{
 pub use crate::market_data::{MarketDataEngine, MarketDataMode};
 pub use crate::orders::OrderSimulator;
 pub use crate::quirks::QuirkGuard;
-pub use crate::scenario::Scenario;
+pub use crate::scenario::{Scenario, ScenarioError, Verb, CURRENT_VERSION};
 pub use crate::server::{start_sim, Sim, SimConfig, SimHandle};
