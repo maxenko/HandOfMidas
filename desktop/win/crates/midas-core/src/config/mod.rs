@@ -36,9 +36,32 @@ pub enum ConfigError {
 
 // ── Config structs ───────────────────────────────────────────────────
 
+/// Current on-disk schema version. Bumped whenever an
+/// [`AppConfig`] field rename, type change, or migration step lands;
+/// the [`migrations`] module owns the v_n → v_{n+1} chain.
+///
+/// Configs without a `version` field deserialize as v1 (the
+/// pre-versioning schema) — see [`default_config_version`]. Older
+/// versions are walked forward to [`CURRENT_CONFIG_VERSION`] on
+/// load; the migrated form is then saved back, stamping the
+/// current value.
+pub const CURRENT_CONFIG_VERSION: u32 = 2;
+
+/// Default for `AppConfig::version` when the field is missing on
+/// disk. v1 = pre-versioning (anything written before the
+/// `version` field landed).
+fn default_config_version() -> u32 {
+    1
+}
+
 /// Root application configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
+    /// On-disk schema version. Always equals
+    /// [`CURRENT_CONFIG_VERSION`] for in-memory configs after
+    /// `load`; older files round-trip through the migration chain.
+    #[serde(default = "default_config_version")]
+    pub version: u32,
     /// Window size settings.
     pub window: WindowConfig,
     /// Theme settings.
@@ -601,6 +624,9 @@ fn default_icon() -> String {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            // Fresh configs start at the current version — they were
+            // born with the latest schema, so no migration applies.
+            version: CURRENT_CONFIG_VERSION,
             window: WindowConfig {
                 width: 1280,
                 height: 800,
@@ -651,33 +677,41 @@ impl AppConfig {
         }
 
         let mut config: Self = toml::from_str(&content)?;
+        // Pre-versioning structural migration. Stays out of the
+        // version chain because it's structurally idempotent (skipped
+        // when `levels` already populated) and predates the version
+        // field; existing v1 files may or may not have it applied.
         migrate_levels(&mut config);
 
-        // One-shot migration: legacy `order_blotters` → `account_panels`.
-        // If any entries are translated, back up the existing file
-        // BEFORE the caller saves the migrated form, so the raw input
-        // is recoverable. Guard the backup with an `.exists()` check so
-        // repeat migrations (should not happen, but defensive) never
-        // overwrite the original pre-migration file.
-        let migrated = migrations::migrate_order_blotters_to_account_panels(&mut config);
-        if migrated > 0 {
-            // Append the suffix to the full file name (not .with_extension,
-            // which mangles paths that already contain dots in the stem).
+        // Walk v_n → v_{n+1} → … → CURRENT_CONFIG_VERSION. The
+        // framework reports back which steps ran so we can write a
+        // single backup file regardless of how many versions the
+        // caller jumped.
+        let initial_version = config.version;
+        let steps = migrations::migrate_to_current(&mut config);
+        if !steps.is_empty() {
             let file_name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let backup = path.with_file_name(format!("{file_name}.bak-account-migration"));
+            let backup = path.with_file_name(format!(
+                "{file_name}.bak-v{initial_version}-to-v{}",
+                CURRENT_CONFIG_VERSION
+            ));
             if !backup.exists() {
                 std::fs::copy(path, &backup).map_err(ConfigError::Io)?;
                 tracing::info!(
-                    "Migrated {migrated} order_blotters → account_panels; backup at {}",
+                    "Migrated config v{initial_version} → v{}: {}; backup at {}",
+                    CURRENT_CONFIG_VERSION,
+                    steps.join(", "),
                     backup.display()
                 );
             } else {
                 tracing::warn!(
-                    "Migrated {migrated} order_blotters → account_panels; \
+                    "Migrated config v{initial_version} → v{}: {}; \
                      existing backup at {} preserved",
+                    CURRENT_CONFIG_VERSION,
+                    steps.join(", "),
                     backup.display()
                 );
             }

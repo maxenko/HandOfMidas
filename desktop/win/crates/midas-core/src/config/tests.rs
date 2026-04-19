@@ -65,6 +65,7 @@ fn save_load_roundtrip_preserves_all_fields() {
         ],
     );
     let config = AppConfig {
+        version: crate::config::CURRENT_CONFIG_VERSION,
         window: WindowConfig {
             width: 1920,
             height: 1080,
@@ -207,6 +208,7 @@ fn chart_config_with_levels_survives_roundtrip() {
         ],
     );
     let config = AppConfig {
+        version: crate::config::CURRENT_CONFIG_VERSION,
         window: WindowConfig {
             width: 1280,
             height: 800,
@@ -409,6 +411,7 @@ fn atomic_write_does_not_corrupt_on_success() {
     let path = dir.join("atomic.toml");
 
     let config = AppConfig {
+        version: crate::config::CURRENT_CONFIG_VERSION,
         window: WindowConfig {
             width: 1600,
             height: 900,
@@ -507,6 +510,7 @@ fn roundtrip_with_camera_and_collapse_gaps_and_line_width() {
         ],
     );
     let config = AppConfig {
+        version: crate::config::CURRENT_CONFIG_VERSION,
         window: WindowConfig {
             width: 2560,
             height: 1440,
@@ -1048,8 +1052,14 @@ order_blotter_index = 0
         }
     ));
 
-    // Backup exists and holds the pre-migration bytes.
-    let backup = dir.join("config.toml.bak-account-migration");
+    // Backup exists and holds the pre-migration bytes. Filename is
+    // `<name>.bak-v<initial>-to-v<current>` — the legacy file has
+    // no `version` field so it deserializes as v1 and the framework
+    // walks it to the current version.
+    let backup = dir.join(format!(
+        "config.toml.bak-v1-to-v{}",
+        crate::config::CURRENT_CONFIG_VERSION
+    ));
     assert!(backup.exists(), "backup file written");
     let backup_contents = std::fs::read_to_string(&backup).expect("read backup");
     assert!(

@@ -101,6 +101,11 @@ impl MidasApp {
         }
 
         AppConfig {
+            // Always stamp the current schema version on save —
+            // load() ensures the in-memory config has been walked
+            // forward to current, so anything we write back is at
+            // CURRENT_CONFIG_VERSION.
+            version: midas_core::config::CURRENT_CONFIG_VERSION,
             // Whole `WindowConfig` projection lives on the
             // controller; the persistence path is just a delegate.
             window: self.window.to_config(),
