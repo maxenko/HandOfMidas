@@ -136,7 +136,8 @@ impl MidasApp {
 
                         // Ensure D1 market snapshot exists for G.ATR display.
                         if let Some(sym) = loaded_symbol {
-                            if self.market_cache.get(&sym).is_none() {
+                            let key = crate::annotation_store::SymbolKey::new(&sym);
+                            if self.market_cache.get(&key).is_none() {
                                 return self.load_market_snapshot(&sym);
                             }
                         }
@@ -342,7 +343,7 @@ impl MidasApp {
                 // the one-shot-per-session toast path.
                 if let Some(sym) = self.active_chart_symbol() {
                     let key = crate::annotation_store::SymbolKey::new(&sym);
-                    let snap = self.market_cache.get(key.as_str());
+                    let snap = self.market_cache.get(&key);
                     if let Some(price) = snap.as_ref().and_then(|s| s.last_price) {
                         let gatr_abs = snap.as_ref().and_then(|s| s.gatr_abs);
                         let _ = self.update(Message::Ticker(
@@ -459,9 +460,7 @@ impl MidasApp {
             ChartAction::Pan { dx, dy } => {
                 self.focus_chart(chart_id);
                 if let Some(chart) = self.charts.get_mut(&chart_id) {
-                    chart
-                        .chart_state
-                        .apply_action(&ChartAction::Pan { dx, dy });
+                    chart.chart_state.apply_action(&ChartAction::Pan { dx, dy });
                     chart.camera_restored_pending = false;
                 }
                 self.save_camera_for_chart(chart_id);
@@ -498,9 +497,7 @@ impl MidasApp {
                 self.mark_config_dirty();
                 Task::none()
             }
-            ChartAction::SetCrosshair { x, y } => {
-                self.apply_crosshair(chart_id, Some((x, y)))
-            }
+            ChartAction::SetCrosshair { x, y } => self.apply_crosshair(chart_id, Some((x, y))),
             ChartAction::ClearCrosshair => self.apply_crosshair(chart_id, None),
             ChartAction::CreateLevel { price } => {
                 self.focus_chart(chart_id);
@@ -661,9 +658,7 @@ impl MidasApp {
                         self.handle_chart_bracket_submit(chart_id, annotation_id)
                     }
                     DecoratorAction::Save => self.handle_chart_bracket_save(annotation_id),
-                    DecoratorAction::TogglePin => {
-                        self.handle_chart_bracket_toggle_pin(chart_id)
-                    }
+                    DecoratorAction::TogglePin => self.handle_chart_bracket_toggle_pin(chart_id),
                     DecoratorAction::CreateTakeProfit
                     | DecoratorAction::CycleEntryType
                     | DecoratorAction::EditQuantity
@@ -688,11 +683,7 @@ impl MidasApp {
     /// `ChartAction::SetCrosshair` and `ChartAction::ClearCrosshair`
     /// because both fold into a single `Option<(f32,f32)>` mutation
     /// + the cross-chart sync update.
-    fn apply_crosshair(
-        &mut self,
-        chart_id: ChartId,
-        pos: Option<(f32, f32)>,
-    ) -> Task<Message> {
+    fn apply_crosshair(&mut self, chart_id: ChartId, pos: Option<(f32, f32)>) -> Task<Message> {
         if pos.is_some() {
             self.focus_chart(chart_id);
         }
@@ -714,8 +705,8 @@ impl MidasApp {
                         let cam = &chart.chart_state.camera;
                         let ts = if chart.chart_state.collapse_gaps {
                             let idx_f = cam.x_to_time(x);
-                            let idx = (idx_f.round().max(0.0) as usize)
-                                .min(data.len().saturating_sub(1));
+                            let idx =
+                                (idx_f.round().max(0.0) as usize).min(data.len().saturating_sub(1));
                             data.timestamps[idx]
                         } else {
                             let cursor_time = cam.x_to_time(x);
@@ -723,8 +714,7 @@ impl MidasApp {
                             data.timestamps[idx]
                         };
                         let price = cam.y_to_price(y);
-                        self.crosshair_sync =
-                            Some((chart_id, ts, price, chart.symbol.clone()));
+                        self.crosshair_sync = Some((chart_id, ts, price, chart.symbol.clone()));
                     }
                 }
             }
@@ -1086,7 +1076,7 @@ impl MidasApp {
                     {
                         let (mc_price, mc_gatr) = self
                             .market_cache
-                            .get(&symbol.to_uppercase())
+                            .get(&sym_key)
                             .map(|s| (s.last_price, s.gatr_abs))
                             .unwrap_or((None, None));
                         let ts = self.ticker_mut(&sym_key);
@@ -1122,7 +1112,7 @@ impl MidasApp {
                     {
                         let (mc_price, mc_gatr) = self
                             .market_cache
-                            .get(&symbol.to_uppercase())
+                            .get(&sym_key)
                             .map(|s| (s.last_price, s.gatr_abs))
                             .unwrap_or((None, None));
                         let ts = self.ticker_mut(&sym_key);
@@ -1167,7 +1157,7 @@ impl MidasApp {
                     // Get last_price from market_cache (authoritative source).
                     let last_price = self
                         .market_cache
-                        .get(&state.symbol)
+                        .get(&crate::annotation_store::SymbolKey::new(&state.symbol))
                         .and_then(|snap| snap.last_price);
 
                     let last_price = match last_price {
@@ -1440,7 +1430,9 @@ impl MidasApp {
                             // can check TP/SL direction against current price.
                             panel.state.last_price = self
                                 .market_cache
-                                .get(&panel.state.symbol)
+                                .get(&crate::annotation_store::SymbolKey::new(
+                                    &panel.state.symbol,
+                                ))
                                 .and_then(|snap| snap.last_price);
                             let errors = crate::order_panel::validate_panel(&panel.state);
                             let valid = errors.is_empty();
@@ -1581,7 +1573,7 @@ impl MidasApp {
                 // corrected memory before the sync below persists it.
                 if let Some(sym) = side_change_symbol {
                     let key = crate::annotation_store::SymbolKey::new(&sym);
-                    let snap = self.market_cache.get(key.as_str());
+                    let snap = self.market_cache.get(&key);
                     if let Some(price) = snap.as_ref().and_then(|s| s.last_price) {
                         let gatr_abs = snap.as_ref().and_then(|s| s.gatr_abs);
                         let _ = self.update(Message::Ticker(
@@ -2186,10 +2178,10 @@ impl MidasApp {
                         .values()
                         .any(|wl| wl.has_ticker(&symbol_upper));
                     if !still_used {
-                        self.market_cache.remove(&symbol_upper);
                         // Evict ticker state for this symbol from both
                         // the in-memory map and the persistence store.
                         let sym_key = crate::annotation_store::SymbolKey::new(&symbol_upper);
+                        self.market_cache.remove(&sym_key);
                         self.tickers.remove(&sym_key);
                         self.ticker_persist.forget(&sym_key);
                     }
@@ -2411,23 +2403,18 @@ impl MidasApp {
                 let in_watchlist = self.watchlists.values().any(|wl| wl.has_ticker(&symbol));
                 let in_chart = self.charts.values().any(|c| c.symbol == symbol)
                     || self.floating_charts.values().any(|c| c.symbol == symbol);
+                let key = crate::annotation_store::SymbolKey::new(&symbol);
                 if in_watchlist || in_chart {
                     let snapshot = crate::market_cache::snapshot_from_candles(&buffer);
-                    self.market_cache.insert(symbol.clone(), snapshot);
+                    self.market_cache.insert(key.clone(), snapshot);
                 }
 
                 // Sync draft bracket entry prices for Market-type brackets via TickerState.
-                let symbol_upper = symbol.to_uppercase();
-                if let Some(new_price) = self
-                    .market_cache
-                    .get(&symbol_upper)
-                    .and_then(|s| s.last_price)
-                {
-                    let sym_key = crate::annotation_store::SymbolKey::new(&symbol_upper);
+                if let Some(new_price) = self.market_cache.get(&key).and_then(|s| s.last_price) {
                     // Check if the TickerState's live bracket needs a price update.
                     let needs_update = self
                         .tickers
-                        .get(&sym_key)
+                        .get(&key)
                         .and_then(|ts| ts.live_bracket())
                         .map(|b| {
                             b.entry_type == midas_chart::widget::order_bracket::EntryType::Market
@@ -2436,7 +2423,7 @@ impl MidasApp {
                         .unwrap_or(false);
                     if needs_update {
                         let _ = self.update(Message::Ticker(
-                            sym_key,
+                            key.clone(),
                             crate::ticker_state::TickerMsg::SetLegPrice {
                                 role: midas_chart::widget::order_bracket::LegRole::Entry,
                                 price: new_price,
@@ -2452,7 +2439,6 @@ impl MidasApp {
                 // "$112 stop on a $14 chart" bug — a stale bracket is
                 // repositioned to the current price the moment its
                 // market data lands.
-                let key = crate::annotation_store::SymbolKey::new(&symbol_upper);
 
                 // Fresh price data just landed. Update the TickerState
                 // with the new market data, then ensure a draft bracket
@@ -2463,7 +2449,7 @@ impl MidasApp {
                 // we have real prices, re-fire it through TickerState.
                 let (cp, gatr) = self
                     .market_cache
-                    .get(key.as_str())
+                    .get(&key)
                     .map(|s| (s.last_price, s.gatr_abs))
                     .unwrap_or((None, None));
                 if let Some(new_price) = cp {
@@ -2493,7 +2479,7 @@ impl MidasApp {
                     )> = self
                         .order_panels
                         .values()
-                        .filter(|p| p.state.symbol.eq_ignore_ascii_case(&symbol_upper))
+                        .filter(|p| p.state.symbol.eq_ignore_ascii_case(key.as_str()))
                         .map(|p| (p.state.side, p.state.entry_type))
                         .collect();
                     for (panel_side, panel_entry_type) in targets {
@@ -2509,7 +2495,7 @@ impl MidasApp {
 
                 if !self.snapped_this_session.contains(&key) {
                     self.snapped_this_session.insert(key.clone());
-                    let snap = self.market_cache.get(key.as_str());
+                    let snap = self.market_cache.get(&key);
                     if let Some(price) = snap.as_ref().and_then(|s| s.last_price) {
                         let gatr_abs = snap.as_ref().and_then(|s| s.gatr_abs);
                         return self.update(Message::Ticker(
@@ -2848,7 +2834,10 @@ impl MidasApp {
         &mut self,
         msg: crate::window_geometry::WindowGeometryMsg,
     ) -> Task<Message> {
-        if matches!(msg, crate::window_geometry::WindowGeometryMsg::MainWindowOpened(_)) {
+        if matches!(
+            msg,
+            crate::window_geometry::WindowGeometryMsg::MainWindowOpened(_)
+        ) {
             tracing::info!("Main window opened (routed via WindowGeometry)");
         }
         let effects = self.window.update(msg);
@@ -3025,9 +3014,8 @@ impl MidasApp {
                 "Bracket drawn on chart: {annotation_id} for {ticker} \
                  ({side:?} entry={entry:.2} tp={tp:.2} sl={sl:.2})"
             );
-            self.status_message = format!(
-                "Bracket placed on {ticker} ({side:?} E={entry:.2} TP={tp:.2} SL={sl:.2})"
-            );
+            self.status_message =
+                format!("Bracket placed on {ticker} ({side:?} E={entry:.2} TP={tp:.2} SL={sl:.2})");
         }
         Task::none()
     }
@@ -3055,12 +3043,8 @@ impl MidasApp {
                     .values()
                     .find(|link| link.annotation_id == annotation_id.0)
                     .and_then(|link| match leg {
-                        midas_chart::widget::order_bracket::LegRole::TakeProfit => {
-                            link.tp_order_id
-                        }
-                        midas_chart::widget::order_bracket::LegRole::StopLoss => {
-                            link.sl_order_id
-                        }
+                        midas_chart::widget::order_bracket::LegRole::TakeProfit => link.tp_order_id,
+                        midas_chart::widget::order_bracket::LegRole::StopLoss => link.sl_order_id,
                         _ => None,
                     });
                 if let Some(order_id) = order_id {
@@ -3107,9 +3091,7 @@ impl MidasApp {
             .iter()
             .find(|a| a.id == ann_id)
             .and_then(|a| match &a.kind {
-                midas_chart::widget::AnnotationKind::OrderBracket(b) => {
-                    Some(b.stop_loss.is_some())
-                }
+                midas_chart::widget::AnnotationKind::OrderBracket(b) => Some(b.stop_loss.is_some()),
                 _ => None,
             })
             .unwrap_or(false);
@@ -3199,9 +3181,7 @@ impl MidasApp {
             .iter()
             .find(|a| a.id == ann_id)
             .and_then(|a| match &a.kind {
-                midas_chart::widget::AnnotationKind::OrderBracket(b) => {
-                    Some(b.as_ref().clone())
-                }
+                midas_chart::widget::AnnotationKind::OrderBracket(b) => Some(b.as_ref().clone()),
                 _ => None,
             });
 
@@ -3234,12 +3214,8 @@ impl MidasApp {
             midas_chart::widget::order_bracket::EntryType::Market => {
                 midas_broker::OrderKind::Market
             }
-            midas_chart::widget::order_bracket::EntryType::Limit => {
-                midas_broker::OrderKind::Limit
-            }
-            midas_chart::widget::order_bracket::EntryType::Stop => {
-                midas_broker::OrderKind::Stop
-            }
+            midas_chart::widget::order_bracket::EntryType::Limit => midas_broker::OrderKind::Limit,
+            midas_chart::widget::order_bracket::EntryType::Stop => midas_broker::OrderKind::Stop,
             midas_chart::widget::order_bracket::EntryType::StopLimit => {
                 midas_broker::OrderKind::StopLimit
             }
@@ -3259,9 +3235,7 @@ impl MidasApp {
         };
 
         let action = match bracket.side {
-            midas_chart::widget::order_bracket::BracketSide::Long => {
-                midas_broker::OrderAction::Buy
-            }
+            midas_chart::widget::order_bracket::BracketSide::Long => midas_broker::OrderAction::Buy,
             midas_chart::widget::order_bracket::BracketSide::Short => {
                 midas_broker::OrderAction::Sell
             }
@@ -3285,13 +3259,12 @@ impl MidasApp {
                 action,
                 quantity,
                 outside_rth: false,
-                take_profit: bracket
-                    .take_profit
-                    .as_ref()
-                    .map(|tp| midas_broker::TakeProfitParams {
+                take_profit: bracket.take_profit.as_ref().map(|tp| {
+                    midas_broker::TakeProfitParams {
                         price: tp.line.price,
                         tif: None,
-                    }),
+                    }
+                }),
                 stop_loss: bracket
                     .stop_loss
                     .as_ref()
@@ -3327,8 +3300,7 @@ impl MidasApp {
                     }
                     if let Some(pid) = panel_id {
                         if let Some(p) = self.order_panels.get_mut(&pid) {
-                            p.state.errors =
-                                vec![("broker".into(), format!("Broker error: {e}"))];
+                            p.state.errors = vec![("broker".into(), format!("Broker error: {e}"))];
                         }
                     }
                     self.mark_levels_dirty_for_ticker(&symbol);
@@ -3775,10 +3747,7 @@ impl MidasApp {
     /// Collapse a [`crate::toast::Effect`] vector into a single
     /// `Task<Message>`. Pulled out so [`Self::dispatch_toast`] and the
     /// `Tick` handler share one interpretation site.
-    fn consume_toast_effects(
-        &mut self,
-        effects: Vec<crate::toast::Effect>,
-    ) -> Task<Message> {
+    fn consume_toast_effects(&mut self, effects: Vec<crate::toast::Effect>) -> Task<Message> {
         let mut tasks: Vec<Task<Message>> = Vec::new();
         for eff in effects {
             match eff {

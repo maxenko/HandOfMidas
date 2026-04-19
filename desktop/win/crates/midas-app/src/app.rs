@@ -1934,7 +1934,7 @@ impl MidasApp {
         // Seed market data on the ticker state before creating the bracket.
         let (mc_price, mc_gatr) = self
             .market_cache
-            .get(&new_upper)
+            .get(&new_key)
             .map(|s| (s.last_price, s.gatr_abs))
             .unwrap_or((None, None));
         {

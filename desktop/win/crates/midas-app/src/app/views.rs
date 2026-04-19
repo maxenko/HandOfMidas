@@ -1214,10 +1214,8 @@ impl MidasApp {
             .tickers
             .iter()
             .map(|ticker| {
-                let snap = self
-                    .market_cache
-                    .get(&ticker.symbol)
-                    .unwrap_or(&empty_snapshot);
+                let key = crate::annotation_store::SymbolKey::new(&ticker.symbol);
+                let snap = self.market_cache.get(&key).unwrap_or(&empty_snapshot);
                 let price_text = snap
                     .last_price
                     .map(|p| format!("{p:.2}"))
@@ -1655,7 +1653,7 @@ impl MidasApp {
         // Fetch last_price from the market cache (authoritative source).
         let last_price = self
             .market_cache
-            .get(&state.symbol)
+            .get(&crate::annotation_store::SymbolKey::new(&state.symbol))
             .and_then(|snap| snap.last_price);
 
         let oid = order_id;
@@ -3684,7 +3682,8 @@ fn gatr_render_from_cache(
     cache: &crate::market_cache::MarketDataCache,
     symbol: &str,
 ) -> Option<midas_chart::GerchikAtrRender> {
-    let snap = cache.get(symbol)?;
+    let key = crate::annotation_store::SymbolKey::new(symbol);
+    let snap = cache.get(&key)?;
     let pct = snap.gatr_pct?;
     let price_up = snap.change_pct.is_none_or(|c| c >= 0.0);
     let color = midas_core::gatr_color(price_up);
