@@ -185,11 +185,91 @@ impl AccountState {
     }
 }
 
+/// Derive a deterministic [`SymbolKey`] for a [`ContractSpec`].
+///
+/// The contract id is folded through a SplitMix64 mixer driven off the
+/// variant tag + every distinguishing field (symbol, exchange, currency,
+/// expiry, strike-bits, right, pair). This is stable across Rust toolchain
+/// versions — unlike [`std::collections::hash_map::DefaultHasher`], which
+/// std docs declare non-portable.
+///
+/// The output `i32` is non-negative so downstream consumers expecting a
+/// positive contract id aren't caught out by `i32::MIN.abs()` panics.
 pub fn symbol_key_for(contract: &ContractSpec) -> SymbolKey {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    contract.hash(&mut h);
-    let contract_id = (h.finish() as i32).abs();
+    use crate::orders::determinism::splitmix64;
+
+    // Fold bytes into a running `u64` via repeated SplitMix64 application.
+    // Equivalent to a tiny stream hash with a fixed avalanche function.
+    #[inline]
+    fn mix_bytes(mut acc: u64, bytes: &[u8]) -> u64 {
+        for &b in bytes {
+            acc = splitmix64(acc ^ b as u64);
+        }
+        // Length-terminate so "ab" and "a\0b" don't alias after concat.
+        splitmix64(acc ^ bytes.len() as u64)
+    }
+
+    #[inline]
+    fn mix_str(acc: u64, s: &str) -> u64 {
+        mix_bytes(acc, s.as_bytes())
+    }
+
+    // Start from a fixed nonzero constant so the empty-variant case still
+    // propagates bits through the mixer.
+    const DOMAIN_SEED: u64 = 0xA55A_A55A_5AA5_5AA5;
+    let mut acc = splitmix64(DOMAIN_SEED);
+
+    match contract {
+        ContractSpec::Stock {
+            symbol,
+            exchange,
+            currency,
+        } => {
+            acc = splitmix64(acc ^ 1);
+            acc = mix_str(acc, symbol);
+            acc = mix_str(acc, exchange);
+            acc = mix_str(acc, currency);
+        }
+        ContractSpec::Option {
+            symbol,
+            expiry,
+            strike,
+            right,
+            exchange,
+        } => {
+            acc = splitmix64(acc ^ 2);
+            acc = mix_str(acc, symbol);
+            acc = mix_str(acc, expiry);
+            // OrderedFloat round-trips through the underlying f64 bits; using
+            // to_bits sidesteps any NaN / -0.0 weirdness.
+            acc = splitmix64(acc ^ strike.into_inner().to_bits());
+            acc = splitmix64(
+                acc ^ match right {
+                    midas_broker_core::OptionRight::Call => 0xC,
+                    midas_broker_core::OptionRight::Put => 0xD,
+                },
+            );
+            acc = mix_str(acc, exchange);
+        }
+        ContractSpec::Future {
+            symbol,
+            expiry,
+            exchange,
+        } => {
+            acc = splitmix64(acc ^ 3);
+            acc = mix_str(acc, symbol);
+            acc = mix_str(acc, expiry);
+            acc = mix_str(acc, exchange);
+        }
+        ContractSpec::Forex { pair } => {
+            acc = splitmix64(acc ^ 4);
+            acc = mix_str(acc, pair);
+        }
+    }
+
+    // Take the low 31 bits as a positive i32 — gives us 2^31 distinct ids
+    // and avoids `i32::MIN.abs()` (which panics in debug).
+    let contract_id = (acc & 0x7FFF_FFFF) as i32;
     SymbolKey {
         contract_id,
         symbol: contract.symbol().to_string(),
@@ -282,5 +362,51 @@ mod tests {
             snap.last(),
             Some(OrderEmission::AcctDownloadEnd(_))
         ));
+    }
+
+    /// Pin `symbol_key_for` to a byte-exact `contract_id` so a fixture replay
+    /// across Rust toolchain versions keeps producing identical SymbolKeys.
+    /// Changing this value means every recorded scenario output must be
+    /// regenerated — treat it as a fixture-breaking change.
+    #[test]
+    fn symbol_key_for_is_stable_across_toolchain() {
+        let c = stock("AAPL");
+        let k = symbol_key_for(&c);
+        assert_eq!(
+            k.contract_id, 0x6DCB_34D9,
+            "symbol_key_for drift: fixture-breaking change. got 0x{:08x}",
+            k.contract_id
+        );
+        assert_eq!(k.symbol, "AAPL");
+    }
+
+    #[test]
+    fn symbol_key_contract_id_is_non_negative() {
+        // Cross-spot-check a handful of arbitrary contracts. Any negative
+        // id means the sign-masking regressed.
+        for sym in ["A", "AAPL", "GOOGL", "TSLA", "XYZ_WITH_LONG_SYMBOL_NAME"] {
+            let k = symbol_key_for(&stock(sym));
+            assert!(k.contract_id >= 0, "negative contract_id for {sym}");
+        }
+    }
+
+    #[test]
+    fn symbol_key_distinguishes_variants() {
+        // Variant tag must actually matter — Stock/Future/Option/Forex with
+        // the same "symbol" must map to different contract ids.
+        let s = symbol_key_for(&ContractSpec::Stock {
+            symbol: "X".into(),
+            exchange: "E".into(),
+            currency: "USD".into(),
+        });
+        let f = symbol_key_for(&ContractSpec::Future {
+            symbol: "X".into(),
+            expiry: "E".into(),
+            exchange: "E".into(),
+        });
+        let fx = symbol_key_for(&ContractSpec::Forex { pair: "X".into() });
+        assert_ne!(s.contract_id, f.contract_id);
+        assert_ne!(s.contract_id, fx.contract_id);
+        assert_ne!(f.contract_id, fx.contract_id);
     }
 }
