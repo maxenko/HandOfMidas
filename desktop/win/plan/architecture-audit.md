@@ -10,7 +10,7 @@
 | P1 | Split `MidasApp` god object | **slice 0 shipped** (Toast — commits `f4015da`, `9614b4b`); pattern-scaling review re-routed slice 1 — see [`midasapp-split.md`](midasapp-split.md) |
 | P1 | Delete `midas_core::broker` mirror | **shipped** (commit `7254f79`, 2026-04-18) |
 | P1 | Introduce view-models | open |
-| P2 | Collapse `Message::Chart*` into `Message::Chart(ChartId, ChartAction)` | **Phase A + Phase B batches 1–2 shipped** (commits `468fd30`, `e8f06c1`, `bf5a807`) — wrapper exists, 14 of 23 chart-action variants deleted (camera + level + placing + settings), bodies inlined in `dispatch_chart_action`. Batch 3 (9 bracket variants, fn-extraction approach) remains. |
+| P2 | Collapse `Message::Chart*` into `Message::Chart(ChartId, ChartAction)` | **shipped** (commits `468fd30`, `e8f06c1`, `bf5a807`, `9204054`) — wrapper introduced + all 23 chart-action variants deleted. Top-level `Message`: 134 → ~110 variants. `chart_widget::action_to_message` 132 LOC → 5. Bracket bodies live as `handle_chart_bracket_*` methods on `MidasApp` (kept fn-extracted because each is 50–150 LOC). |
 | P2 | Versioned config migrations | open |
 | P2 | `SymbolKey` to `midas-core` + normalize | open |
 | P3 | Rename one `midas-core` | open |

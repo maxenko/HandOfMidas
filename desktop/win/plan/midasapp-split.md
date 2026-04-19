@@ -10,7 +10,8 @@
 | 1A — `Message::Chart` wrapper introduced | **shipped** (commit `468fd30`); chart_widget decoupled from Message variants, 132-LOC fan-out → 1 line |
 | 1B batch 1 — Delete `ChartPan`/`ChartZoom`/`ChartZoomY` | **shipped** (commit `e8f06c1`); 3 variants gone, dev_harness migrated |
 | 1B batch 2 — Delete level/placing/setting variants (11) | **shipped** (commit `bf5a807`); `Crosshair`, `CreateLevel`, `DragLevel`, `SelectLevel`, `DeselectLevel`, `DeleteSelectedLevel`, `CancelPlacing`, `PlacingCursorMoved`, `SetTimelineBorderRatio`, `SetVolumeScale`, `RightClickLevel` |
-| 1B batch 3 — Delete bracket variants (9) | open. Bodies live in `handle_bracket_msg` (different handler file), 50–150 LOC each. Use fn-extraction (`handle_chart_bracket_X` methods) rather than inlining into `dispatch_chart_action` so the dispatcher stays readable. |
+| 1B batch 3 — Delete bracket variants (9) | **shipped** (commit `9204054`). Bodies extracted into `handle_chart_bracket_*` methods on `MidasApp`; `dispatch_chart_action` calls them directly. Dispatcher routing for brackets shrinks from 11 entries to 2 (only `BracketContextCancel`/`Dismiss` from the popup widget remain). |
+| **Slice 1 (audit P2 #4) — COMPLETE** | All 23 chart-action `Message::Chart*` variants deleted. Top-level `Message` enum: 134 → ~110 variants. |
 | 2+ — see "Post-slice-0 review verdict" below | open |
 
 Slice 0 ratio came in at **3.98×** (438 LOC new / 110 LOC removed) — just under the 4× kill threshold the plan set. Pattern works for trivial controllers (single-instance state, no shared deps); it is **not yet proven** for cross-cutting controllers like Watchlist.
