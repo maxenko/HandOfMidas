@@ -21,7 +21,7 @@
 use midas_chart::GerchikAtrRender;
 use midas_core::{LinkMode, Timeframe};
 
-use crate::level_store::StoredLevel;
+use crate::annotation_store::StoredLevel;
 use crate::link::LinkDimension;
 
 /// Overlay state for one chart pane. Each field maps to one of the

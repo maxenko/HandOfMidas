@@ -3,7 +3,6 @@
 //! This is the binary entry point. It creates an iced daemon (multi-window
 //! capable) and wires together all workspace crates.
 
-// TODO: Wire into MidasApp when LevelStore is replaced by AnnotationStore.
 mod account_panel;
 mod annotation_persistence;
 mod annotation_store;
@@ -14,7 +13,6 @@ mod chart_widget;
 #[cfg(feature = "dev_harness")]
 mod dev_harness;
 mod layout;
-mod level_store;
 mod link;
 mod market_cache;
 mod order_blotter;

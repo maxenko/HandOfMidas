@@ -503,10 +503,10 @@ impl MidasApp {
                 self.focus_chart(chart_id);
                 let ticker = self.chart_ticker(chart_id).map(str::to_owned);
                 if let Some(ticker) = ticker {
-                    let level_id = self.level_store.alloc_id();
-                    self.level_store.add_level(
+                    let level_id = self.annotation_store.alloc_level_id();
+                    self.annotation_store.add_level(
                         &ticker,
-                        crate::level_store::StoredLevel {
+                        crate::annotation_store::StoredLevel {
                             level: midas_chart::levels::HorizontalLevel {
                                 id: level_id,
                                 line: midas_chart::widget::price_line::PriceLine {
@@ -550,7 +550,7 @@ impl MidasApp {
             ChartAction::RightClickLevel { id, x, y } => {
                 self.focus_chart(chart_id);
                 let price_str = self
-                    .level_store
+                    .annotation_store
                     .find_level(id.0)
                     .map(|(_, l)| midas_chart::format_price(l.line.price));
                 if let Some(chart) = self.charts.get_mut(&chart_id) {
@@ -567,9 +567,10 @@ impl MidasApp {
             ChartAction::DragLevel { id, new_price } => {
                 let ticker = self.chart_ticker(chart_id).map(str::to_owned);
                 if let Some(ticker) = ticker {
-                    if let Some(level) = self.level_store.find_level_mut(&ticker, id.0) {
-                        level.line.price = new_price;
-                    }
+                    self.annotation_store
+                        .update_level(&ticker, id.0, |level, _locked| {
+                            level.line.price = new_price;
+                        });
                     self.mark_levels_dirty_for_ticker(&ticker);
                     self.mark_config_dirty();
                 }
@@ -595,13 +596,13 @@ impl MidasApp {
                 if let (Some(ticker), Some(chart)) = (ticker, self.charts.get_mut(&chart_id)) {
                     if let Some(sel_id) = chart.chart_state.selected_level {
                         let is_locked = self
-                            .level_store
+                            .annotation_store
                             .levels_for(&ticker)
                             .iter()
                             .any(|l| l.id == sel_id.0 && l.locked);
                         if !is_locked {
                             chart.chart_state.selected_level = None;
-                            self.level_store.remove_level(&ticker, sel_id.0);
+                            self.annotation_store.remove_level(&ticker, sel_id.0);
                             self.mark_levels_dirty_for_ticker(&ticker);
                             self.mark_config_dirty();
                         }
@@ -779,7 +780,7 @@ impl MidasApp {
             Message::ChartClearAllLevels(chart_id) => {
                 let ticker = self.chart_ticker(chart_id).map(str::to_owned);
                 if let Some(ticker) = ticker {
-                    self.level_store.clear_levels(&ticker);
+                    self.annotation_store.clear_levels(&ticker);
                     self.mark_levels_dirty_for_ticker(&ticker);
                     // Clear selection and editor on all charts for this ticker.
                     for chart in self.charts.values_mut() {
@@ -806,12 +807,12 @@ impl MidasApp {
                 let ticker = self.chart_ticker(chart_id).map(str::to_owned);
                 if let Some(ticker) = ticker {
                     let is_locked = self
-                        .level_store
+                        .annotation_store
                         .levels_for(&ticker)
                         .iter()
                         .any(|l| l.id == level_id && l.locked);
                     if !is_locked {
-                        self.level_store.remove_level(&ticker, level_id);
+                        self.annotation_store.remove_level(&ticker, level_id);
                         self.mark_levels_dirty_for_ticker(&ticker);
                         if let Some(chart) = self.charts.get_mut(&chart_id) {
                             chart.editing_level_id = None;
@@ -830,9 +831,10 @@ impl MidasApp {
                 let ticker = self.chart_ticker(chart_id).map(str::to_owned);
                 if let Some(ticker) = ticker {
                     if let Ok(price) = text.parse::<f64>() {
-                        if let Some(level) = self.level_store.find_level_mut(&ticker, level_id) {
-                            level.line.price = price;
-                        }
+                        self.annotation_store
+                            .update_level(&ticker, level_id, |level, _| {
+                                level.line.price = price;
+                            });
                         self.mark_levels_dirty_for_ticker(&ticker);
                         self.mark_config_dirty();
                     }
@@ -843,9 +845,14 @@ impl MidasApp {
             Message::LevelEditorPriceStep(chart_id, level_id, delta) => {
                 let ticker = self.chart_ticker(chart_id).map(str::to_owned);
                 if let Some(ticker) = ticker {
-                    if let Some(level) = self.level_store.find_level_mut(&ticker, level_id) {
-                        level.line.price += delta;
-                        let price_str = midas_chart::format_price(level.line.price);
+                    let mut new_price: Option<f64> = None;
+                    self.annotation_store
+                        .update_level(&ticker, level_id, |level, _| {
+                            level.line.price += delta;
+                            new_price = Some(level.line.price);
+                        });
+                    if let Some(price) = new_price {
+                        let price_str = midas_chart::format_price(price);
                         if let Some(chart) = self.charts.get_mut(&chart_id) {
                             chart.level_editor_price_input = price_str;
                         }
@@ -859,13 +866,14 @@ impl MidasApp {
             Message::LevelEditorLabelChanged(chart_id, level_id, label_text) => {
                 let ticker = self.chart_ticker(chart_id).map(str::to_owned);
                 if let Some(ticker) = ticker {
-                    if let Some(level) = self.level_store.find_level_mut(&ticker, level_id) {
-                        level.label = if label_text.is_empty() {
-                            None
-                        } else {
-                            Some(label_text)
-                        };
-                    }
+                    self.annotation_store
+                        .update_level(&ticker, level_id, |level, _| {
+                            level.label = if label_text.is_empty() {
+                                None
+                            } else {
+                                Some(label_text.clone())
+                            };
+                        });
                     self.mark_levels_dirty_for_ticker(&ticker);
                     self.mark_config_dirty();
                 }
@@ -875,9 +883,10 @@ impl MidasApp {
             Message::LevelEditorColorChanged(chart_id, level_id, color) => {
                 let ticker = self.chart_ticker(chart_id).map(str::to_owned);
                 if let Some(ticker) = ticker {
-                    if let Some(level) = self.level_store.find_level_mut(&ticker, level_id) {
-                        level.line.stroke.color = color;
-                    }
+                    self.annotation_store
+                        .update_level(&ticker, level_id, |level, _| {
+                            level.line.stroke.color = color;
+                        });
                     self.mark_levels_dirty_for_ticker(&ticker);
                     self.mark_config_dirty();
                 }
@@ -887,9 +896,10 @@ impl MidasApp {
             Message::LevelEditorThicknessChanged(chart_id, level_id, thickness) => {
                 let ticker = self.chart_ticker(chart_id).map(str::to_owned);
                 if let Some(ticker) = ticker {
-                    if let Some(level) = self.level_store.find_level_mut(&ticker, level_id) {
-                        level.line.stroke.width = thickness;
-                    }
+                    self.annotation_store
+                        .update_level(&ticker, level_id, |level, _| {
+                            level.line.stroke.width = thickness;
+                        });
                     self.mark_levels_dirty_for_ticker(&ticker);
                     self.mark_config_dirty();
                 }
@@ -899,9 +909,10 @@ impl MidasApp {
             Message::LevelEditorIconChanged(chart_id, level_id, icon) => {
                 let ticker = self.chart_ticker(chart_id).map(str::to_owned);
                 if let Some(ticker) = ticker {
-                    if let Some(level) = self.level_store.find_level_mut(&ticker, level_id) {
-                        level.icon = icon;
-                    }
+                    self.annotation_store
+                        .update_level(&ticker, level_id, |level, _| {
+                            level.icon = icon;
+                        });
                     self.mark_levels_dirty_for_ticker(&ticker);
                     self.mark_config_dirty();
                 }
@@ -911,9 +922,10 @@ impl MidasApp {
             Message::LevelEditorToggleLock(chart_id, level_id) => {
                 let ticker = self.chart_ticker(chart_id).map(str::to_owned);
                 if let Some(ticker) = ticker {
-                    if let Some(level) = self.level_store.find_level_mut(&ticker, level_id) {
-                        level.locked = !level.locked;
-                    }
+                    self.annotation_store
+                        .update_level(&ticker, level_id, |_, locked| {
+                            *locked = !*locked;
+                        });
                     self.mark_levels_dirty_for_ticker(&ticker);
                     self.mark_config_dirty();
                 }

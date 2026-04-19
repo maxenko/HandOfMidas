@@ -13,7 +13,8 @@
 //! This format is hand-parsed rather than auto-derived because
 //! [`TickerMsg`]'s transitive type graph includes some types that
 //! do not yet implement `Deserialize` (notably `StoredLevel` and
-//! `TickerState`'s hydrate path). Variants that depend on those are
+//! `TickerState`'s hydrate path). `StoredLevel` lives in
+//! `annotation_store` since audit P2b. Variants that depend on those are
 //! rejected with [`InjectError::NotSupported`] — callers should use
 //! click/drag simulation or fixtures for those cases.
 

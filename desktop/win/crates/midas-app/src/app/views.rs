@@ -2869,7 +2869,7 @@ fn build_drawing_panel<'a>(chart_id: ChartId, is_placing: bool) -> Element<'a, M
 /// thickness buttons, icon selector, lock toggle, and delete button.
 fn build_level_editor<'a>(
     chart_id: ChartId,
-    level: &crate::level_store::StoredLevel,
+    level: &crate::annotation_store::StoredLevel,
     screen_pos: (f32, f32),
     price_input: &str,
     viewport_width: u32,
