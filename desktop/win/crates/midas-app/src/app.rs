@@ -1004,6 +1004,34 @@ impl MidasApp {
         ))
     }
 
+    /// Project the watchlist body inputs (rows incl. thumbnails,
+    /// sort, selection bridge, overlays) into a VM. Returns `None`
+    /// if `wl_id` does not resolve to an open watchlist.
+    pub fn watchlist_body_vm(
+        &self,
+        wl_id: midas_core::WatchlistId,
+    ) -> Option<crate::view_models::watchlist::WatchlistBodyVm> {
+        use crate::view_models::watchlist::WatchlistBodyVm;
+        let wl = self.watchlists.get(&wl_id)?;
+        let show_resize_overlay = self
+            .resizing_column
+            .map(|(id, _, _, _)| id == wl_id)
+            .unwrap_or(false);
+        let link_picker_dim = match self.link_picker_open {
+            Some((PickerTarget::Watchlist(picker_wl_id), dim)) if picker_wl_id == wl_id => {
+                Some(dim)
+            }
+            _ => None,
+        };
+        Some(WatchlistBodyVm::build(
+            wl,
+            &self.market_cache,
+            |symbol| self.build_thumbnail_snapshot(symbol),
+            show_resize_overlay,
+            link_picker_dim,
+        ))
+    }
+
     /// Create a new application, restoring state from config if available.
     ///
     /// Returns the app state and a `Task` that opens the main OS window

@@ -24,3 +24,4 @@
 //! follow-up slices migrate them one at a time.
 
 pub mod account_panel;
+pub mod watchlist;

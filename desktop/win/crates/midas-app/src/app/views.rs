@@ -1201,115 +1201,18 @@ impl MidasApp {
 
     /// Build the body of a watchlist panel.
     fn view_watchlist_body(&self, wl_id: WatchlistId) -> Element<'_, Message> {
-        let wl = match self.watchlists.get(&wl_id) {
-            Some(wl) => wl,
-            None => {
-                return container(text("Watchlist not found").size(14))
-                    .center_x(Fill)
-                    .center_y(Fill)
-                    .into();
-            }
-        };
-
-        // Build WatchlistRow structs from tickers + cached market data.
-        let empty_snapshot = midas_core::MarketSnapshot::default();
-        let mut grid_rows: Vec<crate::watchlist_columns::WatchlistRow> = wl
-            .tickers
-            .iter()
-            .map(|ticker| {
-                let snap = self
-                    .market_cache
-                    .get(&ticker.symbol)
-                    .unwrap_or(&empty_snapshot);
-                let price_text = snap
-                    .last_price
-                    .map(|p| format!("{p:.2}"))
-                    .unwrap_or_else(|| "--".into());
-                let change_text = snap
-                    .change_pct
-                    .map(|c| format!("{c:+.2}%"))
-                    .unwrap_or_else(|| "--".into());
-                let change_color = match snap.change_pct {
-                    Some(c) if c > 0.0 => Color::from_rgb(0.2, 0.8, 0.3),
-                    Some(c) if c < 0.0 => Color::from_rgb(0.9, 0.25, 0.2),
-                    _ => Color::from_rgb(0.6, 0.6, 0.6),
-                };
-                let gatr_text = snap
-                    .gatr_pct
-                    .map(|pct| format!("G.ATR {:.0}%", pct))
-                    .unwrap_or_else(|| "--".into());
-                let gatr_color = snap
-                    .gatr_pct
-                    .map(|_| {
-                        let price_up = snap.change_pct.is_none_or(|c| c >= 0.0);
-                        let c = midas_core::gatr_color(price_up);
-                        Color::from_rgba(c[0], c[1], c[2], c[3])
-                    })
-                    .unwrap_or(Color::from_rgb(0.6, 0.6, 0.6));
-                let thumbnail = self.build_thumbnail_snapshot(&ticker.symbol);
-                crate::watchlist_columns::WatchlistRow {
-                    symbol: ticker.symbol.clone(),
-                    favorite: ticker.favorite,
-                    price_text,
-                    change_text,
-                    change_color,
-                    gatr_text,
-                    gatr_color,
-                    wl_id,
-                    price_value: snap.last_price,
-                    change_value: snap.change_pct,
-                    thumbnail,
-                }
-            })
-            .collect();
-
-        // Sort: favorites first, then by grid sort spec.
-        grid_rows.sort_by(|a, b| {
-            let fav = b.favorite.cmp(&a.favorite);
-            if fav != std::cmp::Ordering::Equal {
-                return fav;
-            }
-            if let Some(sort) = &wl.grid_state.sort {
-                let columns = crate::watchlist_columns::WatchlistColumn::all();
-                if let Some(col) = columns.iter().find(|c| {
-                    use midas_grid::GridColumn;
-                    c.id() == sort.column_id
-                }) {
-                    use midas_grid::GridColumn;
-                    let ord = col.compare(a, b);
-                    return match sort.direction {
-                        midas_grid::SortDirection::Ascending => ord,
-                        midas_grid::SortDirection::Descending => ord.reverse(),
-                    };
-                }
-            }
-            std::cmp::Ordering::Equal
-        });
-
-        // Update selection to match selected_symbol (bridge index-based selection).
-        // Find the index of the selected symbol in the sorted rows.
-        let selected_idx = wl
-            .selected_symbol
-            .as_ref()
-            .and_then(|sym| grid_rows.iter().position(|r| r.symbol == *sym));
-
-        // Build a temporary GridState copy with the correct selection index.
-        let mut view_state = wl.grid_state.clone();
-        if let Some(idx) = selected_idx {
-            view_state.selection.select(idx);
-        } else {
-            view_state.selection.clear();
-        }
-
-        // Build grid header + body via `midas-grid` helpers.
-        // (The Grid builder can't be used here because columns/rows are local
-        // variables whose borrows can't escape the function. The Grid API works
-        // when data lives on &self — see Phase 2.)
         use crate::watchlist::{
             COL_CHANGE, COL_CHART, COL_DELETE, COL_FAV, COL_GATR, COL_PRICE, COL_TICKER,
         };
         use midas_grid::{
             grid_body_cell, grid_body_row, grid_header_cell, HeaderStyle, ResizeHandle,
+        };
+
+        let Some(vm) = self.watchlist_body_vm(wl_id) else {
+            return container(text("Watchlist not found").size(14))
+                .center_x(Fill)
+                .center_y(Fill)
+                .into();
         };
 
         // Column definitions: (id, header_label, sortable).
@@ -1339,11 +1242,10 @@ impl MidasApp {
         // Header row.
         let mut header_cells: Vec<Element<'_, Message>> = Vec::with_capacity(col_defs.len());
         for (i, &(col_id, label, sortable)) in col_defs.iter().enumerate() {
-            let width = view_state.column_width(col_id);
-            let sort_indicator = view_state
-                .sort
-                .filter(|s| s.column_id == col_id)
-                .map(|s| s.direction.indicator())
+            let sort_indicator = vm
+                .sort_indicator
+                .filter(|(id, _)| *id == col_id)
+                .map(|(_, ind)| ind)
                 .unwrap_or("");
             let sort_msg = sortable.then(|| {
                 Message::WatchlistGrid(wl_id, midas_grid::GridMessage::SortToggled(col_id))
@@ -1357,7 +1259,7 @@ impl MidasApp {
             });
             header_cells.push(grid_header_cell(
                 label,
-                width,
+                vm.width(col_id),
                 sort_indicator,
                 sort_msg,
                 resize,
@@ -1368,15 +1270,15 @@ impl MidasApp {
 
         // Body rows.
         let mut body_rows = Column::new();
-        if grid_rows.is_empty() {
+        if vm.rows.is_empty() {
             body_rows = body_rows.push(
                 container(text("Add tickers to get started").size(13))
                     .padding(20)
                     .center_x(Fill),
             );
         } else {
-            for (row_idx, row_data) in grid_rows.iter().enumerate() {
-                let is_selected = view_state.selection.is_selected(row_idx);
+            for (row_idx, row_data) in vm.rows.iter().enumerate() {
+                let is_selected = vm.selected_row_idx == Some(row_idx);
 
                 // Build cells matching column order.
                 let sym = row_data.symbol.clone();
@@ -1414,8 +1316,6 @@ impl MidasApp {
                 )
                 .on_press(Message::WatchlistTickerPressed(wl_id, sym_drag));
 
-                let w = |col_id| view_state.column_width(col_id);
-
                 // Body cells match the order-blotter layout: text size
                 // 12, `[4, 8]` padding, and clip(true) so values never
                 // bleed into the next column.
@@ -1435,7 +1335,7 @@ impl MidasApp {
                 // star (also centred) lines up with body stars. Width
                 // is clipped for symmetry with the other cells.
                 let fav_cell: Element<'_, Message> = container(fav_btn)
-                    .width(w(COL_FAV))
+                    .width(vm.width(COL_FAV))
                     .height(Fill)
                     .align_x(iced::alignment::Horizontal::Center)
                     .align_y(iced::alignment::Vertical::Center)
@@ -1449,20 +1349,24 @@ impl MidasApp {
 
                 let cells: Vec<Element<'_, Message>> = vec![
                     fav_cell,
-                    grid_body_cell(ticker_cell.into(), w(COL_TICKER)),
+                    grid_body_cell(ticker_cell.into(), vm.width(COL_TICKER)),
                     text_cell(
                         row_data.price_text.clone(),
-                        w(COL_PRICE),
+                        vm.width(COL_PRICE),
                         theme::TEXT_PRIMARY,
                     ),
                     text_cell(
                         row_data.change_text.clone(),
-                        w(COL_CHANGE),
+                        vm.width(COL_CHANGE),
                         row_data.change_color,
                     ),
-                    text_cell(row_data.gatr_text.clone(), w(COL_GATR), row_data.gatr_color),
-                    grid_body_cell(thumbnail_cell_widget, w(COL_CHART)),
-                    grid_body_cell(del_btn.into(), w(COL_DELETE)),
+                    text_cell(
+                        row_data.gatr_text.clone(),
+                        vm.width(COL_GATR),
+                        row_data.gatr_color,
+                    ),
+                    grid_body_cell(thumbnail_cell_widget, vm.width(COL_CHART)),
+                    grid_body_cell(del_btn.into(), vm.width(COL_DELETE)),
                 ];
 
                 // Emit WatchlistTickerSelected directly with the symbol.
@@ -1478,7 +1382,7 @@ impl MidasApp {
         }
 
         // Add ticker input row.
-        let add_input = text_input("Add ticker...", &wl.add_ticker_input)
+        let add_input = text_input("Add ticker...", &vm.add_ticker_input)
             .on_input(move |val| Message::WatchlistTickerInputChanged(wl_id, val))
             .on_submit(Message::WatchlistAddTicker(wl_id))
             .size(13)
@@ -1509,24 +1413,14 @@ impl MidasApp {
         .into();
 
         // Wrap in stack only when overlays are needed (resize or link picker).
-        let needs_resize_overlay = self
-            .resizing_column
-            .map(|(id, _, _, _)| id == wl_id)
-            .unwrap_or(false);
-
-        let needs_link_picker = matches!(
-            self.link_picker_open,
-            Some((PickerTarget::Watchlist(id), _)) if id == wl_id
-        );
-
-        if !needs_resize_overlay && !needs_link_picker {
+        if !vm.show_resize_overlay && vm.link_picker_dim.is_none() {
             return main_content;
         }
 
         let mut body_layers: Vec<Element<'_, Message>> = vec![main_content];
 
         // Global resize overlay (when actively dragging a column divider).
-        if needs_resize_overlay {
+        if vm.show_resize_overlay {
             body_layers.push(
                 iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
                     .interaction(iced::mouse::Interaction::ResizingHorizontally)
@@ -1539,29 +1433,26 @@ impl MidasApp {
         let body = stack(body_layers).width(Fill).height(Fill);
 
         // Link picker overlay.
-        if let Some((PickerTarget::Watchlist(picker_wl_id), dim)) = self.link_picker_open {
-            if picker_wl_id == wl_id {
-                let backdrop = iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
-                    .on_press(Message::DismissLinkPicker);
+        if let Some(dim) = vm.link_picker_dim {
+            let backdrop = iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
+                .on_press(Message::DismissLinkPicker);
 
-                let picker = self.build_link_picker(dim, move |mode| {
-                    Message::WatchlistSetSymbolLink(wl_id, mode)
-                });
+            let picker = self
+                .build_link_picker(dim, move |mode| Message::WatchlistSetSymbolLink(wl_id, mode));
 
-                return stack![
-                    body,
-                    backdrop,
-                    container(picker)
-                        .align_x(iced::alignment::Horizontal::Right)
-                        .align_y(iced::alignment::Vertical::Top)
-                        .padding([4, 4])
-                        .width(Fill)
-                        .height(Fill)
-                ]
-                .width(Fill)
-                .height(Fill)
-                .into();
-            }
+            return stack![
+                body,
+                backdrop,
+                container(picker)
+                    .align_x(iced::alignment::Horizontal::Right)
+                    .align_y(iced::alignment::Vertical::Top)
+                    .padding([4, 4])
+                    .width(Fill)
+                    .height(Fill)
+            ]
+            .width(Fill)
+            .height(Fill)
+            .into();
         }
 
         body.into()
