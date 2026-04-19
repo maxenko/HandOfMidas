@@ -250,10 +250,17 @@ impl MidasApp {
             return Task::none();
         };
         let key = SymbolKey::new(&sym);
-        if self.snapped_this_session.contains(&key) {
+        if self
+            .tickers
+            .get(&key)
+            .is_some_and(|ts| ts.is_snapped_this_session())
+        {
             return Task::none();
         }
-        self.snapped_this_session.insert(key.clone());
+        let _ = self.update(Message::Ticker(
+            key.clone(),
+            crate::ticker_state::TickerMsg::MarkSnappedThisSession,
+        ));
         let snap = self.market_cache.get(key.as_str());
         let current_price = snap.as_ref().and_then(|s| s.last_price);
         let gatr_abs = snap.as_ref().and_then(|s| s.gatr_abs);

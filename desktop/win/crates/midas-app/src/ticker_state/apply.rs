@@ -193,7 +193,22 @@ pub enum TickerMsg {
         was_at_live_edge: bool,
     },
 
-    // ── Persistence ���─────────────────────────────────────────────
+    // ── Session flags (audit P3b — session only, never persisted) ─
+    /// Record that the GATR snap rule has been evaluated for this
+    /// symbol in the current session. Idempotent — replaying produces
+    /// no further effects.
+    MarkSnappedThisSession,
+    /// Record that the one-shot "bracket location recorded"
+    /// discoverability toast has been shown for this symbol in the
+    /// current session. Idempotent.
+    MarkAnchorSeedToastShown,
+    /// Store a pre-snap undo slot. Replaces any prior slot for this
+    /// symbol; session-only.
+    StoreGatrUndo(Box<PreSnapState>),
+    /// Clear the pre-snap undo slot. Safe to call when empty.
+    ClearGatrUndo,
+
+    // ── Persistence ───────────────────────────────────────────────
     /// A persisted state was loaded from disk. Replaces the current
     /// in-memory state wholesale.
     Hydrated(Box<TickerState>),
@@ -353,6 +368,24 @@ impl TickerState {
                 price_high,
                 was_at_live_edge,
             ),
+
+            // ── Session flags (audit P3b) ────────────────────────
+            TickerMsg::MarkSnappedThisSession => {
+                self.session.snapped = true;
+                vec![]
+            }
+            TickerMsg::MarkAnchorSeedToastShown => {
+                self.session.anchor_seed_toast_shown = true;
+                vec![]
+            }
+            TickerMsg::StoreGatrUndo(snap) => {
+                self.session.gatr_undo = Some(*snap);
+                vec![]
+            }
+            TickerMsg::ClearGatrUndo => {
+                self.session.gatr_undo = None;
+                vec![]
+            }
 
             // ── Persistence (one-liner, left inline) ─────────────
             TickerMsg::Hydrated(_) => vec![],

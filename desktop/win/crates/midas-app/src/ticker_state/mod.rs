@@ -277,6 +277,13 @@ pub struct TickerState {
     #[serde(skip)]
     pre_snap: Option<(Box<PreSnapState>, std::time::Instant)>,
 
+    // ── Session-only flags (audit P3b) ─────────────────────────
+    /// Session-scoped per-symbol flags that must not be persisted:
+    /// GATR snap-once guard, one-shot anchor-seed toast guard, and
+    /// the pre-snap undo slot. See [`TickerSessionFlags`].
+    #[serde(skip)]
+    session: TickerSessionFlags,
+
     // ── Camera (per-ticker viewport restore) ────────────────────
     /// Saved camera time range start (epoch ms). `None` for fresh
     /// tickers that have never been viewed.
@@ -412,6 +419,34 @@ impl TickerState {
         self.version
     }
 
+    /// Whether the GATR snap rule has already been evaluated for this
+    /// symbol in the current session.
+    ///
+    /// Session-scoped; resets on app restart.
+    pub fn is_snapped_this_session(&self) -> bool {
+        self.session.snapped
+    }
+
+    /// Whether the one-shot "bracket location recorded" toast has
+    /// already been shown for this symbol in the current session.
+    ///
+    /// Session-scoped; resets on app restart.
+    #[allow(dead_code)] // consumed by the future snap toast dedup path
+    pub fn anchor_seed_toast_shown(&self) -> bool {
+        self.session.anchor_seed_toast_shown
+    }
+
+    /// Read-only view of the pre-snap undo slot for this symbol.
+    ///
+    /// Session-scoped; resets on app restart. Distinct from the
+    /// [`PreSnapState`] stored in `pre_snap` (which is the slot
+    /// consumed by [`TickerMsg::UndoSnap`]) — this slot is the
+    /// longer-lived copy previously kept in `MidasApp::gatr_undo_slots`.
+    #[allow(dead_code)] // consumed by the future undo-snap UI path
+    pub fn gatr_undo(&self) -> Option<&PreSnapState> {
+        self.session.gatr_undo.as_ref()
+    }
+
     /// Return the saved camera state, if all four f64 fields are present.
     ///
     /// Returns `None` for a fresh ticker that has never been viewed
@@ -540,6 +575,36 @@ pub struct PreSnapState {
     pub gatr_anchor: GatrAnchor,
 }
 
+// ── TickerSessionFlags ──────────────────────────────────────────────
+
+/// Per-ticker, **session-only** flags.
+///
+/// Mirrors three fields that previously lived on `MidasApp` as
+/// per-symbol side-cars — the GATR snap-once guard, the one-shot
+/// anchor-seed toast guard, and the pre-snap undo slot. Folding them
+/// into `TickerState` keeps per-ticker state in one place while still
+/// respecting the "never persisted" contract: the parent field is
+/// `#[serde(skip)]` on [`TickerState`] so nothing here ever hits disk.
+///
+/// A crash-and-relaunch resets every field — this is deliberate.
+#[derive(Debug, Clone, Default)]
+pub struct TickerSessionFlags {
+    /// `true` once the GATR snap rule has been evaluated for this
+    /// symbol in the current session. Prevents a second snap from
+    /// firing when the user tab-cycles back to a ticker they've
+    /// already looked at.
+    pub snapped: bool,
+    /// `true` once the one-shot "bracket location recorded"
+    /// discoverability toast has been emitted for this symbol in the
+    /// current session. Prevents re-firing on subsequent panel edits.
+    pub anchor_seed_toast_shown: bool,
+    /// Pre-snap undo slot, populated when the GATR snap rule fires
+    /// and drained when the user clicks "Undo". 30-second TTL
+    /// enforced at drain time. Keyed implicitly by this symbol, so a
+    /// second snap replaces the prior slot instead of stacking.
+    pub gatr_undo: Option<PreSnapState>,
+}
+
 // ── v1 → v2 migration ──────────────────────────────────────────────
 
 /// v1 on-disk shape (formerly `TickerOrderIntent`). Used only for
@@ -618,6 +683,7 @@ pub fn migrate_v1_v2(intent: &TickerOrderIntentV1) -> TickerState {
         editing_field: None,
         editing_value: None,
         pre_snap: None,
+        session: TickerSessionFlags::default(),
         camera_time_start: None,
         camera_time_end: None,
         camera_price_low: None,
