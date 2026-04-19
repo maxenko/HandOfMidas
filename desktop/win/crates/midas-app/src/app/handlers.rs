@@ -1756,138 +1756,6 @@ impl MidasApp {
                 self.flush_config()
             }
 
-            Message::AccountOrdersColumnResizeStart(account_id, col_idx) => {
-                let ids = crate::order_blotter::columns::OrderBlotterColumn::ids();
-                if col_idx >= ids.len() {
-                    return Task::none();
-                }
-                let width = self
-                    .account_panels
-                    .get(&account_id)
-                    .map(|p| p.orders.grid_state.column_width(ids[col_idx]))
-                    .unwrap_or(80.0);
-                // start_x is NaN until the first cursor-move lands.
-                self.resizing_account_column = Some((account_id, col_idx, f32::NAN, width));
-                Task::none()
-            }
-
-            Message::AccountOrdersColumnResizing(cursor_x) => {
-                let Some((account_id, col, ref mut start_x, start_w)) =
-                    self.resizing_account_column
-                else {
-                    return Task::none();
-                };
-                if start_x.is_nan() {
-                    self.resizing_account_column = Some((account_id, col, cursor_x, start_w));
-                    return Task::none();
-                }
-                let dx = cursor_x - *start_x;
-                let new_w = (start_w + dx).max(24.0);
-                let ids = crate::order_blotter::columns::OrderBlotterColumn::ids();
-                if col < ids.len() {
-                    if let Some(p) = self.account_panels.get_mut(&account_id) {
-                        p.orders
-                            .grid_state
-                            .set_column_width(ids[col], new_w, 24.0, None);
-                    }
-                }
-                Task::none()
-            }
-
-            Message::AccountOrdersColumnResizeEnd => {
-                self.resizing_account_column = None;
-                self.flush_config()
-            }
-
-            Message::AccountHistoryColumnResizeStart(account_id, col_idx) => {
-                let ids = crate::account_panel::history_columns::HistoryColumn::ids();
-                if col_idx >= ids.len() {
-                    return Task::none();
-                }
-                let width = self
-                    .account_panels
-                    .get(&account_id)
-                    .map(|p| p.history.grid_state.column_width(ids[col_idx]))
-                    .unwrap_or(80.0);
-                self.resizing_account_history_column = Some((account_id, col_idx, f32::NAN, width));
-                Task::none()
-            }
-
-            Message::AccountHistoryColumnResizing(cursor_x) => {
-                let Some((account_id, col, ref mut start_x, start_w)) =
-                    self.resizing_account_history_column
-                else {
-                    return Task::none();
-                };
-                if start_x.is_nan() {
-                    self.resizing_account_history_column =
-                        Some((account_id, col, cursor_x, start_w));
-                    return Task::none();
-                }
-                let dx = cursor_x - *start_x;
-                let new_w = (start_w + dx).max(24.0);
-                let ids = crate::account_panel::history_columns::HistoryColumn::ids();
-                if col < ids.len() {
-                    if let Some(p) = self.account_panels.get_mut(&account_id) {
-                        p.history
-                            .grid_state
-                            .set_column_width(ids[col], new_w, 24.0, None);
-                    }
-                }
-                Task::none()
-            }
-
-            Message::AccountHistoryColumnResizeEnd => {
-                // Widths are runtime-only in v1 (not persisted); nothing
-                // to flush. Parity with the Orders-tab shape keeps the
-                // drag state lifecycle identical.
-                self.resizing_account_history_column = None;
-                Task::none()
-            }
-
-            Message::AccountRecentsColumnResizeStart(account_id, col_idx) => {
-                let ids = crate::account_panel::recents_tab::column_ids();
-                if col_idx >= ids.len() {
-                    return Task::none();
-                }
-                let width = self
-                    .account_panels
-                    .get(&account_id)
-                    .map(|p| p.recents.grid_state.column_width(ids[col_idx]))
-                    .unwrap_or(80.0);
-                self.resizing_account_recents_column = Some((account_id, col_idx, f32::NAN, width));
-                Task::none()
-            }
-
-            Message::AccountRecentsColumnResizing(cursor_x) => {
-                let Some((account_id, col, ref mut start_x, start_w)) =
-                    self.resizing_account_recents_column
-                else {
-                    return Task::none();
-                };
-                if start_x.is_nan() {
-                    self.resizing_account_recents_column =
-                        Some((account_id, col, cursor_x, start_w));
-                    return Task::none();
-                }
-                let dx = cursor_x - *start_x;
-                let new_w = (start_w + dx).max(24.0);
-                let ids = crate::account_panel::recents_tab::column_ids();
-                if col < ids.len() {
-                    if let Some(p) = self.account_panels.get_mut(&account_id) {
-                        p.recents
-                            .grid_state
-                            .set_column_width(ids[col], new_w, 24.0, None);
-                    }
-                }
-                Task::none()
-            }
-
-            Message::AccountRecentsColumnResizeEnd => {
-                self.resizing_account_recents_column = None;
-                Task::none()
-            }
-
             Message::AccountOrdersOpenColumnSelector(account_id) => {
                 // Close any other popups first.
                 self.link_picker_open = None;
@@ -2336,43 +2204,6 @@ impl MidasApp {
                 self.flush_config()
             }
 
-            Message::WatchlistColumnResizeStart(wl_id, col, _) => {
-                let ids = crate::watchlist::WATCHLIST_COLUMN_ORDER;
-                if col >= ids.len() {
-                    return Task::none();
-                }
-                let width = self
-                    .watchlists
-                    .get(&wl_id)
-                    .map(|wl| wl.grid_state.column_width(ids[col]))
-                    .unwrap_or(70.0);
-                // start_x is NaN until the first on_move event provides cursor position.
-                self.resizing_column = Some((wl_id, col, f32::NAN, width));
-                Task::none()
-            }
-
-            Message::WatchlistColumnResizing(current_x) => {
-                if let Some((wl_id, col, ref mut start_x, orig_w)) = self.resizing_column {
-                    if start_x.is_nan() {
-                        *start_x = current_x;
-                    }
-                    let delta = current_x - *start_x;
-                    let new_w = (orig_w + delta).max(20.0);
-                    let ids = crate::watchlist::WATCHLIST_COLUMN_ORDER;
-                    if col < ids.len() {
-                        if let Some(wl) = self.watchlists.get_mut(&wl_id) {
-                            wl.grid_state.set_column_width(ids[col], new_w, 20.0, None);
-                        }
-                    }
-                }
-                Task::none()
-            }
-
-            Message::WatchlistColumnResizeEnd => {
-                self.resizing_column = None;
-                self.flush_config()
-            }
-
             Message::WatchlistGrid(wl_id, grid_msg) => {
                 if let Some(wl) = self.watchlists.get_mut(&wl_id) {
                     match grid_msg {
@@ -2399,6 +2230,179 @@ impl MidasApp {
             }
 
             _ => unreachable!(),
+        }
+    }
+}
+
+// ── Column Resize (unified across all grid surfaces) ─────────────────
+
+impl MidasApp {
+    /// Handle the unified column-resize lifecycle for every grid surface
+    /// (Watchlist / Account Orders / Account History / Account Recents).
+    ///
+    /// The `Begin` arm records the starting width for the target column
+    /// with a `NaN` start_x sentinel; the first `Move` back-fills start_x
+    /// and every subsequent `Move` mutates the target grid-state's
+    /// column width. `End` clears the drag and — for persisted targets
+    /// (Watchlist + Account Orders) — flushes the config.
+    pub(crate) fn handle_column_resize(
+        &mut self,
+        ev: crate::column_resize::ColumnResizeEvent,
+    ) -> Task<Message> {
+        use crate::column_resize::{ColumnResizeEvent, ColumnResizeState, ColumnResizeTarget};
+
+        fn column_count(target: ColumnResizeTarget) -> usize {
+            match target {
+                ColumnResizeTarget::Watchlist(_) => crate::watchlist::WATCHLIST_COLUMN_ORDER.len(),
+                ColumnResizeTarget::AccountOrders(_) => {
+                    crate::order_blotter::columns::OrderBlotterColumn::ids().len()
+                }
+                ColumnResizeTarget::AccountHistory(_) => {
+                    crate::account_panel::history_columns::HistoryColumn::ids().len()
+                }
+                ColumnResizeTarget::AccountRecents(_) => {
+                    crate::account_panel::recents_tab::column_ids().len()
+                }
+            }
+        }
+
+        fn lookup_width(app: &MidasApp, target: ColumnResizeTarget, col_idx: usize) -> f32 {
+            match target {
+                ColumnResizeTarget::Watchlist(wl_id) => {
+                    let ids = crate::watchlist::WATCHLIST_COLUMN_ORDER;
+                    app.watchlists
+                        .get(&wl_id)
+                        .map(|wl| wl.grid_state.column_width(ids[col_idx]))
+                        .unwrap_or(70.0)
+                }
+                ColumnResizeTarget::AccountOrders(id) => {
+                    let ids = crate::order_blotter::columns::OrderBlotterColumn::ids();
+                    app.account_panels
+                        .get(&id)
+                        .map(|p| p.orders.grid_state.column_width(ids[col_idx]))
+                        .unwrap_or(80.0)
+                }
+                ColumnResizeTarget::AccountHistory(id) => {
+                    let ids = crate::account_panel::history_columns::HistoryColumn::ids();
+                    app.account_panels
+                        .get(&id)
+                        .map(|p| p.history.grid_state.column_width(ids[col_idx]))
+                        .unwrap_or(80.0)
+                }
+                ColumnResizeTarget::AccountRecents(id) => {
+                    let ids = crate::account_panel::recents_tab::column_ids();
+                    app.account_panels
+                        .get(&id)
+                        .map(|p| p.recents.grid_state.column_width(ids[col_idx]))
+                        .unwrap_or(80.0)
+                }
+            }
+        }
+
+        fn apply_width(
+            app: &mut MidasApp,
+            target: ColumnResizeTarget,
+            col_idx: usize,
+            new_width: f32,
+            min_width: f32,
+        ) {
+            match target {
+                ColumnResizeTarget::Watchlist(wl_id) => {
+                    let ids = crate::watchlist::WATCHLIST_COLUMN_ORDER;
+                    if let Some(&col_id) = ids.get(col_idx) {
+                        if let Some(wl) = app.watchlists.get_mut(&wl_id) {
+                            wl.grid_state
+                                .set_column_width(col_id, new_width, min_width, None);
+                        }
+                    }
+                }
+                ColumnResizeTarget::AccountOrders(id) => {
+                    let ids = crate::order_blotter::columns::OrderBlotterColumn::ids();
+                    if let Some(&col_id) = ids.get(col_idx) {
+                        if let Some(p) = app.account_panels.get_mut(&id) {
+                            p.orders
+                                .grid_state
+                                .set_column_width(col_id, new_width, min_width, None);
+                        }
+                    }
+                }
+                ColumnResizeTarget::AccountHistory(id) => {
+                    let ids = crate::account_panel::history_columns::HistoryColumn::ids();
+                    if let Some(&col_id) = ids.get(col_idx) {
+                        if let Some(p) = app.account_panels.get_mut(&id) {
+                            p.history
+                                .grid_state
+                                .set_column_width(col_id, new_width, min_width, None);
+                        }
+                    }
+                }
+                ColumnResizeTarget::AccountRecents(id) => {
+                    let ids = crate::account_panel::recents_tab::column_ids();
+                    if let Some(&col_id) = ids.get(col_idx) {
+                        if let Some(p) = app.account_panels.get_mut(&id) {
+                            p.recents
+                                .grid_state
+                                .set_column_width(col_id, new_width, min_width, None);
+                        }
+                    }
+                }
+            }
+        }
+
+        fn min_width(target: ColumnResizeTarget) -> f32 {
+            match target {
+                ColumnResizeTarget::Watchlist(_) => 20.0,
+                _ => 24.0,
+            }
+        }
+        fn persists(target: ColumnResizeTarget) -> bool {
+            matches!(
+                target,
+                ColumnResizeTarget::Watchlist(_) | ColumnResizeTarget::AccountOrders(_)
+            )
+        }
+
+        match ev {
+            ColumnResizeEvent::Begin(target, col_idx) => {
+                if col_idx >= column_count(target) {
+                    return Task::none();
+                }
+                let width = lookup_width(self, target, col_idx);
+                self.resizing_column = Some(ColumnResizeState {
+                    target,
+                    col_idx,
+                    start_x: f32::NAN,
+                    start_width: width,
+                });
+                Task::none()
+            }
+            ColumnResizeEvent::Move(cursor_x) => {
+                let Some(state) = self.resizing_column.as_mut() else {
+                    return Task::none();
+                };
+                if state.start_x.is_nan() {
+                    state.start_x = cursor_x;
+                    return Task::none();
+                }
+                let min = min_width(state.target);
+                let new_w = (state.start_width + (cursor_x - state.start_x)).max(min);
+                let target = state.target;
+                let col_idx = state.col_idx;
+                apply_width(self, target, col_idx, new_w, min);
+                Task::none()
+            }
+            ColumnResizeEvent::End => {
+                let should_persist = self
+                    .resizing_column
+                    .take()
+                    .map(|s| persists(s.target))
+                    .unwrap_or(false);
+                if should_persist {
+                    self.flush_config()
+                } else {
+                    Task::none()
+                }
+            }
         }
     }
 }

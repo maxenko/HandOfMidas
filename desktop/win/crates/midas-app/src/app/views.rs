@@ -1124,7 +1124,10 @@ impl MidasApp {
             // (which still has COL_DRAG at index 0), so we offset by +1
             // to account for the DRAG column we no longer render.
             let resize = (i < col_defs.len() - 1).then(|| ResizeHandle {
-                on_press: Message::WatchlistColumnResizeStart(wl_id, i + 1, 0.0),
+                on_press: Message::ColumnResize(crate::column_resize::ColumnResizeEvent::Begin(
+                    crate::column_resize::ColumnResizeTarget::Watchlist(wl_id),
+                    i + 1,
+                )),
                 height: 26.0,
             });
             header_cells.push(grid_header_cell(
@@ -1294,8 +1297,12 @@ impl MidasApp {
             body_layers.push(
                 iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
                     .interaction(iced::mouse::Interaction::ResizingHorizontally)
-                    .on_move(|point| Message::WatchlistColumnResizing(point.x))
-                    .on_release(Message::WatchlistColumnResizeEnd)
+                    .on_move(|point| {
+                        Message::ColumnResize(crate::column_resize::ColumnResizeEvent::Move(point.x))
+                    })
+                    .on_release(Message::ColumnResize(
+                        crate::column_resize::ColumnResizeEvent::End,
+                    ))
                     .into(),
             );
         }
@@ -2292,7 +2299,10 @@ impl MidasApp {
                 )
             });
             let resize = (i < last_idx).then(|| ResizeHandle {
-                on_press: Message::AccountOrdersColumnResizeStart(account_id, vc.all_col_idx),
+                on_press: Message::ColumnResize(crate::column_resize::ColumnResizeEvent::Begin(
+                    crate::column_resize::ColumnResizeTarget::AccountOrders(account_id),
+                    vc.all_col_idx,
+                )),
                 height: 26.0,
             });
             header_cells.push(grid_header_cell(
@@ -2460,8 +2470,12 @@ impl MidasApp {
             layers.push(
                 iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
                     .interaction(iced::mouse::Interaction::ResizingHorizontally)
-                    .on_move(|point| Message::AccountOrdersColumnResizing(point.x))
-                    .on_release(Message::AccountOrdersColumnResizeEnd)
+                    .on_move(|point| {
+                        Message::ColumnResize(crate::column_resize::ColumnResizeEvent::Move(point.x))
+                    })
+                    .on_release(Message::ColumnResize(
+                        crate::column_resize::ColumnResizeEvent::End,
+                    ))
                     .into(),
             );
         }
@@ -2553,7 +2567,10 @@ impl MidasApp {
             };
             // No sort in v1 — pass `None` and leave the indicator empty.
             let resize = (i < last_idx).then(|| ResizeHandle {
-                on_press: Message::AccountHistoryColumnResizeStart(account_id, i),
+                on_press: Message::ColumnResize(crate::column_resize::ColumnResizeEvent::Begin(
+                    crate::column_resize::ColumnResizeTarget::AccountHistory(account_id),
+                    i,
+                )),
                 height: 26.0,
             });
             header_cells.push(grid_header_cell(
@@ -2607,8 +2624,12 @@ impl MidasApp {
         layers.push(
             iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
                 .interaction(iced::mouse::Interaction::ResizingHorizontally)
-                .on_move(|point| Message::AccountHistoryColumnResizing(point.x))
-                .on_release(Message::AccountHistoryColumnResizeEnd)
+                .on_move(|point| {
+                    Message::ColumnResize(crate::column_resize::ColumnResizeEvent::Move(point.x))
+                })
+                .on_release(Message::ColumnResize(
+                    crate::column_resize::ColumnResizeEvent::End,
+                ))
                 .into(),
         );
         stack(layers).width(Fill).height(Fill).into()
@@ -2656,25 +2677,19 @@ impl MidasApp {
             ..HeaderStyle::default()
         };
 
-        // Column index → (label, on_resize_start). Width comes from the
-        // VM, which already lifted it out of the panel's grid_state.
-        let col_defs: [(&str, Message); 2] = [
-            (
-                "Ticker",
-                Message::AccountRecentsColumnResizeStart(account_id, 0),
-            ),
-            (
-                "Last Seen",
-                Message::AccountRecentsColumnResizeStart(account_id, 1),
-            ),
-        ];
-        let last_idx = col_defs.len().saturating_sub(1);
+        // Column labels. Width comes from the VM, which already lifted
+        // it out of the panel's grid_state.
+        let col_labels: [&str; 2] = ["Ticker", "Last Seen"];
+        let last_idx = col_labels.len().saturating_sub(1);
 
         // ── Header ─────────────────────────────────────────────────
-        let mut header_cells: Vec<Element<'_, Message>> = Vec::with_capacity(col_defs.len());
-        for (i, (label, resize_msg)) in col_defs.into_iter().enumerate() {
+        let mut header_cells: Vec<Element<'_, Message>> = Vec::with_capacity(col_labels.len());
+        for (i, label) in col_labels.into_iter().enumerate() {
             let resize = (i < last_idx).then(|| ResizeHandle {
-                on_press: resize_msg,
+                on_press: Message::ColumnResize(crate::column_resize::ColumnResizeEvent::Begin(
+                    crate::column_resize::ColumnResizeTarget::AccountRecents(account_id),
+                    i,
+                )),
                 height: 26.0,
             });
             header_cells.push(grid_header_cell(
@@ -2735,8 +2750,12 @@ impl MidasApp {
         layers.push(
             iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
                 .interaction(iced::mouse::Interaction::ResizingHorizontally)
-                .on_move(|point| Message::AccountRecentsColumnResizing(point.x))
-                .on_release(Message::AccountRecentsColumnResizeEnd)
+                .on_move(|point| {
+                    Message::ColumnResize(crate::column_resize::ColumnResizeEvent::Move(point.x))
+                })
+                .on_release(Message::ColumnResize(
+                    crate::column_resize::ColumnResizeEvent::End,
+                ))
                 .into(),
         );
         stack(layers).width(Fill).height(Fill).into()

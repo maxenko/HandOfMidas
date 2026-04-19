@@ -10,6 +10,7 @@ mod app;
 mod broker_bridge;
 mod chart_view;
 mod chart_widget;
+mod column_resize;
 #[cfg(feature = "dev_harness")]
 mod dev_harness;
 mod layout;
