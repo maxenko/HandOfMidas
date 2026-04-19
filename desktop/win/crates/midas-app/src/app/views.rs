@@ -173,8 +173,12 @@ impl MidasApp {
                         .into(),
                 );
                 let picker = self.build_link_picker(dim, move |mode| match dim {
-                    LinkDimension::Symbol => Message::FloatingSetSymbolLink(wid, mode),
-                    LinkDimension::Timeframe => Message::FloatingSetTimeframeLink(wid, mode),
+                    LinkDimension::Symbol => {
+                        Message::SetSymbolLink(crate::app::ChartHandle::Floating(wid), mode)
+                    }
+                    LinkDimension::Timeframe => {
+                        Message::SetTimeframeLink(crate::app::ChartHandle::Floating(wid), mode)
+                    }
                 });
                 chart_layers.push(
                     container(picker)
@@ -787,8 +791,12 @@ impl MidasApp {
                         .into(),
                 );
                 let picker = self.build_link_picker(dim, move |mode| match dim {
-                    LinkDimension::Symbol => Message::SetSymbolLink(chart_id, mode),
-                    LinkDimension::Timeframe => Message::SetTimeframeLink(chart_id, mode),
+                    LinkDimension::Symbol => {
+                        Message::SetSymbolLink(crate::app::ChartHandle::Docked(chart_id), mode)
+                    }
+                    LinkDimension::Timeframe => {
+                        Message::SetTimeframeLink(crate::app::ChartHandle::Docked(chart_id), mode)
+                    }
                 });
                 chart_layers.push(
                     container(picker)
