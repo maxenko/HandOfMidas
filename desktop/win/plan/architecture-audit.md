@@ -3,6 +3,18 @@
 *Snapshot: 2026-04-18, after the Account-panel arc + sparkline scissor fix landed.*
 *Scope: both workspaces (root for the broker engine, `desktop/win` for the app).*
 
+## Status
+
+| # | Finding | Status |
+|---|---------|--------|
+| P1 | Split `MidasApp` god object | open |
+| P1 | Delete `midas_core::broker` mirror | **shipped** (commit `7254f79`, 2026-04-18) |
+| P1 | Introduce view-models | open |
+| P2 | Collapse `Message::Chart*` into `Message::Chart(ChartId, ChartAction)` | open |
+| P2 | Versioned config migrations | open |
+| P2 | `SymbolKey` to `midas-core` + normalize | open |
+| P3 | Rename one `midas-core` | open |
+
 ## Summary
 
 - **86 kLOC across 14 crates split into two workspaces.** Engine + sans-IO chart core are tidy and disciplined; the desktop application binary (`midas-app`, 33 kLOC) is where every architectural problem concentrates.
@@ -47,7 +59,14 @@
 
 **Confidence**: high — three corroborating signals (field count, Message arity, churn) plus the dispatch-by-bucket already done in `handlers.rs` proves the seam exists.
 
-### [P1] Duplicated broker domain types — `midas_core::broker` mirror is dead architectural debris
+### [P1] ~~Duplicated broker domain types — `midas_core::broker` mirror is dead architectural debris~~ **(SHIPPED 2026-04-18, commit `7254f79`)**
+
+**Outcome**: mirror file deleted, `OrderRow` now stores `midas_broker::{OrderAction, OrderKind, TimeInForce}` directly, all five `translate_*` helpers in `broker_bridge.rs` gone (kept `translate_connection_state` — different abstractions). `OrderKind::TrailingStop` now displays correctly instead of being silently downgraded. Net −411 / +63 LOC. 1205 desktop + 275 broker tests still pass.
+
+The original finding is preserved below for historical motivation.
+
+---
+
 **Location**: `desktop/win/crates/midas-core/src/broker.rs` (mirror types), `crates/midas-broker/src/orders/types/` (source of truth).
 
 **Evidence**:
@@ -218,8 +237,8 @@
 
 ## TL;DR ranked
 
-1. Split `MidasApp` god object (P1, high payoff, incremental).
-2. Delete `midas_core::broker` mirror (P1, ~30 min, prevents silent divergence).
+1. ~~Delete `midas_core::broker` mirror (P1, ~30 min, prevents silent divergence).~~ **shipped — commit `7254f79`**
+2. Split `MidasApp` god object (P1, high payoff, incremental).
 3. Introduce view-models (P1, gates the MidasApp split).
 4. Collapse `Message::Chart*` into `Message::Chart(ChartId, ChartAction)` (P2, easy reduction).
 5. Versioned config migrations (P2, before next schema change).
