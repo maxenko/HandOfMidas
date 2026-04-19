@@ -3,7 +3,12 @@
 //! enum so other modules can name them.
 
 pub mod generator;
+pub mod hybrid;
 pub mod replay;
+
+use std::time::Duration;
+
+use midas_broker_core::SymbolKey;
 
 use crate::engine::clock::VirtualInstant;
 use crate::engine::types::{MarketEmission, SubKey, SubMode};
@@ -38,7 +43,7 @@ pub trait MarketDataEngine: Send {
     fn step(&mut self, now: VirtualInstant) -> Vec<MarketEmission>;
 
     /// Return the current best-effort snapshot for `symbol`, if any.
-    fn snapshot(&self, symbol: &midas_broker_core::SymbolKey) -> Option<Snapshot>;
+    fn snapshot(&self, symbol: &SymbolKey) -> Option<Snapshot>;
 }
 
 /// Read-only snapshot returned from `MarketDataEngine::snapshot`.
@@ -62,4 +67,46 @@ pub enum MarketDataError {
     CapExceeded,
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+}
+
+/// Scripted perturbations injected into the hybrid engine. Post-processes the
+/// base stream without mutating the base engine's own state.
+#[derive(Clone, Debug)]
+pub enum Perturbation {
+    /// Add an instantaneous log-return jump to `symbol` at `at`.
+    InjectJump {
+        at: VirtualInstant,
+        symbol: SymbolKey,
+        magnitude_pct: f64,
+    },
+    /// Snap `symbol`'s price from `from` to `to` at `at`.
+    InjectGap {
+        at: VirtualInstant,
+        symbol: SymbolKey,
+        from: f64,
+        to: f64,
+    },
+    /// Halt `symbol` for `duration` starting at `at` — suppresses emissions.
+    InjectHalt {
+        at: VirtualInstant,
+        symbol: SymbolKey,
+        duration: Duration,
+    },
+    /// Multiply arrival-rate by `multiplier` for every symbol over [from, to].
+    BurstMode {
+        from: VirtualInstant,
+        to: VirtualInstant,
+        multiplier: f64,
+    },
+}
+
+impl Perturbation {
+    pub fn when(&self) -> VirtualInstant {
+        match self {
+            Self::InjectJump { at, .. }
+            | Self::InjectGap { at, .. }
+            | Self::InjectHalt { at, .. } => *at,
+            Self::BurstMode { from, .. } => *from,
+        }
+    }
 }

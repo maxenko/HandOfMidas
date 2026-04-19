@@ -1103,12 +1103,14 @@ dependencies = [
  "midas-broker-core",
  "proptest",
  "rand 0.8.5",
+ "rand_chacha 0.3.1",
  "rand_distr",
  "rstest",
  "schemars",
  "serde",
  "serde_json",
  "serde_yaml",
+ "static_assertions",
  "statrs",
  "tempfile",
  "thiserror 2.0.18",
@@ -1978,6 +1980,12 @@ dependencies = [
  "libc",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "static_assertions"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "statrs"
