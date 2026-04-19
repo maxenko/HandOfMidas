@@ -1,0 +1,49 @@
+[package]
+name = "midas-ib-sim"
+version = "0.1.0"
+edition = "2021"
+description = "Full-parity Interactive Brokers TWS gateway simulator for Hand of Midas"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "midas-ib-sim-server"
+path = "src/bin/server.rs"
+
+[dependencies]
+midas-broker-core = { path = "../midas-broker-core" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
+async-trait = "0.1"
+bytes = "1"
+tokio-util = { version = "0.7", features = ["codec"] }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+rand = "0.8"
+rand_distr = "0.4"
+statrs = "0.17"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+dbn = "0.19"
+axum = "0.7"
+clap = { version = "4", features = ["derive"] }
+dirs = "5"
+
+[dev-dependencies]
+proptest = "1"
+tokio-test = "0.4"
+rstest = "0.21"
+criterion = { version = "0.5", features = ["async_tokio"] }
+tempfile = "3"
+
+[[bench]]
+name = "engine_realclock_single"
+harness = false
+
+[[bench]]
+name = "engine_realclock_fanout"
+harness = false
