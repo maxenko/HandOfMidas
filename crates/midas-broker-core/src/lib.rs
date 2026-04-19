@@ -109,7 +109,12 @@ impl fmt::Display for OptionRight {
 
 /// Wraps the IB contract ID for efficient comparison on the hot path.
 /// The string symbol is carried for display purposes.
-#[derive(Clone, Debug, Hash, Eq, PartialEq, Serialize, Deserialize)]
+///
+/// `Ord` / `PartialOrd` compare by `(contract_id, symbol)` so `BTreeMap`
+/// keyed on `SymbolKey` iterates in a stable, deterministic order — the
+/// IB sim (and anyone else doing cross-symbol aggregation) relies on this
+/// for reproducible output.
+#[derive(Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct SymbolKey {
     pub contract_id: i32,
     pub symbol: String,
