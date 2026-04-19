@@ -1150,7 +1150,7 @@ impl MidasApp {
         let panel = self.order_panels.get(&order_id)?;
         let last_price = self
             .market_cache
-            .get(&panel.state.symbol)
+            .get(&crate::annotation_store::SymbolKey::new(&panel.state.symbol))
             .and_then(|snap| snap.last_price);
         let (coarse_step, _fine_step) = midas_chart::price_step_for(last_price.unwrap_or(100.0));
         Some(OrderPanelBodyVm {
@@ -2350,7 +2350,7 @@ impl MidasApp {
         // Seed market data on the ticker state before creating the bracket.
         let (mc_price, mc_gatr) = self
             .market_cache
-            .get(&new_upper)
+            .get(&new_key)
             .map(|s| (s.last_price, s.gatr_abs))
             .unwrap_or((None, None));
         {

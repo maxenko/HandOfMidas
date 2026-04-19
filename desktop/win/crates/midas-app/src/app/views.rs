@@ -3292,7 +3292,8 @@ pub(crate) fn gatr_render_from_cache(
     cache: &crate::market_cache::MarketDataCache,
     symbol: &str,
 ) -> Option<midas_chart::GerchikAtrRender> {
-    let snap = cache.get(symbol)?;
+    let key = crate::annotation_store::SymbolKey::new(symbol);
+    let snap = cache.get(&key)?;
     let pct = snap.gatr_pct?;
     let price_up = snap.change_pct.is_none_or(|c| c >= 0.0);
     let color = midas_core::gatr_color(price_up);

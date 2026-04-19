@@ -50,7 +50,7 @@ impl MidasApp {
         // 3. Seed market data from cache.
         let (price, gatr) = self
             .market_cache
-            .get(symbol.as_str())
+            .get(&symbol)
             .map(|s| (s.last_price, s.gatr_abs))
             .unwrap_or((None, None));
         if let Some(p) = price {
@@ -224,10 +224,7 @@ impl MidasApp {
             return;
         };
 
-        let last_price = self
-            .market_cache
-            .get(&symbol.to_uppercase())
-            .and_then(|s| s.last_price);
+        let last_price = self.market_cache.get(&key).and_then(|s| s.last_price);
 
         // Find panels whose `source_chart` links to this chart.
         let ticker_state = ticker_state.clone();
@@ -261,7 +258,7 @@ impl MidasApp {
             key.clone(),
             crate::ticker_state::TickerMsg::MarkSnappedThisSession,
         ));
-        let snap = self.market_cache.get(key.as_str());
+        let snap = self.market_cache.get(&key);
         let current_price = snap.as_ref().and_then(|s| s.last_price);
         let gatr_abs = snap.as_ref().and_then(|s| s.gatr_abs);
         if let Some(price) = current_price {
@@ -403,10 +400,9 @@ impl MidasApp {
                     // mutations land in one place (effects ignored —
                     // a synchronous Show produces no parent-visible
                     // effects).
-                    let _ = self.toasts.update(crate::toast::ToastMsg::Show {
-                        message,
-                        action,
-                    });
+                    let _ = self
+                        .toasts
+                        .update(crate::toast::ToastMsg::Show { message, action });
                 }
                 crate::ticker_state::TickerEffect::PersistDirty => {
                     if let Some(state) = self.tickers.get(sym) {

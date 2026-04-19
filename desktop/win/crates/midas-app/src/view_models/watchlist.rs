@@ -67,7 +67,9 @@ impl WatchlistBodyVm {
             .tickers
             .iter()
             .map(|ticker| {
-                let snap = market_cache.get(&ticker.symbol).unwrap_or(&empty_snapshot);
+                let snap = market_cache
+                    .get(&crate::annotation_store::SymbolKey::new(&ticker.symbol))
+                    .unwrap_or(&empty_snapshot);
                 let price_text = snap
                     .last_price
                     .map(|p| format!("{p:.2}"))

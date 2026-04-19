@@ -1,43 +1,50 @@
-//! In-memory cache of market data snapshots keyed by uppercase symbol.
+//! In-memory cache of market data snapshots keyed by [`SymbolKey`].
 //!
 //! Populated asynchronously from the active DataProvider. The watchlist
 //! reads from this cache instead of scraping chart candle buffers.
+//!
+//! Using `SymbolKey` (not raw `String`) for the map key means lookups
+//! are normalized (trim + uppercase) by construction — callers can't
+//! accidentally miss an entry because they passed `"aapl"` instead of
+//! `"AAPL"`.
 
 use std::collections::HashMap;
 
 use midas_core::MarketSnapshot;
 
+use crate::annotation_store::SymbolKey;
+
 /// In-memory market data cache.
 #[derive(Debug, Default)]
 pub struct MarketDataCache {
-    snapshots: HashMap<String, MarketSnapshot>,
+    snapshots: HashMap<SymbolKey, MarketSnapshot>,
 }
 
 impl MarketDataCache {
     /// Get a snapshot for a symbol.
-    pub fn get(&self, symbol: &str) -> Option<&MarketSnapshot> {
+    pub fn get(&self, symbol: &SymbolKey) -> Option<&MarketSnapshot> {
         self.snapshots.get(symbol)
     }
 
     /// Get a mutable snapshot for a symbol (e.g., to merge GATR from intraday data).
     #[allow(dead_code)] // part of planned API
-    pub fn get_mut(&mut self, symbol: &str) -> Option<&mut MarketSnapshot> {
+    pub fn get_mut(&mut self, symbol: &SymbolKey) -> Option<&mut MarketSnapshot> {
         self.snapshots.get_mut(symbol)
     }
 
     /// Insert or update a snapshot.
-    pub fn insert(&mut self, symbol: String, snapshot: MarketSnapshot) {
+    pub fn insert(&mut self, symbol: SymbolKey, snapshot: MarketSnapshot) {
         self.snapshots.insert(symbol, snapshot);
     }
 
     /// Remove a snapshot.
-    pub fn remove(&mut self, symbol: &str) {
+    pub fn remove(&mut self, symbol: &SymbolKey) {
         self.snapshots.remove(symbol);
     }
 
     /// Iterate over all cached symbols.
     #[allow(dead_code)] // part of planned API
-    pub fn symbols(&self) -> impl Iterator<Item = &String> {
+    pub fn symbols(&self) -> impl Iterator<Item = &SymbolKey> {
         self.snapshots.keys()
     }
 }
@@ -182,9 +189,10 @@ mod tests {
     #[test]
     fn cache_get_insert_remove_roundtrip() {
         let mut cache = MarketDataCache::default();
+        let aapl = SymbolKey::new("AAPL");
 
         // Initially empty.
-        assert!(cache.get("AAPL").is_none());
+        assert!(cache.get(&aapl).is_none());
 
         // Insert a snapshot.
         let snap = MarketSnapshot {
@@ -194,21 +202,24 @@ mod tests {
             gatr_pct: None,
             gatr_abs: None,
         };
-        cache.insert("AAPL".to_string(), snap);
+        cache.insert(aapl.clone(), snap);
 
         // Retrieve it.
-        let retrieved = cache.get("AAPL").expect("should find AAPL");
+        let retrieved = cache.get(&aapl).expect("should find AAPL");
         assert_eq!(retrieved.last_price, Some(150.0));
         assert_eq!(retrieved.change_pct, Some(1.35));
 
         // Verify symbols iterator.
-        let syms: Vec<&String> = cache.symbols().collect();
+        let syms: Vec<&SymbolKey> = cache.symbols().collect();
         assert_eq!(syms.len(), 1);
-        assert_eq!(syms[0], "AAPL");
+        assert_eq!(syms[0], &aapl);
+
+        // Lookup is case-insensitive because SymbolKey normalizes.
+        assert!(cache.get(&SymbolKey::new("aapl")).is_some());
 
         // Remove and verify it's gone.
-        cache.remove("AAPL");
-        assert!(cache.get("AAPL").is_none());
+        cache.remove(&aapl);
+        assert!(cache.get(&aapl).is_none());
         assert_eq!(cache.symbols().count(), 0);
     }
 }
