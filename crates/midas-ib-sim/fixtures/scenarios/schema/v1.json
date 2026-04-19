@@ -1,0 +1,1250 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "AcceptOrderArgs": {
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "entry": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/EntryType"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "limit_price": {
+          "description": "Absolute limit price for Limit entries.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "order_kind": {
+          "$ref": "#/definitions/OrderKindArg"
+        },
+        "order_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "quantity": {
+          "format": "double",
+          "type": "number"
+        },
+        "side": {
+          "$ref": "#/definitions/OrderSide"
+        },
+        "sl_offset": {
+          "description": "Bracket SL offset in price units.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "stop_price": {
+          "description": "Absolute stop price for Stop / StopLimit entries.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "symbol": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tp_offset": {
+          "description": "Bracket TP offset in price units (+ favours direction of side).",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "order_kind",
+        "quantity",
+        "side"
+      ],
+      "type": "object"
+    },
+    "AccountConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "acct_code": {
+          "type": "string"
+        },
+        "currency": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "starting_cash": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "acct_code",
+        "starting_cash"
+      ],
+      "type": "object"
+    },
+    "AssertArgs": {
+      "additionalProperties": false,
+      "properties": {
+        "cond": {
+          "type": "string"
+        },
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "cond"
+      ],
+      "type": "object"
+    },
+    "AssertClientEventOrderArgs": {
+      "additionalProperties": false,
+      "properties": {
+        "sequence": {
+          "description": "Ordered list of message-type names expected in sequence.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "session_id": {
+          "$ref": "#/definitions/SessionSelector"
+        }
+      },
+      "required": [
+        "sequence",
+        "session_id"
+      ],
+      "type": "object"
+    },
+    "AssertClientReceivedArgs": {
+      "additionalProperties": false,
+      "properties": {
+        "matches": {
+          "description": "Optional field-level predicate over the emitted message.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "description": "Message-type name (matches IB's outgoing IDs).",
+          "type": "string"
+        },
+        "session_id": {
+          "$ref": "#/definitions/SessionSelector"
+        }
+      },
+      "required": [
+        "message",
+        "session_id"
+      ],
+      "type": "object"
+    },
+    "CancelOrderArgs": {
+      "additionalProperties": false,
+      "properties": {
+        "order_ref": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "order_ref"
+      ],
+      "type": "object"
+    },
+    "ClockMode": {
+      "description": "Virtual / real / accelerated clock selector.",
+      "oneOf": [
+        {
+          "description": "Real wall-clock; scenario runs in actual elapsed time.",
+          "enum": [
+            "real"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Virtual-time clock, advanced deterministically by the runner.",
+          "enum": [
+            "virtual"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Accelerated — virtual time progresses at `multiplier` times real. The numeric multiplier is carried as a string argument on the scenario itself; the runner parses it.",
+          "enum": [
+            "accelerated"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "EntryType": {
+      "enum": [
+        "market",
+        "limit",
+        "stop",
+        "stop_limit"
+      ],
+      "type": "string"
+    },
+    "FarmCodeArgs": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "description": "IB error code — 1100, 1101, 1102, …",
+          "format": "int32",
+          "type": "integer"
+        },
+        "farms": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "code",
+        "farms"
+      ],
+      "type": "object"
+    },
+    "HistoricalPacingQuirk": {
+      "additionalProperties": false,
+      "properties": {
+        "max_requests_per_10min": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "max_requests_per_10min"
+      ],
+      "type": "object"
+    },
+    "IncludeArgs": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "description": "Relative path to another scenario YAML.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "InjectBadFrameArgs": {
+      "additionalProperties": false,
+      "properties": {
+        "bytes": {
+          "description": "Hex-encoded bytes, e.g. `\"hex:deadbeef\"`.",
+          "type": "string"
+        },
+        "session_id": {
+          "$ref": "#/definitions/SessionSelector"
+        }
+      },
+      "required": [
+        "bytes",
+        "session_id"
+      ],
+      "type": "object"
+    },
+    "InjectBurstArgs": {
+      "additionalProperties": false,
+      "properties": {
+        "duration": {
+          "type": "string"
+        },
+        "multiplier": {
+          "format": "double",
+          "type": "number"
+        },
+        "symbols": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "duration",
+        "multiplier",
+        "symbols"
+      ],
+      "type": "object"
+    },
+    "InjectDisconnectArgs": {
+      "additionalProperties": false,
+      "properties": {
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionSelector"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`all` closes every session; a numeric session-id closes one."
+        }
+      },
+      "type": "object"
+    },
+    "InjectDuplicateOrderStatusArgs": {
+      "additionalProperties": false,
+      "properties": {
+        "count": {
+          "default": 1,
+          "description": "How many times to repeat the status (default 1).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "order_ref": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "order_ref"
+      ],
+      "type": "object"
+    },
+    "InjectGapArgs": {
+      "additionalProperties": false,
+      "properties": {
+        "from": {
+          "format": "double",
+          "type": "number"
+        },
+        "symbol": {
+          "type": "string"
+        },
+        "to": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "from",
+        "symbol",
+        "to"
+      ],
+      "type": "object"
+    },
+    "InjectHaltArgs": {
+      "additionalProperties": false,
+      "properties": {
+        "duration": {
+          "type": "string"
+        },
+        "symbol": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "duration",
+        "symbol"
+      ],
+      "type": "object"
+    },
+    "InjectLagArgs": {
+      "additionalProperties": false,
+      "properties": {
+        "duration": {
+          "description": "Duration string, e.g. `5s`, `250ms`.",
+          "type": "string"
+        },
+        "session_id": {
+          "$ref": "#/definitions/SessionSelector"
+        }
+      },
+      "required": [
+        "duration",
+        "session_id"
+      ],
+      "type": "object"
+    },
+    "InjectOutOfOrderEventsArgs": {
+      "additionalProperties": false,
+      "properties": {
+        "emit_first": {
+          "description": "Names of the two events to swap, in observed vs emit order.",
+          "type": "string"
+        },
+        "emit_second": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "emit_first",
+        "emit_second"
+      ],
+      "type": "object"
+    },
+    "InjectPriceJumpArgs": {
+      "additionalProperties": false,
+      "properties": {
+        "magnitude_pct": {
+          "format": "double",
+          "type": "number"
+        },
+        "symbol": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "magnitude_pct",
+        "symbol"
+      ],
+      "type": "object"
+    },
+    "InjectSlowCommissionReportArgs": {
+      "additionalProperties": false,
+      "properties": {
+        "delay": {
+          "type": "string"
+        },
+        "order_ref": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "delay",
+        "order_ref"
+      ],
+      "type": "object"
+    },
+    "LineLimitQuirk": {
+      "additionalProperties": false,
+      "properties": {
+        "max_l1_lines": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "max_l1_lines"
+      ],
+      "type": "object"
+    },
+    "MsgRateQuirk": {
+      "additionalProperties": false,
+      "properties": {
+        "limit_per_sec": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "limit_per_sec"
+      ],
+      "type": "object"
+    },
+    "OrderKindArg": {
+      "oneOf": [
+        {
+          "description": "A single parent order.",
+          "enum": [
+            "single"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Parent + TP + SL (bracket group).",
+          "enum": [
+            "bracket"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "OrderSide": {
+      "enum": [
+        "buy",
+        "sell"
+      ],
+      "type": "string"
+    },
+    "QuirksConfig": {
+      "additionalProperties": false,
+      "description": "IB quirk knobs. All fields optional — missing fields pick sim defaults.",
+      "properties": {
+        "historical_pacing": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/HistoricalPacingQuirk"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "line_limit": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LineLimitQuirk"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "msg_rate": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MsgRateQuirk"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ScenarioAssert": {
+      "additionalProperties": false,
+      "description": "Top-level assertion applied at scenario end.",
+      "properties": {
+        "cond": {
+          "type": "string"
+        },
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "cond"
+      ],
+      "type": "object"
+    },
+    "ScenarioEvent": {
+      "additionalProperties": false,
+      "description": "One entry in `events:`. Exactly one of `at:` / `after:` / `when:` must be set (the loader enforces this). The verb + typed args are carried by [`Verb`].",
+      "oneOf": [
+        {
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/SubscribeMarketDataArgs"
+            },
+            "do": {
+              "enum": [
+                "subscribe_market_data"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "args",
+            "do"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/UnsubscribeMarketDataArgs"
+            },
+            "do": {
+              "enum": [
+                "unsubscribe_market_data"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "args",
+            "do"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/AcceptOrderArgs"
+            },
+            "do": {
+              "enum": [
+                "accept_order"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "args",
+            "do"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/CancelOrderArgs"
+            },
+            "do": {
+              "enum": [
+                "cancel_order"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "args",
+            "do"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/InjectDisconnectArgs"
+            },
+            "do": {
+              "enum": [
+                "inject_disconnect"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "args",
+            "do"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/FarmCodeArgs"
+            },
+            "do": {
+              "enum": [
+                "inject_farm_outage"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "args",
+            "do"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/FarmCodeArgs"
+            },
+            "do": {
+              "enum": [
+                "inject_farm_restore"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "args",
+            "do"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/SessionArgs"
+            },
+            "do": {
+              "enum": [
+                "inject_pacing_violation"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "args",
+            "do"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/InjectLagArgs"
+            },
+            "do": {
+              "enum": [
+                "inject_lag"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "args",
+            "do"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/InjectBadFrameArgs"
+            },
+            "do": {
+              "enum": [
+                "inject_bad_frame"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "args",
+            "do"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/InjectPriceJumpArgs"
+            },
+            "do": {
+              "enum": [
+                "inject_price_jump"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "args",
+            "do"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/InjectGapArgs"
+            },
+            "do": {
+              "enum": [
+                "inject_gap"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "args",
+            "do"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/InjectHaltArgs"
+            },
+            "do": {
+              "enum": [
+                "inject_halt"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "args",
+            "do"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/InjectBurstArgs"
+            },
+            "do": {
+              "enum": [
+                "inject_burst"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "args",
+            "do"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/InjectDuplicateOrderStatusArgs"
+            },
+            "do": {
+              "enum": [
+                "inject_duplicate_order_status"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "args",
+            "do"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/InjectSlowCommissionReportArgs"
+            },
+            "do": {
+              "enum": [
+                "inject_slow_commission_report"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "args",
+            "do"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/InjectOutOfOrderEventsArgs"
+            },
+            "do": {
+              "enum": [
+                "inject_out_of_order_events"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "args",
+            "do"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "do": {
+              "enum": [
+                "inject_daily_restart"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "do"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/SleepArgs"
+            },
+            "do": {
+              "enum": [
+                "sleep"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "args",
+            "do"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/SetClockModeArgs"
+            },
+            "do": {
+              "enum": [
+                "set_clock_mode"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "args",
+            "do"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/IncludeArgs"
+            },
+            "do": {
+              "enum": [
+                "include"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "args",
+            "do"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/AssertArgs"
+            },
+            "do": {
+              "enum": [
+                "assert"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "args",
+            "do"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/AssertClientReceivedArgs"
+            },
+            "do": {
+              "enum": [
+                "assert_client_received"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "args",
+            "do"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "args": {
+              "$ref": "#/definitions/AssertClientEventOrderArgs"
+            },
+            "do": {
+              "enum": [
+                "assert_client_event_order"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "args",
+            "do"
+          ],
+          "type": "object"
+        }
+      ],
+      "properties": {
+        "after": {
+          "description": "Relative trigger — fire `delay` after the named anchor.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "at": {
+          "description": "Fixed virtual-time offset from scenario start, e.g. `00:00:05`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "delay": {
+          "description": "Duration from the named anchor, e.g. `45s`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "named": {
+          "description": "Optional anchor name — other events may reference via `after:`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "when": {
+          "description": "Pattern-triggered — expression evaluated every tick; fires on first `true`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "SessionArgs": {
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "$ref": "#/definitions/SessionSelector"
+        }
+      },
+      "required": [
+        "session_id"
+      ],
+      "type": "object"
+    },
+    "SessionSelector": {
+      "anyOf": [
+        {
+          "description": "Numeric session id assigned at accept time.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        {
+          "description": "Sentinel token — currently only `\"all\"`.",
+          "type": "string"
+        }
+      ]
+    },
+    "SetClockModeArgs": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "$ref": "#/definitions/ClockMode"
+        },
+        "multiplier": {
+          "description": "Present only when `mode == Accelerated`.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "type": "object"
+    },
+    "SleepArgs": {
+      "additionalProperties": false,
+      "properties": {
+        "duration": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "duration"
+      ],
+      "type": "object"
+    },
+    "SubscribeMarketDataArgs": {
+      "additionalProperties": false,
+      "properties": {
+        "subscription": {
+          "$ref": "#/definitions/SubscriptionKind"
+        },
+        "symbol": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "subscription",
+        "symbol"
+      ],
+      "type": "object"
+    },
+    "SubscriptionKind": {
+      "enum": [
+        "streaming_l1",
+        "tick_by_tick_last",
+        "tick_by_tick_all_last",
+        "tick_by_tick_bid_ask",
+        "tick_by_tick_mid_point",
+        "realtime_bars5s",
+        "historical"
+      ],
+      "type": "string"
+    },
+    "SymbolConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "initial_price": {
+          "description": "Starting mid-price. Required for synthetic generation.",
+          "format": "double",
+          "type": "number"
+        },
+        "overrides": {
+          "additionalProperties": true,
+          "description": "Optional per-symbol overrides carried as a free-form map. Schemars can't describe `serde_yaml::Value`, so we round-trip through `serde_json::Value` — YAML keys that don't fit JSON's model (e.g. non-string map keys) will fail deserialisation, which is exactly the discipline we want for a scripted DSL.",
+          "type": "object"
+        },
+        "preset": {
+          "description": "Preset name (e.g. \"MidCap\", \"Liquid\"). Runner resolves to generator params.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "symbol": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "initial_price",
+        "symbol"
+      ],
+      "type": "object"
+    },
+    "UnsubscribeMarketDataArgs": {
+      "additionalProperties": false,
+      "properties": {
+        "symbol": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "A fully parsed, post-migration scenario document.\n\nThe scenario is strictly declarative — it describes *what* should happen and *when*; the Wave-2 runner converts it into engine commands.",
+  "properties": {
+    "accounts": {
+      "description": "Simulated accounts.",
+      "items": {
+        "$ref": "#/definitions/AccountConfig"
+      },
+      "type": "array"
+    },
+    "asserts": {
+      "description": "Predicates evaluated at session end.",
+      "items": {
+        "$ref": "#/definitions/ScenarioAssert"
+      },
+      "type": "array"
+    },
+    "clock": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ClockMode"
+        }
+      ],
+      "default": "virtual",
+      "description": "Clock mode selected at scenario boot."
+    },
+    "description": {
+      "description": "Optional long-form description for the scenario header.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "duration": {
+      "description": "Duration string, e.g. \"5min\", \"00:05:00\", or \"300s\". Parsed by runner.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "events": {
+      "description": "Timeline of scripted events.",
+      "items": {
+        "$ref": "#/definitions/ScenarioEvent"
+      },
+      "type": "array"
+    },
+    "name": {
+      "description": "Human-readable scenario name. Used in log lines + assertion messages.",
+      "type": "string"
+    },
+    "quirks": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/QuirksConfig"
+        }
+      ],
+      "default": {},
+      "description": "IB quirk knobs (pacing limits, line counts, …)."
+    },
+    "seed": {
+      "default": 0,
+      "description": "Deterministic RNG seed — same seed + same scenario = same sim behaviour.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "symbols": {
+      "description": "Synthetic instruments the scenario will touch.",
+      "items": {
+        "$ref": "#/definitions/SymbolConfig"
+      },
+      "type": "array"
+    },
+    "version": {
+      "description": "Schema version. Required — loader rejects documents that omit it.",
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "name",
+    "version"
+  ],
+  "title": "Scenario",
+  "type": "object"
+}

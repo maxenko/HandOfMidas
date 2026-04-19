@@ -1,29 +1,32 @@
-//! YAML scenario runner. Stage 06 fills in.
+//! Scenario YAML subsystem.
+//!
+//! - [`schema`] declares the [`Scenario`] document shape and [`Verb`]
+//!   enumeration — every scripted action the DSL supports.
+//! - [`loader`] parses + migrates + validates a YAML file into a typed
+//!   [`Scenario`]. Errors flow via [`ScenarioError`].
+//! - [`migrations`] carries the version-to-version upgrade chain.
+//! - [`json_schema`] exports a JSON Schema derived from the Rust types for
+//!   editor tooling.
+//!
+//! Wave-2 runner + expression-interpreter code will live alongside these
+//! modules; the types here stay stable so scenarios written today keep
+//! working when the runner arrives.
 
 pub mod injector;
-pub mod script;
+pub mod json_schema;
+pub mod loader;
+pub mod migrations;
+pub mod schema;
 
-pub use self::script::{Scenario, ScenarioStep};
-
-use std::path::Path;
-
-/// Runtime handle for an in-flight scenario. Stage 06 implements.
-pub struct ScenarioRunner {
-    _priv: (),
-}
-
-impl ScenarioRunner {
-    pub fn load(_path: &Path) -> Result<Scenario, ScenarioError> {
-        todo!("Stage 06 — ScenarioRunner::load")
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum ScenarioError {
-    #[error("yaml parse error: {0}")]
-    Parse(String),
-    #[error("unknown verb: {0}")]
-    UnknownVerb(String),
-    #[error("io: {0}")]
-    Io(#[from] std::io::Error),
-}
+pub use self::loader::{load, load_from_str, ScenarioError};
+pub use self::schema::{
+    AcceptOrderArgs, AccountConfig, AssertArgs, AssertClientEventOrderArgs,
+    AssertClientReceivedArgs, CancelOrderArgs, ClockMode, EntryType, Expression, FarmCodeArgs,
+    HistoricalPacingQuirk, IncludeArgs, InjectBadFrameArgs, InjectBurstArgs, InjectDisconnectArgs,
+    InjectDuplicateOrderStatusArgs, InjectGapArgs, InjectHaltArgs, InjectLagArgs,
+    InjectOutOfOrderEventsArgs, InjectPriceJumpArgs, InjectSlowCommissionReportArgs,
+    LineLimitQuirk, MsgRateQuirk, OrderKindArg, OrderSide, QuirksConfig, Scenario, ScenarioAssert,
+    ScenarioEvent, SessionArgs, SessionSelector, SetClockModeArgs, SleepArgs,
+    SubscribeMarketDataArgs, SubscriptionKind, SymbolConfig, UnsubscribeMarketDataArgs, Verb,
+    CURRENT_VERSION,
+};
