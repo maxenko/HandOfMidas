@@ -142,6 +142,9 @@ impl WindowGeometry {
         self.size
     }
 
+    /// Last-saved window position. Used by the `dev_harness` state
+    /// dump; production reads go through `to_config` for persistence.
+    #[allow(dead_code)]
     pub fn position(&self) -> Option<(i32, i32)> {
         self.position
     }
