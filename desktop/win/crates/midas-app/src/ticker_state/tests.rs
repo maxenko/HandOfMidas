@@ -265,8 +265,8 @@ fn factory_from_legacy() {
 // ── Slice 2: GATR snap/pin/undo ────────────────────────────────────
 
 /// Build a test level with the given price and id.
-fn test_level(id: u64, price: f64) -> crate::level_store::StoredLevel {
-    crate::level_store::StoredLevel {
+fn test_level(id: u64, price: f64) -> crate::annotation_store::StoredLevel {
+    crate::annotation_store::StoredLevel {
         level: midas_chart::HorizontalLevel {
             id,
             line: midas_chart::widget::price_line::PriceLine {
@@ -1451,7 +1451,7 @@ fn persist_forget_removes_from_cache() {
 
 #[test]
 fn inject_levels_populates_ticker_state() {
-    use crate::level_store::StoredLevel;
+    use crate::annotation_store::StoredLevel;
     use midas_chart::widget::price_line::{LineExtent, LineStroke, PriceLine};
     use midas_chart::widget::LineStyle;
     use midas_chart::HorizontalLevel;

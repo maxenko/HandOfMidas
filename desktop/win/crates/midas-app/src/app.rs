@@ -37,7 +37,6 @@ use crate::registry::ProviderRegistry;
 
 use crate::annotation_store::AnnotationStore;
 use crate::layout::{LayoutPresetKind, PanelContent, WorkspaceLayout};
-use crate::level_store::LevelStore;
 use crate::link::{LinkDimension, PickerTarget};
 use crate::order_panel::OrderSide;
 use crate::watchlist::WatchlistPanel;
@@ -275,8 +274,6 @@ pub struct MidasApp {
     /// Floating chart windows popped out from the main pane grid.
     /// Keyed by the OS window ID returned from `window::open()`.
     pub floating_charts: HashMap<window::Id, ChartPanel>,
-    /// Centralized per-ticker level store, shared across all charts.
-    pub level_store: LevelStore,
     /// Whether level placement mode is globally active across all charts.
     pub level_placing: bool,
     /// Active placement preview: (source chart, ticker, price).
@@ -969,8 +966,11 @@ impl MidasApp {
             ..window::Settings::default()
         });
 
-        let open_task = open_task
-            .map(|id| Message::Window(crate::window_geometry::WindowGeometryMsg::MainWindowOpened(id)));
+        let open_task = open_task.map(|id| {
+            Message::Window(crate::window_geometry::WindowGeometryMsg::MainWindowOpened(
+                id,
+            ))
+        });
 
         // Build workspace, charts, watchlists, and order/account panels from config.
         let (
@@ -1112,7 +1112,14 @@ impl MidasApp {
             status_message = "Ready".to_string();
         };
 
-        let level_store = LevelStore::from_config(&config.levels);
+        // Horizontal price levels used to live in `LevelStore`
+        // (audit P2b). Today they round-trip through
+        // `AnnotationStore::import_level_configs` / `to_level_configs`
+        // so `config.levels` stays byte-identical on disk. The import
+        // itself happens later — after `annotation_persistence` has
+        // restored bracket annotations into `app.annotation_store` —
+        // so the level import doesn't get stomped by the bracket
+        // restore.
 
         // Initialize DuckDB store.
         let store = if config.store.enabled {
@@ -1265,20 +1272,55 @@ impl MidasApp {
 
             // v1→v2 migration: import levels from TOML config.
             //
-            // For each symbol in LevelStore, inject its levels into the
-            // corresponding TickerState. Redb data (existing levels in
-            // TickerState) takes priority — only inject if TickerState
-            // has no levels yet.
-            for (ticker, stored_levels) in level_store.all_levels() {
-                let sym_key = crate::annotation_store::SymbolKey::new(ticker);
-                let ts = tickers
-                    .entry(sym_key.clone())
-                    .or_insert_with(|| crate::ticker_state::TickerState::new(sym_key.clone()));
-                if ts.levels().is_empty() && !stored_levels.is_empty() {
-                    ts.inject_levels(stored_levels.to_vec());
+            // For each symbol in `config.levels`, build a projected
+            // `Vec<StoredLevel>` and inject it into the corresponding
+            // `TickerState`. Redb data (existing levels in TickerState)
+            // takes priority — only inject if TickerState has no
+            // levels yet.
+            {
+                use crate::annotation_store::StoredLevel;
+                use midas_chart::widget::price_line::{LineExtent, LineStroke, PriceLine};
+                use midas_chart::widget::LineStyle;
+                let mut next_migration_id: u64 = 1;
+                for (ticker, level_cfgs) in &config.levels {
+                    if level_cfgs.is_empty() {
+                        continue;
+                    }
+                    let sym_key = crate::annotation_store::SymbolKey::new(ticker);
+                    let ts = tickers
+                        .entry(sym_key.clone())
+                        .or_insert_with(|| crate::ticker_state::TickerState::new(sym_key.clone()));
+                    if !ts.levels().is_empty() {
+                        continue;
+                    }
+                    let stored: Vec<StoredLevel> = level_cfgs
+                        .iter()
+                        .map(|cfg| {
+                            let id = next_migration_id;
+                            next_migration_id += 1;
+                            StoredLevel {
+                                level: midas_chart::HorizontalLevel {
+                                    id,
+                                    line: PriceLine {
+                                        price: cfg.price,
+                                        extent: LineExtent::default(),
+                                        stroke: LineStroke {
+                                            color: cfg.color,
+                                            width: cfg.line_width,
+                                            style: LineStyle::default(),
+                                        },
+                                    },
+                                    label: cfg.label.clone(),
+                                    icon: midas_chart::LevelIcon::from_str_id(&cfg.icon),
+                                },
+                                locked: cfg.locked,
+                            }
+                        })
+                        .collect();
+                    let n = stored.len();
+                    ts.inject_levels(stored);
                     tracing::debug!(
-                        "ticker-state: imported {} level(s) for {ticker} from TOML config",
-                        stored_levels.len()
+                        "ticker-state: imported {n} level(s) for {ticker} from TOML config"
                     );
                 }
             }
@@ -1312,17 +1354,20 @@ impl MidasApp {
             last_config_save: Instant::now(),
             current_time,
             window: {
-                let mut g =
-                    crate::window_geometry::WindowGeometry::from_config(&config.window, initial_size);
+                let mut g = crate::window_geometry::WindowGeometry::from_config(
+                    &config.window,
+                    initial_size,
+                );
                 // The runtime `main_window` id is the iced-assigned one
                 // for this launch — feed it in once. Effects from this
                 // synthetic Open are discarded; the parent will spawn
                 // its own monitor-size query right after `new` returns.
-                let _ = g.update(crate::window_geometry::WindowGeometryMsg::MainWindowOpened(main_id));
+                let _ = g.update(crate::window_geometry::WindowGeometryMsg::MainWindowOpened(
+                    main_id,
+                ));
                 g
             },
             floating_charts: HashMap::new(),
-            level_store,
             level_placing: false,
             placing_preview: None,
             dragging_annotation: None,
@@ -1402,6 +1447,12 @@ impl MidasApp {
                 tracing::warn!("Failed to load persisted annotations: {e}");
             }
         }
+
+        // Horizontal price levels from TOML config round-trip through
+        // `AnnotationStore::import_level_configs` (audit P2b — retired
+        // `LevelStore`). Imported AFTER the bracket-annotation restore
+        // so the level annotations coexist with restored brackets.
+        app.annotation_store.import_level_configs(&config.levels);
 
         // Link restored brackets to their order panels and sync state.
         // Saved brackets load Active (visible on chart immediately).
@@ -1728,7 +1779,8 @@ impl MidasApp {
 
     /// Restore a single chart panel from config.
     ///
-    /// Levels are no longer restored per-chart — they live in `LevelStore`.
+    /// Levels are no longer restored per-chart — they live in
+    /// `AnnotationStore` (audit P2b).
     fn restore_panel(cfg: &ChartConfig) -> ChartPanel {
         let tf = Timeframe::from_suffix(&cfg.timeframe).unwrap_or(Timeframe::D1);
         let mut panel = Self::make_empty_panel();
@@ -1826,8 +1878,9 @@ impl MidasApp {
 
     /// Mark levels dirty on every chart (main + floating) displaying `ticker`.
     ///
-    /// This bridges `LevelStore` generation changes to the existing per-chart
-    /// `DirtyFlags.levels` counter that the GPU renderer depends on.
+    /// This bridges `AnnotationStore` generation changes to the
+    /// existing per-chart `DirtyFlags.levels` counter that the GPU
+    /// renderer depends on.
     fn mark_levels_dirty_for_ticker(&mut self, ticker: &str) {
         for chart in self.charts.values_mut() {
             if chart.symbol == ticker {

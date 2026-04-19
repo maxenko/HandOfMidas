@@ -128,7 +128,20 @@ impl MidasApp {
             })
             .collect();
         self.tickers = tickers;
-        self.level_store = crate::level_store::LevelStore::from_config(&config.levels);
+        // Levels live in `AnnotationStore` (audit P2b); drop any
+        // previously-imported level annotations and reload from the
+        // fixture's `config.levels`. Bracket annotations persist through
+        // their own path and aren't touched here.
+        for symbol in self
+            .annotation_store
+            .to_level_configs()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            self.annotation_store.clear_levels(&symbol);
+        }
+        self.annotation_store.import_level_configs(&config.levels);
 
         // Re-seed bound_symbol on charts the config may have set.
         for panel in self.charts.values_mut() {
@@ -145,9 +158,11 @@ impl MidasApp {
         self.window =
             crate::window_geometry::WindowGeometry::from_config(&config.window, self.window.size());
         if let Some(id) = main_id {
-            let _ = self
-                .window
-                .update(crate::window_geometry::WindowGeometryMsg::MainWindowOpened(id));
+            let _ =
+                self.window
+                    .update(crate::window_geometry::WindowGeometryMsg::MainWindowOpened(
+                        id,
+                    ));
         }
 
         // Kick off async data loads; `DataRestoredFromStartup` preserves

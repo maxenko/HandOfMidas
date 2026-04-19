@@ -17,8 +17,8 @@ use midas_chart::widget::order_bracket::{
 };
 use midas_chart::widget::AnnotationId;
 
+use crate::annotation_store::StoredLevel;
 use crate::app::ToastAction;
-use crate::level_store::StoredLevel;
 use crate::order_panel::OrderSide;
 
 use super::price_defaults::default_initial_prices;

@@ -32,12 +32,11 @@ use midas_chart::level_tool::LevelTool;
 #[allow(unused_imports)]
 use midas_chart::levels::HorizontalLevel;
 
-use crate::level_store::StoredLevel;
 use midas_chart::scene::ChartScene;
 use midas_chart::state::{ChartState, InteractionMode};
 use midas_chart::widget::hit_test::HitZoneKind;
 use midas_chart::widget::order_bracket::BracketStatus;
-use midas_chart::widget::{Annotation, AnnotationKind, Presence};
+use midas_chart::widget::{Annotation, AnnotationKind};
 use midas_chart::{
     compute_chart_scene, AnnotationId, CandleInstance, CrosshairRender, GridLineInstance,
     VolumeInstance,
@@ -69,10 +68,11 @@ pub struct ChartRenderSnapshot {
     pub dirty: DirtyFlags,
     /// Crosshair position in chart-local pixels.
     pub crosshair_pos: Option<(f32, f32)>,
-    /// Horizontal price levels (with wrapper-held lock state).
-    pub levels: Vec<StoredLevel>,
-    /// Order bracket annotations from the AnnotationStore.
-    pub bracket_annotations: Vec<Annotation>,
+    /// Every annotation for this chart's symbol (levels + brackets +
+    /// future kinds) pulled verbatim from `AnnotationStore`. The widget
+    /// layer dispatches on [`AnnotationKind`] during hit-testing and
+    /// scene build; non-interactive kinds fall through naturally.
+    pub annotations: Vec<Annotation>,
     /// Viewport width in logical pixels.
     pub viewport_width: u32,
     /// Viewport height in logical pixels.
@@ -166,33 +166,18 @@ pub struct ChartWidgetState {
 
 /// Find the interactive annotation element (if any) at the given cursor Y.
 ///
-/// Checks all annotation types: levels (`LevelLine`), bracket legs
-/// (`BracketTP`, `BracketSL`, `BracketEntry`, `BracketStopTrigger`).
-/// Returns the closest within 6px tolerance.
+/// Checks every annotation kind in the unified slice: levels
+/// (`LevelLine`), bracket legs (`BracketTP`, `BracketSL`, `BracketEntry`,
+/// `BracketStopTrigger`). Returns the closest within 6px tolerance.
 ///
-/// TODO: Replace with `midas_chart::interaction::hit_test_annotation` once
-/// the chart_widget snapshot uses a unified `Vec<Annotation>` that includes
-/// levels as `AnnotationKind::Level` instead of separate `StoredLevel[]`.
-/// The two functions have the same guards and tolerance (6 px), but diverge
-/// in three ways:
-///
-/// - **Input model**: this function takes separate `levels: &[StoredLevel]`
-///   plus bracket-only `&[Annotation]`; the chart-crate version takes a
-///   unified `&[Annotation]` slice.
-/// - **Return type**: the chart-crate version returns an extra `f64`
-///   offset and `Option<BracketClampCtx>` needed for drag clamping;
-///   this function only returns `(AnnotationId, HitZoneKind)`.
-/// - **Tie-breaking**: the chart-crate version uses priority-based
-///   disambiguation (`leg_priority()` + `BRACKET_TIE_EPSILON_PX`)
-///   for overlapping bracket legs; this function uses naive "strictly
-///   closer" ordering.
-///
-/// Unifying requires migrating `ChartRenderSnapshot` to carry a single
-/// `Vec<Annotation>` that includes levels, at which point this function
-/// can delegate to the chart-crate version and discard the extras.
+/// TODO: Replace with `midas_chart::interaction::hit_test_annotation`.
+/// The chart-crate version has the same guards and tolerance (6 px), but
+/// also returns an extra `f64` offset and `Option<BracketClampCtx>` for
+/// drag clamping, and uses priority-based disambiguation
+/// (`leg_priority()` + `BRACKET_TIE_EPSILON_PX`) for overlapping bracket
+/// legs; this function uses naive "strictly closer" ordering.
 fn annotation_at_cursor(
     annotations: &[Annotation],
-    levels: &[StoredLevel],
     camera: &Camera2D,
     cursor_y: f32,
 ) -> Option<(AnnotationId, HitZoneKind)> {
@@ -201,50 +186,49 @@ fn annotation_at_cursor(
     let mut best: Option<(AnnotationId, HitZoneKind, f32)> = None;
     let tolerance = 6.0_f32;
 
-    // Check levels (from old LevelStore — still using bridge).
-    for entry in levels {
-        if entry.locked {
-            continue;
-        }
-        let dist = (cursor_y - camera.price_to_y(entry.line.price)).abs();
-        if dist <= tolerance && best.as_ref().is_none_or(|b| dist < b.2) {
-            best = Some((AnnotationId(entry.id), HitZoneKind::LevelLine, dist));
-        }
-    }
-
-    // Check bracket annotations.
     for ann in annotations {
         if !ann.presence.is_interactive() || ann.locked {
             continue;
         }
-        if let AnnotationKind::OrderBracket(ref bracket) = ann.kind {
-            if let Some(ref tp) = bracket.take_profit {
-                let dist = (cursor_y - camera.price_to_y(tp.line.price)).abs();
+        match &ann.kind {
+            AnnotationKind::Level(level) => {
+                let dist = (cursor_y - camera.price_to_y(level.line.price)).abs();
                 if dist <= tolerance && best.as_ref().is_none_or(|b| dist < b.2) {
-                    best = Some((ann.id, HitZoneKind::BracketTP, dist));
+                    best = Some((ann.id, HitZoneKind::LevelLine, dist));
                 }
             }
-            if let Some(ref sl) = bracket.stop_loss {
-                let dist = (cursor_y - camera.price_to_y(sl.line.price)).abs();
-                if dist <= tolerance && best.as_ref().is_none_or(|b| dist < b.2) {
-                    best = Some((ann.id, HitZoneKind::BracketSL, dist));
-                }
-            }
-            if bracket.entry_type != EntryType::Market && bracket.status == BracketStatus::Draft {
-                let dist = (cursor_y - camera.price_to_y(bracket.entry.line.price)).abs();
-                if dist <= tolerance && best.as_ref().is_none_or(|b| dist < b.2) {
-                    best = Some((ann.id, HitZoneKind::BracketEntry, dist));
-                }
-            }
-            if bracket.entry_type == EntryType::StopLimit && bracket.status == BracketStatus::Draft
-            {
-                if let Some(stop_price) = bracket.entry_stop_price {
-                    let dist = (cursor_y - camera.price_to_y(stop_price)).abs();
+            AnnotationKind::OrderBracket(bracket) => {
+                if let Some(ref tp) = bracket.take_profit {
+                    let dist = (cursor_y - camera.price_to_y(tp.line.price)).abs();
                     if dist <= tolerance && best.as_ref().is_none_or(|b| dist < b.2) {
-                        best = Some((ann.id, HitZoneKind::BracketStopTrigger, dist));
+                        best = Some((ann.id, HitZoneKind::BracketTP, dist));
+                    }
+                }
+                if let Some(ref sl) = bracket.stop_loss {
+                    let dist = (cursor_y - camera.price_to_y(sl.line.price)).abs();
+                    if dist <= tolerance && best.as_ref().is_none_or(|b| dist < b.2) {
+                        best = Some((ann.id, HitZoneKind::BracketSL, dist));
+                    }
+                }
+                if bracket.entry_type != EntryType::Market && bracket.status == BracketStatus::Draft
+                {
+                    let dist = (cursor_y - camera.price_to_y(bracket.entry.line.price)).abs();
+                    if dist <= tolerance && best.as_ref().is_none_or(|b| dist < b.2) {
+                        best = Some((ann.id, HitZoneKind::BracketEntry, dist));
+                    }
+                }
+                if bracket.entry_type == EntryType::StopLimit
+                    && bracket.status == BracketStatus::Draft
+                {
+                    if let Some(stop_price) = bracket.entry_stop_price {
+                        let dist = (cursor_y - camera.price_to_y(stop_price)).abs();
+                        if dist <= tolerance && best.as_ref().is_none_or(|b| dist < b.2) {
+                            best = Some((ann.id, HitZoneKind::BracketStopTrigger, dist));
+                        }
                     }
                 }
             }
+            _ => {}
         }
     }
     best.map(|(id, kind, _)| (id, kind))
@@ -259,27 +243,24 @@ fn annotation_at_cursor(
 /// `widget/order_bracket/decorators.rs`. Horizontal levels report group
 /// 0 (the right-edge price badge). Other annotation kinds have no
 /// decorator groups today.
-fn decorator_group_ids_for_annotation(
-    aid: AnnotationId,
-    bracket_annotations: &[Annotation],
-    levels: &[StoredLevel],
-) -> Vec<u16> {
-    if levels.iter().any(|entry| AnnotationId(entry.id) == aid) {
-        return vec![0];
-    }
-    for ann in bracket_annotations {
+fn decorator_group_ids_for_annotation(aid: AnnotationId, annotations: &[Annotation]) -> Vec<u16> {
+    for ann in annotations {
         if ann.id != aid {
             continue;
         }
-        if let AnnotationKind::OrderBracket(bracket) = &ann.kind {
-            let mut groups = vec![0u16];
-            if bracket.take_profit.is_some() {
-                groups.push(1);
+        match &ann.kind {
+            AnnotationKind::Level(_) => return vec![0],
+            AnnotationKind::OrderBracket(bracket) => {
+                let mut groups = vec![0u16];
+                if bracket.take_profit.is_some() {
+                    groups.push(1);
+                }
+                if bracket.stop_loss.is_some() {
+                    groups.push(2);
+                }
+                return groups;
             }
-            if bracket.stop_loss.is_some() {
-                groups.push(2);
-            }
-            return groups;
+            _ => return Vec::new(),
         }
     }
     Vec::new()
@@ -298,8 +279,7 @@ fn decorator_group_ids_for_annotation(
 fn recompute_hit_zones_for_group(
     aid: AnnotationId,
     group_id: u16,
-    bracket_annotations: &[Annotation],
-    levels: &[StoredLevel],
+    annotations: &[Annotation],
     camera: &Camera2D,
 ) -> Vec<midas_chart::widget::hit_test::HitZone> {
     use midas_chart::widget::compute::{ComputeContext, Viewport};
@@ -337,19 +317,18 @@ fn recompute_hit_zones_for_group(
         pinned: false,
     };
 
-    // Horizontal level path: check legacy LevelStore first.
-    if let Some(entry) = levels.iter().find(|e| AnnotationId(e.id) == aid) {
-        let groups = entry.level.to_decorators(entry.locked);
-        if let Some(group) = groups.into_iter().find(|g| g.group_id == group_id) {
-            return compute_decorator_group(&group, &entry.level.line, aid, &ctx, 1.0).hit_zones;
-        }
-        return Vec::new();
-    }
-
-    // Bracket path.
-    for ann in bracket_annotations {
+    // Unified annotation dispatch: find the matching annotation and
+    // branch on its kind.
+    for ann in annotations {
         if ann.id != aid {
             continue;
+        }
+        if let AnnotationKind::Level(level) = &ann.kind {
+            let groups = level.to_decorators(ann.locked);
+            if let Some(group) = groups.into_iter().find(|g| g.group_id == group_id) {
+                return compute_decorator_group(&group, &level.line, aid, &ctx, 1.0).hit_zones;
+            }
+            return Vec::new();
         }
         if let AnnotationKind::OrderBracket(bracket) = &ann.kind {
             match group_id {
@@ -577,12 +556,7 @@ impl shader::Program<Message> for ChartProgram {
         {
             let cursor_pos = cursor.position_in(bounds);
             let line_hover = cursor_pos.and_then(|pos| {
-                annotation_at_cursor(
-                    &self.snapshot.bracket_annotations,
-                    &self.snapshot.levels,
-                    &chart_state.camera,
-                    pos.y,
-                )
+                annotation_at_cursor(&self.snapshot.annotations, &chart_state.camera, pos.y)
             });
 
             // Step 1 of the recompute: seed with every decorator group
@@ -591,11 +565,7 @@ impl shader::Program<Message> for ChartProgram {
                 smallvec::SmallVec::new();
             if let (Some(pos), Some((aid, _))) = (cursor_pos, line_hover) {
                 let _ = pos;
-                for gid in decorator_group_ids_for_annotation(
-                    aid,
-                    &self.snapshot.bracket_annotations,
-                    &self.snapshot.levels,
-                ) {
+                for gid in decorator_group_ids_for_annotation(aid, &self.snapshot.annotations) {
                     new_groups.push((aid, gid));
                 }
             }
@@ -615,8 +585,7 @@ impl shader::Program<Message> for ChartProgram {
                     let zones = recompute_hit_zones_for_group(
                         aid,
                         gid,
-                        &self.snapshot.bracket_annotations,
-                        &self.snapshot.levels,
+                        &self.snapshot.annotations,
                         &chart_state.camera,
                     );
                     for z in &zones {
@@ -652,12 +621,6 @@ impl shader::Program<Message> for ChartProgram {
         let mut messages: Vec<Message> = Vec::new();
         let mut captured = false;
 
-        // Convert old HorizontalLevel snapshots to Annotation for handle_event,
-        // then append bracket annotations from the AnnotationStore.
-        let mut event_annotations: Vec<Annotation> =
-            old_levels_to_annotations(&self.snapshot.levels);
-        event_annotations.extend(self.snapshot.bracket_annotations.iter().cloned());
-
         for chart_event in chart_events {
             let data_ref = self
                 .snapshot
@@ -670,7 +633,7 @@ impl shader::Program<Message> for ChartProgram {
                 chart_event,
                 data_ref,
                 is_collapsed,
-                &event_annotations,
+                &self.snapshot.annotations,
             );
             for action in &actions {
                 // Apply volume scale locally so the triangle moves
@@ -813,27 +776,34 @@ impl shader::Program<Message> for ChartProgram {
             dirty.crosshair += 1;
         }
 
-        // Build levels with drag override applied for immediate visual feedback.
-        let effective_levels: Vec<StoredLevel> = if snap.show_levels {
-            if let Some((drag_id, drag_price)) = state.drag_price_override {
-                snap.levels
-                    .iter()
-                    .map(|entry| {
-                        if entry.id == drag_id {
-                            let mut clone = entry.clone();
-                            clone.level.line.price = drag_price;
-                            clone
-                        } else {
-                            entry.clone()
+        // Build the unified annotation slice fed into `ChartInput`.
+        //
+        // - When `show_levels` is off, `AnnotationKind::Level` entries
+        //   are filtered out while other kinds (brackets, etc.) still
+        //   render.
+        // - The widget's local `drag_price_override` overrides the level
+        //   price on the dragging chart for immediate visual feedback
+        //   before the message round-trip updates `AnnotationStore`.
+        let effective_annotations: Vec<Annotation> = snap
+            .annotations
+            .iter()
+            .filter_map(|ann| match &ann.kind {
+                AnnotationKind::Level(_) if !snap.show_levels => None,
+                AnnotationKind::Level(level) => {
+                    if let Some((drag_id, drag_price)) = state.drag_price_override {
+                        if level.id == drag_id {
+                            let mut clone = ann.clone();
+                            if let AnnotationKind::Level(ref mut l) = clone.kind {
+                                l.line.price = drag_price;
+                            }
+                            return Some(clone);
                         }
-                    })
-                    .collect()
-            } else {
-                snap.levels.clone()
-            }
-        } else {
-            Vec::new()
-        };
+                    }
+                    Some(ann.clone())
+                }
+                _ => Some(ann.clone()),
+            })
+            .collect();
 
         // Two-source drag resolution:
         //   1. `state.drag_price_override` — set by the widget that's
@@ -852,10 +822,13 @@ impl shader::Program<Message> for ChartProgram {
             .map(|(id, _)| id)
             .or(snap.dragging_annotation_id)
             .and_then(|drag_id| {
-                snap.levels
-                    .iter()
-                    .find(|l| l.id == drag_id)
-                    .map(|l| (midas_chart::widget::AnnotationId(l.id), l.line.price))
+                snap.annotations.iter().find_map(|ann| match &ann.kind {
+                    AnnotationKind::Level(level) if level.id == drag_id => Some((
+                        midas_chart::widget::AnnotationId(level.id),
+                        level.line.price,
+                    )),
+                    _ => None,
+                })
             });
 
         // Build the level tool for chart scene computation.
@@ -872,12 +845,6 @@ impl shader::Program<Message> for ChartProgram {
         if !is_placing_source {
             effective_level_tool.preview_price = None;
         }
-
-        // Convert effective old-style levels to Annotation for ChartInput,
-        // then append bracket annotations from the AnnotationStore.
-        let mut effective_annotations: Vec<Annotation> =
-            old_levels_to_annotations(&effective_levels);
-        effective_annotations.extend(snap.bracket_annotations.iter().cloned());
 
         let input = ChartInput {
             symbol: &snap.symbol,
@@ -996,14 +963,7 @@ impl shader::Program<Message> for ChartProgram {
             // Unified cursor change for all interactive annotation elements
             // (levels + bracket legs).
             if let Some(cs) = &state.chart_state {
-                if annotation_at_cursor(
-                    &self.snapshot.bracket_annotations,
-                    &self.snapshot.levels,
-                    &cs.camera,
-                    pos.y,
-                )
-                .is_some()
-                {
+                if annotation_at_cursor(&self.snapshot.annotations, &cs.camera, pos.y).is_some() {
                     return mouse::Interaction::ResizingVertically;
                 }
             }
@@ -1542,31 +1502,6 @@ fn action_to_message(
     _camera: &Camera2D,
 ) -> Option<Message> {
     Some(Message::Chart(chart_id, action.clone()))
-}
-
-// ── Old-level-to-annotation bridge ───────────────────────────────────
-
-/// Convert a slice of `StoredLevel` (from the legacy `LevelStore`)
-/// into `Annotation` values for the widget system. Used during the
-/// migration period while the app still stores bare levels in
-/// `LevelStore` outside of an `AnnotationStore`. Each `StoredLevel`
-/// already owns a post-Slice-7 `HorizontalLevel` (with `PriceLine` +
-/// decorators); the only data we need to rehydrate here is the
-/// wrapper-held `locked` flag, which the decorator pipeline reads off
-/// `Annotation.locked`.
-fn old_levels_to_annotations(levels: &[StoredLevel]) -> Vec<Annotation> {
-    levels
-        .iter()
-        .map(|entry| Annotation {
-            id: AnnotationId(entry.id),
-            kind: AnnotationKind::Level(entry.level.clone()),
-            presence: Presence::Active,
-            visible_timeframes: None,
-            locked: entry.locked,
-            created_at: 0,
-            modified_at: 0,
-        })
-        .collect()
 }
 
 // ── Crosshair line conversion ─────────────────────────────────────────

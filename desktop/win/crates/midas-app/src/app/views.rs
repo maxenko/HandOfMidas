@@ -112,7 +112,6 @@ impl MidasApp {
                 camera: chart.chart_state.camera.clone(),
                 dirty: chart.chart_state.dirty.clone(),
                 crosshair_pos: chart.chart_state.crosshair.render_pos(),
-                levels: self.level_store.levels_for(&chart.symbol).to_vec(),
                 viewport_width: chart.chart_state.camera.viewport_width,
                 viewport_height: chart.chart_state.camera.viewport_height,
                 collapse_gaps: chart.chart_state.collapse_gaps,
@@ -143,15 +142,7 @@ impl MidasApp {
                     },
                 ),
                 placing_cursor_chart: self.placing_preview.as_ref().map(|(id, _, _)| *id),
-                bracket_annotations: self
-                    .annotation_store
-                    .get(&chart.symbol)
-                    .iter()
-                    .filter(|a| {
-                        matches!(a.kind, midas_chart::widget::AnnotationKind::OrderBracket(_))
-                    })
-                    .cloned()
-                    .collect(),
+                annotations: self.annotation_store.get(&chart.symbol).to_vec(),
                 gatr_bright_ranges: if chart.gatr_hover && chart.timeframe == Timeframe::D1 {
                     chart
                         .data
@@ -213,7 +204,7 @@ impl MidasApp {
             chart_layers.push(drawing_panel);
 
             // Level editor popup (when a level is being edited).
-            let store_levels = self.level_store.levels_for(&chart.symbol);
+            let store_levels = self.annotation_store.levels_for(&chart.symbol);
             if let (Some(editing_id), Some(screen_pos)) =
                 (chart.editing_level_id, chart.editing_level_screen_pos)
             {
@@ -805,7 +796,6 @@ impl MidasApp {
                 camera: chart.chart_state.camera.clone(),
                 dirty: chart.chart_state.dirty.clone(),
                 crosshair_pos: chart.chart_state.crosshair.render_pos(),
-                levels: self.level_store.levels_for(&chart.symbol).to_vec(),
                 viewport_width: chart.chart_state.camera.viewport_width,
                 viewport_height: chart.chart_state.camera.viewport_height,
                 collapse_gaps: chart.chart_state.collapse_gaps,
@@ -836,15 +826,7 @@ impl MidasApp {
                     },
                 ),
                 placing_cursor_chart: self.placing_preview.as_ref().map(|(id, _, _)| *id),
-                bracket_annotations: self
-                    .annotation_store
-                    .get(&chart.symbol)
-                    .iter()
-                    .filter(|a| {
-                        matches!(a.kind, midas_chart::widget::AnnotationKind::OrderBracket(_))
-                    })
-                    .cloned()
-                    .collect(),
+                annotations: self.annotation_store.get(&chart.symbol).to_vec(),
                 gatr_bright_ranges: if chart.gatr_hover && chart.timeframe == Timeframe::D1 {
                     chart
                         .data
@@ -898,7 +880,7 @@ impl MidasApp {
             chart_layers.push(drawing_panel);
 
             // Level editor popup (when a level is being edited).
-            let store_levels = self.level_store.levels_for(&chart.symbol);
+            let store_levels = self.annotation_store.levels_for(&chart.symbol);
             if let (Some(editing_id), Some(screen_pos)) =
                 (chart.editing_level_id, chart.editing_level_screen_pos)
             {
@@ -3261,7 +3243,7 @@ fn build_drawing_panel<'a>(chart_id: ChartId, is_placing: bool) -> Element<'a, M
 /// thickness buttons, icon selector, lock toggle, and delete button.
 fn build_level_editor<'a>(
     chart_id: ChartId,
-    level: &crate::level_store::StoredLevel,
+    level: &crate::annotation_store::StoredLevel,
     screen_pos: (f32, f32),
     price_input: &str,
     viewport_width: u32,

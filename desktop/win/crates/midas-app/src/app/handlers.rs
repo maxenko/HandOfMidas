@@ -459,9 +459,7 @@ impl MidasApp {
             ChartAction::Pan { dx, dy } => {
                 self.focus_chart(chart_id);
                 if let Some(chart) = self.charts.get_mut(&chart_id) {
-                    chart
-                        .chart_state
-                        .apply_action(&ChartAction::Pan { dx, dy });
+                    chart.chart_state.apply_action(&ChartAction::Pan { dx, dy });
                     chart.camera_restored_pending = false;
                 }
                 self.save_camera_for_chart(chart_id);
@@ -498,18 +496,16 @@ impl MidasApp {
                 self.mark_config_dirty();
                 Task::none()
             }
-            ChartAction::SetCrosshair { x, y } => {
-                self.apply_crosshair(chart_id, Some((x, y)))
-            }
+            ChartAction::SetCrosshair { x, y } => self.apply_crosshair(chart_id, Some((x, y))),
             ChartAction::ClearCrosshair => self.apply_crosshair(chart_id, None),
             ChartAction::CreateLevel { price } => {
                 self.focus_chart(chart_id);
                 let ticker = self.chart_ticker(chart_id).map(str::to_owned);
                 if let Some(ticker) = ticker {
-                    let level_id = self.level_store.alloc_id();
-                    self.level_store.add_level(
+                    let level_id = self.annotation_store.alloc_level_id();
+                    self.annotation_store.add_level(
                         &ticker,
-                        crate::level_store::StoredLevel {
+                        crate::annotation_store::StoredLevel {
                             level: midas_chart::levels::HorizontalLevel {
                                 id: level_id,
                                 line: midas_chart::widget::price_line::PriceLine {
@@ -553,7 +549,7 @@ impl MidasApp {
             ChartAction::RightClickLevel { id, x, y } => {
                 self.focus_chart(chart_id);
                 let price_str = self
-                    .level_store
+                    .annotation_store
                     .find_level(id.0)
                     .map(|(_, l)| midas_chart::format_price(l.line.price));
                 if let Some(chart) = self.charts.get_mut(&chart_id) {
@@ -570,9 +566,10 @@ impl MidasApp {
             ChartAction::DragLevel { id, new_price } => {
                 let ticker = self.chart_ticker(chart_id).map(str::to_owned);
                 if let Some(ticker) = ticker {
-                    if let Some(level) = self.level_store.find_level_mut(&ticker, id.0) {
-                        level.line.price = new_price;
-                    }
+                    self.annotation_store
+                        .update_level(&ticker, id.0, |level, _locked| {
+                            level.line.price = new_price;
+                        });
                     self.mark_levels_dirty_for_ticker(&ticker);
                     self.mark_config_dirty();
                 }
@@ -598,13 +595,13 @@ impl MidasApp {
                 if let (Some(ticker), Some(chart)) = (ticker, self.charts.get_mut(&chart_id)) {
                     if let Some(sel_id) = chart.chart_state.selected_level {
                         let is_locked = self
-                            .level_store
+                            .annotation_store
                             .levels_for(&ticker)
                             .iter()
                             .any(|l| l.id == sel_id.0 && l.locked);
                         if !is_locked {
                             chart.chart_state.selected_level = None;
-                            self.level_store.remove_level(&ticker, sel_id.0);
+                            self.annotation_store.remove_level(&ticker, sel_id.0);
                             self.mark_levels_dirty_for_ticker(&ticker);
                             self.mark_config_dirty();
                         }
@@ -661,9 +658,7 @@ impl MidasApp {
                         self.handle_chart_bracket_submit(chart_id, annotation_id)
                     }
                     DecoratorAction::Save => self.handle_chart_bracket_save(annotation_id),
-                    DecoratorAction::TogglePin => {
-                        self.handle_chart_bracket_toggle_pin(chart_id)
-                    }
+                    DecoratorAction::TogglePin => self.handle_chart_bracket_toggle_pin(chart_id),
                     DecoratorAction::CreateTakeProfit
                     | DecoratorAction::CycleEntryType
                     | DecoratorAction::EditQuantity
@@ -688,11 +683,7 @@ impl MidasApp {
     /// `ChartAction::SetCrosshair` and `ChartAction::ClearCrosshair`
     /// because both fold into a single `Option<(f32,f32)>` mutation
     /// + the cross-chart sync update.
-    fn apply_crosshair(
-        &mut self,
-        chart_id: ChartId,
-        pos: Option<(f32, f32)>,
-    ) -> Task<Message> {
+    fn apply_crosshair(&mut self, chart_id: ChartId, pos: Option<(f32, f32)>) -> Task<Message> {
         if pos.is_some() {
             self.focus_chart(chart_id);
         }
@@ -714,8 +705,8 @@ impl MidasApp {
                         let cam = &chart.chart_state.camera;
                         let ts = if chart.chart_state.collapse_gaps {
                             let idx_f = cam.x_to_time(x);
-                            let idx = (idx_f.round().max(0.0) as usize)
-                                .min(data.len().saturating_sub(1));
+                            let idx =
+                                (idx_f.round().max(0.0) as usize).min(data.len().saturating_sub(1));
                             data.timestamps[idx]
                         } else {
                             let cursor_time = cam.x_to_time(x);
@@ -723,8 +714,7 @@ impl MidasApp {
                             data.timestamps[idx]
                         };
                         let price = cam.y_to_price(y);
-                        self.crosshair_sync =
-                            Some((chart_id, ts, price, chart.symbol.clone()));
+                        self.crosshair_sync = Some((chart_id, ts, price, chart.symbol.clone()));
                     }
                 }
             }
@@ -789,7 +779,7 @@ impl MidasApp {
             Message::ChartClearAllLevels(chart_id) => {
                 let ticker = self.chart_ticker(chart_id).map(str::to_owned);
                 if let Some(ticker) = ticker {
-                    self.level_store.clear_levels(&ticker);
+                    self.annotation_store.clear_levels(&ticker);
                     self.mark_levels_dirty_for_ticker(&ticker);
                     // Clear selection and editor on all charts for this ticker.
                     for chart in self.charts.values_mut() {
@@ -816,12 +806,12 @@ impl MidasApp {
                 let ticker = self.chart_ticker(chart_id).map(str::to_owned);
                 if let Some(ticker) = ticker {
                     let is_locked = self
-                        .level_store
+                        .annotation_store
                         .levels_for(&ticker)
                         .iter()
                         .any(|l| l.id == level_id && l.locked);
                     if !is_locked {
-                        self.level_store.remove_level(&ticker, level_id);
+                        self.annotation_store.remove_level(&ticker, level_id);
                         self.mark_levels_dirty_for_ticker(&ticker);
                         if let Some(chart) = self.charts.get_mut(&chart_id) {
                             chart.editing_level_id = None;
@@ -840,9 +830,10 @@ impl MidasApp {
                 let ticker = self.chart_ticker(chart_id).map(str::to_owned);
                 if let Some(ticker) = ticker {
                     if let Ok(price) = text.parse::<f64>() {
-                        if let Some(level) = self.level_store.find_level_mut(&ticker, level_id) {
-                            level.line.price = price;
-                        }
+                        self.annotation_store
+                            .update_level(&ticker, level_id, |level, _| {
+                                level.line.price = price;
+                            });
                         self.mark_levels_dirty_for_ticker(&ticker);
                         self.mark_config_dirty();
                     }
@@ -853,9 +844,14 @@ impl MidasApp {
             Message::LevelEditorPriceStep(chart_id, level_id, delta) => {
                 let ticker = self.chart_ticker(chart_id).map(str::to_owned);
                 if let Some(ticker) = ticker {
-                    if let Some(level) = self.level_store.find_level_mut(&ticker, level_id) {
-                        level.line.price += delta;
-                        let price_str = midas_chart::format_price(level.line.price);
+                    let mut new_price: Option<f64> = None;
+                    self.annotation_store
+                        .update_level(&ticker, level_id, |level, _| {
+                            level.line.price += delta;
+                            new_price = Some(level.line.price);
+                        });
+                    if let Some(price) = new_price {
+                        let price_str = midas_chart::format_price(price);
                         if let Some(chart) = self.charts.get_mut(&chart_id) {
                             chart.level_editor_price_input = price_str;
                         }
@@ -869,13 +865,14 @@ impl MidasApp {
             Message::LevelEditorLabelChanged(chart_id, level_id, label_text) => {
                 let ticker = self.chart_ticker(chart_id).map(str::to_owned);
                 if let Some(ticker) = ticker {
-                    if let Some(level) = self.level_store.find_level_mut(&ticker, level_id) {
-                        level.label = if label_text.is_empty() {
-                            None
-                        } else {
-                            Some(label_text)
-                        };
-                    }
+                    self.annotation_store
+                        .update_level(&ticker, level_id, |level, _| {
+                            level.label = if label_text.is_empty() {
+                                None
+                            } else {
+                                Some(label_text.clone())
+                            };
+                        });
                     self.mark_levels_dirty_for_ticker(&ticker);
                     self.mark_config_dirty();
                 }
@@ -885,9 +882,10 @@ impl MidasApp {
             Message::LevelEditorColorChanged(chart_id, level_id, color) => {
                 let ticker = self.chart_ticker(chart_id).map(str::to_owned);
                 if let Some(ticker) = ticker {
-                    if let Some(level) = self.level_store.find_level_mut(&ticker, level_id) {
-                        level.line.stroke.color = color;
-                    }
+                    self.annotation_store
+                        .update_level(&ticker, level_id, |level, _| {
+                            level.line.stroke.color = color;
+                        });
                     self.mark_levels_dirty_for_ticker(&ticker);
                     self.mark_config_dirty();
                 }
@@ -897,9 +895,10 @@ impl MidasApp {
             Message::LevelEditorThicknessChanged(chart_id, level_id, thickness) => {
                 let ticker = self.chart_ticker(chart_id).map(str::to_owned);
                 if let Some(ticker) = ticker {
-                    if let Some(level) = self.level_store.find_level_mut(&ticker, level_id) {
-                        level.line.stroke.width = thickness;
-                    }
+                    self.annotation_store
+                        .update_level(&ticker, level_id, |level, _| {
+                            level.line.stroke.width = thickness;
+                        });
                     self.mark_levels_dirty_for_ticker(&ticker);
                     self.mark_config_dirty();
                 }
@@ -909,9 +908,10 @@ impl MidasApp {
             Message::LevelEditorIconChanged(chart_id, level_id, icon) => {
                 let ticker = self.chart_ticker(chart_id).map(str::to_owned);
                 if let Some(ticker) = ticker {
-                    if let Some(level) = self.level_store.find_level_mut(&ticker, level_id) {
-                        level.icon = icon;
-                    }
+                    self.annotation_store
+                        .update_level(&ticker, level_id, |level, _| {
+                            level.icon = icon;
+                        });
                     self.mark_levels_dirty_for_ticker(&ticker);
                     self.mark_config_dirty();
                 }
@@ -921,9 +921,10 @@ impl MidasApp {
             Message::LevelEditorToggleLock(chart_id, level_id) => {
                 let ticker = self.chart_ticker(chart_id).map(str::to_owned);
                 if let Some(ticker) = ticker {
-                    if let Some(level) = self.level_store.find_level_mut(&ticker, level_id) {
-                        level.locked = !level.locked;
-                    }
+                    self.annotation_store
+                        .update_level(&ticker, level_id, |_, locked| {
+                            *locked = !*locked;
+                        });
                     self.mark_levels_dirty_for_ticker(&ticker);
                     self.mark_config_dirty();
                 }
@@ -2848,7 +2849,10 @@ impl MidasApp {
         &mut self,
         msg: crate::window_geometry::WindowGeometryMsg,
     ) -> Task<Message> {
-        if matches!(msg, crate::window_geometry::WindowGeometryMsg::MainWindowOpened(_)) {
+        if matches!(
+            msg,
+            crate::window_geometry::WindowGeometryMsg::MainWindowOpened(_)
+        ) {
             tracing::info!("Main window opened (routed via WindowGeometry)");
         }
         let effects = self.window.update(msg);
@@ -3025,9 +3029,8 @@ impl MidasApp {
                 "Bracket drawn on chart: {annotation_id} for {ticker} \
                  ({side:?} entry={entry:.2} tp={tp:.2} sl={sl:.2})"
             );
-            self.status_message = format!(
-                "Bracket placed on {ticker} ({side:?} E={entry:.2} TP={tp:.2} SL={sl:.2})"
-            );
+            self.status_message =
+                format!("Bracket placed on {ticker} ({side:?} E={entry:.2} TP={tp:.2} SL={sl:.2})");
         }
         Task::none()
     }
@@ -3055,12 +3058,8 @@ impl MidasApp {
                     .values()
                     .find(|link| link.annotation_id == annotation_id.0)
                     .and_then(|link| match leg {
-                        midas_chart::widget::order_bracket::LegRole::TakeProfit => {
-                            link.tp_order_id
-                        }
-                        midas_chart::widget::order_bracket::LegRole::StopLoss => {
-                            link.sl_order_id
-                        }
+                        midas_chart::widget::order_bracket::LegRole::TakeProfit => link.tp_order_id,
+                        midas_chart::widget::order_bracket::LegRole::StopLoss => link.sl_order_id,
                         _ => None,
                     });
                 if let Some(order_id) = order_id {
@@ -3107,9 +3106,7 @@ impl MidasApp {
             .iter()
             .find(|a| a.id == ann_id)
             .and_then(|a| match &a.kind {
-                midas_chart::widget::AnnotationKind::OrderBracket(b) => {
-                    Some(b.stop_loss.is_some())
-                }
+                midas_chart::widget::AnnotationKind::OrderBracket(b) => Some(b.stop_loss.is_some()),
                 _ => None,
             })
             .unwrap_or(false);
@@ -3199,9 +3196,7 @@ impl MidasApp {
             .iter()
             .find(|a| a.id == ann_id)
             .and_then(|a| match &a.kind {
-                midas_chart::widget::AnnotationKind::OrderBracket(b) => {
-                    Some(b.as_ref().clone())
-                }
+                midas_chart::widget::AnnotationKind::OrderBracket(b) => Some(b.as_ref().clone()),
                 _ => None,
             });
 
@@ -3234,12 +3229,8 @@ impl MidasApp {
             midas_chart::widget::order_bracket::EntryType::Market => {
                 midas_broker::OrderKind::Market
             }
-            midas_chart::widget::order_bracket::EntryType::Limit => {
-                midas_broker::OrderKind::Limit
-            }
-            midas_chart::widget::order_bracket::EntryType::Stop => {
-                midas_broker::OrderKind::Stop
-            }
+            midas_chart::widget::order_bracket::EntryType::Limit => midas_broker::OrderKind::Limit,
+            midas_chart::widget::order_bracket::EntryType::Stop => midas_broker::OrderKind::Stop,
             midas_chart::widget::order_bracket::EntryType::StopLimit => {
                 midas_broker::OrderKind::StopLimit
             }
@@ -3259,9 +3250,7 @@ impl MidasApp {
         };
 
         let action = match bracket.side {
-            midas_chart::widget::order_bracket::BracketSide::Long => {
-                midas_broker::OrderAction::Buy
-            }
+            midas_chart::widget::order_bracket::BracketSide::Long => midas_broker::OrderAction::Buy,
             midas_chart::widget::order_bracket::BracketSide::Short => {
                 midas_broker::OrderAction::Sell
             }
@@ -3285,13 +3274,12 @@ impl MidasApp {
                 action,
                 quantity,
                 outside_rth: false,
-                take_profit: bracket
-                    .take_profit
-                    .as_ref()
-                    .map(|tp| midas_broker::TakeProfitParams {
+                take_profit: bracket.take_profit.as_ref().map(|tp| {
+                    midas_broker::TakeProfitParams {
                         price: tp.line.price,
                         tif: None,
-                    }),
+                    }
+                }),
                 stop_loss: bracket
                     .stop_loss
                     .as_ref()
@@ -3327,8 +3315,7 @@ impl MidasApp {
                     }
                     if let Some(pid) = panel_id {
                         if let Some(p) = self.order_panels.get_mut(&pid) {
-                            p.state.errors =
-                                vec![("broker".into(), format!("Broker error: {e}"))];
+                            p.state.errors = vec![("broker".into(), format!("Broker error: {e}"))];
                         }
                     }
                     self.mark_levels_dirty_for_ticker(&symbol);
@@ -3775,10 +3762,7 @@ impl MidasApp {
     /// Collapse a [`crate::toast::Effect`] vector into a single
     /// `Task<Message>`. Pulled out so [`Self::dispatch_toast`] and the
     /// `Tick` handler share one interpretation site.
-    fn consume_toast_effects(
-        &mut self,
-        effects: Vec<crate::toast::Effect>,
-    ) -> Task<Message> {
+    fn consume_toast_effects(&mut self, effects: Vec<crate::toast::Effect>) -> Task<Message> {
         let mut tasks: Vec<Task<Message>> = Vec::new();
         for eff in effects {
             match eff {

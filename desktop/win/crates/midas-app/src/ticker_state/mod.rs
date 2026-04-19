@@ -31,8 +31,7 @@ use midas_chart::widget::order_bracket::{EntryType, OrderBracket};
 use midas_chart::widget::AnnotationId;
 use serde::{Deserialize, Serialize};
 
-use crate::annotation_store::SymbolKey;
-use crate::level_store::StoredLevel;
+use crate::annotation_store::{StoredLevel, SymbolKey};
 use crate::order_panel::{OrderSide, PriceInputMode, StopLossType};
 
 // ── Types formerly in ticker_order_intent ──────────────────────────
@@ -248,10 +247,13 @@ pub struct TickerState {
     #[serde(default)]
     live_annotation_id: Option<AnnotationId>,
 
-    // ── Levels (from LevelStore) ─────────────────────────────────
+    // ── Levels (legacy migration staging area) ───────────────────
     /// Price levels for this symbol. Not serialized because
     /// `StoredLevel` does not implement `Serialize`/`Deserialize`;
-    /// levels are migrated from TOML config in Slice 4.
+    /// levels are migrated from TOML config in Slice 4. Live
+    /// rendering reads from `AnnotationStore` (audit P2b) — this
+    /// field is kept as the one-way-door migration staging area
+    /// until Slice 4's TickerState-owned level path lands.
     #[serde(skip)]
     levels: Vec<StoredLevel>,
 

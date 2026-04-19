@@ -108,7 +108,7 @@ impl MidasApp {
                 mode: "dark".into(),
             },
             charts: chart_configs,
-            levels: self.level_store.to_config(),
+            levels: self.annotation_store.to_level_configs(),
             watchlists: watchlist_configs,
             order_panels: order_panel_configs,
             // Legacy vec stays empty — migration drained it at load time

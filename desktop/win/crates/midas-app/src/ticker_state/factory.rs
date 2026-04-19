@@ -6,7 +6,8 @@
 //! - [`TickerState::new_with_defaults`]: populates all 8 compound keys
 //!   with sensible bracket defaults derived from the current price.
 //! - [`TickerState::from_legacy`]: migration path from the old
-//!   `TickerOrderIntent` + `LevelStore` + `AnnotationStore` data.
+//!   `TickerOrderIntent` + `AnnotationStore` data (levels used to live
+//!   in a separate `LevelStore`; retired in audit P2b).
 
 use std::collections::HashMap;
 
@@ -14,8 +15,7 @@ use chrono::Utc;
 use midas_chart::widget::order_bracket::{EntryType, OrderBracket};
 use midas_chart::widget::AnnotationId;
 
-use crate::annotation_store::SymbolKey;
-use crate::level_store::StoredLevel;
+use crate::annotation_store::{StoredLevel, SymbolKey};
 use crate::order_panel::OrderSide;
 
 use super::price_defaults::default_initial_prices;
@@ -121,9 +121,9 @@ impl TickerState {
     /// Construct a ticker state from legacy data sources.
     ///
     /// Copies all fields from a v1 `TickerOrderIntentV1`, then overlays
-    /// levels, bracket, and annotation ID from `AnnotationStore` /
-    /// `LevelStore`. Last-write-wins: redb data (the intent) takes
-    /// priority for fields that exist in both sources.
+    /// levels, bracket, and annotation ID from `AnnotationStore`.
+    /// Last-write-wins: redb data (the intent) takes priority for
+    /// fields that exist in both sources.
     #[allow(dead_code)] // used by tests and v1 migration
     pub fn from_legacy(
         intent: TickerOrderIntentV1,
