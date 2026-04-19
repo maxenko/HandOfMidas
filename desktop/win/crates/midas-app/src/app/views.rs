@@ -3,7 +3,6 @@
 //! Builds the widget tree: toolbar, pane grid, title bars, chart body,
 //! status bar, and floating chart windows.
 
-use std::sync::Arc;
 
 use iced::widget::pane_grid::{self, PaneGrid};
 use iced::widget::{
@@ -101,100 +100,43 @@ impl MidasApp {
         wid: window::Id,
         chart: &'a ChartPanel,
     ) -> Element<'a, Message> {
-        // If data is loaded, render via GPU Shader widget.
-        if let Some(ref data) = chart.data {
-            // Compute G.ATR early so bright_ranges can be included in the snapshot.
-            let gerchik_atr = gatr_render_from_cache(&self.market_cache, &chart.symbol);
+        // Use ChartId(0) for floating windows -- they don't participate
+        // in the pane_grid's chart map. Same sentinel as the prior
+        // implementation; the snapshot's `placing_cursor_chart` and
+        // ghost-preview comparisons treat 0 as "not a real chart id".
+        let floating_chart_id = ChartId::new(0);
+        let link_picker_dim = match self.link_picker_open {
+            Some((PickerTarget::Floating(picker_wid), dim)) if picker_wid == wid => Some(dim),
+            _ => None,
+        };
 
-            let snapshot = crate::chart_widget::ChartRenderSnapshot {
-                symbol: chart.symbol.clone(),
-                data: Some(Arc::clone(data)),
-                camera: chart.chart_state.camera.clone(),
-                dirty: chart.chart_state.dirty.clone(),
-                crosshair_pos: chart.chart_state.crosshair.render_pos(),
-                levels: self.level_store.levels_for(&chart.symbol).to_vec(),
-                viewport_width: chart.chart_state.camera.viewport_width,
-                viewport_height: chart.chart_state.camera.viewport_height,
-                collapse_gaps: chart.chart_state.collapse_gaps,
-                timeline_border_ratio: chart.chart_state.timeline_border_ratio,
-                volume_scale: chart.chart_state.volume_scale,
-                show_volume_profile: chart.chart_state.show_volume_profile,
-                show_levels: chart.chart_state.show_levels,
-                data_time_start: chart.chart_state.data_time_start,
-                data_time_end: chart.chart_state.data_time_end,
-                editing_level_id: chart.editing_level_id,
-                dragging_annotation_id: self.dragging_annotation.map(|aid| aid.0),
-                level_tool: chart.chart_state.level_tool.clone(),
-                level_placing: self.level_placing,
-                ghost_crosshair: compute_ghost_crosshair(
-                    &self.crosshair_sync,
-                    ChartId::new(0),
-                    &chart.symbol,
-                    &chart.chart_state,
-                    chart.data.as_deref(),
-                ),
-                ghost_preview_price: self.placing_preview.as_ref().and_then(
-                    |(src_id, sym, price)| {
-                        if *src_id != ChartId::new(0) && chart.symbol == *sym {
-                            Some(*price)
-                        } else {
-                            None
-                        }
-                    },
-                ),
-                placing_cursor_chart: self.placing_preview.as_ref().map(|(id, _, _)| *id),
-                bracket_annotations: self
-                    .annotation_store
-                    .get(&chart.symbol)
-                    .iter()
-                    .filter(|a| {
-                        matches!(a.kind, midas_chart::widget::AnnotationKind::OrderBracket(_))
-                    })
-                    .cloned()
-                    .collect(),
-                gatr_bright_ranges: if chart.gatr_hover && chart.timeframe == Timeframe::D1 {
-                    chart
-                        .data
-                        .as_ref()
-                        .map_or(Vec::new(), |d| compute_daily_bright_ranges(d))
-                } else {
-                    Vec::new()
-                },
-                pinned: self
-                    .tickers
-                    .get(&crate::annotation_store::SymbolKey::new(&chart.symbol))
-                    .map(|ts| ts.pinned())
-                    .unwrap_or(false),
-            };
-            // Use ChartId(0) for floating windows -- they don't participate
-            // in the pane_grid's chart map.
+        // If data is loaded, render via GPU Shader widget.
+        if let Some(snapshot) = self.chart_render_snapshot_for(chart, floating_chart_id) {
+            let overlays = self.chart_pane_overlays_vm_for(chart, link_picker_dim);
+
+            // Re-borrow `data` for the crosshair-labels call below; the
+            // snapshot's own copy is consumed by the shader Program.
+            let data = chart
+                .data
+                .as_ref()
+                .expect("chart_render_snapshot_for returned Some => chart.data is Some");
+
             let program = crate::chart_widget::ChartProgram {
-                chart_id: ChartId::new(0),
+                chart_id: floating_chart_id,
                 snapshot,
             };
             let shader = crate::chart_widget::chart_shader(program);
 
-            // Timeline + priceline axis labels both render on GPU via
-            // `midas_render::pipelines::text::TextPipeline::draw_axis`,
-            // which sits BEFORE any annotation/decorator draw so axis
-            // text always lives at the back of the chart.
             let camera = &chart.chart_state.camera;
-
-            // Build level-related overlays for floating window.
-            let floating_chart_id = ChartId::new(0);
-            let drawing_panel = build_drawing_panel(floating_chart_id, self.level_placing);
+            let drawing_panel = build_drawing_panel(floating_chart_id, overlays.level_placing);
 
             let mut chart_layers: Vec<Element<'_, Message>> = vec![shader.into()];
 
             chart_layers.push(build_gerchik_atr_overlay(
-                gerchik_atr.as_ref(),
+                overlays.gatr.as_ref(),
                 floating_chart_id,
                 chart.timeframe == Timeframe::D1,
             ));
-
-            // Level text (price flag + icon/name) now renders on GPU
-            // via `midas_render::pipelines::text::TextPipeline`, fed
-            // by `scene.labels` forwarded from the decorator compute.
 
             // Crosshair axis labels for floating window.
             let crosshair_labels = midas_chart::compute_crosshair_labels(
@@ -212,46 +154,37 @@ impl MidasApp {
 
             chart_layers.push(drawing_panel);
 
-            // Level editor popup (when a level is being edited).
-            let store_levels = self.level_store.levels_for(&chart.symbol);
-            if let (Some(editing_id), Some(screen_pos)) =
-                (chart.editing_level_id, chart.editing_level_screen_pos)
-            {
-                if let Some(level) = store_levels.iter().find(|l| l.id == editing_id) {
-                    chart_layers.push(build_level_editor(
-                        floating_chart_id,
-                        level,
-                        screen_pos,
-                        &chart.level_editor_price_input,
-                        chart.chart_state.camera.viewport_width,
-                        chart.chart_state.camera.viewport_height,
-                    ));
-                }
+            if let Some(editor) = overlays.editing_level.as_ref() {
+                chart_layers.push(build_level_editor(
+                    floating_chart_id,
+                    &editor.level,
+                    editor.screen_pos,
+                    &editor.price_input,
+                    editor.viewport_width,
+                    editor.viewport_height,
+                ));
             }
 
-            // Link color picker overlay (when open for this floating chart).
-            if let Some((PickerTarget::Floating(picker_wid), dim)) = self.link_picker_open {
-                if picker_wid == wid {
-                    // Backdrop to dismiss picker on click outside.
-                    chart_layers.push(
-                        iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
-                            .on_press(Message::DismissLinkPicker)
-                            .into(),
-                    );
-                    let picker = self.build_link_picker(dim, move |mode| match dim {
-                        LinkDimension::Symbol => Message::FloatingSetSymbolLink(wid, mode),
-                        LinkDimension::Timeframe => Message::FloatingSetTimeframeLink(wid, mode),
-                    });
-                    chart_layers.push(
-                        container(picker)
-                            .align_x(iced::alignment::Horizontal::Right)
-                            .align_y(iced::alignment::Vertical::Top)
-                            .padding([4, 4])
-                            .width(Fill)
-                            .height(Fill)
-                            .into(),
-                    );
-                }
+            if let Some(dim) = overlays.link_picker_dim {
+                // Backdrop to dismiss picker on click outside.
+                chart_layers.push(
+                    iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
+                        .on_press(Message::DismissLinkPicker)
+                        .into(),
+                );
+                let picker = self.build_link_picker(dim, move |mode| match dim {
+                    LinkDimension::Symbol => Message::FloatingSetSymbolLink(wid, mode),
+                    LinkDimension::Timeframe => Message::FloatingSetTimeframeLink(wid, mode),
+                });
+                chart_layers.push(
+                    container(picker)
+                        .align_x(iced::alignment::Horizontal::Right)
+                        .align_y(iced::alignment::Vertical::Top)
+                        .padding([4, 4])
+                        .width(Fill)
+                        .height(Fill)
+                        .into(),
+                );
             }
 
             let chart_area = stack(chart_layers).width(Fill).height(Fill);
@@ -795,91 +728,32 @@ impl MidasApp {
             None => return self.view_empty_placeholder(),
         };
 
-        if let Some(ref data) = chart.data {
-            // Compute G.ATR early so bright_ranges can be included in the snapshot.
-            let gerchik_atr = gatr_render_from_cache(&self.market_cache, &chart.symbol);
+        if let Some(snapshot) = self.chart_render_snapshot(chart_id) {
+            let overlays = self
+                .chart_pane_overlays_vm(chart_id)
+                .expect("chart_render_snapshot returned Some => overlays VM also builds");
 
-            let snapshot = crate::chart_widget::ChartRenderSnapshot {
-                symbol: chart.symbol.clone(),
-                data: Some(Arc::clone(data)),
-                camera: chart.chart_state.camera.clone(),
-                dirty: chart.chart_state.dirty.clone(),
-                crosshair_pos: chart.chart_state.crosshair.render_pos(),
-                levels: self.level_store.levels_for(&chart.symbol).to_vec(),
-                viewport_width: chart.chart_state.camera.viewport_width,
-                viewport_height: chart.chart_state.camera.viewport_height,
-                collapse_gaps: chart.chart_state.collapse_gaps,
-                timeline_border_ratio: chart.chart_state.timeline_border_ratio,
-                volume_scale: chart.chart_state.volume_scale,
-                show_volume_profile: chart.chart_state.show_volume_profile,
-                show_levels: chart.chart_state.show_levels,
-                data_time_start: chart.chart_state.data_time_start,
-                data_time_end: chart.chart_state.data_time_end,
-                editing_level_id: chart.editing_level_id,
-                dragging_annotation_id: self.dragging_annotation.map(|aid| aid.0),
-                level_tool: chart.chart_state.level_tool.clone(),
-                level_placing: self.level_placing,
-                ghost_crosshair: compute_ghost_crosshair(
-                    &self.crosshair_sync,
-                    chart_id,
-                    &chart.symbol,
-                    &chart.chart_state,
-                    chart.data.as_deref(),
-                ),
-                ghost_preview_price: self.placing_preview.as_ref().and_then(
-                    |(src_id, sym, price)| {
-                        if *src_id != chart_id && chart.symbol == *sym {
-                            Some(*price)
-                        } else {
-                            None
-                        }
-                    },
-                ),
-                placing_cursor_chart: self.placing_preview.as_ref().map(|(id, _, _)| *id),
-                bracket_annotations: self
-                    .annotation_store
-                    .get(&chart.symbol)
-                    .iter()
-                    .filter(|a| {
-                        matches!(a.kind, midas_chart::widget::AnnotationKind::OrderBracket(_))
-                    })
-                    .cloned()
-                    .collect(),
-                gatr_bright_ranges: if chart.gatr_hover && chart.timeframe == Timeframe::D1 {
-                    chart
-                        .data
-                        .as_ref()
-                        .map_or(Vec::new(), |d| compute_daily_bright_ranges(d))
-                } else {
-                    Vec::new()
-                },
-                pinned: self
-                    .tickers
-                    .get(&crate::annotation_store::SymbolKey::new(&chart.symbol))
-                    .map(|ts| ts.pinned())
-                    .unwrap_or(false),
-            };
+            // Snapshot is consumed by the shader Program; `data` is
+            // re-borrowed off `chart` for the crosshair-labels call
+            // below.
+            let data = chart
+                .data
+                .as_ref()
+                .expect("chart_render_snapshot returned Some => chart.data is Some");
+
             let program = crate::chart_widget::ChartProgram { chart_id, snapshot };
             let shader = crate::chart_widget::chart_shader(program);
 
-            // Timeline + priceline axis labels render on GPU via the
-            // text pipeline's axis layer.
             let camera = &chart.chart_state.camera;
-
-            // Build level-related overlays.
-            let drawing_panel = build_drawing_panel(chart_id, self.level_placing);
+            let drawing_panel = build_drawing_panel(chart_id, overlays.level_placing);
 
             let mut chart_layers: Vec<Element<'_, Message>> = vec![shader.into()];
 
             chart_layers.push(build_gerchik_atr_overlay(
-                gerchik_atr.as_ref(),
+                overlays.gatr.as_ref(),
                 chart_id,
                 chart.timeframe == Timeframe::D1,
             ));
-
-            // Level text (price flag + icon/name) now renders on GPU
-            // via `midas_render::pipelines::text::TextPipeline`, fed
-            // by `scene.labels` forwarded from the decorator compute.
 
             // Crosshair axis labels (white badges at arm endpoints).
             let crosshair_labels = midas_chart::compute_crosshair_labels(
@@ -897,46 +771,37 @@ impl MidasApp {
 
             chart_layers.push(drawing_panel);
 
-            // Level editor popup (when a level is being edited).
-            let store_levels = self.level_store.levels_for(&chart.symbol);
-            if let (Some(editing_id), Some(screen_pos)) =
-                (chart.editing_level_id, chart.editing_level_screen_pos)
-            {
-                if let Some(level) = store_levels.iter().find(|l| l.id == editing_id) {
-                    chart_layers.push(build_level_editor(
-                        chart_id,
-                        level,
-                        screen_pos,
-                        &chart.level_editor_price_input,
-                        chart.chart_state.camera.viewport_width,
-                        chart.chart_state.camera.viewport_height,
-                    ));
-                }
+            if let Some(editor) = overlays.editing_level.as_ref() {
+                chart_layers.push(build_level_editor(
+                    chart_id,
+                    &editor.level,
+                    editor.screen_pos,
+                    &editor.price_input,
+                    editor.viewport_width,
+                    editor.viewport_height,
+                ));
             }
 
-            // Link color picker overlay (when open for this chart).
-            if let Some((PickerTarget::Docked(picker_id), dim)) = self.link_picker_open {
-                if picker_id == chart_id {
-                    // Backdrop to dismiss picker on click outside.
-                    chart_layers.push(
-                        iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
-                            .on_press(Message::DismissLinkPicker)
-                            .into(),
-                    );
-                    let picker = self.build_link_picker(dim, move |mode| match dim {
-                        LinkDimension::Symbol => Message::SetSymbolLink(chart_id, mode),
-                        LinkDimension::Timeframe => Message::SetTimeframeLink(chart_id, mode),
-                    });
-                    chart_layers.push(
-                        container(picker)
-                            .align_x(iced::alignment::Horizontal::Right)
-                            .align_y(iced::alignment::Vertical::Top)
-                            .padding([4, 4])
-                            .width(Fill)
-                            .height(Fill)
-                            .into(),
-                    );
-                }
+            if let Some(dim) = overlays.link_picker_dim {
+                // Backdrop to dismiss picker on click outside.
+                chart_layers.push(
+                    iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
+                        .on_press(Message::DismissLinkPicker)
+                        .into(),
+                );
+                let picker = self.build_link_picker(dim, move |mode| match dim {
+                    LinkDimension::Symbol => Message::SetSymbolLink(chart_id, mode),
+                    LinkDimension::Timeframe => Message::SetTimeframeLink(chart_id, mode),
+                });
+                chart_layers.push(
+                    container(picker)
+                        .align_x(iced::alignment::Horizontal::Right)
+                        .align_y(iced::alignment::Vertical::Top)
+                        .padding([4, 4])
+                        .width(Fill)
+                        .height(Fill)
+                        .into(),
+                );
             }
 
             return container(stack(chart_layers).width(Fill).height(Fill))
@@ -3410,7 +3275,7 @@ fn build_level_editor<'a>(
 /// with the same symbol. The Y position uses the source chart's raw cursor
 /// price (same ticker = same price axis) so the horizontal arm tracks
 /// smoothly instead of jumping between candle closes.
-fn compute_ghost_crosshair(
+pub(crate) fn compute_ghost_crosshair(
     sync: &Option<(ChartId, i64, f64, String)>,
     this_chart: ChartId,
     symbol: &str,
@@ -3530,7 +3395,7 @@ fn build_crosshair_label_overlay<'a>(
 
 /// Build a GerchikAtrRender from the central market_cache.
 /// Both chart overlay and watchlist grid read from the same source.
-fn gatr_render_from_cache(
+pub(crate) fn gatr_render_from_cache(
     cache: &crate::market_cache::MarketDataCache,
     symbol: &str,
 ) -> Option<midas_chart::GerchikAtrRender> {
@@ -3548,7 +3413,9 @@ fn gatr_render_from_cache(
 
 /// Compute bright candle index ranges for G.ATR hover highlighting
 /// on a daily chart. Each selected bar maps 1:1 to a candle index.
-fn compute_daily_bright_ranges(data: &midas_core::CandleBuffer) -> Vec<(usize, usize)> {
+pub(crate) fn compute_daily_bright_ranges(
+    data: &midas_core::CandleBuffer,
+) -> Vec<(usize, usize)> {
     if data.len() < 2 {
         return Vec::new();
     }

@@ -1004,6 +1004,156 @@ impl MidasApp {
         ))
     }
 
+    /// Build the immutable per-frame render snapshot for the chart
+    /// pane identified by `chart_id`. Returns `None` when the chart
+    /// is not open OR when no candle data has loaded yet (the caller
+    /// renders the empty/loading placeholder in that case).
+    ///
+    /// All ~10 `self.*` reads previously inlined inside
+    /// `view_pane_body` (level store, annotation store, ticker
+    /// state, drag/preview state, market cache for G.ATR, crosshair
+    /// sync) live here now. The view function consumes the snapshot
+    /// (and a few cheap chart-local fields) and stays presentation-
+    /// only.
+    pub fn chart_render_snapshot(
+        &self,
+        chart_id: midas_core::ChartId,
+    ) -> Option<crate::chart_widget::ChartRenderSnapshot> {
+        let chart = self.charts.get(&chart_id)?;
+        self.chart_render_snapshot_for(chart, chart_id)
+    }
+
+    /// Same as [`Self::chart_render_snapshot`] but takes a borrowed
+    /// `ChartPanel` directly. Floating-window charts live outside
+    /// `self.charts`, so they can't go through the id lookup; they
+    /// own the `ChartPanel` themselves and pass `ChartId::new(0)` as
+    /// the cross-chart-comparison sentinel (used by the
+    /// crosshair/preview projections).
+    pub fn chart_render_snapshot_for(
+        &self,
+        chart: &ChartPanel,
+        chart_id: midas_core::ChartId,
+    ) -> Option<crate::chart_widget::ChartRenderSnapshot> {
+        let data = chart.data.as_ref()?;
+
+        // G.ATR is only meaningful on the daily timeframe; the bright-
+        // range overlay also gates on the hover hint.
+        let bright_ranges = if chart.gatr_hover && chart.timeframe == midas_core::Timeframe::D1 {
+            chart
+                .data
+                .as_ref()
+                .map_or(Vec::new(), |d| crate::app::views::compute_daily_bright_ranges(d))
+        } else {
+            Vec::new()
+        };
+
+        Some(crate::chart_widget::ChartRenderSnapshot {
+            symbol: chart.symbol.clone(),
+            data: Some(std::sync::Arc::clone(data)),
+            camera: chart.chart_state.camera.clone(),
+            dirty: chart.chart_state.dirty.clone(),
+            crosshair_pos: chart.chart_state.crosshair.render_pos(),
+            levels: self.level_store.levels_for(&chart.symbol).to_vec(),
+            viewport_width: chart.chart_state.camera.viewport_width,
+            viewport_height: chart.chart_state.camera.viewport_height,
+            collapse_gaps: chart.chart_state.collapse_gaps,
+            timeline_border_ratio: chart.chart_state.timeline_border_ratio,
+            volume_scale: chart.chart_state.volume_scale,
+            show_volume_profile: chart.chart_state.show_volume_profile,
+            show_levels: chart.chart_state.show_levels,
+            data_time_start: chart.chart_state.data_time_start,
+            data_time_end: chart.chart_state.data_time_end,
+            editing_level_id: chart.editing_level_id,
+            dragging_annotation_id: self.dragging_annotation.map(|aid| aid.0),
+            level_tool: chart.chart_state.level_tool.clone(),
+            level_placing: self.level_placing,
+            ghost_crosshair: crate::app::views::compute_ghost_crosshair(
+                &self.crosshair_sync,
+                chart_id,
+                &chart.symbol,
+                &chart.chart_state,
+                chart.data.as_deref(),
+            ),
+            ghost_preview_price: self.placing_preview.as_ref().and_then(
+                |(src_id, sym, price)| {
+                    if *src_id != chart_id && chart.symbol == *sym {
+                        Some(*price)
+                    } else {
+                        None
+                    }
+                },
+            ),
+            placing_cursor_chart: self.placing_preview.as_ref().map(|(id, _, _)| *id),
+            bracket_annotations: self
+                .annotation_store
+                .get(&chart.symbol)
+                .iter()
+                .filter(|a| matches!(a.kind, midas_chart::widget::AnnotationKind::OrderBracket(_)))
+                .cloned()
+                .collect(),
+            gatr_bright_ranges: bright_ranges,
+            pinned: self
+                .tickers
+                .get(&crate::annotation_store::SymbolKey::new(&chart.symbol))
+                .map(|ts| ts.pinned())
+                .unwrap_or(false),
+        })
+    }
+
+    /// Project the chart pane's overlay-layer inputs into a VM —
+    /// G.ATR badge, level-placing flag, editing-level popup, link-
+    /// picker dimension. Returns `None` when the chart isn't open
+    /// (the view's snapshot path already handles the no-data case
+    /// independently).
+    pub fn chart_pane_overlays_vm(
+        &self,
+        chart_id: midas_core::ChartId,
+    ) -> Option<crate::view_models::chart_pane::ChartPaneOverlaysVm> {
+        let chart = self.charts.get(&chart_id)?;
+        let link_picker_dim = match self.link_picker_open {
+            Some((PickerTarget::Docked(picker_id), dim)) if picker_id == chart_id => Some(dim),
+            _ => None,
+        };
+        Some(self.chart_pane_overlays_vm_for(chart, link_picker_dim))
+    }
+
+    /// Same as [`Self::chart_pane_overlays_vm`] but takes a borrowed
+    /// `ChartPanel` directly. Used by the floating-window view path
+    /// (which owns its `ChartPanel` outside `self.charts`) and which
+    /// resolves the link-picker target itself
+    /// (`PickerTarget::Floating(wid)` rather than
+    /// `PickerTarget::Docked(chart_id)`).
+    pub fn chart_pane_overlays_vm_for(
+        &self,
+        chart: &ChartPanel,
+        link_picker_dim: Option<crate::link::LinkDimension>,
+    ) -> crate::view_models::chart_pane::ChartPaneOverlaysVm {
+        use crate::view_models::chart_pane::{ChartPaneOverlaysVm, EditingLevelVm};
+        let gatr = crate::app::views::gatr_render_from_cache(&self.market_cache, &chart.symbol);
+        let editing_level = match (chart.editing_level_id, chart.editing_level_screen_pos) {
+            (Some(editing_id), Some(screen_pos)) => self
+                .level_store
+                .levels_for(&chart.symbol)
+                .iter()
+                .find(|l| l.id == editing_id)
+                .cloned()
+                .map(|level| EditingLevelVm {
+                    level,
+                    screen_pos,
+                    price_input: chart.level_editor_price_input.clone(),
+                    viewport_width: chart.chart_state.camera.viewport_width,
+                    viewport_height: chart.chart_state.camera.viewport_height,
+                }),
+            _ => None,
+        };
+        ChartPaneOverlaysVm {
+            gatr,
+            level_placing: self.level_placing,
+            editing_level,
+            link_picker_dim,
+        }
+    }
+
     /// Project the watchlist body inputs (rows incl. thumbnails,
     /// sort, selection bridge, overlays) into a VM. Returns `None`
     /// if `wl_id` does not resolve to an open watchlist.
