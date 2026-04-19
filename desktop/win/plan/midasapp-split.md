@@ -7,6 +7,7 @@
 | Slice | Status |
 |---|---|
 | 0 — Toast controller | **shipped** (commits `f4015da`, `9614b4b`, follow-up review fixes) |
+| 2 — WindowGeometry controller | **shipped** (commits `f338700`, `2395864`); 4 fields + 4 Message variants moved into `crate::window_geometry`. Round-trips through `midas_core::config::WindowConfig` (7 fields). Pattern proven for "multi-field + persistence + iced runtime task spawn" beyond Toast's degenerate single-Option case. |
 | 1A — `Message::Chart` wrapper introduced | **shipped** (commit `468fd30`); chart_widget decoupled from Message variants, 132-LOC fan-out → 1 line |
 | 1B batch 1 — Delete `ChartPan`/`ChartZoom`/`ChartZoomY` | **shipped** (commit `e8f06c1`); 3 variants gone, dev_harness migrated |
 | 1B batch 2 — Delete level/placing/setting variants (11) | **shipped** (commit `bf5a807`); `Crosshair`, `CreateLevel`, `DragLevel`, `SelectLevel`, `DeselectLevel`, `DeleteSelectedLevel`, `CancelPlacing`, `PlacingCursorMoved`, `SetTimelineBorderRatio`, `SetVolumeScale`, `RightClickLevel` |
