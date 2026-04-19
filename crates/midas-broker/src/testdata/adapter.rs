@@ -1,6 +1,6 @@
 //! `MarketDataSource` implementation for `TestDataProvider`.
 
-use midas_core::SymbolKey;
+use midas_broker_core::SymbolKey;
 
 use crate::error::BrokerError;
 use crate::market_data::{HistoricalBarsResult, MarketDataSource};
@@ -12,7 +12,7 @@ impl MarketDataSource for TestDataProvider {
         &mut self,
         symbol: &str,
         con_id: i32,
-        timeframe: midas_core::Timeframe,
+        timeframe: midas_broker_core::Timeframe,
         start: i64,
         end: i64,
         request_id: u64,
@@ -40,7 +40,7 @@ impl MarketDataSource for TestDataProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use midas_core::Timeframe;
+    use midas_broker_core::Timeframe;
 
     #[test]
     fn adapter_returns_bars() {

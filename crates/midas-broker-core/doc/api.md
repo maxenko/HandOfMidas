@@ -1,6 +1,8 @@
-# midas-core API
+# midas-broker-core API
 
-Shared foundation types used by all crates. Zero dependency on `ibapi`.
+Shared foundation types used by `midas-broker`. Zero dependency on `ibapi`.
+Renamed from `midas-core` (audit P3) to disambiguate from
+`desktop/win/crates/midas-core`.
 
 ## Types
 

@@ -1,5 +1,5 @@
 use super::*;
-use midas_core::Timeframe;
+use midas_broker_core::Timeframe;
 use personality::ticker_seed;
 
 // -- Seed determinism -------------------------------------------------

@@ -1,0 +1,14 @@
+[package]
+name = "midas-broker-core"
+# Renamed from `midas-core` to disambiguate from
+# `desktop/win/crates/midas-core` (audit P3). Same name across two
+# workspaces was a confusion hazard for newcomers; the rename gives
+# each crate its own identity. Version stays at 0.2.0 for now —
+# bump on the next breaking change.
+version = "0.2.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }
+ordered-float = { version = "4", features = ["serde"] }

@@ -41,7 +41,7 @@ Two independent Cargo workspaces share a single git repo:
 HandOfMidas/
 ├── Cargo.toml                     # Root workspace: broker engine
 ├── crates/
-│   ├── midas-core/                # Shared domain types (OrderId, SecurityType, etc.)
+│   ├── midas-broker-core/         # Shared domain types (OrderId, SecurityType, etc.) — root workspace leaf
 │   └── midas-broker/              # Trading engine — wraps IB via rust-ibapi
 ├── desktop/win/                   # Desktop workspace (11 crates)
 │   ├── Cargo.toml                 # Workspace root with shared dependency versions
@@ -112,7 +112,7 @@ cargo build --workspace --release
 
 | Topic | Where to look |
 |---|---|
-| midas-core API | `crates/midas-core/doc/api.md` |
+| midas-broker-core API | `crates/midas-broker-core/doc/api.md` |
 | midas-broker API | `crates/midas-broker/doc/` (6 files) |
 | Broker architecture | `plan/broker/01-architecture.md` |
 | Order state machine | `plan/broker/02-order-management.md` |

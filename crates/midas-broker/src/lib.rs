@@ -37,5 +37,5 @@ pub use orders::types::{BracketRole, LocalOrder, OrderKind};
 pub use test_broker::{TestBroker, TestBrokerConfig};
 
 pub use engine::start_broker_engine;
-pub use midas_core::SecurityType;
+pub use midas_broker_core::SecurityType;
 pub use orders::types::{OrderAction, TimeInForce};

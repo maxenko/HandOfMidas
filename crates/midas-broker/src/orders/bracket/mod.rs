@@ -6,7 +6,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use midas_core::SecurityType;
+use midas_broker_core::SecurityType;
 use serde::{Deserialize, Serialize};
 
 use super::state::OrderStatus;

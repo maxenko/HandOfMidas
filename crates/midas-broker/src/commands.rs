@@ -87,7 +87,7 @@ mod tests {
         let cmd = BrokerCommand::CreateBracket(BracketParams {
             symbol: "AAPL".to_string(),
             con_id: None,
-            sec_type: midas_core::SecurityType::Stock,
+            sec_type: midas_broker_core::SecurityType::Stock,
             exchange: "SMART".to_string(),
             currency: "USD".to_string(),
             action: crate::orders::types::OrderAction::Buy,

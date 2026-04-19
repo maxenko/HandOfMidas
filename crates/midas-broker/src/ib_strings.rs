@@ -4,7 +4,7 @@
 //! into typed `Timeframe` values and epoch timestamps.
 
 use chrono::{DateTime, Months, Utc};
-use midas_core::Timeframe;
+use midas_broker_core::Timeframe;
 
 use crate::error::BrokerError;
 

@@ -6,7 +6,7 @@ Deterministic, realistic per-ticker market data. ~10 years (2016–2026), multi-
 
 ```rust
 use midas_broker::testdata::TestDataProvider;
-use midas_core::Timeframe;
+use midas_broker_core::Timeframe;
 
 let mut provider = TestDataProvider::new();
 

@@ -2,7 +2,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
-use midas_core::SecurityType;
+use midas_broker_core::SecurityType;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 

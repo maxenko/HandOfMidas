@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use midas_core::SymbolKey;
+use midas_broker_core::SymbolKey;
 use uuid::Uuid;
 
 use crate::orders::bracket::BracketLifecycleStatus;
@@ -256,7 +256,7 @@ mod tests {
     #[test]
     fn tick_event_with_optional_fields() {
         let event = BrokerEvent::Tick {
-            symbol: midas_core::SymbolKey {
+            symbol: midas_broker_core::SymbolKey {
                 contract_id: 265598,
                 symbol: "AAPL".to_string(),
             },

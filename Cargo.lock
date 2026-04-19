@@ -486,7 +486,7 @@ dependencies = [
  "dirs",
  "futures",
  "ibapi",
- "midas-core",
+ "midas-broker-core",
  "parking_lot",
  "rand",
  "rusqlite",
@@ -502,7 +502,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "midas-core"
+name = "midas-broker-core"
 version = "0.2.0"
 dependencies = [
  "chrono",

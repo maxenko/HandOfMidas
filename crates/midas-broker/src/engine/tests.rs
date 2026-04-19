@@ -179,7 +179,7 @@ fn sample_bracket_params() -> BracketParams {
     BracketParams {
         symbol: "AAPL".to_string(),
         con_id: Some(265598),
-        sec_type: midas_core::SecurityType::Stock,
+        sec_type: midas_broker_core::SecurityType::Stock,
         exchange: "SMART".to_string(),
         currency: "USD".to_string(),
         action: crate::orders::types::OrderAction::Buy,
@@ -1123,7 +1123,7 @@ fn test_bracket_persistence_round_trip() {
     assert_eq!(restored_parent.status, OrderStatus::Inactive);
     assert_eq!(restored_parent.bracket_role, Some(BracketRole::Parent));
     assert_eq!(restored_parent.con_id, Some(265598));
-    assert_eq!(restored_parent.sec_type, midas_core::SecurityType::Stock);
+    assert_eq!(restored_parent.sec_type, midas_broker_core::SecurityType::Stock);
     assert_eq!(restored_parent.exchange, "SMART");
     assert_eq!(restored_parent.currency, "USD");
     assert_eq!(restored_parent.strategy, Some("test_strat".to_string()));
@@ -1175,7 +1175,7 @@ fn test_order_row_to_local_all_fields() {
     order.ib_order_id = Some(9876);
     order.ib_perm_id = Some(5555555);
     order.con_id = Some(76792991);
-    order.sec_type = midas_core::SecurityType::Stock;
+    order.sec_type = midas_broker_core::SecurityType::Stock;
     order.exchange = "ISLAND".to_string();
     order.currency = "USD".to_string();
     order.limit_price = Some(250.0);
@@ -1215,7 +1215,7 @@ fn test_order_row_to_local_all_fields() {
     assert_eq!(restored.ib_perm_id, Some(5555555));
     assert_eq!(restored.symbol, "TSLA");
     assert_eq!(restored.con_id, Some(76792991));
-    assert_eq!(restored.sec_type, midas_core::SecurityType::Stock);
+    assert_eq!(restored.sec_type, midas_broker_core::SecurityType::Stock);
     assert_eq!(restored.exchange, "ISLAND");
     assert_eq!(restored.currency, "USD");
     assert_eq!(restored.action, OrderAction::Sell);

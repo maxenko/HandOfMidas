@@ -2797,7 +2797,7 @@ dependencies = [
  "mailbox_processor",
  "midas-broker",
  "midas-chart",
- "midas-core 0.1.0",
+ "midas-core",
  "midas-data",
  "midas-devloop-proto",
  "midas-feed",
@@ -2829,7 +2829,7 @@ dependencies = [
  "dirs 5.0.1",
  "futures",
  "ibapi",
- "midas-core 0.2.0",
+ "midas-broker-core",
  "parking_lot",
  "rand 0.8.5",
  "rusqlite",
@@ -2843,6 +2843,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "midas-broker-core"
+version = "0.2.0"
+dependencies = [
+ "chrono",
+ "ordered-float 4.6.0",
+ "serde",
+]
+
+[[package]]
 name = "midas-chart"
 version = "0.1.0"
 dependencies = [
@@ -2850,7 +2859,7 @@ dependencies = [
  "chrono",
  "criterion",
  "glam 0.29.3",
- "midas-core 0.1.0",
+ "midas-core",
  "midas-data",
  "midas-indicators",
  "serde",
@@ -2877,15 +2886,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "midas-core"
-version = "0.2.0"
-dependencies = [
- "chrono",
- "ordered-float 4.6.0",
- "serde",
-]
-
-[[package]]
 name = "midas-data"
 version = "0.1.0"
 dependencies = [
@@ -2894,7 +2894,7 @@ dependencies = [
  "criterion",
  "glam 0.29.3",
  "memmap2",
- "midas-core 0.1.0",
+ "midas-core",
  "serde",
  "tempfile",
  "thiserror 2.0.18",
@@ -2917,7 +2917,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "csv",
- "midas-core 0.1.0",
+ "midas-core",
  "midas-data",
  "parking_lot",
  "rand 0.8.5",
@@ -2951,7 +2951,7 @@ dependencies = [
  "etagere",
  "glam 0.29.3",
  "midas-chart",
- "midas-core 0.1.0",
+ "midas-core",
  "midas-data",
  "png 0.17.16",
  "pollster",
@@ -2967,7 +2967,7 @@ version = "0.1.0"
 dependencies = [
  "duckdb",
  "mailbox_processor",
- "midas-core 0.1.0",
+ "midas-core",
  "midas-data",
  "tempfile",
  "thiserror 2.0.18",
@@ -2989,7 +2989,7 @@ version = "0.0.0"
 dependencies = [
  "glam 0.29.3",
  "midas-chart",
- "midas-core 0.1.0",
+ "midas-core",
  "midas-data",
  "midas-feed",
  "tempfile",

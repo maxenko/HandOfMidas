@@ -2,7 +2,7 @@
 //! data requests through this trait so test data and real IB data are
 //! interchangeable.
 
-use midas_core::{OhlcvBar, SymbolKey, Timeframe};
+use midas_broker_core::{OhlcvBar, SymbolKey, Timeframe};
 
 use crate::error::BrokerError;
 

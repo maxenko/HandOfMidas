@@ -12,7 +12,7 @@
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
-use midas_core::SecurityType;
+use midas_broker_core::SecurityType;
 use rusqlite::{params, Connection};
 use uuid::Uuid;
 

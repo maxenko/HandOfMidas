@@ -10,7 +10,7 @@
 //!
 //! ```ignore
 //! use midas_broker::testdata::TestDataProvider;
-//! use midas_core::Timeframe;
+//! use midas_broker_core::Timeframe;
 //!
 //! let mut provider = TestDataProvider::new();
 //!
@@ -32,7 +32,7 @@ pub mod personality;
 
 use std::collections::HashMap;
 
-use midas_core::{OhlcvBar, Timeframe};
+use midas_broker_core::{OhlcvBar, Timeframe};
 
 use generate::{generate_daily_bars, generate_intraday_for_day};
 use personality::{personality_for_seed, ticker_seed, StockPersonality};

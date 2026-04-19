@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use midas_core::{OhlcvBar, SymbolKey, Timeframe};
+use midas_broker_core::{OhlcvBar, SymbolKey, Timeframe};
 use tokio::runtime::Handle;
 
 use crate::error::BrokerError;

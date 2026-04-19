@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 # Workspace crates
-midas-core = { path = "../midas-core" }
+midas-broker-core = { path = "../midas-broker-core" }
 
 # IB connectivity
 ibapi = "2.10"

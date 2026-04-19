@@ -1438,7 +1438,7 @@ impl BrokerEngine {
         volume: Option<i64>,
     ) {
         let _ = self.market_event_tx.send(BrokerEvent::Tick {
-            symbol: midas_core::SymbolKey {
+            symbol: midas_broker_core::SymbolKey {
                 contract_id: con_id,
                 symbol,
             },
@@ -1462,7 +1462,7 @@ impl BrokerEngine {
         volume: i64,
     ) {
         let _ = self.market_event_tx.send(BrokerEvent::BarUpdated {
-            symbol: midas_core::SymbolKey {
+            symbol: midas_broker_core::SymbolKey {
                 contract_id: 0,
                 symbol,
             },
@@ -1487,7 +1487,7 @@ impl BrokerEngine {
         volume: i64,
     ) {
         let _ = self.market_event_tx.send(BrokerEvent::BarClosed {
-            symbol: midas_core::SymbolKey {
+            symbol: midas_broker_core::SymbolKey {
                 contract_id: 0,
                 symbol,
             },

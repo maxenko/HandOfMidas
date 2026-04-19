@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/midas-core",
+    "crates/midas-broker-core",
     "crates/midas-broker",
 ]
 exclude = ["desktop/win/duckdb-spike"]

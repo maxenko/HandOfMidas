@@ -1,7 +1,7 @@
 //! Daily and intraday bar generation using regime-switching random walk
 //! with GARCH volatility clustering and Brownian bridge intraday paths.
 
-use midas_core::OhlcvBar;
+use midas_broker_core::OhlcvBar;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
