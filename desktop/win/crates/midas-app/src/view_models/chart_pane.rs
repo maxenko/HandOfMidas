@@ -13,8 +13,13 @@
 //!
 //! Together with the snapshot builder, these collapse the remaining
 //! ~4 `self.*` reads in `view_pane_body` into one VM build call.
+//!
+//! [`ChartPaneTitleBarVm`] complements the body migration on the
+//! TitleBar side — content (symbol input + tf/toggle/reset buttons)
+//! AND controls (link buttons + pop-out + close) consume it.
 
 use midas_chart::GerchikAtrRender;
+use midas_core::{LinkMode, Timeframe};
 
 use crate::level_store::StoredLevel;
 use crate::link::LinkDimension;
@@ -52,4 +57,27 @@ pub struct EditingLevelVm {
     pub price_input: String,
     pub viewport_width: u32,
     pub viewport_height: u32,
+}
+
+/// Projection of a chart pane's TitleBar inputs — the symbol-input
+/// text, active timeframe, the three toggle states (collapse-gaps,
+/// volume-profile, levels), and the two link modes (symbol +
+/// timeframe).
+///
+/// The pre-VM code threaded `Option<&ChartPanel>` through both
+/// content + controls render paths and used per-field
+/// `chart.map(|c| ...).unwrap_or(default)`. The VM bakes in those
+/// defaults so the view function pulls clean values.
+#[derive(Debug, Clone)]
+pub struct ChartPaneTitleBarVm {
+    /// Current text in the symbol input. Empty when the chart is
+    /// missing or the user has cleared it.
+    pub symbol_input: String,
+    pub timeframe: Timeframe,
+    pub collapse_gaps: bool,
+    pub show_volume_profile: bool,
+    /// Defaults to `true` — the levels overlay starts on.
+    pub show_levels: bool,
+    pub symbol_link: LinkMode,
+    pub timeframe_link: LinkMode,
 }

@@ -535,11 +535,10 @@ impl MidasApp {
 
     /// Build the content (left) area of a pane's TitleBar.
     fn view_title_bar_content(&self, chart_id: ChartId) -> Element<'_, Message> {
-        let chart = self.charts.get(&chart_id);
-        let panel_tf = chart.map(|c| c.timeframe).unwrap_or(Timeframe::D1);
-        let symbol_input_value = chart.map(|c| c.symbol_input.as_str()).unwrap_or("");
+        let vm = self.chart_pane_title_bar_vm(chart_id);
+        let panel_tf = vm.timeframe;
 
-        let ticker_input = text_input("SYMBOL", symbol_input_value)
+        let ticker_input = text_input("SYMBOL", &vm.symbol_input)
             .on_input(move |val| Message::PanelSymbolInputChanged(chart_id, val))
             .on_submit(Message::PanelSymbolSubmitted(chart_id))
             .width(70)
@@ -577,7 +576,7 @@ impl MidasApp {
             .collect();
         let tf_row = Row::with_children(tf_buttons).spacing(1);
 
-        let collapse_active = chart.map(|c| c.chart_state.collapse_gaps).unwrap_or(false);
+        let collapse_active = vm.collapse_gaps;
         let collapse_btn = if collapse_active {
             button(text("G").size(10).color(Color::WHITE))
                 .on_press(Message::ToggleCollapseGaps(chart_id))
@@ -590,9 +589,7 @@ impl MidasApp {
                 .style(button::text)
         };
 
-        let vp_active = chart
-            .map(|c| c.chart_state.show_volume_profile)
-            .unwrap_or(false);
+        let vp_active = vm.show_volume_profile;
         let vp_btn = if vp_active {
             button(text("VP").size(10).color(Color::WHITE))
                 .on_press(Message::ToggleVolumeProfile(chart_id))
@@ -605,7 +602,7 @@ impl MidasApp {
                 .style(button::text)
         };
 
-        let levels_active = chart.map(|c| c.chart_state.show_levels).unwrap_or(true);
+        let levels_active = vm.show_levels;
         let levels_btn = if levels_active {
             button(text("LV").size(10).color(Color::WHITE))
                 .on_press(Message::ToggleLevels(chart_id))
@@ -646,14 +643,14 @@ impl MidasApp {
         pane: pane_grid::Pane,
         pane_count: usize,
     ) -> Element<'_, Message> {
-        let chart = self.charts.get(&chart_id);
+        let vm = self.chart_pane_title_bar_vm(chart_id);
 
         // Symbol link button.
         let bold_font = iced::Font {
             weight: iced::font::Weight::Bold,
             ..iced::Font::default()
         };
-        let sym_link = chart.map(|c| c.symbol_link).unwrap_or(LinkMode::Unlinked);
+        let sym_link = vm.symbol_link;
         let sym_color = link_mode_indicator_rgba(sym_link);
         let s_btn = button(text("S").size(10).color(Color::WHITE).font(bold_font))
             .on_press(Message::ToggleLinkPicker(
@@ -674,9 +671,7 @@ impl MidasApp {
             });
 
         // Timeframe link button.
-        let tf_link = chart
-            .map(|c| c.timeframe_link)
-            .unwrap_or(LinkMode::Unlinked);
+        let tf_link = vm.timeframe_link;
         let tf_color = link_mode_indicator_rgba(tf_link);
         let t_btn = button(text("T").size(10).color(Color::WHITE).font(bold_font))
             .on_press(Message::ToggleLinkPicker(
@@ -1985,25 +1980,15 @@ impl MidasApp {
         account_id: AccountPanelId,
         pane: pane_grid::Pane,
     ) -> pane_grid::TitleBar<'_, Message> {
-        let name = self
-            .account_panels
-            .get(&account_id)
-            .map(|p| p.name.clone())
-            .unwrap_or_else(|| "Account".to_string());
-        let row_count = self.order_blotter.len();
-        let title_text = if row_count > 0 {
-            format!("{name} ({row_count})")
+        let vm = self.account_title_bar_vm(account_id);
+        let title_text = if vm.row_count > 0 {
+            format!("{} ({})", vm.name, vm.row_count)
         } else {
-            name
+            vm.name.clone()
         };
 
         // Symbol-link [S] button (Orders tab's link colour).
-        let link = self
-            .account_panels
-            .get(&account_id)
-            .map(|p| p.orders.symbol_link)
-            .unwrap_or(LinkMode::Unlinked);
-        let link_rgba = link_mode_indicator_rgba(link);
+        let link_rgba = link_mode_indicator_rgba(vm.symbol_link);
         let bold_font = iced::Font {
             weight: iced::font::Weight::Bold,
             ..iced::Font::default()
@@ -2776,56 +2761,11 @@ impl MidasApp {
 impl MidasApp {
     /// Build the status bar at the bottom of the window.
     fn view_status_bar(&self) -> Element<'_, Message> {
-        let active_info = if let Some(id) = self.active_chart_id() {
-            if let Some(chart) = self.charts.get(&id) {
-                let sym = if chart.symbol.is_empty() {
-                    "---"
-                } else {
-                    &chart.symbol
-                };
-                format!("{sym} | {}", chart.timeframe.display_name())
-            } else {
-                "---".to_string()
-            }
-        } else {
-            "No chart".to_string()
-        };
-        let pane_count = self.workspace.pane_count();
-        let overlay_indicator = if self.show_frame_overlay {
-            " | F11: overlay ON"
-        } else {
-            ""
-        };
-
-        // Connection indicator: green dot + provider name.
-        let conn = self.connection_indicator();
-
-        // Broker connection indicator: colored dot + broker name.
-        let broker_indicator = {
-            let (dot_color, label) = if self.broker_connection_display == "Ready" {
-                let broker_name = self
-                    .providers
-                    .active_broker()
-                    .map(|b| b.name().to_string())
-                    .unwrap_or_else(|| "Broker".to_string());
-                (
-                    Color::from_rgb(0.2, 0.8, 0.2),
-                    format!("Broker: {broker_name}"),
-                )
-            } else if self.broker_connection_display == "Disconnected" {
-                (
-                    Color::from_rgb(0.6, 0.6, 0.6),
-                    format!("Broker: {}", self.broker_connection_display),
-                )
-            } else {
-                (
-                    Color::from_rgb(0.9, 0.7, 0.2),
-                    format!("Broker: {}", self.broker_connection_display),
-                )
-            };
+        let vm = self.status_bar_vm();
+        let conn_block = |block: crate::view_models::status_bar::ConnectionBlockVm| {
             row![
-                text("\u{25CF}").size(10).color(dot_color),
-                text(format!(" {label}"))
+                text("\u{25CF}").size(10).color(block.dot_color),
+                text(format!(" {}", block.label))
                     .size(12)
                     .color(theme::TEXT_SECONDARY),
             ]
@@ -2833,17 +2773,15 @@ impl MidasApp {
         };
 
         let status_row = row![
-            conn,
+            conn_block(vm.data_connection),
             text(" | ").size(12).color(theme::TEXT_MUTED),
-            broker_indicator,
+            conn_block(vm.broker_connection),
             text(" | ").size(12).color(theme::TEXT_MUTED),
-            text(&self.status_message)
-                .size(12)
-                .color(theme::TEXT_SECONDARY),
+            text(vm.status_message).size(12).color(theme::TEXT_SECONDARY),
             Space::new().width(Fill),
             text(format!(
-                "{active_info} | {pane_count} pane(s){overlay_indicator} | {}",
-                self.current_time
+                "{} | {} pane(s){} | {}",
+                vm.active_info, vm.pane_count, vm.overlay_indicator, vm.current_time,
             ))
             .size(12)
             .color(theme::TEXT_MUTED),
@@ -2858,30 +2796,6 @@ impl MidasApp {
                 ..Default::default()
             })
             .into()
-    }
-
-    /// Build a small connection status indicator for the status bar.
-    ///
-    /// Shows a colored dot and the active provider name.
-    fn connection_indicator(&self) -> Element<'_, Message> {
-        let provider_name = self.providers.active_data_provider_name();
-        let is_connected = self
-            .providers
-            .active_data_provider()
-            .is_some_and(|p| p.is_connected());
-        let dot_color = if is_connected {
-            Color::from_rgb(0.2, 0.8, 0.2) // green
-        } else {
-            Color::from_rgb(0.6, 0.6, 0.6) // grey
-        };
-        row![
-            text("\u{25CF}").size(10).color(dot_color),
-            text(format!(" {provider_name}"))
-                .size(12)
-                .color(theme::TEXT_SECONDARY),
-        ]
-        .align_y(iced::Alignment::Center)
-        .into()
     }
 }
 

@@ -25,4 +25,5 @@
 
 pub mod account_panel;
 pub mod chart_pane;
+pub mod status_bar;
 pub mod watchlist;

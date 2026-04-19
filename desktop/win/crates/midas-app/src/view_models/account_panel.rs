@@ -18,6 +18,7 @@ use midas_core::config::AccountTab;
 
 use std::collections::{HashMap, HashSet};
 
+use midas_core::LinkMode;
 use midas_grid::ColumnId;
 use uuid::Uuid;
 
@@ -72,6 +73,24 @@ impl AccountPanelHeaderVm {
     /// Tighter cap for the Recents badge — the underlying MRU list is
     /// already bounded, so a 2-digit cap is enough.
     pub const RECENTS_BADGE_CAP: usize = 99;
+}
+
+/// Projection of the Account pane's TitleBar inputs.
+///
+/// `view_account_title_bar` previously did two `account_panels.get`
+/// calls + a `order_blotter.len()` read; the VM resolves all three
+/// once and the view consumes a single struct.
+#[derive(Debug, Clone)]
+pub struct AccountTitleBarVm {
+    /// Panel name (falls back to "Account" when the panel is missing,
+    /// matching the prior `unwrap_or_else` behaviour).
+    pub name: String,
+    /// Total order-blotter row count for the title's "(N)" suffix.
+    /// `0` hides the suffix.
+    pub row_count: usize,
+    /// Symbol-link mode for the [S] button colour. Defaults to
+    /// `Unlinked` when the panel is missing.
+    pub symbol_link: LinkMode,
 }
 
 /// One row in the Recent Instruments grid, pre-formatted.

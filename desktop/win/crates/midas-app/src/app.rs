@@ -1100,6 +1100,136 @@ impl MidasApp {
         })
     }
 
+    /// Project the Account pane's TitleBar inputs into a VM. Always
+    /// returns a value; missing panel falls back to defaults
+    /// (`name = "Account"`, `symbol_link = Unlinked`) — matches the
+    /// prior render path's `unwrap_or` chain.
+    pub fn account_title_bar_vm(
+        &self,
+        account_id: midas_core::AccountPanelId,
+    ) -> crate::view_models::account_panel::AccountTitleBarVm {
+        use crate::view_models::account_panel::AccountTitleBarVm;
+        let panel = self.account_panels.get(&account_id);
+        AccountTitleBarVm {
+            name: panel
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| "Account".to_string()),
+            row_count: self.order_blotter.len(),
+            symbol_link: panel
+                .map(|p| p.orders.symbol_link)
+                .unwrap_or(midas_core::LinkMode::Unlinked),
+        }
+    }
+
+    /// Project all status-bar inputs into a single VM. Resolves the
+    /// active-chart label, pane count, both connection blocks (data
+    /// and broker) with their colours, and the various messages and
+    /// clock fields. Folds 8+ `self.*` reads in `view_status_bar`
+    /// plus the connection-indicator helper into one builder call.
+    pub fn status_bar_vm(&self) -> crate::view_models::status_bar::StatusBarVm {
+        use crate::view_models::status_bar::{ConnectionBlockVm, StatusBarVm};
+        use iced::Color;
+
+        let active_info = if let Some(id) = self.active_chart_id() {
+            if let Some(chart) = self.charts.get(&id) {
+                let sym = if chart.symbol.is_empty() {
+                    "---"
+                } else {
+                    &chart.symbol
+                };
+                format!("{sym} | {}", chart.timeframe.display_name())
+            } else {
+                "---".to_string()
+            }
+        } else {
+            "No chart".to_string()
+        };
+
+        let data_connection = {
+            let provider_name = self.providers.active_data_provider_name().to_string();
+            let is_connected = self
+                .providers
+                .active_data_provider()
+                .is_some_and(|p| p.is_connected());
+            let dot_color = if is_connected {
+                Color::from_rgb(0.2, 0.8, 0.2)
+            } else {
+                Color::from_rgb(0.6, 0.6, 0.6)
+            };
+            ConnectionBlockVm {
+                dot_color,
+                label: provider_name,
+            }
+        };
+
+        let broker_connection = match self.broker_connection_display.as_str() {
+            "Ready" => {
+                let broker_name = self
+                    .providers
+                    .active_broker()
+                    .map(|b| b.name().to_string())
+                    .unwrap_or_else(|| "Broker".to_string());
+                ConnectionBlockVm {
+                    dot_color: Color::from_rgb(0.2, 0.8, 0.2),
+                    label: format!("Broker: {broker_name}"),
+                }
+            }
+            "Disconnected" => ConnectionBlockVm {
+                dot_color: Color::from_rgb(0.6, 0.6, 0.6),
+                label: format!("Broker: {}", self.broker_connection_display),
+            },
+            _ => ConnectionBlockVm {
+                dot_color: Color::from_rgb(0.9, 0.7, 0.2),
+                label: format!("Broker: {}", self.broker_connection_display),
+            },
+        };
+
+        StatusBarVm {
+            active_info,
+            pane_count: self.workspace.pane_count(),
+            overlay_indicator: if self.show_frame_overlay {
+                " | F11: overlay ON"
+            } else {
+                ""
+            },
+            status_message: self.status_message.clone(),
+            current_time: self.current_time.clone(),
+            data_connection,
+            broker_connection,
+        }
+    }
+
+    /// Project the chart pane's TitleBar inputs into a VM. Always
+    /// returns a value; missing chart falls back to the same defaults
+    /// the prior `chart.map(...).unwrap_or(default)` chain produced
+    /// (empty symbol input, `Timeframe::D1`, levels-on, etc.).
+    pub fn chart_pane_title_bar_vm(
+        &self,
+        chart_id: midas_core::ChartId,
+    ) -> crate::view_models::chart_pane::ChartPaneTitleBarVm {
+        use crate::view_models::chart_pane::ChartPaneTitleBarVm;
+        let chart = self.charts.get(&chart_id);
+        ChartPaneTitleBarVm {
+            symbol_input: chart
+                .map(|c| c.symbol_input.clone())
+                .unwrap_or_default(),
+            timeframe: chart
+                .map(|c| c.timeframe)
+                .unwrap_or(midas_core::Timeframe::D1),
+            collapse_gaps: chart.map(|c| c.chart_state.collapse_gaps).unwrap_or(false),
+            show_volume_profile: chart
+                .map(|c| c.chart_state.show_volume_profile)
+                .unwrap_or(false),
+            show_levels: chart.map(|c| c.chart_state.show_levels).unwrap_or(true),
+            symbol_link: chart
+                .map(|c| c.symbol_link)
+                .unwrap_or(midas_core::LinkMode::Unlinked),
+            timeframe_link: chart
+                .map(|c| c.timeframe_link)
+                .unwrap_or(midas_core::LinkMode::Unlinked),
+        }
+    }
+
     /// Project the chart pane's overlay-layer inputs into a VM —
     /// G.ATR badge, level-placing flag, editing-level popup, link-
     /// picker dimension. Returns `None` when the chart isn't open
