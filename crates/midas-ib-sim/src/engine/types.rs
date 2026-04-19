@@ -342,7 +342,11 @@ pub struct OrderStatus {
     pub last_fill_price: f64,
     pub client_id: i32,
     pub why_held: String,
-    pub mkt_cap_price: f64,
+    /// `None` when there's no market-cap-price cap on the order. Emitted as
+    /// the canonical `UNSET_DOUBLE` sentinel on the wire, which rust-ibapi
+    /// decodes back to `None`. A literal `Some(0.0)` means "explicit zero",
+    /// not "absent" — don't collapse the two.
+    pub mkt_cap_price: Option<f64>,
 }
 
 /// Sim-side projection of the IB `execDetails` callback.

@@ -126,11 +126,16 @@ impl<'a> FieldReader<'a> {
         Ok(self.take_str()?.to_owned())
     }
 
-    /// Read a boolean — `"1"` → true, anything else → false. IB's convention
-    /// is permissive; empty or `"0"` both mean false.
+    /// Read a boolean. IB's convention: parse as `i32`, `0` is false,
+    /// anything else is true. Legacy paths may emit `"2"` or `"-1"` for
+    /// truthy; empty string is tolerated as false. A non-numeric blob is
+    /// also treated as false rather than an error — mirrors IB/TWS.
     pub fn read_bool(&mut self) -> Result<bool, ProtocolError> {
         let s = self.take_str()?;
-        Ok(s == "1")
+        if s.is_empty() {
+            return Ok(false);
+        }
+        Ok(s.parse::<i32>().unwrap_or(0) != 0)
     }
 
     /// Read an optional `i32`. `None` if the field is empty or the
@@ -338,11 +343,20 @@ fn format_f64(v: f64) -> String {
         return UNSET_DOUBLE_STR.to_string();
     }
     // Rust's default `{}` already matches IB's common output shape for
-    // sensible values (e.g. `1.5` → `"1.5"`, `100.0` → `"100"`).
+    // sensible values (e.g. `1.5` → `"1.5"`, `100.0` → `"100"`). One gotcha:
+    // Rust emits lowercase `e` for scientific notation (`1e17`) while IB
+    // uses uppercase `E` (matches Java's Double.toString and our
+    // `UNSET_DOUBLE_STR` sentinel). Normalise to uppercase so wire output
+    // stays byte-identical to real TWS traffic.
     if v.fract() == 0.0 && v.is_finite() && v.abs() < 1e16 {
         format!("{}", v as i64)
     } else {
-        format!("{v}")
+        let s = format!("{v}");
+        if s.contains('e') {
+            s.replace('e', "E")
+        } else {
+            s
+        }
     }
 }
 
@@ -387,6 +401,39 @@ mod tests {
         let mut w = FieldWriter::new();
         w.write_f64(1.5);
         assert_eq!(w.as_bytes(), b"1.5\x00");
+    }
+
+    #[test]
+    fn format_f64_never_emits_lowercase_exponent() {
+        // IB / Java `Double.toString` use capital `E` for any scientific
+        // notation. Current Rust `{}` only emits lowercase `e` under narrow
+        // conditions (and future Rust may change that), but rust-ibapi's
+        // parser and real TWS traffic both use uppercase `E`. The fix
+        // replaces any lowercase `e` with `E` before writing. Probe a broad
+        // range of magnitudes including extreme normals and subnormals.
+        let probes = [
+            1e-20,
+            1.5e-20,
+            1.7976931348623155e308_f64,
+            f64::MIN_POSITIVE,
+            -1e-100,
+            -1e308,
+            12.345_678_901_234_567,
+            1e17,
+            -1e-300,
+        ];
+        for probe in probes {
+            let s = format_f64(probe);
+            assert!(
+                !s.contains('e'),
+                "format_f64({probe}) emitted lowercase 'e': {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn format_f64_preserves_unset_sentinel_exactly() {
+        assert_eq!(format_f64(UNSET_DOUBLE), UNSET_DOUBLE_STR);
     }
 
     // ---- Reader round-trip ----------------------------------------------
@@ -461,19 +508,25 @@ mod tests {
     }
 
     #[test]
-    fn reader_bool_permissive() {
-        // "1" → true, anything else (empty, "0", "2", "true") → false.
+    fn reader_bool_matches_ib_i32_semantics() {
+        // IB's convention: decode as i32, `0` is false, anything else is
+        // true (legacy paths emit `"2"` or `"-1"` for truthy). Empty and
+        // non-numeric strings are tolerated as false.
         let fields = vec![
-            Bytes::from_static(b"1"),
             Bytes::from_static(b"0"),
+            Bytes::from_static(b"1"),
+            Bytes::from_static(b"2"),
+            Bytes::from_static(b"-1"),
             Bytes::from_static(b""),
-            Bytes::from_static(b"true"),
+            Bytes::from_static(b"true"), // non-numeric → false
         ];
         let mut r = FieldReader::new(&fields);
-        assert!(r.read_bool().unwrap());
-        assert!(!r.read_bool().unwrap());
-        assert!(!r.read_bool().unwrap());
-        assert!(!r.read_bool().unwrap());
+        assert!(!r.read_bool().unwrap(), "0 is false");
+        assert!(r.read_bool().unwrap(), "1 is true");
+        assert!(r.read_bool().unwrap(), "2 is true (legacy)");
+        assert!(r.read_bool().unwrap(), "-1 is true (legacy)");
+        assert!(!r.read_bool().unwrap(), "empty is false");
+        assert!(!r.read_bool().unwrap(), "non-numeric is false");
     }
 
     #[test]
@@ -560,6 +613,36 @@ mod tests {
             let fields = w.into_fields();
             let mut r = FieldReader::new(&fields);
             prop_assert_eq!(r.read_string().unwrap(), s);
+        }
+
+        /// `format_f64` must NEVER emit a lowercase `e` in scientific
+        /// notation — IB uses Java's `Double.toString` output which is
+        /// uppercase `E`.
+        #[test]
+        fn prop_format_f64_no_lowercase_exponent(v in prop::num::f64::ANY) {
+            let s = format_f64(v);
+            prop_assert!(
+                !s.contains('e'),
+                "format_f64({v}) emitted lowercase 'e': {s:?}"
+            );
+        }
+
+        /// Finite, non-sentinel f64 values must parse back to a value close
+        /// to the original through `format_f64` (covers subnormals and
+        /// extreme magnitudes — the standard roundtrip test above uses
+        /// NORMAL).
+        #[test]
+        fn prop_format_f64_roundtrip_finite(v in prop::num::f64::ANY) {
+            prop_assume!(v.is_finite());
+            prop_assume!(v != UNSET_DOUBLE);
+            let s = format_f64(v);
+            let parsed: f64 = s.parse().expect("format_f64 output must be parseable");
+            if v == 0.0 {
+                prop_assert_eq!(parsed, 0.0);
+            } else {
+                let rel = ((parsed - v).abs()) / v.abs();
+                prop_assert!(rel < 1e-12, "v={v} s={s:?} parsed={parsed} rel={rel}");
+            }
         }
     }
 }
