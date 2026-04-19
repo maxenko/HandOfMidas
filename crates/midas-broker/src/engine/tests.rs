@@ -1123,7 +1123,10 @@ fn test_bracket_persistence_round_trip() {
     assert_eq!(restored_parent.status, OrderStatus::Inactive);
     assert_eq!(restored_parent.bracket_role, Some(BracketRole::Parent));
     assert_eq!(restored_parent.con_id, Some(265598));
-    assert_eq!(restored_parent.sec_type, midas_broker_core::SecurityType::Stock);
+    assert_eq!(
+        restored_parent.sec_type,
+        midas_broker_core::SecurityType::Stock
+    );
     assert_eq!(restored_parent.exchange, "SMART");
     assert_eq!(restored_parent.currency, "USD");
     assert_eq!(restored_parent.strategy, Some("test_strat".to_string()));

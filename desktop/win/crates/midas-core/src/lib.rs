@@ -29,9 +29,7 @@ pub use candle_data::CandleData;
 pub use config::AppConfig;
 /// Re-export common types at crate root for ergonomic imports.
 /// Example: `use midas_core::{Timeframe, CandleData, AppConfig};`
-pub use id::{
-    AccountPanelId, ChartId, OrderBlotterId, OrderPanelId, PaneId, WatchlistId,
-};
+pub use id::{AccountPanelId, ChartId, OrderBlotterId, OrderPanelId, PaneId, WatchlistId};
 pub use link::{LinkColor, LinkMode};
 pub use market_data::MarketSnapshot;
 pub use provider::{ConnectionState, DataProvider, OrderBroker, ProviderError};

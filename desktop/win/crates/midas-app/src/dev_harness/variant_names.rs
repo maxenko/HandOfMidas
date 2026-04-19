@@ -49,6 +49,10 @@ pub fn ticker_msg_variant(msg: &TickerMsg) -> &'static str {
         TickerMsg::OrderCancelled => "OrderCancelled",
         TickerMsg::SaveCameraState { .. } => "SaveCameraState",
         TickerMsg::Hydrated(_) => "Hydrated",
+        TickerMsg::MarkSnappedThisSession => "MarkSnappedThisSession",
+        TickerMsg::MarkAnchorSeedToastShown => "MarkAnchorSeedToastShown",
+        TickerMsg::StoreGatrUndo(_) => "StoreGatrUndo",
+        TickerMsg::ClearGatrUndo => "ClearGatrUndo",
     }
 }
 

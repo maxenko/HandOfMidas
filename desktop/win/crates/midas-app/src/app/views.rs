@@ -3,7 +3,6 @@
 //! Builds the widget tree: toolbar, pane grid, title bars, chart body,
 //! status bar, and floating chart windows.
 
-
 use iced::widget::pane_grid::{self, PaneGrid};
 use iced::widget::{
     button, column, container, pick_list, row, scrollable, stack, text, text_input, Column, Row,
@@ -1298,7 +1297,9 @@ impl MidasApp {
                 iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
                     .interaction(iced::mouse::Interaction::ResizingHorizontally)
                     .on_move(|point| {
-                        Message::ColumnResize(crate::column_resize::ColumnResizeEvent::Move(point.x))
+                        Message::ColumnResize(crate::column_resize::ColumnResizeEvent::Move(
+                            point.x,
+                        ))
                     })
                     .on_release(Message::ColumnResize(
                         crate::column_resize::ColumnResizeEvent::End,
@@ -1314,8 +1315,9 @@ impl MidasApp {
             let backdrop = iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
                 .on_press(Message::DismissLinkPicker);
 
-            let picker = self
-                .build_link_picker(dim, move |mode| Message::WatchlistSetSymbolLink(wl_id, mode));
+            let picker = self.build_link_picker(dim, move |mode| {
+                Message::WatchlistSetSymbolLink(wl_id, mode)
+            });
 
             return stack![
                 body,
@@ -2354,8 +2356,7 @@ impl MidasApp {
                 grid_body_cell(aligned.into(), width)
             };
 
-            let mut cells: Vec<Element<'_, Message>> =
-                Vec::with_capacity(vm.visible_columns.len());
+            let mut cells: Vec<Element<'_, Message>> = Vec::with_capacity(vm.visible_columns.len());
             for vc in vm.visible_columns.iter().copied() {
                 let col_id = vc.id;
                 let cell: Element<'_, Message> = match col_id {
@@ -2419,9 +2420,13 @@ impl MidasApp {
                         primary,
                         false,
                     ),
-                    id if id == COL_ORDER_ID => {
-                        text_cell(r.order_id.clone(), 11, vm.width(COL_ORDER_ID), primary, true)
-                    }
+                    id if id == COL_ORDER_ID => text_cell(
+                        r.order_id.clone(),
+                        11,
+                        vm.width(COL_ORDER_ID),
+                        primary,
+                        true,
+                    ),
                     id if id == COL_CHART => {
                         // Thumbnail snapshot is parallel-indexed with
                         // sorted_rows in the VM — the view does no
@@ -2471,7 +2476,9 @@ impl MidasApp {
                 iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
                     .interaction(iced::mouse::Interaction::ResizingHorizontally)
                     .on_move(|point| {
-                        Message::ColumnResize(crate::column_resize::ColumnResizeEvent::Move(point.x))
+                        Message::ColumnResize(crate::column_resize::ColumnResizeEvent::Move(
+                            point.x,
+                        ))
                     })
                     .on_release(Message::ColumnResize(
                         crate::column_resize::ColumnResizeEvent::End,
@@ -2783,7 +2790,9 @@ impl MidasApp {
             text(" | ").size(12).color(theme::TEXT_MUTED),
             conn_block(vm.broker_connection),
             text(" | ").size(12).color(theme::TEXT_MUTED),
-            text(vm.status_message).size(12).color(theme::TEXT_SECONDARY),
+            text(vm.status_message)
+                .size(12)
+                .color(theme::TEXT_SECONDARY),
             Space::new().width(Fill),
             text(format!(
                 "{} | {} pane(s){} | {}",
@@ -3334,9 +3343,7 @@ pub(crate) fn gatr_render_from_cache(
 
 /// Compute bright candle index ranges for G.ATR hover highlighting
 /// on a daily chart. Each selected bar maps 1:1 to a candle index.
-pub(crate) fn compute_daily_bright_ranges(
-    data: &midas_core::CandleBuffer,
-) -> Vec<(usize, usize)> {
+pub(crate) fn compute_daily_bright_ranges(data: &midas_core::CandleBuffer) -> Vec<(usize, usize)> {
     if data.len() < 2 {
         return Vec::new();
     }

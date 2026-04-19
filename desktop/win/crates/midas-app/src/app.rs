@@ -1031,10 +1031,9 @@ impl MidasApp {
         // G.ATR is only meaningful on the daily timeframe; the bright-
         // range overlay also gates on the hover hint.
         let bright_ranges = if chart.gatr_hover && chart.timeframe == midas_core::Timeframe::D1 {
-            chart
-                .data
-                .as_ref()
-                .map_or(Vec::new(), |d| crate::app::views::compute_daily_bright_ranges(d))
+            chart.data.as_ref().map_or(Vec::new(), |d| {
+                crate::app::views::compute_daily_bright_ranges(d)
+            })
         } else {
             Vec::new()
         };
@@ -1065,15 +1064,16 @@ impl MidasApp {
                 &chart.chart_state,
                 chart.data.as_deref(),
             ),
-            ghost_preview_price: self.placing_preview.as_ref().and_then(
-                |(src_id, sym, price)| {
+            ghost_preview_price: self
+                .placing_preview
+                .as_ref()
+                .and_then(|(src_id, sym, price)| {
                     if *src_id != chart_id && chart.symbol == *sym {
                         Some(*price)
                     } else {
                         None
                     }
-                },
-            ),
+                }),
             placing_cursor_chart: self.placing_preview.as_ref().map(|(id, _, _)| *id),
             annotations: self.annotation_store.get(&chart.symbol).to_vec(),
             gatr_bright_ranges: bright_ranges,
@@ -1156,7 +1156,9 @@ impl MidasApp {
         let panel = self.order_panels.get(&order_id)?;
         let last_price = self
             .market_cache
-            .get(&crate::annotation_store::SymbolKey::new(&panel.state.symbol))
+            .get(&crate::annotation_store::SymbolKey::new(
+                &panel.state.symbol,
+            ))
             .and_then(|snap| snap.last_price);
         let (coarse_step, _fine_step) = midas_chart::price_step_for(last_price.unwrap_or(100.0));
         Some(OrderPanelBodyVm {
@@ -1255,9 +1257,7 @@ impl MidasApp {
         use crate::view_models::chart_pane::ChartPaneTitleBarVm;
         let chart = self.charts.get(&chart_id);
         ChartPaneTitleBarVm {
-            symbol_input: chart
-                .map(|c| c.symbol_input.clone())
-                .unwrap_or_default(),
+            symbol_input: chart.map(|c| c.symbol_input.clone()).unwrap_or_default(),
             timeframe: chart
                 .map(|c| c.timeframe)
                 .unwrap_or(midas_core::Timeframe::D1),

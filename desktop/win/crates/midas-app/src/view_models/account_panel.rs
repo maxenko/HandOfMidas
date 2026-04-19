@@ -436,7 +436,7 @@ mod tests {
     fn recents_vm_pre_formats_last_seen_labels() {
         let recents = RecentsTab::new();
         let entries = vec![
-            entry("AAPL", Some(Duration::from_secs(30))), // < 1 min
+            entry("AAPL", Some(Duration::from_secs(30))),  // < 1 min
             entry("MSFT", Some(Duration::from_secs(180))), // 3 min
             entry("NVDA", None),
         ];
