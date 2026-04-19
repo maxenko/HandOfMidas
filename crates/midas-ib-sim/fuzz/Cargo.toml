@@ -1,0 +1,29 @@
+[package]
+name = "midas-ib-sim-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# Fuzz crates are explicitly excluded from the parent workspace; cargo-fuzz
+# manages them as a standalone harness driven by nightly toolchain + libfuzzer.
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bytes = "1"
+tokio-util = { version = "0.7", features = ["codec"] }
+
+[dependencies.midas-ib-sim]
+path = ".."
+
+# Prevent `cargo build` in the parent workspace from recursing into this crate.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "decode_incoming"
+path = "fuzz_targets/decode_incoming.rs"
+test = false
+doc = false
+bench = false
