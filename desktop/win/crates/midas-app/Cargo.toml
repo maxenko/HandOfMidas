@@ -32,7 +32,10 @@ image-compare = { workspace = true, optional = true }
 
 iced       = { workspace = true }
 wgpu       = { workspace = true }
-tokio      = { workspace = true }
+# `process` + `io-util` are opt-in features, needed by the dev-harness
+# sim-child lifecycle (tokio::process::Command + AsyncReadExt) and
+# released crates elsewhere in the workspace don't need them.
+tokio      = { workspace = true, features = ["process", "io-util", "net"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 crossbeam  = { workspace = true }
 serde      = { workspace = true }

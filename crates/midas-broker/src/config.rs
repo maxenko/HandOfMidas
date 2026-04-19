@@ -99,6 +99,15 @@ pub struct ConnectionConfig {
     /// If `false` and `port == 4001`, the engine refuses to connect.
     #[serde(default)]
     pub allow_live: bool,
+
+    /// Must be set to `true` to allow connecting to the in-process
+    /// `midas-ib-sim` server. Because the sim listens on the same
+    /// paper-trading port (7497) as real IB Gateway, the broker refuses
+    /// to connect without explicit user opt-in — protects against
+    /// accidentally running a test scenario against a real account if
+    /// the ports happen to match. Default: `false`.
+    #[serde(default)]
+    pub sim_allowed: bool,
 }
 
 fn default_host() -> String {
@@ -121,6 +130,7 @@ impl Default for ConnectionConfig {
             client_id: default_client_id(),
             account_id: None,
             allow_live: false,
+            sim_allowed: false,
         }
     }
 }
@@ -332,6 +342,32 @@ max_retries = 5
         let cfg = BrokerConfig::load_from_file(&path).unwrap();
         assert_eq!(cfg.connection.port, 4002);
         assert_eq!(cfg.order_defaults.order_type, "LMT");
+    }
+
+    #[test]
+    fn sim_allowed_defaults_to_false() {
+        let cfg = BrokerConfig::default();
+        assert!(
+            !cfg.connection.sim_allowed,
+            "sim_allowed must default to false — user opts in to connecting to midas-ib-sim explicitly"
+        );
+    }
+
+    #[test]
+    fn sim_allowed_toml_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sim.toml");
+        std::fs::write(
+            &path,
+            r#"
+[connection]
+port = 7497
+sim_allowed = true
+"#,
+        )
+        .unwrap();
+        let cfg = BrokerConfig::load_from_file(&path).unwrap();
+        assert!(cfg.connection.sim_allowed);
     }
 
     #[test]

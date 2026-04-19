@@ -25,6 +25,7 @@ pub mod inject;
 pub mod input;
 pub mod listener;
 pub mod screenshot;
+pub mod sim_child;
 pub mod variant_names;
 
 // ── Responder ─────────────────────────────────────────────────────────
@@ -404,7 +405,120 @@ pub fn handle_command(
             );
             iced::Task::none()
         }
+
+        Command::SpawnSim {
+            port,
+            control_port,
+            scenario,
+            seed,
+        } => {
+            if app.sim_child.is_some() {
+                responder.err(
+                    ErrorKind::Internal,
+                    "a sim child is already running; call ShutdownSim first",
+                    cursor_now(),
+                );
+                return iced::Task::none();
+            }
+            let opts = sim_child::SpawnOptions {
+                tws_port: port,
+                control_port,
+                scenario,
+                seed,
+            };
+            iced::Task::perform(
+                async move {
+                    let result = sim_child::spawn(opts).await;
+                    (result, responder)
+                },
+                move |(result, responder)| match result {
+                    Ok(handle) => Message::DevHarnessSimSpawned { handle, responder },
+                    Err(e) => {
+                        let cursor = event_log::try_global().map(|l| l.cursor()).unwrap_or(0);
+                        responder.err(ErrorKind::SimSpawnFailed, e.to_string(), cursor);
+                        Message::Tick
+                    }
+                },
+            )
+        }
+
+        Command::ShutdownSim => {
+            let Some(handle) = app.sim_child.take() else {
+                responder.err(
+                    ErrorKind::SimNotRunning,
+                    "no sim child to shut down",
+                    cursor_now(),
+                );
+                return iced::Task::none();
+            };
+            iced::Task::perform(
+                async move {
+                    let result = handle.shutdown().await;
+                    (result, responder)
+                },
+                |(result, responder)| {
+                    let cursor = event_log::try_global().map(|l| l.cursor()).unwrap_or(0);
+                    match result {
+                        Ok(()) => responder.ok_empty(cursor),
+                        Err(e) => {
+                            responder.err(ErrorKind::Internal, format!("sim shutdown: {e}"), cursor)
+                        }
+                    }
+                    Message::Tick
+                },
+            )
+        }
+
+        Command::InjectSimFault { fault } => {
+            let Some(handle) = app.sim_child.clone() else {
+                responder.err(
+                    ErrorKind::SimNotRunning,
+                    "no sim child running; issue SpawnSim first",
+                    cursor_now(),
+                );
+                return iced::Task::none();
+            };
+            iced::Task::perform(
+                async move {
+                    let result = handle.inject_fault(&fault).await;
+                    (result, responder)
+                },
+                |(result, responder)| {
+                    let cursor = event_log::try_global().map(|l| l.cursor()).unwrap_or(0);
+                    match result {
+                        Ok(()) => responder.ok_empty(cursor),
+                        Err(e) => {
+                            responder.err(ErrorKind::Internal, format!("inject_fault: {e}"), cursor)
+                        }
+                    }
+                    Message::Tick
+                },
+            )
+        }
     }
+}
+
+/// Called from `MidasApp::update` when a successful [`Command::SpawnSim`]
+/// completes. Stashes the handle on the app so later `InjectSimFault`
+/// calls can reach the control plane, and fires the pending responder.
+pub fn handle_sim_spawned(
+    app: &mut crate::app::MidasApp,
+    handle: sim_child::SimChildHandle,
+    responder: Responder,
+) {
+    let tws_port = handle.tws_port;
+    let control_port = handle.control_port;
+    let pid_path = handle.pid_path.display().to_string();
+    app.sim_child = Some(handle);
+    let cursor = event_log::try_global().map(|l| l.cursor()).unwrap_or(0);
+    responder.ok(
+        serde_json::json!({
+            "tws_port": tws_port,
+            "control_port": control_port,
+            "pid_path": pid_path,
+        }),
+        cursor,
+    );
 }
 
 // ── Startup side-effects ──────────────────────────────────────────────

@@ -21,8 +21,9 @@ use tokio::task::JoinSet;
 use tokio::time::timeout;
 use tracing::{debug, error, info, instrument, warn};
 
+use crate::control::ControlApi;
 use crate::engine::clock::{Clock, ClockMode, RealClock};
-use crate::engine::types::{EngineCmd, EngineEvent, SessionId};
+use crate::engine::types::{EngineCmd, EngineEvent, EngineSnapshot, SessionId};
 use crate::market_data::MarketDataMode;
 use crate::security::{resolve_bind_address, BindError, ControlToken};
 
@@ -169,6 +170,37 @@ pub async fn start_sim(config: SimConfig) -> Result<Sim, StartError> {
     let shutdown = Arc::new(Notify::new());
     let shutdown_accept = shutdown.clone();
 
+    // Spawn a minimal control-plane engine command sink. Wave 3 keeps the
+    // engine's full orchestrator off the Stage 09 hot path — the devloop
+    // integration only needs `/control/health` to return OK and
+    // `/control/inject` to accept commands (the engine-side handlers
+    // are exercised by the dedicated `midas-ib-sim` integration tests).
+    //
+    // The sink speaks just enough `EngineCmd` to keep the control plane
+    // honest about engine liveness: it answers `DumpState` with an empty
+    // snapshot, and silently consumes `Inject*` commands. That's the
+    // correct behaviour when no TWS sessions are connected; a real engine
+    // orchestrator will replace this sink once Stage 09 lands the full
+    // boot sequence.
+    let (engine_tx, engine_rx) = mpsc::channel::<EngineCmd>(256);
+    tokio::spawn(run_engine_sink(engine_rx));
+
+    let control_api = ControlApi::new(Arc::clone(&token), engine_tx);
+    let control_listener = tokio::net::TcpListener::bind(control_addr).await?;
+    let bound_control_addr = control_listener.local_addr()?;
+    info!(addr = %bound_control_addr, "control plane listening");
+    let control_router = control_api.router();
+    let shutdown_control = shutdown.clone();
+    tokio::spawn(async move {
+        let axum_serve =
+            axum::serve(control_listener, control_router).with_graceful_shutdown(async move {
+                shutdown_control.notified().await;
+            });
+        if let Err(e) = axum_serve.await {
+            warn!(error = %e, "control plane exited");
+        }
+    });
+
     let task = tokio::spawn(async move {
         run_accept_loop(listener, shutdown_accept).await;
     });
@@ -176,11 +208,30 @@ pub async fn start_sim(config: SimConfig) -> Result<Sim, StartError> {
     Ok(Sim {
         config,
         bound_addr,
-        control_addr,
+        control_addr: bound_control_addr,
         token,
         shutdown,
         task,
     })
+}
+
+/// Minimal engine stand-in consumed by the control plane before Stage 09
+/// wires the real orchestrator into `start_sim`. Answers `DumpState` with
+/// an empty snapshot and silently drops every other command.
+///
+/// Lives here (not in `engine/`) because it's a Stage-09 integration
+/// concession — full `start_sim` wiring would pull in the
+/// `MarketDataEngine` + `OrderSimulator` + `CompositeQuirkGuard` boot
+/// sequence that Wave 4 still owns.
+async fn run_engine_sink(mut rx: mpsc::Receiver<EngineCmd>) {
+    while let Some(cmd) = rx.recv().await {
+        if let EngineCmd::DumpState { reply } = cmd {
+            let _ = reply.send(EngineSnapshot::default());
+        }
+        // All other commands are no-ops in the sink — but accepting
+        // them keeps the control plane's `202 Accepted` semantics
+        // honest, which is what the devloop integration tests assert.
+    }
 }
 
 /// Accept loop: accepts clients, spawns per-session tasks, respects shutdown.
