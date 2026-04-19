@@ -47,3 +47,7 @@ harness = false
 [[bench]]
 name = "engine_realclock_fanout"
 harness = false
+
+[[bench]]
+name = "scheduler_10k_virtual"
+harness = false

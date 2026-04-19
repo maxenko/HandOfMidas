@@ -16,7 +16,7 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, instrument, trace, warn};
 
-pub use self::clock::{Clock, RealClock};
+pub use self::clock::{AcceleratedClock, Clock, ClockMode, RealClock, SessionAnchor, VirtualClock};
 pub use self::scheduler::{EngineAction, EventScheduler, ScheduledEvent};
 pub use self::state::SessionState;
 pub use self::types::{
@@ -62,13 +62,22 @@ pub struct EngineHandle {
 }
 
 impl Engine {
-    /// Main loop: interleaves session commands, control-plane commands, and
-    /// scheduled events. Wave 2 (Stage 08) integrates the cancel-safe `select!`
-    /// described in `08-deterministic-clock.md`.
+    /// Main loop: interleaves session commands and scheduled events under the
+    /// cancel-safe pattern from `plan/ib-sim/08-deterministic-clock.md`.
+    ///
+    /// Both `select!` arms only await cancel-safe primitives
+    /// (`mpsc::Receiver::recv`, `Clock::sleep_until`). The scheduler's
+    /// `peek_deadline` / `pop_if_due` are synchronous, so scheduler state is
+    /// never held across an `await`. If a command handler schedules an event
+    /// with an earlier deadline than the one currently being awaited, the
+    /// next loop iteration re-peeks and re-sleeps — adding at most one loop
+    /// iteration of wake latency relative to the new deadline.
     #[instrument(name = "sim", skip(self))]
     pub async fn run(&mut self) {
         trace!("engine loop starting");
         loop {
+            let next_deadline = self.scheduler.peek_deadline();
+
             tokio::select! {
                 maybe_cmd = self.command_rx.recv() => {
                     match maybe_cmd {
@@ -77,6 +86,18 @@ impl Engine {
                             debug!("command channel closed — engine draining");
                             break;
                         }
+                    }
+                }
+
+                _ = async {
+                    match next_deadline {
+                        Some(d) => self.clock.sleep_until(d).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    let now = self.clock.now();
+                    while let Some(action) = self.scheduler.pop_if_due(now) {
+                        self.handle_scheduled(action);
                     }
                 }
             }
