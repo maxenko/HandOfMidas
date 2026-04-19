@@ -150,12 +150,16 @@ fn subscription(state: &MidasApp) -> Subscription<Message> {
     // and save config when the main window is closed.
     let close_sub = window::close_events().map(Message::FloatingWindowClosed);
 
-    // Track window move/resize for config persistence.
+    // Track window move/resize for config persistence. Wrapped in
+    // `Message::Window` so the WindowGeometry controller owns the
+    // event interpretation (audit P1 slice 2).
     let window_events_sub = window::events().map(|(_id, event)| match event {
-        iced::window::Event::Moved(pos) => Message::WindowMoved(pos.x as i32, pos.y as i32),
-        iced::window::Event::Resized(size) => {
-            Message::WindowResized(size.width as u32, size.height as u32)
-        }
+        iced::window::Event::Moved(pos) => Message::Window(
+            window_geometry::WindowGeometryMsg::Moved(pos.x as i32, pos.y as i32),
+        ),
+        iced::window::Event::Resized(size) => Message::Window(
+            window_geometry::WindowGeometryMsg::Resized(size.width as u32, size.height as u32),
+        ),
         _ => Message::Tick,
     });
 

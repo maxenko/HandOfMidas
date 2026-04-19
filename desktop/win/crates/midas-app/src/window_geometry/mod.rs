@@ -29,11 +29,6 @@ use midas_core::config::WindowConfig;
 
 /// Window-geometry sub-controller. Field-private; mutate only via
 /// [`Self::update`].
-//
-// Allowance scope: Phase A introduces this module unused so the
-// next commit (Phase B) can wire it in atomically while every
-// API surface is already exercised by the unit tests below.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct WindowGeometry {
     main_window: Option<window::Id>,
@@ -43,7 +38,6 @@ pub struct WindowGeometry {
 }
 
 /// Messages routed to the window-geometry controller.
-#[allow(dead_code)] // wired in Phase B; tests exercise the variants
 #[derive(Clone, Debug)]
 pub enum WindowGeometryMsg {
     /// The main app window was created with this `window::Id`.
@@ -66,7 +60,6 @@ pub enum WindowGeometryMsg {
 /// Two variants — kept tight on purpose so the parent boundary
 /// stays narrow. New variants need a real cross-controller use case
 /// AND a paragraph of justification at the call site.
-#[allow(dead_code)] // wired in Phase B; tests exercise the variants
 #[derive(Debug, Clone)]
 pub enum Effect {
     /// Mark the parent's config-dirty flag so the next debounced
@@ -87,12 +80,12 @@ const _: () = {
     }
 };
 
-#[allow(dead_code)] // see struct decl
 impl WindowGeometry {
     /// Fresh controller with the given initial size and no main
     /// window yet. The initial size is the parent's fallback when
     /// [`WindowConfig`] doesn't carry one (rare; only first launch
     /// or hand-edited config).
+    #[allow(dead_code)] // tests construct via this; production goes through `from_config`.
     pub fn new(initial_size: (u32, u32)) -> Self {
         Self {
             main_window: None,
@@ -153,6 +146,9 @@ impl WindowGeometry {
         self.position
     }
 
+    /// Last-known monitor size for the window. Exposed for the dev
+    /// harness state dump and future auto-fit-to-monitor logic.
+    #[allow(dead_code)]
     pub fn monitor_size(&self) -> Option<(u32, u32)> {
         self.monitor_size
     }

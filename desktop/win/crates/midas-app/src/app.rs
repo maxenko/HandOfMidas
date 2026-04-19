@@ -267,17 +267,14 @@ pub struct MidasApp {
     pub last_config_save: Instant,
     /// Current wall-clock time string for the status bar.
     pub current_time: String,
-    /// The window ID of the main application window (set after daemon opens it).
-    pub main_window: Option<window::Id>,
+    /// OS-window geometry sub-controller (audit P1 slice 2). Owns
+    /// `main_window`, `position`, `size`, `monitor_size`. MidasApp
+    /// only routes [`Message::Window`] into it and interprets the
+    /// resulting effects via `dispatch_window`.
+    pub window: crate::window_geometry::WindowGeometry,
     /// Floating chart windows popped out from the main pane grid.
     /// Keyed by the OS window ID returned from `window::open()`.
     pub floating_charts: HashMap<window::Id, ChartPanel>,
-    /// Last known main window position (logical pixels, updated on move).
-    pub window_position: Option<(i32, i32)>,
-    /// Last known main window size (logical pixels, updated on resize).
-    pub window_size: (u32, u32),
-    /// Size of the monitor the main window is on (for config persistence).
-    pub monitor_size: Option<(u32, u32)>,
     /// Centralized per-ticker level store, shared across all charts.
     pub level_store: LevelStore,
     /// Whether level placement mode is globally active across all charts.
@@ -583,18 +580,16 @@ pub enum Message {
     // -- Floating windows --
     /// Pop out a pane's chart into a floating OS window.
     PopOut(pane_grid::Pane),
-    /// The main window was opened by the daemon; store its ID.
-    MainWindowOpened(window::Id),
     /// A floating window was closed by the user.
     FloatingWindowClosed(window::Id),
 
     // -- Window geometry --
-    /// Main window was moved (logical position).
-    WindowMoved(i32, i32),
-    /// Main window was resized (logical size).
-    WindowResized(u32, u32),
-    /// Monitor size query result.
-    MonitorSizeResult(Option<iced::Size>),
+    /// Wrapper for OS-window geometry events (move / resize / monitor
+    /// query / open). Routed to `dispatch_window` which calls the
+    /// `WindowGeometry` controller and interprets its effects.
+    /// Audit P1 slice 2 — collapsed `MainWindowOpened`, `WindowMoved`,
+    /// `WindowResized`, `MonitorSizeResult` into one wrapper.
+    Window(crate::window_geometry::WindowGeometryMsg),
 
     // -- Watchlist --
     /// Add a new watchlist panel to the workspace.
@@ -932,7 +927,8 @@ impl MidasApp {
             ..window::Settings::default()
         });
 
-        let open_task = open_task.map(Message::MainWindowOpened);
+        let open_task = open_task
+            .map(|id| Message::Window(crate::window_geometry::WindowGeometryMsg::MainWindowOpened(id)));
 
         // Build workspace, charts, watchlists, and order/account panels from config.
         let (
@@ -1273,11 +1269,17 @@ impl MidasApp {
             config_dirty: false,
             last_config_save: Instant::now(),
             current_time,
-            main_window: Some(main_id),
+            window: {
+                let mut g =
+                    crate::window_geometry::WindowGeometry::from_config(&config.window, initial_size);
+                // The runtime `main_window` id is the iced-assigned one
+                // for this launch — feed it in once. Effects from this
+                // synthetic Open are discarded; the parent will spawn
+                // its own monitor-size query right after `new` returns.
+                let _ = g.update(crate::window_geometry::WindowGeometryMsg::MainWindowOpened(main_id));
+                g
+            },
             floating_charts: HashMap::new(),
-            window_position: config.window.x.zip(config.window.y),
-            window_size: initial_size,
-            monitor_size: None,
             level_store,
             level_placing: false,
             placing_preview: None,
@@ -2686,13 +2688,15 @@ impl MidasApp {
             | Message::DismissLinkPicker => self.handle_link_msg(message),
 
             // -- Window / config / floating --
+            // Window-geometry events route through the dedicated
+            // controller (audit P1 slice 2). Lifecycle / floating /
+            // ConfigSaved / PopOut still live on MidasApp pending
+            // their own slices.
+            Message::Window(m) => self.dispatch_window(m),
+
             Message::ConfigSaved(..)
             | Message::WindowCloseRequested
             | Message::PopOut(..)
-            | Message::WindowMoved(..)
-            | Message::WindowResized(..)
-            | Message::MonitorSizeResult(..)
-            | Message::MainWindowOpened(..)
             | Message::FloatingWindowClosed(..) => self.handle_window_config_msg(message),
 
             // -- G.ATR hover highlight --

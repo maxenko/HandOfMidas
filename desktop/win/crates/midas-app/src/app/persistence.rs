@@ -100,19 +100,10 @@ impl MidasApp {
             }
         }
 
-        let (win_w, win_h) = self.window_size;
-        let (win_x, win_y) = self.window_position.unzip();
-
         AppConfig {
-            window: midas_core::config::WindowConfig {
-                width: win_w,
-                height: win_h,
-                maximized: false,
-                x: win_x,
-                y: win_y,
-                monitor_width: self.monitor_size.map(|(w, _)| w),
-                monitor_height: self.monitor_size.map(|(_, h)| h),
-            },
+            // Whole `WindowConfig` projection lives on the
+            // controller; the persistence path is just a delegate.
+            window: self.window.to_config(),
             theme: midas_core::config::ThemeConfig {
                 mode: "dark".into(),
             },

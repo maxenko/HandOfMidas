@@ -2270,7 +2270,7 @@ impl MidasApp {
                 // pane grid origin, then offset to window coordinates.
                 const TOOLBAR_H: f32 = 32.0;
                 const STATUS_H: f32 = 26.0;
-                let (win_w, win_h) = self.window_size;
+                let (win_w, win_h) = self.window.size();
                 let grid_w = win_w as f32;
                 let grid_h = (win_h as f32 - TOOLBAR_H - STATUS_H).max(1.0);
 
@@ -2819,37 +2819,6 @@ impl MidasApp {
                 Task::none()
             }
 
-            Message::WindowMoved(x, y) => {
-                self.window_position = Some((x, y));
-                self.mark_config_dirty();
-                // Re-query monitor size (window may have moved to a different monitor).
-                if let Some(id) = self.main_window {
-                    return window::monitor_size(id).map(Message::MonitorSizeResult);
-                }
-                Task::none()
-            }
-
-            Message::WindowResized(w, h) => {
-                self.window_size = (w, h);
-                self.mark_config_dirty();
-                Task::none()
-            }
-
-            Message::MonitorSizeResult(size) => {
-                if let Some(s) = size {
-                    self.monitor_size = Some((s.width as u32, s.height as u32));
-                    self.mark_config_dirty();
-                }
-                Task::none()
-            }
-
-            Message::MainWindowOpened(id) => {
-                tracing::info!("Main window opened: {id}");
-                self.main_window = Some(id);
-                // Query the monitor size for config persistence.
-                window::monitor_size(id).map(Message::MonitorSizeResult)
-            }
-
             Message::FloatingWindowClosed(id) => {
                 if matches!(self.link_picker_open, Some((PickerTarget::Floating(wid), _)) if wid == id)
                 {
@@ -2859,13 +2828,47 @@ impl MidasApp {
                     tracing::info!("Floating window closed for {}", chart.symbol);
                 }
                 // If the main window was closed, exit the application.
-                if self.main_window == Some(id) {
+                if self.window.main_window() == Some(id) {
                     return self.flush_config().chain(iced::exit());
                 }
                 Task::none()
             }
 
             _ => unreachable!(),
+        }
+    }
+
+    /// Route a `WindowGeometryMsg` to the controller and translate
+    /// any returned effects back into a parent `Task<Message>`.
+    ///
+    /// The single bridge between the window-geometry controller's
+    /// local message + effect vocabulary and the parent's god-`Message`.
+    /// Same shape as `dispatch_toast` (slice 0).
+    pub(crate) fn dispatch_window(
+        &mut self,
+        msg: crate::window_geometry::WindowGeometryMsg,
+    ) -> Task<Message> {
+        if matches!(msg, crate::window_geometry::WindowGeometryMsg::MainWindowOpened(_)) {
+            tracing::info!("Main window opened (routed via WindowGeometry)");
+        }
+        let effects = self.window.update(msg);
+        let mut tasks: Vec<Task<Message>> = Vec::new();
+        for eff in effects {
+            match eff {
+                crate::window_geometry::Effect::MarkConfigDirty => self.mark_config_dirty(),
+                crate::window_geometry::Effect::QueryMonitor(id) => {
+                    tasks.push(window::monitor_size(id).map(|size| {
+                        Message::Window(
+                            crate::window_geometry::WindowGeometryMsg::MonitorSizeResult(size),
+                        )
+                    }));
+                }
+            }
+        }
+        if tasks.is_empty() {
+            Task::none()
+        } else {
+            Task::batch(tasks)
         }
     }
 }

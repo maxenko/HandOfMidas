@@ -253,7 +253,7 @@ pub fn handle_command(
         }
 
         Command::Screenshot { out_path } => {
-            let Some(main_id) = app.main_window else {
+            let Some(main_id) = app.window.main_window() else {
                 responder.err(
                     ErrorKind::Internal,
                     "main window not yet created",

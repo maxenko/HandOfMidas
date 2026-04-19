@@ -137,11 +137,18 @@ impl MidasApp {
             }
         }
 
-        self.window_size = (config.window.width, config.window.height);
-        self.window_position = match (config.window.x, config.window.y) {
-            (Some(x), Some(y)) => Some((x, y)),
-            _ => None,
-        };
+        // Re-hydrate window geometry from the fixture's snapshot.
+        // Preserve the controller's main_window id (set during boot)
+        // by going through the controller's API rather than building
+        // a fresh one from scratch.
+        let main_id = self.window.main_window();
+        self.window =
+            crate::window_geometry::WindowGeometry::from_config(&config.window, self.window.size());
+        if let Some(id) = main_id {
+            let _ = self
+                .window
+                .update(crate::window_geometry::WindowGeometryMsg::MainWindowOpened(id));
+        }
 
         // Kick off async data loads; `DataRestoredFromStartup` preserves
         // the camera the fixture just set.
