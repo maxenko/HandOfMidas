@@ -22,22 +22,25 @@ Hand of Midas is a native Windows desktop application written entirely in Rust. 
            midas-app                      midas-app
         (main window)                  (floating charts)
                 |                               |
-      +---------+---------+                     |
-      |         |         |                     |
- midas-ui  midas-chart  midas-render      midas-render
- (widgets) (sans-IO)    (wgpu 27)         (wgpu 27)
+      +---------+---------+-------------+
+      |         |         |             |
+ midas-ui  midas-chart  midas-render   midas-devloop-proto
+ (widgets) (sans-IO)    (wgpu 27)      (dev-harness IPC)
       |         |
  midas-grid  midas-data      midas-indicators
  (tables)  (SoA, mmap, LOD)  (ATR, Gerchik ATR)
                 |
-           midas-feed         midas-store
-        (CSV, providers)      (DuckDB cache)
+           midas-feed         midas-store         mailbox_processor
+        (CSV, providers)      (DuckDB cache)      (actor channel)
 
                          midas-broker
-                      (IB engine, rusqlite)
+                  (IB engine, rusqlite)
+                         |
+                  midas-broker-core
+                (shared domain types)
 ```
 
-The chart core (`midas-chart`) is a pure state machine with zero GPU or framework dependencies. It produces a `ChartScene` that the GPU renderer consumes. All chart logic -- zoom, pan, interactions, auto-scale, widget hit-testing, annotation decorators -- is fully unit-testable without a window or GPU context. 1,300+ tests run across both workspaces in under a second.
+The chart core (`midas-chart`) is a pure state machine with zero GPU or framework dependencies. It produces a `ChartScene` that the GPU renderer consumes. All chart logic -- zoom, pan, interactions, auto-scale, widget hit-testing, annotation decorators -- is fully unit-testable without a window or GPU context. **1,500+ tests** run across both workspaces in under a second.
 
 ---
 
@@ -56,7 +59,7 @@ The chart core (`midas-chart`) is a pure state machine with zero GPU or framewor
 | Candle storage | Custom binary format, SoA layout, memmap2 |
 | Math | glam 0.29 (SIMD) |
 
-Two Cargo workspaces, 13 crates total. Dependency flows strictly downward -- no cycles, no leaky abstractions. The broker's IB types never reach the UI layer.
+Two Cargo workspaces, 14 crates total (broker engine + desktop app + shared domain types). Dependency flows strictly downward -- no cycles, no leaky abstractions. The broker's IB types never reach the UI layer; a dedicated `midas-broker-core` crate carries shared domain enums (`SecurityType`, `OrderAction`, `OptionRight`) so they can be consumed without pulling the `ibapi` transport.
 
 ---
 
@@ -70,7 +73,11 @@ Two Cargo workspaces, 13 crates total. Dependency flows strictly downward -- no 
 
 **Interactive order brackets** -- Market, Limit, Stop, and Stop-Limit entry with a 3-click bracket tool (entry + TP + SL). Auto-directional constraint enforcement, drag-to-modify legs, bidirectional panel-chart sync, GATR-based default offsets.
 
-**TickerState machine** -- Per-ticker single source of truth. All bracket mutations, entry-type memory, GATR anchors, and price levels flow through `apply(TickerMsg) -> Vec<TickerEffect>`. Private fields, public getters, compiler-enforced invariants.
+**TickerState machine** -- Per-ticker single source of truth. All bracket mutations, entry-type memory, GATR anchors, price levels, and session flags flow through `apply(TickerMsg) -> Vec<TickerEffect>`. Private fields, public getters, compiler-enforced invariants. The same shape (`SubMsg -> Vec<Effect>`) is now the project's canonical decomposition pattern for sub-controllers splitting out of the top-level app.
+
+**View-model projection layer** -- Every major pane (Account, Watchlist, Chart, Order, Status bar, Toolbar) renders from a dedicated `*Vm` projection built once per frame by a `MidasApp::*_vm()` method. Views take a `&Vm`, not `&MidasApp` -- so the view layer doesn't reach across ~80 fields of top-level state, and VM builders are unit-testable without spinning up iced. Part of a multi-phase structural audit that also collapsed parallel message/state triples (4-tab column-resize → one `Message::ColumnResize` envelope; docked + floating chart maps → one iterator abstraction with `ChartHandle`) and retired duplicate per-symbol stores (`LevelStore` + `AnnotationStore` → single `AnnotationStore` with `AnnotationKind::Level`).
+
+**Centralized annotations + symbols** -- One `AnnotationStore` keyed by `SymbolKey` holds every chart overlay (order brackets, price levels, future annotation kinds). `SymbolKey` is a `#[serde(transparent)]` newtype in `midas-core` that trims + uppercases on construction, so `"AAPL"`, `"aapl"`, and `" AAPL "` become the same key by the type system -- symbol-mismatch bugs are unrepresentable across module boundaries.
 
 **Order bracket engine** -- OCA cancellation, validated state machine transitions across 11 order states, and a full-simulation test broker for development without an IB connection.
 
