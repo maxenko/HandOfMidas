@@ -1180,23 +1180,23 @@ impl MidasApp {
 
                     // Send to broker engine.
                     if let Some(ref bridge) = self.broker_bridge {
-                        let broker_params = midas_core::broker::BracketParams {
+                        let broker_params = midas_broker::BracketParams {
                             symbol: symbol.clone(),
                             con_id: None,
-                            sec_type: midas_core::SecurityType::Stock,
+                            sec_type: midas_broker::SecurityType::Stock,
                             exchange: "SMART".to_string(),
                             currency: "USD".to_string(),
                             action: match side {
-                                OrderSide::Buy => midas_core::broker::OrderAction::Buy,
-                                OrderSide::Sell => midas_core::broker::OrderAction::Sell,
+                                OrderSide::Buy => midas_broker::OrderAction::Buy,
+                                OrderSide::Sell => midas_broker::OrderAction::Sell,
                             },
                             quantity,
                             outside_rth: false,
-                            take_profit: tp_price.map(|p| midas_core::broker::TakeProfitParams {
+                            take_profit: tp_price.map(|p| midas_broker::TakeProfitParams {
                                 price: p,
                                 tif: None,
                             }),
-                            stop_loss: sl_price.map(|p| midas_core::broker::StopLossParams {
+                            stop_loss: sl_price.map(|p| midas_broker::StopLossParams {
                                 stop_price: p,
                                 limit_price: None,
                                 tif: None,
@@ -1204,7 +1204,7 @@ impl MidasApp {
                             reference_price: Some(last_price),
                             strategy: None,
                             tags: Vec::new(),
-                            entry_kind: midas_core::EntryKind::Market,
+                            entry_kind: midas_broker::OrderKind::Market,
                             entry_price: None,
                             entry_stop_price: None,
                         };
@@ -3107,16 +3107,16 @@ impl MidasApp {
                 // Map chart EntryType → desktop EntryKind for broker params.
                 let entry_kind = match bracket.entry_type {
                     midas_chart::widget::order_bracket::EntryType::Market => {
-                        midas_core::EntryKind::Market
+                        midas_broker::OrderKind::Market
                     }
                     midas_chart::widget::order_bracket::EntryType::Limit => {
-                        midas_core::EntryKind::Limit
+                        midas_broker::OrderKind::Limit
                     }
                     midas_chart::widget::order_bracket::EntryType::Stop => {
-                        midas_core::EntryKind::Stop
+                        midas_broker::OrderKind::Stop
                     }
                     midas_chart::widget::order_bracket::EntryType::StopLimit => {
-                        midas_core::EntryKind::StopLimit
+                        midas_broker::OrderKind::StopLimit
                     }
                 };
 
@@ -3140,10 +3140,10 @@ impl MidasApp {
 
                 let action = match bracket.side {
                     midas_chart::widget::order_bracket::BracketSide::Long => {
-                        midas_core::broker::OrderAction::Buy
+                        midas_broker::OrderAction::Buy
                     }
                     midas_chart::widget::order_bracket::BracketSide::Short => {
-                        midas_core::broker::OrderAction::Sell
+                        midas_broker::OrderAction::Sell
                     }
                 };
 
@@ -3158,23 +3158,23 @@ impl MidasApp {
 
                 // Send to broker engine.
                 if let Some(ref bridge) = self.broker_bridge {
-                    let broker_params = midas_core::broker::BracketParams {
+                    let broker_params = midas_broker::BracketParams {
                         symbol: symbol.clone(),
                         con_id: None,
-                        sec_type: midas_core::SecurityType::Stock,
+                        sec_type: midas_broker::SecurityType::Stock,
                         exchange: "SMART".to_string(),
                         currency: "USD".to_string(),
                         action,
                         quantity,
                         outside_rth: false,
                         take_profit: bracket.take_profit.as_ref().map(|tp| {
-                            midas_core::broker::TakeProfitParams {
+                            midas_broker::TakeProfitParams {
                                 price: tp.line.price,
                                 tif: None,
                             }
                         }),
                         stop_loss: bracket.stop_loss.as_ref().map(|sl| {
-                            midas_core::broker::StopLossParams {
+                            midas_broker::StopLossParams {
                                 stop_price: sl.line.price,
                                 limit_price: None,
                                 tif: None,

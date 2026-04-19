@@ -6,7 +6,6 @@
 use serde::{Deserialize, Serialize};
 
 pub mod atr;
-pub mod broker;
 pub mod candle_buffer;
 pub mod candle_data;
 pub mod config;
@@ -36,12 +35,6 @@ pub use link::{LinkColor, LinkMode};
 pub use market_data::MarketSnapshot;
 pub use provider::{ConnectionState, DataProvider, OrderBroker, ProviderError};
 pub use timeframe::Timeframe;
-
-// Re-export broker bridge types for convenience.
-pub use broker::{
-    BracketEvent, BracketLifecycleStatus, BracketParams, EntryKind, OrderAction, StopLossParams,
-    TakeProfitParams, TimeInForce,
-};
 
 // ---------------------------------------------------------------------------
 // SecurityType — IB security type for contracts

@@ -1,8 +1,8 @@
 //! Adapter between `midas-broker::BrokerHandle` and the desktop workspace.
 //!
-//! `BrokerBridge` wraps the broker engine's channel handles and translates
-//! between the desktop mirror types (`midas_core::broker::*`) and the broker
-//! engine types (`midas_broker::*`).
+//! `BrokerBridge` wraps the broker engine's channel handles and routes
+//! `BrokerCommand`s + `BrokerEvent`s between the engine task and iced's
+//! `update`/`subscription` loop.
 
 use std::hash::{Hash, Hasher};
 
@@ -59,10 +59,9 @@ impl BrokerBridge {
         self.send_command(BrokerCommand::Connect)
     }
 
-    /// Send `BrokerCommand::CreateBracket` with translated params.
-    pub fn create_bracket(&self, params: midas_core::broker::BracketParams) -> Result<(), String> {
-        let broker_params = translate_bracket_params(params);
-        self.send_command(BrokerCommand::CreateBracket(broker_params))
+    /// Send `BrokerCommand::CreateBracket`.
+    pub fn create_bracket(&self, params: midas_broker::BracketParams) -> Result<(), String> {
+        self.send_command(BrokerCommand::CreateBracket(params))
     }
 
     /// Send `BrokerCommand::CancelBracket`.
@@ -214,76 +213,11 @@ pub fn broker_conn_stream(source: &BrokerConnSource) -> impl iced::futures::Stre
 // Type translation functions
 // ══════════════════════════════════════════════════════════════════════════════
 
-/// Translate desktop `BracketParams` to broker engine
-/// `midas_broker::BracketParams`.
-fn translate_bracket_params(p: midas_core::broker::BracketParams) -> midas_broker::BracketParams {
-    midas_broker::BracketParams {
-        symbol: p.symbol,
-        con_id: p.con_id,
-        sec_type: translate_security_type(p.sec_type),
-        exchange: p.exchange,
-        currency: p.currency,
-        action: translate_order_action(p.action),
-        quantity: p.quantity,
-        outside_rth: p.outside_rth,
-        take_profit: p.take_profit.map(|tp| midas_broker::TakeProfitParams {
-            price: tp.price,
-            tif: tp.tif.map(translate_tif),
-        }),
-        stop_loss: p.stop_loss.map(|sl| midas_broker::StopLossParams {
-            stop_price: sl.stop_price,
-            limit_price: sl.limit_price,
-            tif: sl.tif.map(translate_tif),
-        }),
-        reference_price: p.reference_price,
-        strategy: p.strategy,
-        tags: p.tags,
-        entry_kind: translate_entry_kind(p.entry_kind),
-        entry_price: p.entry_price,
-        entry_stop_price: p.entry_stop_price,
-    }
-}
-
-/// Desktop `EntryKind` -> broker `OrderKind`.
-fn translate_entry_kind(ek: midas_core::broker::EntryKind) -> midas_broker::OrderKind {
-    match ek {
-        midas_core::broker::EntryKind::Market => midas_broker::OrderKind::Market,
-        midas_core::broker::EntryKind::Limit => midas_broker::OrderKind::Limit,
-        midas_core::broker::EntryKind::Stop => midas_broker::OrderKind::Stop,
-        midas_core::broker::EntryKind::StopLimit => midas_broker::OrderKind::StopLimit,
-    }
-}
-
-/// Desktop `SecurityType` -> broker `SecurityType`.
-fn translate_security_type(st: midas_core::SecurityType) -> midas_broker::SecurityType {
-    match st {
-        midas_core::SecurityType::Stock => midas_broker::SecurityType::Stock,
-        midas_core::SecurityType::Option => midas_broker::SecurityType::Option,
-        midas_core::SecurityType::Future => midas_broker::SecurityType::Future,
-        midas_core::SecurityType::Forex => midas_broker::SecurityType::Forex,
-    }
-}
-
-/// Desktop `OrderAction` -> broker `OrderAction`.
-fn translate_order_action(a: midas_core::broker::OrderAction) -> midas_broker::OrderAction {
-    match a {
-        midas_core::broker::OrderAction::Buy => midas_broker::OrderAction::Buy,
-        midas_core::broker::OrderAction::Sell => midas_broker::OrderAction::Sell,
-    }
-}
-
-/// Desktop `TimeInForce` -> broker `TimeInForce`.
-fn translate_tif(tif: midas_core::broker::TimeInForce) -> midas_broker::TimeInForce {
-    match tif {
-        midas_core::broker::TimeInForce::Day => midas_broker::TimeInForce::Day,
-        midas_core::broker::TimeInForce::Gtc => midas_broker::TimeInForce::Gtc,
-        midas_core::broker::TimeInForce::Ioc => midas_broker::TimeInForce::Ioc,
-        midas_core::broker::TimeInForce::Gtd => midas_broker::TimeInForce::Gtd,
-        midas_core::broker::TimeInForce::Opg => midas_broker::TimeInForce::Opg,
-    }
-}
-
 /// Broker engine `ConnectionState` -> desktop `ConnectionState`.
+///
+/// These are *not* mirrors of each other — `midas_core::provider::ConnectionState`
+/// is the abstract provider state shared with the test/IB providers, while
+/// `midas_broker::ConnectionState` is engine-specific. The mapping stays.
 fn translate_connection_state(
     cs: &midas_broker::ConnectionState,
 ) -> midas_core::provider::ConnectionState {
@@ -319,14 +253,6 @@ pub fn translate_action_to_side(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn translate_order_action_roundtrip() {
-        let buy = translate_order_action(midas_core::broker::OrderAction::Buy);
-        assert_eq!(buy, midas_broker::OrderAction::Buy);
-        let sell = translate_order_action(midas_core::broker::OrderAction::Sell);
-        assert_eq!(sell, midas_broker::OrderAction::Sell);
-    }
 
     #[test]
     fn translate_action_to_side_mapping() {

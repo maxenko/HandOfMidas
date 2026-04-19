@@ -33,7 +33,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, Utc};
 use midas_broker::BrokerEvent;
-use midas_core::broker::{EntryKind, OrderAction, TimeInForce};
+use midas_broker::{OrderAction, OrderKind, TimeInForce};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -109,7 +109,7 @@ pub struct OrderRow {
     pub leg_role: LegRole,
     pub symbol: String,
     pub side: OrderAction,
-    pub kind: EntryKind,
+    pub kind: OrderKind,
     pub quantity: f64,
     #[serde(default)]
     pub filled_qty: f64,
@@ -307,8 +307,8 @@ impl OrderBlotter {
         let mut touched = Vec::with_capacity(3);
 
         let now = Utc::now();
-        let side = translate_action(action);
-        let kind = translate_kind(entry_kind);
+        let side = action;
+        let kind = entry_kind;
 
         // Entry leg always exists.
         let entry_row = OrderRow {
@@ -350,7 +350,7 @@ impl OrderBlotter {
                 leg_role: LegRole::TakeProfit,
                 symbol: symbol.to_owned(),
                 side: child_side,
-                kind: EntryKind::Limit,
+                kind: OrderKind::Limit,
                 quantity,
                 filled_qty: 0.0,
                 remaining_qty: quantity,
@@ -360,7 +360,7 @@ impl OrderBlotter {
                 tp_price,
                 sl_price,
                 status: OrderStatus::Working,
-                time_in_force: tp_tif.map(translate_tif),
+                time_in_force: tp_tif,
                 ib_order_id: None,
                 ib_perm_id: None,
                 created_at: now,
@@ -373,9 +373,9 @@ impl OrderBlotter {
 
         if let (Some(id), Some(price)) = (sl_id, sl_price) {
             let sl_kind = if sl_limit_price.is_some() {
-                EntryKind::StopLimit
+                OrderKind::StopLimit
             } else {
-                EntryKind::Stop
+                OrderKind::Stop
             };
             let row = OrderRow {
                 order_id: id,
@@ -393,7 +393,7 @@ impl OrderBlotter {
                 tp_price,
                 sl_price,
                 status: OrderStatus::Working,
-                time_in_force: sl_tif.map(translate_tif),
+                time_in_force: sl_tif,
                 ib_order_id: None,
                 ib_perm_id: None,
                 created_at: now,
@@ -467,37 +467,6 @@ impl OrderBlotter {
     }
 }
 
-// ── Type translations ────────────────────────────────────────────────
-
-fn translate_action(a: midas_broker::OrderAction) -> OrderAction {
-    match a {
-        midas_broker::OrderAction::Buy => OrderAction::Buy,
-        midas_broker::OrderAction::Sell => OrderAction::Sell,
-    }
-}
-
-fn translate_kind(k: midas_broker::OrderKind) -> EntryKind {
-    match k {
-        midas_broker::OrderKind::Market => EntryKind::Market,
-        midas_broker::OrderKind::Limit => EntryKind::Limit,
-        midas_broker::OrderKind::Stop => EntryKind::Stop,
-        midas_broker::OrderKind::StopLimit => EntryKind::StopLimit,
-        // TrailingStop has no midas-core mirror today; fall back to
-        // Stop for display purposes. Future growth: add TrailingStop.
-        midas_broker::OrderKind::TrailingStop => EntryKind::Stop,
-    }
-}
-
-fn translate_tif(t: midas_broker::TimeInForce) -> TimeInForce {
-    match t {
-        midas_broker::TimeInForce::Day => TimeInForce::Day,
-        midas_broker::TimeInForce::Gtc => TimeInForce::Gtc,
-        midas_broker::TimeInForce::Ioc => TimeInForce::Ioc,
-        midas_broker::TimeInForce::Gtd => TimeInForce::Gtd,
-        midas_broker::TimeInForce::Opg => TimeInForce::Opg,
-    }
-}
-
 // ── Tests ────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -548,7 +517,7 @@ mod tests {
 
         let entry = b.row(parent).unwrap();
         assert_eq!(entry.leg_role, LegRole::Entry);
-        assert_eq!(entry.kind, EntryKind::Limit);
+        assert_eq!(entry.kind, OrderKind::Limit);
         assert_eq!(entry.side, OrderAction::Buy);
         assert_eq!(entry.limit_price, Some(184.5));
         assert_eq!(entry.tp_price, Some(195.0));
@@ -556,13 +525,13 @@ mod tests {
 
         let tp_row = b.row(tp).unwrap();
         assert_eq!(tp_row.leg_role, LegRole::TakeProfit);
-        assert_eq!(tp_row.kind, EntryKind::Limit);
+        assert_eq!(tp_row.kind, OrderKind::Limit);
         assert_eq!(tp_row.side, OrderAction::Sell);
         assert_eq!(tp_row.limit_price, Some(195.0));
 
         let sl_row = b.row(sl).unwrap();
         assert_eq!(sl_row.leg_role, LegRole::StopLoss);
-        assert_eq!(sl_row.kind, EntryKind::Stop);
+        assert_eq!(sl_row.kind, OrderKind::Stop);
         assert_eq!(sl_row.stop_price, Some(178.0));
     }
 
@@ -747,7 +716,7 @@ mod tests {
             leg_role: LegRole::Entry,
             symbol: "AAPL".to_owned(),
             side: OrderAction::Buy,
-            kind: EntryKind::Limit,
+            kind: OrderKind::Limit,
             quantity: 100.0,
             filled_qty: 0.0,
             remaining_qty: 100.0,

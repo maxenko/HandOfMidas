@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 use iced::widget::{text, text::Wrapping};
 use iced::{Color, Element};
 
-use midas_core::broker::OrderAction;
+use midas_broker::OrderAction;
 use midas_grid::{Alignment, ColumnId, ColumnWidth, GridColumn};
 use uuid::Uuid;
 

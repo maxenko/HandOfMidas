@@ -410,50 +410,50 @@ impl MidasApp {
                     if let Some(ref bridge) = self.broker_bridge {
                         let action = match bracket.side {
                             midas_chart::widget::order_bracket::BracketSide::Long => {
-                                midas_core::broker::OrderAction::Buy
+                                midas_broker::OrderAction::Buy
                             }
                             midas_chart::widget::order_bracket::BracketSide::Short => {
-                                midas_core::broker::OrderAction::Sell
+                                midas_broker::OrderAction::Sell
                             }
                         };
                         let quantity = bracket.quantity.unwrap_or(0.0);
                         let (entry_kind, entry_price, entry_stop_price) = match bracket.entry_type {
                             midas_chart::widget::order_bracket::EntryType::Market => {
-                                (midas_core::broker::EntryKind::Market, None, None)
+                                (midas_broker::OrderKind::Market, None, None)
                             }
                             midas_chart::widget::order_bracket::EntryType::Limit => (
-                                midas_core::broker::EntryKind::Limit,
+                                midas_broker::OrderKind::Limit,
                                 Some(bracket.entry.line.price),
                                 None,
                             ),
                             midas_chart::widget::order_bracket::EntryType::Stop => (
-                                midas_core::broker::EntryKind::Stop,
+                                midas_broker::OrderKind::Stop,
                                 None,
                                 Some(bracket.entry.line.price),
                             ),
                             midas_chart::widget::order_bracket::EntryType::StopLimit => (
-                                midas_core::broker::EntryKind::StopLimit,
+                                midas_broker::OrderKind::StopLimit,
                                 Some(bracket.entry.line.price),
                                 bracket.entry_stop_price,
                             ),
                         };
-                        let broker_params = midas_core::broker::BracketParams {
+                        let broker_params = midas_broker::BracketParams {
                             symbol: sym.as_str().to_owned(),
                             con_id: None,
-                            sec_type: midas_core::SecurityType::Stock,
+                            sec_type: midas_broker::SecurityType::Stock,
                             exchange: "SMART".to_string(),
                             currency: "USD".to_string(),
                             action,
                             quantity,
                             outside_rth: false,
                             take_profit: bracket.take_profit.as_ref().map(|tp| {
-                                midas_core::broker::TakeProfitParams {
+                                midas_broker::TakeProfitParams {
                                     price: tp.line.price,
                                     tif: None,
                                 }
                             }),
                             stop_loss: bracket.stop_loss.as_ref().map(|sl| {
-                                midas_core::broker::StopLossParams {
+                                midas_broker::StopLossParams {
                                     stop_price: sl.line.price,
                                     limit_price: None,
                                     tif: None,

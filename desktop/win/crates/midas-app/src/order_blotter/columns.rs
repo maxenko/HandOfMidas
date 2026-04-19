@@ -8,7 +8,7 @@ use std::cmp::Ordering;
 use iced::widget::{container, row, text, text::Wrapping};
 use iced::{Color, Element};
 
-use midas_core::broker::{EntryKind, OrderAction, TimeInForce};
+use midas_broker::{OrderAction, OrderKind, TimeInForce};
 use midas_grid::{Alignment, ColumnId, ColumnWidth, GridColumn};
 use uuid::Uuid;
 
@@ -68,7 +68,7 @@ pub struct DisplayRow {
     pub symbol: String,
     pub side: OrderAction,
     pub leg_role: LegRole,
-    pub kind: EntryKind,
+    pub kind: OrderKind,
     pub kind_text: String,
     pub qty_text: String,
     pub qty_value: f64,
@@ -92,11 +92,12 @@ impl DisplayRow {
     pub fn from_row(row: &OrderRow) -> Self {
         let kind_text = match (row.kind, row.leg_role) {
             // For SL leg, plan calls "Stop" / "Stop Limit" in Type.
-            (EntryKind::Stop, _) => "Stop Loss".to_owned(),
-            (EntryKind::StopLimit, LegRole::StopLoss) => "Stop Limit".to_owned(),
-            (EntryKind::StopLimit, _) => "Stop Limit".to_owned(),
-            (EntryKind::Market, _) => "Market".to_owned(),
-            (EntryKind::Limit, _) => "Limit".to_owned(),
+            (OrderKind::Stop, _) => "Stop Loss".to_owned(),
+            (OrderKind::StopLimit, LegRole::StopLoss) => "Stop Limit".to_owned(),
+            (OrderKind::StopLimit, _) => "Stop Limit".to_owned(),
+            (OrderKind::Market, _) => "Market".to_owned(),
+            (OrderKind::Limit, _) => "Limit".to_owned(),
+            (OrderKind::TrailingStop, _) => "Trailing Stop".to_owned(),
         };
         Self {
             order_id: short_uuid(row.order_id),

@@ -2698,8 +2698,8 @@ impl MidasApp {
             let w = |id| orders.grid_state.column_width(id);
 
             let side_color = match r.side {
-                midas_core::broker::OrderAction::Buy => Color::from_rgb(0.30, 0.54, 0.96),
-                midas_core::broker::OrderAction::Sell => Color::from_rgb(0.88, 0.31, 0.27),
+                midas_broker::OrderAction::Buy => Color::from_rgb(0.30, 0.54, 0.96),
+                midas_broker::OrderAction::Sell => Color::from_rgb(0.88, 0.31, 0.27),
             };
             let status_color = match r.status {
                 crate::order_blotter::OrderStatus::Filled => Color::from_rgb(0.27, 0.75, 0.47),
@@ -2737,8 +2737,8 @@ impl MidasApp {
                     }
                     id if id == COL_SIDE => text_cell(
                         match r.side {
-                            midas_core::broker::OrderAction::Buy => "Buy".to_owned(),
-                            midas_core::broker::OrderAction::Sell => "Sell".to_owned(),
+                            midas_broker::OrderAction::Buy => "Buy".to_owned(),
+                            midas_broker::OrderAction::Sell => "Sell".to_owned(),
                         },
                         12,
                         w(COL_SIDE),
