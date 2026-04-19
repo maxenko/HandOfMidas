@@ -932,6 +932,78 @@ impl MidasApp {
         })
     }
 
+    /// Project the inputs needed by `view_account_recents_tab` into a
+    /// VM. Returns `None` if `account_id` does not resolve to an open
+    /// panel. Pure-`&self`; deterministic given a fixed `now`.
+    pub fn account_recents_tab_vm(
+        &self,
+        account_id: midas_core::AccountPanelId,
+    ) -> Option<crate::view_models::account_panel::AccountRecentsTabVm> {
+        use crate::view_models::account_panel::AccountRecentsTabVm;
+        let panel = self.account_panels.get(&account_id)?;
+        let show_resize_overlay = self
+            .resizing_account_recents_column
+            .map(|(id, _, _, _)| id == account_id)
+            .unwrap_or(false);
+        Some(AccountRecentsTabVm::build(
+            &panel.recents,
+            self.recent_symbols.iter(),
+            show_resize_overlay,
+            std::time::Instant::now(),
+        ))
+    }
+
+    /// Project the inputs needed by `view_account_history_tab` into a
+    /// VM. Returns `None` if `account_id` does not resolve to an open
+    /// panel. The VM borrows from `self.account_panels[id].history` —
+    /// see [`crate::view_models::account_panel::AccountHistoryTabVm`]
+    /// for why the borrow can't be sidestepped by cloning.
+    pub fn account_history_tab_vm(
+        &self,
+        account_id: midas_core::AccountPanelId,
+    ) -> Option<crate::view_models::account_panel::AccountHistoryTabVm<'_>> {
+        use crate::view_models::account_panel::AccountHistoryTabVm;
+        let panel = self.account_panels.get(&account_id)?;
+        let show_resize_overlay = self
+            .resizing_account_history_column
+            .map(|(id, _, _, _)| id == account_id)
+            .unwrap_or(false);
+        Some(AccountHistoryTabVm::build(
+            &panel.history,
+            show_resize_overlay,
+        ))
+    }
+
+    /// Project the Orders-tab inputs into a VM: visible-column filter,
+    /// overlay flags, hidden-column set, sorted rows, per-row thumbnail
+    /// snapshots, column widths, selection, and sort indicator.
+    /// Returns `None` if `account_id` does not resolve to an open panel.
+    ///
+    /// `all_columns` is passed in by the view because the static
+    /// `(ColumnId, label, sortable)` table is a presentation choice
+    /// living in `views.rs`, not a state shape.
+    pub fn account_orders_tab_vm(
+        &self,
+        account_id: midas_core::AccountPanelId,
+        all_columns: &[(midas_grid::ColumnId, &'static str, bool)],
+    ) -> Option<crate::view_models::account_panel::AccountOrdersTabVm> {
+        use crate::view_models::account_panel::AccountOrdersTabVm;
+        let panel = self.account_panels.get(&account_id)?;
+        let show_resize_overlay = self
+            .resizing_account_column
+            .map(|(id, _, _, _)| id == account_id)
+            .unwrap_or(false);
+        let show_column_selector = self.account_column_selector_open == Some(account_id);
+        Some(AccountOrdersTabVm::build(
+            &panel.orders,
+            &self.order_blotter,
+            all_columns,
+            |symbol| self.build_thumbnail_snapshot(symbol),
+            show_resize_overlay,
+            show_column_selector,
+        ))
+    }
+
     /// Create a new application, restoring state from config if available.
     ///
     /// Returns the app state and a `Task` that opens the main OS window

@@ -1125,7 +1125,10 @@ impl MidasApp {
     /// from [`crate::thumbnail_data::ThumbnailDataStore`] (read-only
     /// via `peek` — `view()` only has `&self`), and picks a trend
     /// color from the theme.
-    fn build_thumbnail_snapshot(&self, symbol: &str) -> crate::thumbnail_widget::ThumbnailSnapshot {
+    pub(crate) fn build_thumbnail_snapshot(
+        &self,
+        symbol: &str,
+    ) -> crate::thumbnail_widget::ThumbnailSnapshot {
         let tf = self.thumbnail_store.get(symbol);
         let entry = self.thumbnail_data.peek(symbol, tf);
         let color = thumbnail_color(&entry.closes);
@@ -2489,55 +2492,6 @@ impl MidasApp {
     /// (14 columns, sort, selection, resize, column-selector popup,
     /// link-picker overlay, empty-state, thumbnail cells).
     fn view_account_orders_tab(&self, account_id: AccountPanelId) -> Element<'_, Message> {
-        use crate::order_blotter::columns::{DisplayRow, OrderBlotterColumn};
-        use midas_grid::GridColumn;
-
-        let Some(panel) = self.account_panels.get(&account_id) else {
-            return container(text("Account panel not found").size(14)).into();
-        };
-        let orders = &panel.orders;
-
-        if self.order_blotter.is_empty() {
-            return container(
-                column![
-                    text("No orders yet")
-                        .size(14)
-                        .color(Color::from_rgba(0.7, 0.7, 0.7, 1.0)),
-                    text("Submit a bracket on a chart to see orders here.")
-                        .size(11)
-                        .color(Color::from_rgba(0.5, 0.5, 0.5, 1.0)),
-                ]
-                .spacing(6)
-                .align_x(iced::Alignment::Center),
-            )
-            .center_x(Fill)
-            .center_y(Fill)
-            .into();
-        }
-
-        // Project every OrderRow → DisplayRow for render.
-        let mut rows: Vec<DisplayRow> = self
-            .order_blotter
-            .rows()
-            .map(DisplayRow::from_row)
-            .collect();
-
-        // Apply the grid's active sort.
-        if let Some(sort) = orders.grid_state.sort.as_ref() {
-            if let Some(col) = OrderBlotterColumn::ALL
-                .iter()
-                .find(|c| c.id() == sort.column_id)
-            {
-                rows.sort_by(|a, b| {
-                    let ord = col.compare(a, b);
-                    match sort.direction {
-                        midas_grid::SortDirection::Ascending => ord,
-                        midas_grid::SortDirection::Descending => ord.reverse(),
-                    }
-                });
-            }
-        }
-
         use crate::order_blotter::columns::{
             symbol_badge, COL_AVG_FILL, COL_CHART, COL_INSTRUCTION, COL_LAST_UPDATE, COL_LIMIT,
             COL_ORDER_ID, COL_QTY, COL_SIDE, COL_SL, COL_STATUS, COL_STOP, COL_SYMBOL, COL_TP,
@@ -2565,45 +2519,57 @@ impl MidasApp {
             (COL_CHART, "Chart", false),
         ];
 
-        let visible: Vec<(midas_grid::ColumnId, &'static str, bool, usize)> = ALL_COL_DEFS
-            .iter()
-            .enumerate()
-            .filter(|(_, (col_id, _, _))| {
-                *col_id == COL_SYMBOL || !orders.hidden_columns.contains(col_id)
-            })
-            .map(|(idx, (col_id, label, sortable))| (*col_id, *label, *sortable, idx))
-            .collect();
+        let Some(vm) = self.account_orders_tab_vm(account_id, ALL_COL_DEFS) else {
+            return container(text("Account panel not found").size(14)).into();
+        };
+
+        if vm.is_empty {
+            return container(
+                column![
+                    text("No orders yet")
+                        .size(14)
+                        .color(Color::from_rgba(0.7, 0.7, 0.7, 1.0)),
+                    text("Submit a bracket on a chart to see orders here.")
+                        .size(11)
+                        .color(Color::from_rgba(0.5, 0.5, 0.5, 1.0)),
+                ]
+                .spacing(6)
+                .align_x(iced::Alignment::Center),
+            )
+            .center_x(Fill)
+            .center_y(Fill)
+            .into();
+        }
 
         // ── Header ─────────────────────────────────────────────────
         let header_style = HeaderStyle {
             label_color: Some(theme::TEXT_SECONDARY),
             ..HeaderStyle::default()
         };
-        let mut header_cells: Vec<Element<'_, Message>> = Vec::with_capacity(visible.len());
-        let last_idx = visible.len().saturating_sub(1);
-        for (i, (col_id, label, sortable, all_col_idx)) in visible.iter().copied().enumerate() {
-            let width = orders.grid_state.column_width(col_id);
-            let indicator = orders
-                .grid_state
-                .sort
-                .filter(|s| s.column_id == col_id)
-                .map(|s| s.direction.indicator())
+        let mut header_cells: Vec<Element<'_, Message>> =
+            Vec::with_capacity(vm.visible_columns.len());
+        let last_idx = vm.visible_columns.len().saturating_sub(1);
+        for (i, vc) in vm.visible_columns.iter().copied().enumerate() {
+            let indicator = vm
+                .sort_indicator
+                .filter(|(col_id, _)| *col_id == vc.id)
+                .map(|(_, ind)| ind)
                 .unwrap_or("");
-            let sort_msg = sortable.then(|| {
+            let sort_msg = vc.sortable.then(|| {
                 Message::Account(
                     account_id,
                     crate::account_panel::AccountMsg::Orders(midas_grid::GridMessage::SortToggled(
-                        col_id,
+                        vc.id,
                     )),
                 )
             });
             let resize = (i < last_idx).then(|| ResizeHandle {
-                on_press: Message::AccountOrdersColumnResizeStart(account_id, all_col_idx),
+                on_press: Message::AccountOrdersColumnResizeStart(account_id, vc.all_col_idx),
                 height: 26.0,
             });
             header_cells.push(grid_header_cell(
-                label,
-                width,
+                vc.label,
+                vm.width(vc.id),
                 indicator,
                 sort_msg,
                 resize,
@@ -2615,9 +2581,8 @@ impl MidasApp {
 
         // ── Body rows ─────────────────────────────────────────────
         let mut body = IcedColumn::new();
-        for (row_idx, r) in rows.iter().enumerate() {
-            let is_selected = orders.selected_row == Some(r.order_uuid);
-            let w = |id| orders.grid_state.column_width(id);
+        for (row_idx, r) in vm.sorted_rows.iter().enumerate() {
+            let is_selected = vm.selected_row == Some(r.order_uuid);
 
             let side_color = match r.side {
                 midas_broker::OrderAction::Buy => Color::from_rgb(0.30, 0.54, 0.96),
@@ -2651,74 +2616,84 @@ impl MidasApp {
                 grid_body_cell(aligned.into(), width)
             };
 
-            let mut cells: Vec<Element<'_, Message>> = Vec::with_capacity(visible.len());
-            for (col_id, _, _, _) in visible.iter().copied() {
+            let mut cells: Vec<Element<'_, Message>> =
+                Vec::with_capacity(vm.visible_columns.len());
+            for vc in vm.visible_columns.iter().copied() {
+                let col_id = vc.id;
                 let cell: Element<'_, Message> = match col_id {
-                    id if id == COL_SYMBOL => {
-                        grid_body_cell(symbol_badge(r.symbol.clone(), r.side).into(), w(COL_SYMBOL))
-                    }
+                    id if id == COL_SYMBOL => grid_body_cell(
+                        symbol_badge(r.symbol.clone(), r.side).into(),
+                        vm.width(COL_SYMBOL),
+                    ),
                     id if id == COL_SIDE => text_cell(
                         match r.side {
                             midas_broker::OrderAction::Buy => "Buy".to_owned(),
                             midas_broker::OrderAction::Sell => "Sell".to_owned(),
                         },
                         12,
-                        w(COL_SIDE),
+                        vm.width(COL_SIDE),
                         side_color,
                         false,
                     ),
                     id if id == COL_TYPE => {
-                        text_cell(r.kind_text.clone(), 12, w(COL_TYPE), primary, false)
+                        text_cell(r.kind_text.clone(), 12, vm.width(COL_TYPE), primary, false)
                     }
                     id if id == COL_QTY => {
-                        text_cell(r.qty_text.clone(), 12, w(COL_QTY), primary, true)
+                        text_cell(r.qty_text.clone(), 12, vm.width(COL_QTY), primary, true)
                     }
-                    id if id == COL_AVG_FILL => {
-                        text_cell(r.avg_fill_text.clone(), 12, w(COL_AVG_FILL), primary, true)
-                    }
+                    id if id == COL_AVG_FILL => text_cell(
+                        r.avg_fill_text.clone(),
+                        12,
+                        vm.width(COL_AVG_FILL),
+                        primary,
+                        true,
+                    ),
                     id if id == COL_LIMIT => {
-                        text_cell(r.limit_text.clone(), 12, w(COL_LIMIT), primary, true)
+                        text_cell(r.limit_text.clone(), 12, vm.width(COL_LIMIT), primary, true)
                     }
                     id if id == COL_STOP => {
-                        text_cell(r.stop_text.clone(), 12, w(COL_STOP), primary, true)
+                        text_cell(r.stop_text.clone(), 12, vm.width(COL_STOP), primary, true)
                     }
                     id if id == COL_TP => {
-                        text_cell(r.tp_text.clone(), 12, w(COL_TP), primary, true)
+                        text_cell(r.tp_text.clone(), 12, vm.width(COL_TP), primary, true)
                     }
                     id if id == COL_SL => {
-                        text_cell(r.sl_text.clone(), 12, w(COL_SL), primary, true)
+                        text_cell(r.sl_text.clone(), 12, vm.width(COL_SL), primary, true)
                     }
                     id if id == COL_STATUS => text_cell(
                         r.status.as_str().to_owned(),
                         12,
-                        w(COL_STATUS),
+                        vm.width(COL_STATUS),
                         status_color,
                         false,
                     ),
                     id if id == COL_LAST_UPDATE => text_cell(
                         r.last_update_text.clone(),
                         11,
-                        w(COL_LAST_UPDATE),
+                        vm.width(COL_LAST_UPDATE),
                         primary,
                         true,
                     ),
                     id if id == COL_INSTRUCTION => text_cell(
                         r.instruction_text.clone(),
                         12,
-                        w(COL_INSTRUCTION),
+                        vm.width(COL_INSTRUCTION),
                         primary,
                         false,
                     ),
                     id if id == COL_ORDER_ID => {
-                        text_cell(r.order_id.clone(), 11, w(COL_ORDER_ID), primary, true)
+                        text_cell(r.order_id.clone(), 11, vm.width(COL_ORDER_ID), primary, true)
                     }
                     id if id == COL_CHART => {
-                        let snapshot = self.build_thumbnail_snapshot(&r.symbol);
+                        // Thumbnail snapshot is parallel-indexed with
+                        // sorted_rows in the VM — the view does no
+                        // store lookup itself.
+                        let snapshot = vm.row_thumbnails[row_idx].clone();
                         let thumb = crate::thumbnail_widget::thumbnail_cell(
                             snapshot,
                             Message::ThumbnailIntervalCycle(r.symbol.clone()),
                         );
-                        grid_body_cell(thumb, w(COL_CHART))
+                        grid_body_cell(thumb, vm.width(COL_CHART))
                     }
                     _ => Space::new().into(),
                 };
@@ -2745,20 +2720,15 @@ impl MidasApp {
         // Link-picker is rendered at the body level in `view_account_body`
         // so it works across all tabs, not just Orders. Here we only
         // handle the two Orders-specific overlays: column-resize drag
-        // and column-visibility popup.
-        let needs_resize_overlay = self
-            .resizing_account_column
-            .map(|(id, _, _, _)| id == account_id)
-            .unwrap_or(false);
-        let needs_column_selector = self.account_column_selector_open == Some(account_id);
-
-        if !needs_resize_overlay && !needs_column_selector {
+        // and column-visibility popup. Both flags are pre-projected
+        // into the VM above.
+        if !vm.show_resize_overlay && !vm.show_column_selector {
             return main_content;
         }
 
         let mut layers: Vec<Element<'_, Message>> = vec![main_content];
 
-        if needs_resize_overlay {
+        if vm.show_resize_overlay {
             layers.push(
                 iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
                     .interaction(iced::mouse::Interaction::ResizingHorizontally)
@@ -2768,7 +2738,7 @@ impl MidasApp {
             );
         }
 
-        if needs_column_selector {
+        if vm.show_column_selector {
             let backdrop = iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
                 .on_press(Message::AccountOrdersDismissColumnSelector);
             layers.push(backdrop.into());
@@ -2783,7 +2753,7 @@ impl MidasApp {
                 .collect();
             let popup = midas_grid::column_selector_popup(
                 &entries,
-                &orders.hidden_columns,
+                &vm.hidden_columns,
                 move |col_id| Message::AccountOrdersToggleColumn(account_id, col_id),
                 Message::AccountOrdersDismissColumnSelector,
             );
@@ -2813,12 +2783,11 @@ impl MidasApp {
             grid_body_cell, grid_body_row, grid_header_cell, GridColumn, HeaderStyle, ResizeHandle,
         };
 
-        let Some(panel) = self.account_panels.get(&account_id) else {
+        let Some(vm) = self.account_history_tab_vm(account_id) else {
             return container(text("Account panel not found").size(14)).into();
         };
-        let history = &panel.history;
 
-        if history.cached_rows().is_empty() {
+        if vm.is_empty() {
             return container(
                 column![
                     text("No trade history yet")
@@ -2854,7 +2823,6 @@ impl MidasApp {
                 HistoryColumn::FillPrice => "Fill Price",
                 HistoryColumn::Status => "Status",
             };
-            let width = history.grid_state.column_width(col.id());
             // No sort in v1 — pass `None` and leave the indicator empty.
             let resize = (i < last_idx).then(|| ResizeHandle {
                 on_press: Message::AccountHistoryColumnResizeStart(account_id, i),
@@ -2862,7 +2830,7 @@ impl MidasApp {
             });
             header_cells.push(grid_header_cell(
                 label,
-                width,
+                vm.column_widths[i],
                 "",
                 None::<Message>,
                 resize,
@@ -2872,11 +2840,10 @@ impl MidasApp {
         let header = IcedRow::with_children(header_cells);
 
         // ── Body rows ─────────────────────────────────────────────
-        let w = |id| history.grid_state.column_width(id);
         let mut body = IcedColumn::new();
-        for (row_idx, r) in history.cached_rows().iter().enumerate() {
+        for (row_idx, r) in vm.rows.iter().enumerate() {
             let mut cells: Vec<Element<'_, Message>> = Vec::with_capacity(columns.len());
-            for col in columns.iter() {
+            for (col_idx, col) in columns.iter().enumerate() {
                 // Reuse the column's own `cell()` for rendering — it already
                 // handles colour tinting for Side and Status. Map the
                 // AccountMsg output (column emits into its own scope) into
@@ -2888,7 +2855,7 @@ impl MidasApp {
                         col.cell(r, row_idx);
                     account_inner.map(move |m| Message::Account(account_id, m))
                 };
-                cells.push(grid_body_cell(inner, w(col.id())));
+                cells.push(grid_body_cell(inner, vm.column_widths[col_idx]));
             }
             body = body.push(grid_body_row(cells, false, row_idx % 2 == 0, None));
         }
@@ -2904,12 +2871,7 @@ impl MidasApp {
                 .into();
 
         // ── Resize overlay ────────────────────────────────────────
-        let needs_resize_overlay = self
-            .resizing_account_history_column
-            .map(|(id, _, _, _)| id == account_id)
-            .unwrap_or(false);
-
-        if !needs_resize_overlay {
+        if !vm.show_resize_overlay {
             return main_content;
         }
 
@@ -2930,19 +2892,16 @@ impl MidasApp {
     /// `AccountMsg::RecentClicked` which re-selects the symbol on the
     /// focused chart.
     fn view_account_recents_tab(&self, account_id: AccountPanelId) -> Element<'_, Message> {
-        use crate::account_panel::recents_tab::{COL_RECENTS_LAST_SEEN, COL_RECENTS_TICKER};
         use iced::widget::{scrollable, text::Wrapping, Column as IcedColumn, Row as IcedRow};
         use midas_grid::{
             grid_body_cell, grid_body_row, grid_header_cell, HeaderStyle, ResizeHandle,
         };
-        use std::time::Instant;
 
-        let Some(panel) = self.account_panels.get(&account_id) else {
+        let Some(vm) = self.account_recents_tab_vm(account_id) else {
             return container(text("Account panel not found").size(14)).into();
         };
-        let recents = &panel.recents;
 
-        if self.recent_symbols.is_empty() {
+        if vm.is_empty() {
             return container(
                 column![
                     text("No recent instruments yet")
@@ -2969,23 +2928,30 @@ impl MidasApp {
             ..HeaderStyle::default()
         };
 
-        let col_defs: [(midas_grid::ColumnId, &str); 2] = [
-            (COL_RECENTS_TICKER, "Ticker"),
-            (COL_RECENTS_LAST_SEEN, "Last Seen"),
+        // Column index → (label, on_resize_start). Width comes from the
+        // VM, which already lifted it out of the panel's grid_state.
+        let col_defs: [(&str, Message); 2] = [
+            (
+                "Ticker",
+                Message::AccountRecentsColumnResizeStart(account_id, 0),
+            ),
+            (
+                "Last Seen",
+                Message::AccountRecentsColumnResizeStart(account_id, 1),
+            ),
         ];
         let last_idx = col_defs.len().saturating_sub(1);
 
         // ── Header ─────────────────────────────────────────────────
         let mut header_cells: Vec<Element<'_, Message>> = Vec::with_capacity(col_defs.len());
-        for (i, &(col_id, label)) in col_defs.iter().enumerate() {
-            let width = recents.grid_state.column_width(col_id);
+        for (i, (label, resize_msg)) in col_defs.into_iter().enumerate() {
             let resize = (i < last_idx).then(|| ResizeHandle {
-                on_press: Message::AccountRecentsColumnResizeStart(account_id, i),
+                on_press: resize_msg,
                 height: 26.0,
             });
             header_cells.push(grid_header_cell(
                 label,
-                width,
+                vm.column_widths[i],
                 "",
                 None::<Message>,
                 resize,
@@ -2995,30 +2961,27 @@ impl MidasApp {
         let header = IcedRow::with_children(header_cells);
 
         // ── Body rows ─────────────────────────────────────────────
-        let w = |id| recents.grid_state.column_width(id);
-        let now = Instant::now();
         let mut body = IcedColumn::new();
-        for (row_idx, entry) in self.recent_symbols.iter().enumerate() {
-            let elapsed = crate::account_panel::recents_tab::format_elapsed(entry.last_seen, now);
+        for (row_idx, row) in vm.rows.iter().enumerate() {
             let ticker_cell: Element<'_, Message> = grid_body_cell(
-                text(entry.symbol.clone())
+                text(row.symbol.clone())
                     .size(12)
                     .wrapping(Wrapping::None)
                     .color(theme::TEXT_PRIMARY)
                     .into(),
-                w(COL_RECENTS_TICKER),
+                vm.column_widths[0],
             );
             let last_seen_cell: Element<'_, Message> = grid_body_cell(
-                text(elapsed)
+                text(row.last_seen_label.clone())
                     .size(12)
                     .wrapping(Wrapping::None)
                     .color(theme::TEXT_SECONDARY)
                     .into(),
-                w(COL_RECENTS_LAST_SEEN),
+                vm.column_widths[1],
             );
             let click_msg = Message::Account(
                 account_id,
-                crate::account_panel::AccountMsg::RecentClicked(entry.symbol.clone()),
+                crate::account_panel::AccountMsg::RecentClicked(row.symbol.clone()),
             );
             body = body.push(grid_body_row(
                 vec![ticker_cell, last_seen_cell],
@@ -3036,11 +2999,7 @@ impl MidasApp {
                 .into();
 
         // ── Resize overlay ────────────────────────────────────────
-        let needs_resize_overlay = self
-            .resizing_account_recents_column
-            .map(|(id, _, _, _)| id == account_id)
-            .unwrap_or(false);
-        if !needs_resize_overlay {
+        if !vm.show_resize_overlay {
             return main_content;
         }
 
