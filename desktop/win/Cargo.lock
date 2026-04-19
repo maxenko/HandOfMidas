@@ -2794,6 +2794,7 @@ dependencies = [
  "iced",
  "image",
  "image-compare",
+ "libc",
  "mailbox_processor",
  "midas-broker",
  "midas-chart",

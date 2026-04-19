@@ -1,8 +1,8 @@
 //! Anonymize captured sessions so they can be committed to git.
 //!
 //! The anonymizer is a byte-level rewriter that finds sensitive patterns in
-//! payloads (account codes, perm IDs, exec IDs, cash balances) and replaces
-//! them with deterministic synthetic equivalents.
+//! payloads (account codes, perm IDs, exec IDs) and replaces them with
+//! deterministic synthetic equivalents.
 //!
 //! # Determinism
 //!
@@ -15,14 +15,25 @@
 //!
 //! # Patterns covered
 //!
-//! | Kind | Regex | Synthetic form |
+//! | Kind | Shape | Synthetic form |
 //! |------|-------|----------------|
-//! | Account codes | `DU\d{7}` (excluding `DU0000xxx`) | `DU` + `00` + 5 hashed digits |
-//! | Perm IDs | `[perm_id=]\d{10,}` | Stable remap via counter |
-//! | Exec IDs | `[0-9a-f]{16,}\.\w{8}\.\w{2}` | `sha256(salt||in)[..16]` |
+//! | Paper account codes | `DU\d{7}` (excluding `DU0000xxx`) | `DU0000` + 3 hashed digits |
+//! | Retail account codes | `U\d{7}` | `U0000` + 3 hashed digits |
+//! | Advisor-account codes | `F\d{7}` | `F0000` + 3 hashed digits |
+//! | Perm IDs | 10–19 digit runs | `sha256(salt||in)` → digit sequence, length preserved |
+//! | Exec IDs | `[0-9a-f]{6,32}\.\w{4,16}\.\w{2,8}` | `sha256(salt||in)` |
 //!
 //! The perm-id remapping preserves uniqueness: the *same* input perm id maps
 //! to the *same* synthetic id within a run AND across runs (salt-keyed).
+//!
+//! # Cash balances
+//!
+//! Cash amounts are **not** anonymized. They're just numbers in a TWS payload
+//! with no structural context the anonymizer can detect reliably; dropping
+//! them from recordings would also break calibrated synthetic generators
+//! that model spread + volume distributions. A caller who needs cash
+//! obfuscation should strip `ACCT_VALUE` + `NETLIQUIDATION` keys before
+//! committing the fixture.
 //!
 //! # Non-goals
 //!
@@ -39,10 +50,14 @@ use sha2::{Digest, Sha256};
 
 use crate::session::pcap::{TwsPcapReader, TwsPcapWriter};
 
-/// Fixed reserved range for synthetic account codes. Real IB paper accounts
-/// never fall into `DU0000000..DU0000999`, so the anonymizer can safely skip
-/// codes already in this range (idempotency).
+/// Fixed reserved range for synthetic *paper* account codes. Real IB paper
+/// accounts never fall into `DU0000000..DU0000999`, so the anonymizer can
+/// safely skip codes already in this range (idempotency).
 pub const RESERVED_SYNTHETIC_ACCOUNT_PREFIX: &str = "DU0000";
+/// Reserved synthetic range for *retail* `U` accounts.
+pub const RESERVED_SYNTHETIC_RETAIL_PREFIX: &str = "U0000";
+/// Reserved synthetic range for *advisor/FA* `F` accounts.
+pub const RESERVED_SYNTHETIC_FA_PREFIX: &str = "F0000";
 
 /// Configuration for the anonymizer. Loaded from YAML.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -102,6 +117,8 @@ pub struct Anonymizer {
     account_cache: HashMap<String, String>,
     /// Cache of synthesised exec IDs.
     exec_id_cache: HashMap<String, String>,
+    /// Cache of synthesised perm IDs.
+    perm_id_cache: HashMap<String, String>,
 }
 
 impl Anonymizer {
@@ -111,6 +128,7 @@ impl Anonymizer {
             config,
             account_cache: HashMap::new(),
             exec_id_cache: HashMap::new(),
+            perm_id_cache: HashMap::new(),
         }
     }
 
@@ -161,15 +179,29 @@ impl Anonymizer {
         let mut out = Vec::with_capacity(input.len());
         let mut i = 0;
         while i < input.len() {
-            // Account code: DU followed by exactly 7 digits.
-            if let Some(len) = match_account_code(&input[i..]) {
+            // Account codes: DU / U / F prefix + exactly 7 digits. Order
+            // matters — try account first so a DU account isn't consumed
+            // by the exec-id matcher.
+            //
+            // The boundary-prev check stops `U` / `F` single-char prefixes
+            // from being matched inside a larger identifier (e.g. the
+            // trailing `U1234567` of `XU1234567`). `DU` is safe without
+            // the boundary check because real payloads use `DU` only as
+            // an account prefix.
+            if let Some((len, kind)) = match_account_code_bounded(&input[i..], prev_byte(input, i))
+            {
                 let original =
                     std::str::from_utf8(&input[i..i + len]).expect("ASCII by construction");
                 // Skip already-synthetic codes (idempotency).
-                if original.starts_with(RESERVED_SYNTHETIC_ACCOUNT_PREFIX) {
+                let already_synth = match kind {
+                    AccountKind::Paper => original.starts_with(RESERVED_SYNTHETIC_ACCOUNT_PREFIX),
+                    AccountKind::Retail => original.starts_with(RESERVED_SYNTHETIC_RETAIL_PREFIX),
+                    AccountKind::Fa => original.starts_with(RESERVED_SYNTHETIC_FA_PREFIX),
+                };
+                if already_synth {
                     out.extend_from_slice(&input[i..i + len]);
                 } else {
-                    let replacement = self.synth_account(original);
+                    let replacement = self.synth_account(original, kind);
                     out.extend_from_slice(replacement.as_bytes());
                 }
                 i += len;
@@ -185,21 +217,33 @@ impl Anonymizer {
                 i += len;
                 continue;
             }
+            // Perm IDs: 10-19 digit runs that stand alone (no adjacent
+            // alphanumeric neighbours). Must run *after* account matches
+            // so we don't shred the `7`-digit suffix of a DU account.
+            if let Some(len) = match_perm_id(&input[i..], prev_byte(input, i)) {
+                let original =
+                    std::str::from_utf8(&input[i..i + len]).expect("ASCII by construction");
+                let replacement = self.synth_perm_id(original);
+                out.extend_from_slice(replacement.as_bytes());
+                i += len;
+                continue;
+            }
             out.push(input[i]);
             i += 1;
         }
         out
     }
 
-    fn synth_account(&mut self, original: &str) -> String {
+    fn synth_account(&mut self, original: &str, kind: AccountKind) -> String {
         if let Some(over) = self.config.account_map.get(original) {
             return over.clone();
         }
         if let Some(c) = self.account_cache.get(original) {
             return c.clone();
         }
-        // DU + 7 digits, restricted to the reserved DU0000xxx synthetic range
-        // so the pass is idempotent (the matcher skips codes already there).
+        // Restrict synthetic output to the kind-specific reserved range so
+        // the pass is idempotent (the matcher skips codes already there)
+        // AND length-preserving (all three input shapes are 8 or 9 chars).
         let mut hasher = Sha256::new();
         hasher.update(self.config.salt.as_bytes());
         hasher.update(b"|account|");
@@ -208,11 +252,50 @@ impl Anonymizer {
         let mut eight = [0u8; 8];
         eight.copy_from_slice(&digest[..8]);
         let n = u64::from_be_bytes(eight) % 1000;
-        let synth9 = format!("DU0000{n:03}");
-        debug_assert_eq!(synth9.len(), 9);
+        // DU has a 2-char prefix, U/F are 1-char — insert an extra zero
+        // into the reserved range for U/F so the synthetic code matches
+        // the source length exactly. DU1234567 → DU0000ABC (9 chars),
+        // U1234567  → U0000ABC  (8 chars), F1234567 → F0000ABC (8 chars).
+        let synth = match kind {
+            AccountKind::Paper => format!("{RESERVED_SYNTHETIC_ACCOUNT_PREFIX}{n:03}"),
+            AccountKind::Retail => format!("{RESERVED_SYNTHETIC_RETAIL_PREFIX}{n:03}"),
+            AccountKind::Fa => format!("{RESERVED_SYNTHETIC_FA_PREFIX}{n:03}"),
+        };
+        debug_assert_eq!(synth.len(), original.len());
         self.account_cache
-            .insert(original.to_string(), synth9.clone());
-        synth9
+            .insert(original.to_string(), synth.clone());
+        synth
+    }
+
+    fn synth_perm_id(&mut self, original: &str) -> String {
+        if let Some(c) = self.perm_id_cache.get(original) {
+            return c.clone();
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(self.config.salt.as_bytes());
+        hasher.update(b"|perm_id|");
+        hasher.update(original.as_bytes());
+        let digest = hasher.finalize();
+        // Turn the digest into a digit-only string matching the original
+        // length. Each output digit is `digest[i % 32] % 10`; that's not
+        // cryptographically uniform but is deterministic, length-preserving,
+        // and collision-resistant enough that two distinct real perm ids
+        // essentially never map to the same synthetic within a session.
+        let mut out = String::with_capacity(original.len());
+        for i in 0..original.len() {
+            // First char avoids a leading zero so the synthetic retains
+            // the wire-shape of a real 10+ significant-digit perm id.
+            let ch = if i == 0 {
+                let d = (digest[0] % 9) + 1; // 1..=9
+                char::from(b'0' + d)
+            } else {
+                char::from(b'0' + (digest[i % digest.len()] % 10))
+            };
+            out.push(ch);
+        }
+        debug_assert_eq!(out.len(), original.len());
+        self.perm_id_cache.insert(original.to_string(), out.clone());
+        out
     }
 
     fn synth_exec_id(&mut self, original: &str) -> String {
@@ -271,26 +354,104 @@ fn pad_or_truncate(s: &str, target: usize) -> String {
     }
 }
 
-/// Returns the length in bytes if `bytes` starts with a real account-code
-/// pattern (`DU` followed by exactly 7 digits that aren't all in
-/// `0000000..0000999`).
-fn match_account_code(bytes: &[u8]) -> Option<usize> {
-    if bytes.len() < 9 {
-        return None;
+/// Account-matcher wrapper that rejects `U` / `F` matches when the
+/// preceding byte is alphanumeric — prevents `XU1234567` from being
+/// classified as retail account `U1234567`. `DU` bypasses this guard
+/// since its two-char prefix is unambiguous in every payload shape we
+/// care about.
+fn match_account_code_bounded(bytes: &[u8], prev: Option<u8>) -> Option<(usize, AccountKind)> {
+    let m = match_account_code(bytes)?;
+    if matches!(m.1, AccountKind::Retail | AccountKind::Fa) {
+        if let Some(p) = prev {
+            if p.is_ascii_alphanumeric() || p == b'_' {
+                return None;
+            }
+        }
     }
-    if bytes[0] != b'D' || bytes[1] != b'U' {
-        return None;
+    Some(m)
+}
+
+/// Which flavour of IB account the matcher recognised.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum AccountKind {
+    /// Paper-trading account — `DU` + 7 digits (total 9 chars).
+    Paper,
+    /// Retail cash/margin account — `U` + 7 digits (total 8 chars).
+    Retail,
+    /// Financial-advisor account — `F` + 7 digits (total 8 chars).
+    Fa,
+}
+
+/// Returns `(length, kind)` if `bytes` starts with a real account-code
+/// pattern. Supports:
+///
+/// - `DU\d{7}` — paper accounts (e.g. `DU1234567`).
+/// - `U\d{7}` — retail accounts (e.g. `U1234567`).
+/// - `F\d{7}` — FA/advisor accounts (e.g. `F1234567`).
+///
+/// The `U` / `F` variants are guarded by a previous-byte check via
+/// `prev_byte` above at the call site so they don't swallow the second
+/// char of something like `DU1234567` or `XF1234567`.
+fn match_account_code(bytes: &[u8]) -> Option<(usize, AccountKind)> {
+    // Longest first so `DU` doesn't get consumed as a `U`.
+    if bytes.len() >= 9
+        && bytes[0] == b'D'
+        && bytes[1] == b'U'
+        && bytes[2..9].iter().all(u8::is_ascii_digit)
+        && !bytes.get(9).is_some_and(u8::is_ascii_digit)
+    {
+        return Some((9, AccountKind::Paper));
     }
-    for b in &bytes[2..9] {
-        if !b.is_ascii_digit() {
+    if bytes.len() >= 8 {
+        let kind = match bytes[0] {
+            b'U' => AccountKind::Retail,
+            b'F' => AccountKind::Fa,
+            _ => return None,
+        };
+        if bytes[1..8].iter().all(u8::is_ascii_digit)
+            && !bytes.get(8).is_some_and(u8::is_ascii_digit)
+        {
+            return Some((8, kind));
+        }
+    }
+    None
+}
+
+/// Returns the length of a run of 10–19 digits starting at `bytes`
+/// iff neither the preceding byte nor the following byte is an
+/// alphanumeric character. The upper bound of 19 matches an `i64`
+/// ceiling; the lower bound of 10 filters out short ints (order ids,
+/// client ids, contract ids) that must not be mangled.
+fn match_perm_id(bytes: &[u8], prev: Option<u8>) -> Option<usize> {
+    const MIN: usize = 10;
+    const MAX: usize = 19;
+    if let Some(p) = prev {
+        if p.is_ascii_alphanumeric() || p == b'_' {
             return None;
         }
     }
-    // Must not run *into* another digit — it's a standalone code.
-    if bytes.len() > 9 && bytes[9].is_ascii_digit() {
+    let mut i = 0;
+    while i < bytes.len() && i < MAX && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i < MIN {
         return None;
     }
-    Some(9)
+    // Don't greedily consume into an adjacent alphanumeric — might be an
+    // arbitrary numeric token inside a larger identifier.
+    if bytes.get(i).is_some_and(|b| b.is_ascii_alphanumeric()) {
+        return None;
+    }
+    Some(i)
+}
+
+/// Safe look-back helper for the perm-id boundary check.
+fn prev_byte(input: &[u8], i: usize) -> Option<u8> {
+    if i == 0 {
+        None
+    } else {
+        Some(input[i - 1])
+    }
 }
 
 /// IB exec IDs look like `0000e1a7.66218745.01.01` — up to four dot-separated
@@ -344,11 +505,109 @@ mod tests {
 
     #[test]
     fn account_pattern_matches_classic_du() {
-        assert_eq!(match_account_code(b"DU1234567"), Some(9));
-        assert_eq!(match_account_code(b"DU1234567\0rest"), Some(9));
+        assert_eq!(
+            match_account_code(b"DU1234567"),
+            Some((9, AccountKind::Paper))
+        );
+        assert_eq!(
+            match_account_code(b"DU1234567\0rest"),
+            Some((9, AccountKind::Paper))
+        );
         assert_eq!(match_account_code(b"DU123456"), None); // too short
         assert_eq!(match_account_code(b"XX1234567"), None);
         assert_eq!(match_account_code(b"DU12345678"), None); // extra digit
+    }
+
+    #[test]
+    fn account_pattern_matches_retail_and_fa() {
+        assert_eq!(
+            match_account_code(b"U1234567"),
+            Some((8, AccountKind::Retail))
+        );
+        assert_eq!(match_account_code(b"F9876543"), Some((8, AccountKind::Fa)));
+        // Trailing digit disqualifies.
+        assert_eq!(match_account_code(b"U12345678"), None);
+        // Short/no-digit input.
+        assert_eq!(match_account_code(b"U123456"), None);
+        assert_eq!(match_account_code(b"Ufoobar7"), None);
+    }
+
+    #[test]
+    fn anonymize_replaces_retail_account_deterministically() {
+        let cfg = AnonymizeConfig::default();
+        let mut a = Anonymizer::new(cfg);
+        let inp = b" U1234567 acct";
+        let out = a.anonymize_bytes(inp);
+        assert_eq!(out.len(), inp.len());
+        let s = std::str::from_utf8(&out).unwrap();
+        // U accounts must remap into the U0000xxx reserved range.
+        assert!(
+            s.contains(RESERVED_SYNTHETIC_RETAIL_PREFIX),
+            "retail prefix missing in {s}"
+        );
+        assert!(
+            !s.contains("U1234567"),
+            "retail account leaked into anonymised output: {s}"
+        );
+    }
+
+    #[test]
+    fn anonymize_replaces_fa_account_deterministically() {
+        let cfg = AnonymizeConfig::default();
+        let mut a = Anonymizer::new(cfg);
+        let inp = b" F1234567 acct";
+        let out = a.anonymize_bytes(inp);
+        assert_eq!(out.len(), inp.len());
+        let s = std::str::from_utf8(&out).unwrap();
+        assert!(
+            s.contains(RESERVED_SYNTHETIC_FA_PREFIX),
+            "FA prefix missing in {s}"
+        );
+        assert!(
+            !s.contains("F1234567"),
+            "FA account leaked into anonymised output: {s}"
+        );
+    }
+
+    #[test]
+    fn perm_id_matches_standalone_10_digit_run() {
+        assert_eq!(match_perm_id(b"1656474657", None), Some(10));
+        assert_eq!(match_perm_id(b"1656474657 rest", None), Some(10));
+        // Too short: order id, not perm id.
+        assert_eq!(match_perm_id(b"123456789", None), None);
+        // Prior alphanumeric: don't start a match.
+        assert_eq!(match_perm_id(b"1656474657", Some(b'A')), None);
+        // Adjacent alphanumeric after: don't greedily eat into larger tokens.
+        assert_eq!(match_perm_id(b"1656474657A", None), None);
+    }
+
+    #[test]
+    fn anonymize_replaces_perm_id_deterministically() {
+        let cfg = AnonymizeConfig::default();
+        let mut a = Anonymizer::new(cfg.clone());
+        let mut b = Anonymizer::new(cfg);
+        let inp = b"perm_id=1656474657 price=100";
+        let out_a = a.anonymize_bytes(inp);
+        let out_b = b.anonymize_bytes(inp);
+        assert_eq!(out_a, out_b);
+        assert_eq!(out_a.len(), inp.len());
+        let s = std::str::from_utf8(&out_a).unwrap();
+        assert!(!s.contains("1656474657"), "perm id leaked: {s}");
+    }
+
+    #[test]
+    fn anonymize_same_perm_id_maps_consistently() {
+        let cfg = AnonymizeConfig::default();
+        let mut a = Anonymizer::new(cfg);
+        let inp = b"a=1656474657 b=1656474657 c=9988776655";
+        let out = a.anonymize_bytes(inp);
+        let s = std::str::from_utf8(&out).unwrap();
+        let parts: Vec<&str> = s.split(' ').collect();
+        let a_syn = parts[0].trim_start_matches("a=");
+        let b_syn = parts[1].trim_start_matches("b=");
+        let c_syn = parts[2].trim_start_matches("c=");
+        assert_eq!(a_syn, b_syn);
+        assert_ne!(a_syn, c_syn);
     }
 
     #[test]

@@ -230,20 +230,53 @@ async fn run_proxy_mode(
     };
     let cfg = ProxyConfig::new(bind, upstream);
     info!(%bind, %upstream, "proxy mode — waiting for client");
-    match run_proxy(cfg, recorder).await {
-        Ok(stats) => {
-            info!(
-                client_to_upstream_bytes = stats.client_to_upstream_bytes,
-                upstream_to_client_bytes = stats.upstream_to_client_bytes,
-                "proxy session ended"
-            );
-            ExitCode::SUCCESS
+
+    // Race the proxy session against ctrl-c so a SIGINT/SIGTERM delivered
+    // mid-session drives us through `Recorder::finalize`, which closes
+    // the trailing zstd frame so the captured pcap is decodable. A
+    // SIGKILL still leaves the file unfinalised — there's nothing the
+    // process can do about that — but SIGTERM is the common case.
+    let proxy_fut = run_proxy(cfg, Arc::clone(&recorder));
+    let shutdown_fut = tokio::signal::ctrl_c();
+    let (exit_code, result) = tokio::select! {
+        r = proxy_fut => {
+            match &r {
+                Ok(stats) => info!(
+                    client_to_upstream_bytes = stats.client_to_upstream_bytes,
+                    upstream_to_client_bytes = stats.upstream_to_client_bytes,
+                    "proxy session ended"
+                ),
+                Err(e) => error!("proxy failed: {e}"),
+            }
+            (if r.is_ok() { ExitCode::SUCCESS } else { ExitCode::FAILURE }, Some(r))
         }
-        Err(e) => {
-            error!("proxy failed: {e}");
-            ExitCode::FAILURE
+        _ = shutdown_fut => {
+            info!("ctrl-c received — finalising recorder");
+            (ExitCode::SUCCESS, None)
+        }
+    };
+
+    // Extract the recorder out of the Arc<Mutex<_>> and finalise.
+    // `Arc::try_unwrap` fails if copies leak; in that case we drop the
+    // Arc and rely on `AutoFinishEncoder`'s drop to run finish() when
+    // the last reference goes away. That still completes the zstd
+    // frame; the explicit finalize path is preferred because it can
+    // surface I/O errors instead of silently dropping them.
+    drop(result); // release any leftover Recorder refs held by the Result
+    match Arc::try_unwrap(recorder) {
+        Ok(mutex) => {
+            let rec = mutex.into_inner();
+            if let Err(e) = rec.finalize() {
+                error!("recorder finalize failed: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+        Err(arc) => {
+            tracing::warn!("recorder still shared — relying on Drop to finalise zstd frame");
+            drop(arc);
         }
     }
+    exit_code
 }
 
 async fn run_replay_mode(replay_path: &PathBuf, mode_str: &str) -> ExitCode {
