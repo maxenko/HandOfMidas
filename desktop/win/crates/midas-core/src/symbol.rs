@@ -22,7 +22,13 @@
 use serde::{Deserialize, Serialize};
 
 /// Normalised symbol identifier (trimmed + uppercase ASCII).
+///
+/// Serialises transparently as the inner string so on-disk TOML and
+/// redb payloads stay byte-identical across releases — if `SymbolKey`
+/// ever gains a second field, `#[serde(transparent)]` stops compiling
+/// and we're forced to version the schema rather than silently drift.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct SymbolKey(String);
 
 impl SymbolKey {
