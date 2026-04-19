@@ -1,0 +1,50 @@
+# Canonical line-limit-overflow scenario.
+#
+# Intent: subscribe many tickers; verify the overflow triggers the right
+# quirk. Against the mock engine this is the command sequence — real engine
+# will emit error 10197 on the 101st.
+
+version: 1
+name: "line_limit_overflow"
+description: "Subscribe > max_l1_lines; 101st must be rejected."
+seed: 100
+clock: virtual
+duration: 30s
+
+symbols:
+  - symbol: AAPL
+    initial_price: 175.00
+  - symbol: SPY
+    initial_price: 450.00
+  - symbol: MSFT
+    initial_price: 400.00
+
+quirks:
+  line_limit:
+    max_l1_lines: 2
+
+events:
+  - at: "00:00:01"
+    do: subscribe_market_data
+    args:
+      symbol: AAPL
+      subscription: streaming_l1
+
+  - at: "00:00:02"
+    do: subscribe_market_data
+    args:
+      symbol: SPY
+      subscription: streaming_l1
+
+  - at: "00:00:03"
+    # This one trips the line-limit quirk.
+    do: subscribe_market_data
+    args:
+      symbol: MSFT
+      subscription: streaming_l1
+
+asserts:
+  # Expression eval can't yet reach the quirk-counter, so assert on
+  # session still up; the recording pins the request sequence.
+  - cond: "session[0].connected"
+    message: "session stays connected even after line-limit overflow"

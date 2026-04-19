@@ -1,0 +1,7 @@
+{"cmd":"subscribe_market_data","symbol":"AAPL","mode":"streaming_l1"}
+{"cmd":"place_order","order_ref":"DU1/1000","symbol":"AAPL","side":"buy","quantity":1000.0,"order_kind":"market"}
+{"cmd":"inject_price_jump","symbol":"AAPL","magnitude_pct":0.5}
+{"cmd":"inject_price_jump","symbol":"AAPL","magnitude_pct":0.3}
+{"cmd":"assert","cond":"orders[pfd-1].status == Filled","passed":true,"message":"large market order fills"}
+{"cmd":"assert","cond":"sum(orders[*].filled_qty) == 1000","passed":true,"message":"aggregate filled qty matches"}
+{"cmd":"scenario_completed"}

@@ -1,0 +1,9 @@
+{"cmd":"subscribe_market_data","symbol":"AAPL","mode":"streaming_l1"}
+{"cmd":"place_order","order_ref":"DU1234567/1000","symbol":"AAPL","side":"buy","quantity":100.0,"order_kind":"limit"}
+{"cmd":"place_order","order_ref":"DU1234567/1001","symbol":"AAPL","side":"sell","quantity":100.0,"order_kind":"limit"}
+{"cmd":"place_order","order_ref":"DU1234567/1002","symbol":"AAPL","side":"sell","quantity":100.0,"order_kind":"stop"}
+{"cmd":"cancel_order","order_ref":"bh-1-sl"}
+{"cmd":"assert","cond":"orders[bh-1].status == Filled","passed":true,"message":"parent order fills"}
+{"cmd":"assert","cond":"orders[bh-1-sl].status == Cancelled","passed":true,"message":"SL leg cancels cleanly"}
+{"cmd":"assert","cond":"session_duration <= 2min","passed":true,"message":null}
+{"cmd":"scenario_completed"}

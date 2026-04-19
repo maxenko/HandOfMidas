@@ -1,0 +1,5 @@
+{"cmd":"subscribe_market_data","symbol":"AAPL","mode":"streaming_l1"}
+{"cmd":"place_order","order_ref":"DU1/1000","symbol":"AAPL","side":"buy","quantity":10.0,"order_kind":"limit"}
+{"cmd":"inject_daily_restart"}
+{"cmd":"assert","cond":"count(orders[*].status) >= 1","passed":true,"message":"at least one order survives the restart"}
+{"cmd":"scenario_completed"}

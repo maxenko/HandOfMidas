@@ -1,0 +1,59 @@
+# Canonical bracket-happy-path scenario.
+#
+# Intent: bracket submitted, parent fills, TP leg exists, SL leg cancels
+# when SL isn't hit. We can't yet simulate a TP hit from the runner's
+# mock engine (price movement lives in Stages 03/05), so this fixture
+# exercises the structural shape of brackets + cancel-the-children flow.
+
+version: 1
+name: "bracket_happy"
+description: "Bracket submit, parent fills, cancel the SL leg by order_ref."
+seed: 42
+clock: virtual
+duration: 2min
+
+symbols:
+  - symbol: AAPL
+    preset: MidCap
+    initial_price: 175.00
+
+accounts:
+  - acct_code: "DU1234567"
+    starting_cash: 100000.00
+    currency: USD
+
+events:
+  - at: "00:00:02"
+    do: subscribe_market_data
+    args:
+      symbol: AAPL
+      subscription: streaming_l1
+
+  - at: "00:00:05"
+    named: entry
+    do: accept_order
+    args:
+      order_kind: bracket
+      side: buy
+      quantity: 100
+      entry: limit
+      limit_price: 175.00
+      tp_offset: 2.00
+      sl_offset: 1.00
+      symbol: AAPL
+      account: DU1234567
+      order_ref: bh-1
+
+  # After the parent fills, cancel the SL leg so the scenario ends clean.
+  - when: "orders[bh-1].status == Filled"
+    named: parent_filled
+    do: cancel_order
+    args:
+      order_ref: bh-1-sl
+
+asserts:
+  - cond: "orders[bh-1].status == Filled"
+    message: "parent order fills"
+  - cond: "orders[bh-1-sl].status == Cancelled"
+    message: "SL leg cancels cleanly"
+  - cond: "session_duration <= 2min"

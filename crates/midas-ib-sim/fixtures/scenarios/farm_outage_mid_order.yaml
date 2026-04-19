@@ -1,0 +1,56 @@
+# Canonical farm-outage-mid-order scenario.
+#
+# Intent: order submitted, farm outage (1100) fires mid-submit, farm
+# restores (1101) after 45s, scenario asserts the order still made it.
+
+version: 1
+name: "farm_outage_mid_order"
+description: "Farm outage and restore while order is inflight."
+seed: 7
+clock: virtual
+duration: 3min
+
+symbols:
+  - symbol: AAPL
+    initial_price: 175.00
+
+accounts:
+  - acct_code: "DU1"
+    starting_cash: 50000.00
+
+events:
+  - at: "00:00:02"
+    do: subscribe_market_data
+    args:
+      symbol: AAPL
+      subscription: streaming_l1
+
+  - at: "00:00:10"
+    named: order_submit
+    do: accept_order
+    args:
+      order_kind: single
+      side: buy
+      quantity: 50
+      entry: market
+      symbol: AAPL
+      account: DU1
+      order_ref: fo-1
+
+  - at: "00:00:11"
+    named: outage_start
+    do: inject_farm_outage
+    args:
+      code: 1100
+      farms: ["usfarm"]
+
+  - after: outage_start
+    delay: 45s
+    do: inject_farm_restore
+    args:
+      code: 1101
+      farms: ["usfarm"]
+
+asserts:
+  - cond: "orders[fo-1].status == Filled"
+    message: "order fills despite farm blip"

@@ -1,0 +1,4 @@
+{"cmd":"subscribe_market_data","symbol":"SPY","mode":"streaming_l1"}
+{"cmd":"inject_pacing_violation","session_id":"0"}
+{"cmd":"assert","cond":"session[0].connected == false","passed":true,"message":"session 0 must be disconnected after pacing violation"}
+{"cmd":"scenario_completed"}

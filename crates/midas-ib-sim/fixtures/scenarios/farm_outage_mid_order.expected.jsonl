@@ -1,0 +1,6 @@
+{"cmd":"subscribe_market_data","symbol":"AAPL","mode":"streaming_l1"}
+{"cmd":"place_order","order_ref":"DU1/1000","symbol":"AAPL","side":"buy","quantity":50.0,"order_kind":"market"}
+{"cmd":"inject_farm_outage","code":1100,"farms":["usfarm"]}
+{"cmd":"inject_farm_restore","code":1101,"farms":["usfarm"]}
+{"cmd":"assert","cond":"orders[fo-1].status == Filled","passed":true,"message":"order fills despite farm blip"}
+{"cmd":"scenario_completed"}

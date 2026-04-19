@@ -1,0 +1,6 @@
+{"cmd":"subscribe_market_data","symbol":"AAPL","mode":"streaming_l1"}
+{"cmd":"inject_price_jump","symbol":"AAPL","magnitude_pct":-10.0}
+{"cmd":"inject_halt","symbol":"AAPL","duration":"30000ms"}
+{"cmd":"inject_price_jump","symbol":"AAPL","magnitude_pct":2.0}
+{"cmd":"assert","cond":"session_duration <= 2min","passed":true,"message":null}
+{"cmd":"scenario_completed"}
