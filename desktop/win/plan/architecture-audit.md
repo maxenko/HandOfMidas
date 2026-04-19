@@ -245,4 +245,206 @@ The original finding is preserved below for historical motivation.
 6. ~~`SymbolKey` to `midas-core` + normalize (P2).~~ **shipped — commit `316503a`**
 7. ~~Rename one `midas-core` (P3).~~ **shipped — commit `c7b3daf`**
 
-**Audit status: closed except for MidasApp split (gated)**.
+**Audit status: round 1 closed except for MidasApp split (gated)**.
+
+---
+
+# Re-audit 2026-04-18 (round 2)
+
+*Re-run after round 1 closed out. Focus: what *new* structural debt has surfaced or was missed last time, now that the big moves (view-models, `Message::Chart` collapse, SymbolKey promotion, mirror deletion) are behind us.*
+
+## Status — round 2
+
+| # | Finding | Status |
+|---|---------|--------|
+| P1 | Parallel column-resize state + message triples (4×) | **open** |
+| P2 | `charts` + `floating_charts` parallel maps of `ChartPanel` | **open** |
+| P2 | `LevelStore` ↔ `AnnotationStore` dual per-symbol stores | **open** (migration known-deferred; documenting as a finding so it doesn't rot) |
+| P3 | Raw `String` symbol keys in `MarketDataCache` + `LevelStore` | **open** (finishes the round-1 SymbolKey promotion) |
+| P3 | Session-scoped per-symbol side-car maps on `MidasApp` | **open** |
+
+## Summary — round 2
+
+- The big-hammer round-1 findings have mostly landed. The structural problems now visible are **parallel-change / copy-paste-extension smells** concentrated in the UI dispatch layer — what Fowler calls Parallel Hierarchies + Shotgun Surgery. These are the kind of debt that survives a god-object split if you don't specifically target them, because each `self.foo` access is innocent-looking individually.
+- **Top 1–3 moves**: (1) collapse the four `*ColumnResize*` message triples and the four matching `resizing_*_column` fields into one parameterised `ColumnResize` shape; (2) unify `charts` + `floating_charts` behind a single `HashMap<ChartHandle, ChartPanel>` or equivalent iterator abstraction; (3) finish the `LevelStore → AnnotationStore` migration so the render pipeline has one per-symbol store, not two with a bridging function.
+- **None of these are blockers for the MidasApp split** — in fact, #1 and #2 make the future Chart / Account / Watchlist controller extractions noticeably cleaner, because the per-controller message surface shrinks before the split rather than after.
+
+## Findings — round 2
+
+### [P1] Four parallel `*ColumnResize*` triples — 12 Message variants, 4 state fields, 4 near-identical handler blocks
+**Location**:
+- State: `crates/midas-app/src/app.rs:312-322` — `resizing_column`, `resizing_account_column`, `resizing_account_history_column`, `resizing_account_recents_column`, all of type `Option<(PanelId, usize, f32, f32)>`.
+- Messages: `crates/midas-app/src/app.rs:621-688` — `WatchlistColumnResize{Start,ing,End}`, `AccountOrdersColumnResize{Start,ing,End}`, `AccountHistoryColumnResize{Start,ing,End}`, `AccountRecentsColumnResize{Start,ing,End}` — 12 variants total.
+- Handlers: `crates/midas-app/src/app/handlers.rs:1760-1885` — three consecutive Orders/History/Recents handler triples that differ only in which `column::ids()` function and which `<panel>.grid_state` field they touch; `2346-2368` has the Watchlist variant.
+
+**Evidence**:
+- Four `Option<(X, usize, f32, f32)>` fields with the *same shape* and *same lifecycle* (set on Start, mutated on first Move, cleared on End). Primitive obsession + connascence of position across the 4-tuple.
+- 12 Message variants driving exactly 3 semantic operations (begin / move / end). That's 12 lines in the enum, 12 dispatcher entries, 12 handler cases — all for parameterization on (grid target).
+- Orders-tab and History-tab handler blocks are byte-for-byte identical except for `orders.grid_state`/`OrderBlotterColumn::ids` vs `history.grid_state`/`HistoryColumn::ids`. Recents-tab is a third copy. The Watchlist variant is a 4th. A fifth tabbed-grid (plan mentions a Trades tab as future work) will add 3 more variants + 1 more field + 1 more handler block by copy-paste.
+- Zero abstraction over "a grid's column-resize state machine" despite `midas_grid::GridState` already exposing `column_width`/`set_column_width` as the unifying primitive.
+
+**Lens**: Cohesion (divergent change — 4 places edit for one concept) + Coupling (connascence of position repeated 4×).
+
+**Principle**: Fowler — Parallel Hierarchies / Shotgun Surgery. Connascence: same concept represented four times without a unifying type. Ousterhout — interface surface is 4× wider than it needs to be for a single concept.
+
+**Impact**: Any change to column-resize UX (snap-to-grid, min-width enforcement, persistence rules, keyboard cancel, touch support) has to be made in 4 places. Last-write-wins bugs have already appeared once (per git history; `f32::NAN` sentinel for "no cursor delta yet" is repeated in each copy, one easily forgotten).
+
+**Refactor** (bare-enum shape — no trait):
+1. Introduce `ColumnResizeTarget` enum (4 variants today — `Watchlist(WatchlistId)`, `AccountOrders(AccountPanelId)`, `AccountHistory(AccountPanelId)`, `AccountRecents(AccountPanelId)`). The variant data carries the panel ID; no trait or dynamic dispatch — Rust idiom favours bare `match` for closed, known, few-variant sum types.
+2. Add one `resizing_column: Option<ColumnResizeState>` field on `MidasApp` (`struct ColumnResizeState { target: ColumnResizeTarget, col_idx: usize, start_x: f32, start_width: f32 }`).
+3. Collapse the 12 Message variants into one: `Message::ColumnResize(ColumnResizeEvent)` where `ColumnResizeEvent = enum { Begin(ColumnResizeTarget, usize), Move(f32), End }`. (Three separate top-level variants also fine if preferred; the single-wrapper shape matches the round-1 `Message::Chart(ChartId, ChartAction)` collapse.)
+4. Handler: one `handle_column_resize(&mut self, ev: ColumnResizeEvent) -> Task<Message>` that pattern-matches on `self.resizing_column.as_ref().map(|s| s.target)` to route to the right panel's `grid_state`. Column-ids and persistence rules live inline per-variant — `AccountOrders` calls `self.flush_config()` on End; `AccountHistory` doesn't; `AccountRecents` doesn't; `Watchlist` does.
+5. Emit-site change: every widget that currently emits `Message::AccountOrdersColumnResizeStart(id, i)` now emits `Message::ColumnResize(ColumnResizeEvent::Begin(ColumnResizeTarget::AccountOrders(id), i))`. One line at each call site; compile errors find all of them.
+
+**Seam**: new module `crates/midas-app/src/column_resize.rs` exports `ColumnResizeTarget`, `ColumnResizeState`, `ColumnResizeEvent`. The handler moves into `handlers.rs` as a single `handle_column_resize` function; emit-sites and the Message variant shape define the boundary.
+
+**Rollback signal**: if the inline per-variant `match` in the handler exceeds the size of the 4 original handler blocks combined, the indirection isn't paying off — back out the Message collapse and keep only the field consolidation. If a 5th target genuinely won't fit the enum, reconsider a trait *then* (not now).
+
+**Confidence**: high — all 4 triples sit side-by-side in one file, shape is identical, semantics are identical, the unifying primitive (`GridState`) already exists.
+
+**LOC delta estimate**: −200 / +80 net. Plus the fitness-function win: future tabbed grids cost 10 LOC (impl the trait) instead of 60 (enum + field + handler block).
+
+### [P2] `charts` + `floating_charts` — parallel maps of the same `ChartPanel` type keyed by different IDs
+**Location**:
+- `crates/midas-app/src/app.rs:255` `charts: HashMap<ChartId, ChartPanel>`
+- `crates/midas-app/src/app.rs:277` `floating_charts: HashMap<window::Id, ChartPanel>` — same value type.
+- `crates/midas-app/src/app.rs:635-637` — `FloatingSetSymbolLink`, `FloatingSetTimeframeLink` parallel to `SetSymbolLink` / `SetTimeframeLink`.
+- `crates/midas-app/src/app/handlers.rs:2562-2644` (docked handlers) vs `2646-2760` (floating handlers) — the `SetSymbolLink` and `FloatingSetSymbolLink` blocks are near-identical ~50 LOC copy-paste, differing only in which map gets `.get_mut(&id)` and which map orders the `.chain()` in the siblings iterator.
+- `crates/midas-app/src/app/handlers.rs:3856-3920` `broadcast_symbol_to_link_group` — two parallel loops (one for docked, one for floating) routing the same semantic event.
+
+**Evidence**:
+- 16 direct `self.floating_charts.*` references in handler code; most paired with a `self.charts.*` sibling.
+- `find_link_targets(source_link, self.floating_charts.iter().map(...))` pattern repeated 4× — explicit parallel enumeration.
+- Whenever new chart-level state is added to `ChartPanel`, both code paths have to be kept in sync. Drift history: `crosshair_sync` (docked-only for two commits until the floating path was back-filled), `bound_symbol` (same).
+- One Message variant exists only because of the split: `FloatingWindowClosed(window::Id)`. No equivalent `DockedChartClosed` exists — docked-close is workspace-driven.
+
+**Lens**: Coupling + Abstraction (connascence of type across two call chains).
+
+**Principle**: Fowler — Parallel Hierarchies. The two maps represent the same concept ("a chart panel the user is interacting with") with a different location identity. Connascence of type across sibling enumerations — every caller has to *know* there are two containers and *know* to scan both.
+
+**Impact**: The main UI event that has to iterate "all charts" (symbol-link propagation, timeframe broadcast, crosshair sync, market-snapshot fan-out, drag-drop target search) repeats the same two-loop pattern. Future features — cross-chart cursor sync, synchronized-scroll groups, per-chart layout persistence — each pay this tax.
+
+**Refactor** — Option B is the target shape; Option A is contingent:
+
+**Prep step (required before either option)**: the two loops in `broadcast_symbol_to_link_group` are not strictly parallel — the docked path calls `self.load_symbol_for_chart(id, symbol)` while the floating path does inline `bound_symbol`/`symbol`/`symbol_input`/`load_state` mutation before calling `self.load_floating_chart_async(wid, ...)`. Extract a helper `fn apply_symbol_to_panel(panel: &mut ChartPanel, symbol: &str, sym_key: SymbolKey)` that performs the shared mutation; both paths then use it. This is the pre-refactor — removes a hidden asymmetry the iterator collapse would otherwise trip over.
+
+Option B — **iterator abstraction** (target shape; ~80 LOC touched):
+1. Introduce `pub enum ChartHandle { Docked(ChartId), Floating(window::Id) }` — used only in iterator items and the collapsed Message variant, NOT as a HashMap key. Derive `Hash, Eq, Copy, Clone` anyway (cheap and future-proof).
+2. Add `fn all_chart_panels(&self) -> impl Iterator<Item = (ChartHandle, &ChartPanel)>` (+ `_mut` variant) on `MidasApp` that chains `self.charts.iter()` and `self.floating_charts.iter()`, wrapping each key.
+3. Collapse `SetSymbolLink` + `FloatingSetSymbolLink` (and the timeframe pair) into `Message::SetSymbolLink(ChartHandle, LinkMode)`. The handler matches `ChartHandle` to route to the right storage map.
+4. Rewrite `broadcast_symbol_to_link_group`'s two loops as one iteration over `all_chart_panels_mut()`, using the `apply_symbol_to_panel` helper from the prep step.
+5. Keep both storage maps — `window::Id`-keyed `floating_charts` preserves iced 0.14's native window-event routing (iced dispatches `window::Event::Closed`/`Resized` keyed on `window::Id`; a unified `HashMap<ChartHandle, _>` would force a wrap on every window-event handler path for no benefit).
+
+Option A — **unified map** (contingent; only if Option B proves the asymmetry is cosmetic):
+Replace both maps with `charts: HashMap<ChartHandle, ChartPanel>`. Promote to Option A ONLY IF, after Option B ships, ≥3 call sites that currently use `all_chart_panels()` never care about the `Docked`/`Floating` distinction AND no handler that receives a raw `window::Id` from iced has to wrap it. Known iced production apps (Halloy, cosmic apps) keep the two maps separate for exactly the routing-asymmetry reason; don't fight that default without evidence.
+
+**Seam**: `crates/midas-app/src/app.rs:255-277` (the two field declarations stay); new `impl MidasApp` block near the field block for `all_chart_panels`/`_mut`; `handlers.rs:2562-2760` is where the four Link handlers collapse to two (one SetSymbolLink, one SetTimeframeLink).
+
+**Promotion criterion (Option B → Option A)**: after Option B lands and bakes for one release, count call sites that (a) iterate `all_chart_panels()` and never branch on `ChartHandle` variant, vs. (b) sites that must branch (window-event routing, persistence boundaries). If (a) ≥ 3× (b), promote. If not, leave as Option B — the two-map shape is the correct end state.
+
+**Rollback signal (Option B)**: if `ChartHandle` needs to sprout helper methods like `.window_id() -> Option<window::Id>` in more than 3 call sites, the enum is acting as a tuple — drop `ChartHandle` from the Message shape and restore the Link-variant pair, keeping only the iterator helper.
+
+**Confidence**: high on Option B; Option A status downgraded to contingent based on iced 0.14 routing semantics.
+
+### [P2] `LevelStore` and `AnnotationStore` — dual per-symbol stores with a bridge function
+**Location**:
+- `crates/midas-app/src/level_store/mod.rs:62-69` `LevelStore { levels: HashMap<String, Vec<StoredLevel>>, generations: HashMap<String, u64>, next_id: u64 }`
+- `crates/midas-app/src/annotation_store/mod.rs:49-57` `AnnotationStore { by_symbol: HashMap<SymbolKey, SymbolAnnotations>, global_generation: u64, next_id: u64 }` — module doc: *"It replaces `LevelStore` as the single source of truth for chart annotations."*
+- `crates/midas-app/src/chart_widget.rs:73-75` `ChartRenderSnapshot { levels: Vec<StoredLevel>, bracket_annotations: Vec<Annotation>, ... }` — both kinds pass through the render path.
+- `crates/midas-app/src/chart_widget.rs:1557` `fn old_levels_to_annotations(levels: &[StoredLevel]) -> Vec<Annotation>` — explicit migration-bridge function.
+
+**Evidence**:
+- Two per-symbol stores, same role, different key types (`String` vs `SymbolKey`).
+- Chart render pipeline reads from both and bridges at the seam.
+- Feature-work comment chains reference a "LevelStore→AnnotationStore migration deferred" from slice 10 of the unified-annotation work (user memory `project_unified_annotation_tracks.md`); the deferral has now outlived the original work.
+- Both stores bump generations independently; the dirty-tracking path has to watch both.
+
+**Lens**: Abstraction — Single Source of Truth principle violated.
+
+**Principle**: Evans (DDD) — a single authoritative model per concept. Hickey — complecting "level" and "annotation" with a bridge function means every consumer has to know there are two representations.
+
+**Impact**: Every new feature on annotations (e.g., an "annotation history" undo stack, a per-annotation lock state that isn't already modelled, a persistence schema change) has to decide which store it lives in and how it bridges. Test doubles multiply — `annotation_store/tests.rs` + `level_store/tests.rs` cover overlapping invariants.
+
+**Refactor**:
+1. Freeze `LevelStore`'s API: no new methods; no new call sites.
+2. Introduce `AnnotationKind::Level(HorizontalLevel)` with a `locked: bool` that lives on `Annotation` itself (it already does per the slice-7 note in `level_store/mod.rs:7-16`). Write the small shim that makes `.iter()` on AnnotationStore yield what `StoredLevel` yielded.
+3. Flip call sites one-by-one — the render snapshot builder, the level editor, the ticker_state effect handler for level creation — from `self.level_store.*` to `self.annotation_store.*`. `old_levels_to_annotations` becomes the identity function and can be deleted.
+4. Delete `LevelStore` and its tests.
+
+**Seam**: `crates/midas-app/src/chart_widget.rs:1557` — the bridge function is the canary. When it's gone, the migration is done.
+
+**Rollback signal**: if `AnnotationStore`'s public API has to grow a level-specific helper set (`add_level`, `find_level_mut`, `levels_for`) that duplicates `LevelStore`'s shape, the migration missed the generalization; revisit whether `AnnotationKind` should carry a richer per-kind index instead of a flat `Vec<Annotation>`.
+
+**Confidence**: high on the smell (two stores, explicit bridge), medium on scope — 17 files reference `self.level_store`, so mechanical migration time is real. Roughly 1–2 days.
+
+### [P3] Raw `String` symbol keys in `MarketDataCache` and `LevelStore` — finishes the round-1 SymbolKey promotion
+**Location**:
+- `crates/midas-app/src/market_cache.rs:13` `snapshots: HashMap<String, MarketSnapshot>`; public accessors take `&str`.
+- `crates/midas-app/src/level_store/mod.rs:64` `levels: HashMap<String, Vec<StoredLevel>>`; accessors take `&str`.
+
+**Evidence**:
+- Round 1 promoted `SymbolKey` to `midas-core` with normalizing construction (trim + uppercase). `annotation_store` and `tickers` use `SymbolKey`. These two stores didn't get the migration.
+- `MarketDataCache::insert(String, _)` puts whatever the caller passes — `"AAPL"` and `"aapl"` insert as different keys. No compile-time guard.
+- `LevelStore::levels_for(ticker: &str)` uses raw `get(ticker)` — no trim, no uppercase; relies on callers to be disciplined.
+
+**Lens**: Abstraction (Primitive Obsession).
+
+**Principle**: Connascence of name/value across module boundaries. The whole point of round 1's SymbolKey move was to make invalid symbol representations unrepresentable at the type level — leaving two stores out of it defeats the purpose.
+
+**Impact**: Low today (every producer happens to uppercase before insert) but one bug away. `MarketSnapshot` is read by every watchlist row; a missed uppercase anywhere upstream shows as "no quote" silently.
+
+**Refactor**: mechanical — replace `HashMap<String, _>` with `HashMap<SymbolKey, _>`; change accessor signatures from `&str` to `&SymbolKey` (or accept `impl Borrow<SymbolKey>`). Callers that still have `&str` call `SymbolKey::new(s)`. About 30 call sites.
+
+**Persistence-boundary note**: `LevelStore::from_config` / `to_config` at `crates/midas-app/src/level_store/mod.rs:169,199` cross the `data/config.toml` persistence boundary as `HashMap<String, Vec<LevelConfig>>`. The in-memory migration is only zero-cost at the disk schema if `SymbolKey` is `#[serde(transparent)]` (it's a newtype around `String` so this is trivial) — verify first, add the attribute if missing. If `SymbolKey` ever becomes something richer than a transparent string (e.g., interned ID), this P3 needs to couple to a config-schema bump using the versioned-migration framework that already landed in round 1 P2.
+
+**Seam**: `crates/midas-app/src/market_cache.rs:13` and `crates/midas-app/src/level_store/mod.rs:64` — change the field, follow the compile errors. Verify `SymbolKey` serde representation at `crates/midas-core/src/symbol.rs` before starting.
+
+**Confidence**: high; trivial. Defer `LevelStore` half until P2 #3 (LevelStore retirement) lands so we don't migrate a store we're about to delete; do the `MarketDataCache` half now.
+
+### [P3] Session-scoped per-symbol side-cars on `MidasApp` shadow `TickerState`
+**Location**: `crates/midas-app/src/app.rs:386-403`
+- `snapped_this_session: HashSet<SymbolKey>` — GATR snap-once guard
+- `anchor_seed_toasts_shown: HashSet<SymbolKey>` — toast dedup guard (currently `#[allow(dead_code)]`)
+- `gatr_undo_slots: HashMap<SymbolKey, PreSnapState>` — undo-snap slot (currently `#[allow(dead_code)]`)
+
+**Evidence**:
+- The project architecture rule (CLAUDE.md §Key patterns) says "All per-ticker state lives in `TickerState`... fields are private, read via getters." These three maps violate that rule — they're per-ticker state sitting on the god-struct.
+- Two of the three are dead-code-with-planned-API flags, meaning the design has already decided they belong *somewhere*; nobody has circled back to fold them into `TickerState`.
+
+**Lens**: Abstraction (SSoT violation for a small set of fields) + Cohesion (related state, wrong home).
+
+**Principle**: the project has an explicit invariant — per-ticker state goes through `TickerState::apply() -> Vec<TickerEffect>`. These fields are the ones that escaped.
+
+**Impact**: Small today. The cost is that `TickerState`'s "single source of truth" claim has three known exceptions; future readers will wonder whether there are more.
+
+**Refactor**:
+1. Add `session_flags: TickerSessionFlags { snapped: bool, anchor_seed_toast_shown: bool, gatr_undo: Option<PreSnapState> }` to `TickerState`. Not persisted (per the existing `snapped_this_session` comment — "deliberately not persisted").
+2. Expose `session_flags(&self) -> &TickerSessionFlags` / mutations via `TickerMsg::MarkSnappedThisSession`/`ClearGatrUndo` etc. Keeps the `apply()` invariant.
+3. Delete the three side-car fields.
+
+**Seam**: `crates/midas-app/src/ticker_state/mod.rs` struct definition.
+
+**Confidence**: high on the principle, low on urgency — the three maps are 5 LOC total and read cleanly where they're used. Touch when the next per-ticker session flag is added.
+
+## Explicitly dropped (round 2)
+
+- **"`handle_chart_bracket_submit` is 150 LOC of broker-params translation in a handler"** — it's genuinely essential structural complexity (bracket side, entry type, TP/SL legs → `BracketParams`). Extracting it to a `to_broker_params()` function on the bracket type is a drive-by cleanup, not an architectural concern. Do it if you're in the file anyway.
+- **"`ChartRenderSnapshot` is 30+ fields captured per frame"** — it's the boundary between sans-IO chart core and GPU render. Flat-struct shape is correct for a frame-time hot path; the snapshot is rebuilt from refs, not persisted.
+- **"handlers.rs is 3928 LOC"** — same god-object concern as round-1 P1. Don't double-count.
+- **"Message enum is still ~111 variants"** — same god-object concern. Will shrink further when the ColumnResize collapse (round-2 P1) lands and when the link-message pair (round-2 P2) collapses.
+- **"`broker_bridge.rs` translates ConnectionState"** — intentional thin translator, not a mirror. Round 1 audit already covered this.
+
+## Fitness functions — round 2 additions
+
+5. **Cap `resizing_*_column` field count** at 1: `grep -cE "^    pub resizing_.*_column:" crates/midas-app/src/app.rs` must be `1` after P1 lands (`resizing_column`). The pattern is line-anchored, so stray references in handlers/comments don't inflate the count.
+6. **Cap `ColumnResize` Message variant count**: prefer an AST-based check over grep. Add a short test in `crates/midas-app/tests/fitness_functions.rs` (if none exists, create it) that uses `syn` to parse `app.rs`, find the `Message` enum, and assert the number of variants matching `*ColumnResize*` or `ColumnResize` equals 1 (the wrapper) — or 3 (Begin/Move/End) if the Begin/Move/End shape is chosen over the single-wrapper shape. `grep -cE "ColumnResize"` over the whole 2952-LOC file is too coarse: it also counts dispatcher arms, handler references, and doc comments, inflating the number against the post-refactor baseline.
+7. **Forbid direct `old_levels_to_annotations` call sites** once P2 #3 lands: `grep -r "old_levels_to_annotations" crates/midas-app/src/ | wc -l` must be 0. The bridge function's deletion is the migration done-marker; the function name is unique enough that `grep` is fine here.
+8. **Post-P3 cap: no `HashMap<String, _>` keyed by symbol in `midas-app/src`**. After both P3 halves land, add a grep check that flags new `HashMap<String, ` occurrences in files that handle symbol-keyed state (watchlist, market, level, annotation, ticker, account modules). Locks in the SymbolKey invariant so the next contributor doesn't silently reintroduce a raw-string store.
+
+## TL;DR — round 2 ranked
+
+1. **Parallel `*ColumnResize*` collapse (P1, ~1 day, decisive shrink)** — deletes 9 Message variants + 3 state fields, removes the copy-paste channel for future tabbed grids.
+2. **`charts` + `floating_charts` unification (P2, ~1–2 days, Option B first)** — collapses the longest-running copy-paste in the codebase; shrinks the Message enum by 2 more.
+3. **Finish `LevelStore → AnnotationStore` migration (P2, 1–2 days)** — deletes a store and a bridge function; round-1 follow-up.
+4. **Raw-string symbol keys in remaining stores (P3, mechanical).**
+5. **Fold session-scoped per-symbol maps into `TickerState` (P3, tiny but preserves the SSoT invariant).**

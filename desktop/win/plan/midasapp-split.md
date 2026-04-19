@@ -323,3 +323,14 @@ With A + B in place, Watchlist becomes:
 
 - Account / Order / Chart-list / Workspace controllers — those are post-Watchlist slices, sized after we see what the actual cost of `SharedServices` + `Controller` looks like in production.
 - Splitting the `Message` enum into per-controller `Msg` types globally. Only Watchlist's slice needs `WatchlistMsg`; the rest stay flat until proven otherwise.
+
+## 2026-04-18 re-audit interaction
+
+Round 2 of the architecture audit (`architecture-audit.md` §Re-audit) surfaced two follow-ups that are **independent of the SharedServices/Controller/Watchlist track** but shrink the god-object surface area in parallel:
+
+- **P1 — Parallel `*ColumnResize*` collapse** (9 Message variants, 3 fields, 3 handler blocks to delete). Pure message-enum + primitive-obsession refactor. No new abstraction; no `SharedServices` involvement. Good parallel work for anyone who doesn't want to wait on the Controller trait landing.
+- **P2 — `charts` + `floating_charts` unification** (2+ Message variants, `broadcast_symbol_to_link_group` duplicated loop). Strictly reduces the "reach into multiple parallel maps" pattern that the Chart-list controller (post-Watchlist) would otherwise inherit. Useful *before* a chart controller is extracted so the extracted controller isn't born with the two-map problem baked in.
+
+Neither blocks Slice A (SharedServices) or Slice B (Controller trait) — they don't touch either abstraction. They do, however, noticeably reduce what a future `ChartController` has to own (one map + one message pair instead of two + two), so landing #2 before the Chart controller slice is recommended but not required.
+
+**Slice C (Watchlist) is unaffected**: `WatchlistColumnResize*` is one of the 4 parallel triples and gets consolidated away whether Watchlist becomes a controller or not.
