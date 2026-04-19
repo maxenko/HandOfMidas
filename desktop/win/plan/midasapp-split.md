@@ -7,7 +7,9 @@
 | Slice | Status |
 |---|---|
 | 0 — Toast controller | **shipped** (commits `f4015da`, `9614b4b`, follow-up review fixes) |
-| Slice 1 — see "Post-slice-0 review verdict" below | open |
+| 1A — `Message::Chart` wrapper introduced | **shipped** (commit `468fd30`); chart_widget decoupled from Message variants, 132-LOC fan-out → 1 line |
+| 1B — Delete 17 legacy `Message::Chart*` variants, inline handler bodies | open (~500 LOC mechanical) |
+| 2+ — see "Post-slice-0 review verdict" below | open |
 
 Slice 0 ratio came in at **3.98×** (438 LOC new / 110 LOC removed) — just under the 4× kill threshold the plan set. Pattern works for trivial controllers (single-instance state, no shared deps); it is **not yet proven** for cross-cutting controllers like Watchlist.
 

@@ -10,7 +10,7 @@
 | P1 | Split `MidasApp` god object | **slice 0 shipped** (Toast — commits `f4015da`, `9614b4b`); pattern-scaling review re-routed slice 1 — see [`midasapp-split.md`](midasapp-split.md) |
 | P1 | Delete `midas_core::broker` mirror | **shipped** (commit `7254f79`, 2026-04-18) |
 | P1 | Introduce view-models | open |
-| P2 | Collapse `Message::Chart*` into `Message::Chart(ChartId, ChartAction)` | **promoted to next slice** by post-`MidasApp`-split-0 pattern-scaling review |
+| P2 | Collapse `Message::Chart*` into `Message::Chart(ChartId, ChartAction)` | **Phase A shipped** (commit `468fd30`) — wrapper exists, `chart_widget::action_to_message` shrunk 132 LOC → 1; Phase B (delete legacy variants, inline 17 handler arms) is ~500 LOC of mechanical migration, deferred |
 | P2 | Versioned config migrations | open |
 | P2 | `SymbolKey` to `midas-core` + normalize | open |
 | P3 | Rename one `midas-core` | open |
