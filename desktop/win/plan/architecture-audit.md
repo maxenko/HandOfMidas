@@ -9,11 +9,11 @@
 |---|---------|--------|
 | P1 | Split `MidasApp` god object | **slices 0 + 2 shipped** (Toast — `f4015da`, `9614b4b`; WindowGeometry — `f338700`, `2395864`). Pattern proven for trivial state AND multi-field + persistence. Watchlist still pending `SharedServices` + `Controller` trait per pattern-scaling review. |
 | P1 | Delete `midas_core::broker` mirror | **shipped** (commit `7254f79`, 2026-04-18) |
-| P1 | Introduce view-models | open |
+| P1 | Introduce view-models | **shipped** across slices 3A–3E + 4 + 5 + 6 + 7 + 8 + 9 + 10 + 11 + 12 (commits `d58c75d`, `4cbad6e`, `deb9e2b`, `cac474b`, `78f114b`, `012a800`). Account panel (4 sub-tabs + chrome), Watchlist, Chart pane (snapshot + overlays + title-bar), Order panel, Status bar, Toolbar. ~30 unit tests on the projection layer. Audit's three named view targets (Account, Watchlist, Pane body) all VM-driven. |
 | P2 | Collapse `Message::Chart*` into `Message::Chart(ChartId, ChartAction)` | **shipped** (commits `468fd30`, `e8f06c1`, `bf5a807`, `9204054`) — wrapper introduced + all 23 chart-action variants deleted. Top-level `Message`: 134 → ~110 variants. `chart_widget::action_to_message` 132 LOC → 5. Bracket bodies live as `handle_chart_bracket_*` methods on `MidasApp` (kept fn-extracted because each is 50–150 LOC). |
-| P2 | Versioned config migrations | open |
-| P2 | `SymbolKey` to `midas-core` + normalize | open |
-| P3 | Rename one `midas-core` | open |
+| P2 | Versioned config migrations | **shipped** (commit `51080ce`). `version: u32` field + `migrate_to_current` framework chains v_n → v_{n+1}. Existing order_blotter→account_panel migration folded in as v1→v2. Single backup path (`<name>.bak-v{from}-to-v{to}`). |
+| P2 | `SymbolKey` to `midas-core` + normalize | **shipped** (commit `316503a`). Promoted to `midas_core::SymbolKey`; old `crate::annotation_store::SymbolKey` is a re-export. Construction normalises trim+upper. Unused `SymbolId(u32)` deleted. |
+| P3 | Rename one `midas-core` | **shipped** (commit `c7b3daf`). Root workspace's crate renamed to `midas-broker-core`; desktop one keeps the `midas-core` name (smaller blast radius). |
 
 ## Summary
 
