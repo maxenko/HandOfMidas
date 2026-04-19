@@ -770,6 +770,28 @@ pub struct QuirkCounters {
     pub line_limit_triggers: u64,
     pub historical_pacing_triggers: u64,
     pub tick_by_tick_triggers: u64,
+    /// Broadcast `EngineEvent` send failures, broken down by cause. Bumped
+    /// on `event_tx.send()` errors so operators can tell a silently-dropped
+    /// event apart from a benign "no receivers attached" in standalone
+    /// tests. Missing (`#[serde(default)]`) to keep existing fixtures
+    /// forward-compatible.
+    #[serde(default)]
+    pub dropped_events: DroppedEvents,
+}
+
+/// Counter breakdown for broadcast-send failures from `Engine::emit_event`.
+///
+/// Tokio's `broadcast::Sender::send` only surfaces a `no receivers` error
+/// directly; consumer-side `Lagged` is detected on the receive path. We
+/// still track both counters for future cross-layer wiring (e.g. a
+/// receiver-side adapter that bumps `lagged` when it sees `RecvError::Lagged`
+/// and forwards that into the engine snapshot).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct DroppedEvents {
+    /// Engine event emitted with zero subscribed receivers.
+    pub no_receivers: u64,
+    /// Engine event dropped because a receiver fell behind its capacity.
+    pub lagged: u64,
 }
 
 #[cfg(test)]

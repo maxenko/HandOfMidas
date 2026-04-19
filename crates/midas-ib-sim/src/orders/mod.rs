@@ -556,25 +556,36 @@ impl BasicOrderSimulator {
 
         materialized.sort_by_key(|a| a.0);
         // Wave-4 out-of-order reordering: when present, permute the sorted
-        // vector by `reorder[i] -> new index`. Malformed permutations
-        // (wrong length or out-of-range indices) silently fall back.
+        // vector by `reorder[i] -> new index`. We validate the permutation
+        // up-front — length, bounds, AND uniqueness of destination indices
+        // (a BTreeSet view the same size as the perm). A malformed perm
+        // (duplicate dst → two src entries would collide and one entry
+        // would silently vanish) is rejected and the sort order preserved.
         if let Some(perm) = reorder {
-            if perm.len() == materialized.len()
-                && perm.iter().all(|&i| (i as usize) < materialized.len())
-            {
+            let len = materialized.len();
+            let bounds_ok = perm.len() == len && perm.iter().all(|&i| (i as usize) < len);
+            let unique_dsts = perm.iter().collect::<BTreeSet<_>>().len() == perm.len();
+            if bounds_ok && unique_dsts {
                 let mut reordered: Vec<Option<(Duration, OrderEmission)>> =
-                    (0..materialized.len()).map(|_| None).collect();
+                    (0..len).map(|_| None).collect();
                 for (src_idx, item) in materialized.into_iter().enumerate() {
                     let dst = perm[src_idx] as usize;
                     reordered[dst] = Some(item);
                 }
-                if reordered.iter().all(|x| x.is_some()) {
-                    materialized = reordered.into_iter().map(|x| x.unwrap()).collect();
-                } else {
-                    // Collision — two src entries wrote to the same dst.
-                    // Recover the original order to keep determinism.
-                    materialized = reordered.into_iter().flatten().collect();
-                }
+                // Uniqueness + bounds means every slot is now Some; any
+                // None at this point is a bug, not a collision.
+                materialized = reordered
+                    .into_iter()
+                    .map(|x| x.expect("validated perm filled every slot"))
+                    .collect();
+            } else {
+                tracing::warn!(
+                    perm_len = perm.len(),
+                    materialized_len = len,
+                    unique_dsts,
+                    bounds_ok,
+                    "out-of-order reorder skipped: malformed permutation",
+                );
             }
         }
         let mut out: Vec<OrderEmission> = materialized.into_iter().map(|(_, e)| e).collect();

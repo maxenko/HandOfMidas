@@ -75,6 +75,17 @@ pub struct SubState {
     pub data_type: MarketDataType,
 }
 
+/// Entry stored in the per-session subscription map. We key by
+/// `(SessionId, ReqId)` so `unsubscribe` is an O(log n) deterministic lookup
+/// instead of a `HashMap::keys().find(...)` scan whose result depends on the
+/// non-deterministic hasher iteration order whenever two subscriptions ever
+/// shared a `(session, req_id)` pair.
+#[derive(Clone, Debug)]
+pub struct SubEntry {
+    pub symbol: SymbolKey,
+    pub state: SubState,
+}
+
 // ---------------------------------------------------------------------------
 // Orchestrator entry points
 // ---------------------------------------------------------------------------
@@ -103,7 +114,7 @@ pub fn build_engine(
         orders,
         quirks,
         sessions: BTreeMap::new(),
-        subscriptions: HashMap::new(),
+        subscriptions: BTreeMap::new(),
         contract_to_sym: HashMap::new(),
         order_sessions: BTreeMap::new(),
         order_contracts: BTreeMap::new(),
@@ -131,10 +142,16 @@ pub struct OrchestratedEngine {
     pub quirks: CompositeQuirkGuard,
     /// Per-session state.
     pub sessions: BTreeMap<SessionId, SessionState>,
-    /// Active subscriptions, keyed by `(session, req_id, symbol)`. HashMap
-    /// because `SubKey`'s central-type freeze omits `Ord`; snapshot
-    /// projection sorts deterministically on the way out.
-    pub subscriptions: HashMap<SubKey, SubState>,
+    /// Active subscriptions, keyed by `(session, req_id)`.
+    ///
+    /// Using a `BTreeMap` keyed on the deterministic `(SessionId, ReqId)`
+    /// pair avoids the pre-fix `HashMap<SubKey, _>::keys().find(...)` scan —
+    /// which relied on the symbol field to disambiguate and whose result
+    /// depended on the non-deterministic hasher iteration order if two
+    /// entries ever collided on `(session, req_id)` with different symbols.
+    /// Collisions are now rejected on `subscribe` instead of silently
+    /// overwriting (see `on_subscribe_market_data`).
+    pub subscriptions: BTreeMap<(SessionId, ReqId), SubEntry>,
     /// Cache: `contract_id (from SubKey::symbol)` → `symbol_key_for(contract)`
     /// so emissions translate to snapshots in O(1).
     pub contract_to_sym: HashMap<i32, SymbolKey>,
@@ -451,6 +468,28 @@ impl OrchestratedEngine {
             req_id,
             symbol: symbol.clone(),
         };
+        let map_key = (session, req_id);
+
+        // Reject duplicate (session, req_id) subscriptions instead of
+        // silently overwriting. Real IB assigns req_ids per client and a
+        // reused id on the same session is a protocol error, so surface it
+        // as an UnknownContract-style violation rather than losing state.
+        if self.subscriptions.contains_key(&map_key) {
+            warn!(
+                ?session,
+                ?req_id,
+                "subscribe rejected: (session, req_id) already has an active subscription",
+            );
+            self.handle_violation(
+                session,
+                QuirkViolation::UnknownContract {
+                    code: error_codes::NO_SECURITY_DEF,
+                    message: "duplicate market-data subscription".into(),
+                    req_id,
+                },
+            );
+            return;
+        }
 
         let kind = match &mode {
             SubMode::StreamingL1 { .. } => QuirkCheckKind::L1Subscribe { symbol: &symbol },
@@ -487,11 +526,14 @@ impl OrchestratedEngine {
         self.contract_to_sym
             .insert(symbol.contract_id, symbol_key_for(&contract));
         self.subscriptions.insert(
-            key.clone(),
-            SubState {
-                contract,
-                mode,
-                data_type: MarketDataType::Live,
+            map_key,
+            SubEntry {
+                symbol: symbol.clone(),
+                state: SubState {
+                    contract,
+                    mode,
+                    data_type: MarketDataType::Live,
+                },
             },
         );
         if let Some(s) = self.sessions.get_mut(&session) {
@@ -505,14 +547,15 @@ impl OrchestratedEngine {
     }
 
     fn on_unsubscribe_market_data(&mut self, session: SessionId, req_id: ReqId) {
-        let key_opt = self
-            .subscriptions
-            .keys()
-            .find(|k| k.session == session && k.req_id == req_id)
-            .cloned();
-        if let Some(key) = key_opt {
+        // Deterministic O(log n) lookup — no `keys().find(...)` scan, no
+        // hasher-order dependency if two entries ever collided on the key.
+        if let Some(entry) = self.subscriptions.remove(&(session, req_id)) {
+            let key = SubKey {
+                session,
+                req_id,
+                symbol: entry.symbol,
+            };
             self.market_data.unsubscribe(&key);
-            self.subscriptions.remove(&key);
             self.quirks.release_l1(session, req_id);
         }
         if let Some(s) = self.sessions.get_mut(&session) {
@@ -660,10 +703,35 @@ impl OrchestratedEngine {
         }
     }
 
-    fn emit_event(&self, event: EngineEvent) {
-        // Fan-out failure is not fatal — no receivers just means nobody
-        // cares about engine events (e.g. standalone tests).
-        let _ = self.event_tx.send(event);
+    fn emit_event(&mut self, event: EngineEvent) {
+        // Fan-out failure is not fatal, but we stop swallowing it silently.
+        // `broadcast::Sender::send` only errors on "no receivers" — receiver
+        // lag is surfaced receive-side. We trace-log the benign no-receivers
+        // case and bump a counter; a follow-up that forwards `RecvError::
+        // Lagged` from adapter receivers will feed the `lagged` counter via
+        // [`Self::record_lagged_event`].
+        if let Err(broadcast::error::SendError(dropped)) = self.event_tx.send(event) {
+            self.quirk_counters.dropped_events.no_receivers += 1;
+            trace!(
+                dropped = ?dropped,
+                total_no_receivers = self.quirk_counters.dropped_events.no_receivers,
+                "engine event dropped: no receivers",
+            );
+        }
+    }
+
+    /// Receive-side callers (adapters, tests) that observe
+    /// [`tokio::sync::broadcast::error::RecvError::Lagged`] can forward the
+    /// count here so the snapshot's `dropped_events.lagged` counter reflects
+    /// it. Logged at `warn` level because a lagged receiver is a genuine
+    /// back-pressure signal, not a benign no-subscriber state.
+    pub fn record_lagged_event(&mut self, count: u64) {
+        self.quirk_counters.dropped_events.lagged += count;
+        warn!(
+            count,
+            total_lagged = self.quirk_counters.dropped_events.lagged,
+            "engine event dropped: receiver lagged",
+        );
     }
 
     fn record_order_emission(&mut self, emission: &OrderEmission) {
@@ -715,13 +783,16 @@ impl OrchestratedEngine {
             })
             .collect();
 
+        // BTreeMap iteration is already ordered by `(SessionId, ReqId)`, so
+        // no post-sort is needed — but we keep the explicit sort below as a
+        // belt-and-braces guard against future key changes.
         let mut active_subscriptions: Vec<SubscriptionSummary> = self
             .subscriptions
-            .keys()
-            .map(|k| SubscriptionSummary {
-                session: k.session,
-                req_id: k.req_id,
-                symbol: Some(k.symbol.clone()),
+            .iter()
+            .map(|(&(session, req_id), entry)| SubscriptionSummary {
+                session,
+                req_id,
+                symbol: Some(entry.symbol.clone()),
             })
             .collect();
         active_subscriptions.sort_by_key(|s| (s.session.0, s.req_id.0));
@@ -1080,6 +1151,64 @@ mod tests {
             req_id: ReqId(1),
         });
         assert_eq!(eng.subscriptions.len(), 0);
+    }
+
+    /// Regression: before the BTreeMap<(session, req_id), SubEntry> switch,
+    /// two subscribes on the same `(session, req_id)` with different symbols
+    /// would both land in the map — the `keys().find(...)` unsubscribe scan
+    /// then picked whichever entry the HashMap iterator yielded first
+    /// (non-deterministic). Now the duplicate is rejected up front and the
+    /// first subscription is preserved intact.
+    #[tokio::test]
+    async fn duplicate_subscribe_is_rejected_not_silently_overwritten() {
+        let clock = VirtualClock::shared();
+        let (mut eng, _tx, _rx) = build(clock);
+        eng.handle_command(EngineCmd::StartApi {
+            session: SessionId(1),
+            client_id: 1,
+        });
+        // First subscribe admits.
+        eng.handle_command(EngineCmd::SubscribeMarketData {
+            session: SessionId(1),
+            req_id: ReqId(1),
+            contract: stock("AAPL"),
+            mode: SubMode::StreamingL1 {
+                snapshot: false,
+                regulatory_snapshot: false,
+            },
+        });
+        assert_eq!(eng.subscriptions.len(), 1);
+        let original_symbol = eng
+            .subscriptions
+            .get(&(SessionId(1), ReqId(1)))
+            .expect("entry")
+            .symbol
+            .symbol
+            .clone();
+
+        // Second subscribe on the same (session, req_id) with a different
+        // symbol must be rejected. The map is untouched.
+        eng.handle_command(EngineCmd::SubscribeMarketData {
+            session: SessionId(1),
+            req_id: ReqId(1),
+            contract: stock("MSFT"),
+            mode: SubMode::StreamingL1 {
+                snapshot: false,
+                regulatory_snapshot: false,
+            },
+        });
+        assert_eq!(eng.subscriptions.len(), 1);
+        let after = eng
+            .subscriptions
+            .get(&(SessionId(1), ReqId(1)))
+            .expect("entry")
+            .symbol
+            .symbol
+            .clone();
+        assert_eq!(
+            after, original_symbol,
+            "duplicate subscribe overwrote state"
+        );
     }
 
     #[tokio::test]

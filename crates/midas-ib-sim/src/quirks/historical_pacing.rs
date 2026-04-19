@@ -139,7 +139,7 @@ impl HistoricalPacing {
         let cost = self.cost_for(req);
 
         let state = self.per_session.entry(session).or_default();
-        prune_window(state, now, self.window);
+        prune_window(state, now, self.window, self.identical_cooldown);
 
         // Regime 1 — rolling 10-minute window (cost-weighted).
         if state.window_cost + cost > self.window_limit {
@@ -232,7 +232,12 @@ impl Default for PacingParams {
     }
 }
 
-fn prune_window(state: &mut SessionState, now: VirtualInstant, window: Duration) {
+fn prune_window(
+    state: &mut SessionState,
+    now: VirtualInstant,
+    window: Duration,
+    identical_cooldown: Duration,
+) {
     while let Some(front) = state.window.front() {
         if now.saturating_sub(front.ts) > window {
             // Evicting — decrement window_cost by the evicted entry's cost.
@@ -242,6 +247,13 @@ fn prune_window(state: &mut SessionState, now: VirtualInstant, window: Duration)
             break;
         }
     }
+    // Also prune the identical-cooldown map — its entries age out once they
+    // pass the 15s cooldown. Without this, long-lived sessions with a large
+    // cardinality of distinct (contract, bar, tick-type) tuples leak memory
+    // one entry per unique request indefinitely.
+    state
+        .identical_cooldown
+        .retain(|_, ts| now.saturating_sub(*ts) <= identical_cooldown);
 }
 
 fn violation(msg: &str) -> QuirkViolation {
@@ -462,6 +474,45 @@ mod tests {
         // Session 2 is untouched.
         clock.advance(VirtualInstant::from_millis(50));
         assert!(p.check(SessionId(2), &req).is_ok());
+    }
+
+    /// Regression: the `identical_cooldown` map used to accumulate one entry
+    /// per unique `RequestKey` with no eviction. A long-lived session with a
+    /// wide variety of (symbol, bar_size, what_to_show) tuples would leak
+    /// memory unboundedly. After the `prune_window` fix, entries aged past
+    /// the cooldown window are evicted.
+    #[test]
+    fn identical_cooldown_map_is_pruned_after_cooldown_expires() {
+        // Distinct symbols spaced so every request is admitted. 1000 of them
+        // across 20 virtual minutes — far longer than the 15s cooldown, so
+        // the map must not contain 1000 entries at the end.
+        let clock = Arc::new(VirtualClock::new());
+        let mut p = HistoricalPacing::with_params(
+            clock.clone() as Arc<dyn Clock>,
+            PacingParams {
+                // Fit 1000 requests in a rolling window.
+                window_limit: 10_000,
+                ..PacingParams::default()
+            },
+        );
+        let step_ms: u64 = 1_200; // 1.2s between requests → 20 minutes total.
+        for i in 0..1_000u64 {
+            clock.advance(VirtualInstant::from_millis(i * step_ms));
+            let sym = format!("SYM{i}");
+            p.check(SessionId(1), &mk_req(&sym, "TRADES", "1 min"))
+                .unwrap();
+        }
+        let state_len = p
+            .per_session
+            .get(&SessionId(1))
+            .map(|s| s.identical_cooldown.len())
+            .unwrap_or(0);
+        // With cooldown = 15s and spacing = 1.2s, at most
+        // ceil(15 / 1.2) + 1 = 14 entries should remain live.
+        assert!(
+            state_len <= 14,
+            "identical_cooldown map did not prune: len={state_len}",
+        );
     }
 
     #[test]
