@@ -2310,13 +2310,21 @@ impl MidasApp {
         use midas_core::config::AccountTab;
         use midas_ui::{TabItem, Tabs, UiTheme};
 
-        let Some(panel) = self.account_panels.get(&account_id) else {
+        // Header chrome — tab badges, banner visibility — comes from a
+        // pure projection so it stays unit-testable without iced.
+        // `None` means the panel id is not open; the body resolution
+        // below also rechecks via `account_panels.get` for the same
+        // reason.
+        let Some(header) = self.account_panel_header_vm(account_id) else {
             return container(text("Account panel not found").size(14)).into();
         };
+        // Re-borrow the panel for the sub-tab body dispatch; the header
+        // VM owns its values by now and doesn't carry a borrow.
+        let panel = self
+            .account_panels
+            .get(&account_id)
+            .expect("account_panel_header_vm returned Some => panel exists");
 
-        // Derive a simple connected/disconnected bool from the broker
-        // connection display string. "Ready" is the steady state;
-        // "Connected" (pre-handshake) is treated as healthy.
         let broker_connected = matches!(
             self.broker_connection_display.as_str(),
             "Ready" | "Connected"
@@ -2329,53 +2337,30 @@ impl MidasApp {
         let recents_snapshot: Vec<crate::app::RecentEntry> =
             self.recent_symbols.iter().cloned().collect();
 
-        // Badges cap at 999 so a blotter with thousands of rows never
-        // blows up the fixed-width badge layout. Recents caps at 99
-        // further down (it's bounded to MAX_RECENTS anyway).
-        const BADGE_CAP: usize = 999;
-        // Cache the working-order count for the Orders tab badge. Only
-        // non-terminal orders count.
-        let working_count = self
-            .order_blotter
-            .rows()
-            .filter(|r| !r.status.is_terminal())
-            .count()
-            .min(BADGE_CAP);
-        // Terminal-order count drives the Trade History badge. Hidden
-        // when zero — the `Tabs` widget renders no badge for the 0 case.
-        let history_count = self.order_blotter.terminal_row_count().min(BADGE_CAP);
-        // Open-position count drives the Positions tab badge. Slice 4
-        // turns it on once the first `PositionUpdate` arrives; Slice 5
-        // renders the grid rows that back the count.
-        let positions_count = self.positions.len().min(BADGE_CAP);
-
         // The Tabs widget is a midas-ui primitive. Store a theme locally so
         // the tab colours stay consistent with the rest of the UI until
         // Slice 6 threads the full theme through MidasApp.
         let ui_theme = UiTheme::default();
         let mut history_tab_item = TabItem::new("Trade History", AccountTab::TradeHistory);
-        if history_count > 0 {
-            history_tab_item = history_tab_item.with_badge(history_count);
+        if header.history_count > 0 {
+            history_tab_item = history_tab_item.with_badge(header.history_count);
         }
         let mut positions_tab_item = TabItem::new("Positions", AccountTab::Positions);
-        if positions_count > 0 {
-            positions_tab_item = positions_tab_item.with_badge(positions_count);
+        if header.positions_count > 0 {
+            positions_tab_item = positions_tab_item.with_badge(header.positions_count);
         }
-        // Recents badge — total count of MRU entries, capped at 99 so a
-        // theoretically-unbounded value never blows up badge layout.
-        let recents_count = self.recent_symbols.len().min(99);
         let mut recents_tab_item = TabItem::new("Recent Instruments", AccountTab::Recents);
-        if recents_count > 0 {
-            recents_tab_item = recents_tab_item.with_badge(recents_count);
+        if header.recents_count > 0 {
+            recents_tab_item = recents_tab_item.with_badge(header.recents_count);
         }
         let tabs_el: Element<'_, Message> = Tabs::new(
             vec![
                 positions_tab_item,
-                TabItem::new("Orders", AccountTab::Orders).with_badge(working_count),
+                TabItem::new("Orders", AccountTab::Orders).with_badge(header.working_count),
                 history_tab_item,
                 recents_tab_item,
             ],
-            panel.active_tab,
+            header.active_tab,
             move |tab| {
                 Message::Account(
                     account_id,
@@ -2398,7 +2383,7 @@ impl MidasApp {
             .into();
 
         // Active-tab body.
-        let body: Element<'_, Message> = match panel.active_tab {
+        let body: Element<'_, Message> = match header.active_tab {
             AccountTab::Orders => self.view_account_orders_tab(account_id),
             AccountTab::Positions => {
                 // Slice 5: live Positions grid driven by `self.positions`.
@@ -2422,43 +2407,42 @@ impl MidasApp {
         // broker is offline AND the user has not dismissed the banner
         // for this disconnect episode. Per the plan, the banner does
         // NOT auto-dismiss on reconnect.
-        let banner: Option<Element<'_, Message>> =
-            if panel.should_show_disconnect_banner(broker_connected) {
-                let warning_bg = ui_theme.warning_bg;
-                let warning_text = ui_theme.warning_text;
-                let dismiss_msg = Message::Account(
-                    account_id,
-                    crate::account_panel::AccountMsg::DisconnectBannerDismissed,
-                );
-                let banner_el: Element<'_, Message> = container(
-                    iced::widget::row![
-                        text("Disconnected — data may be stale")
-                            .size(13)
-                            .color(warning_text),
-                        Space::new().width(Fill),
-                        button(text("\u{00D7}").size(14).color(warning_text))
-                            .on_press(dismiss_msg)
-                            .padding([0, 6])
-                            .style(move |_theme, _status| iced::widget::button::Style {
-                                background: None,
-                                text_color: warning_text,
-                                ..Default::default()
-                            }),
-                    ]
-                    .align_y(iced::Alignment::Center)
-                    .spacing(8),
-                )
-                .padding([6, 12])
-                .width(Fill)
-                .style(move |_theme| container::Style {
-                    background: Some(warning_bg.into()),
-                    ..Default::default()
-                })
-                .into();
-                Some(banner_el)
-            } else {
-                None
-            };
+        let banner: Option<Element<'_, Message>> = if header.show_disconnect_banner {
+            let warning_bg = ui_theme.warning_bg;
+            let warning_text = ui_theme.warning_text;
+            let dismiss_msg = Message::Account(
+                account_id,
+                crate::account_panel::AccountMsg::DisconnectBannerDismissed,
+            );
+            let banner_el: Element<'_, Message> = container(
+                iced::widget::row![
+                    text("Disconnected — data may be stale")
+                        .size(13)
+                        .color(warning_text),
+                    Space::new().width(Fill),
+                    button(text("\u{00D7}").size(14).color(warning_text))
+                        .on_press(dismiss_msg)
+                        .padding([0, 6])
+                        .style(move |_theme, _status| iced::widget::button::Style {
+                            background: None,
+                            text_color: warning_text,
+                            ..Default::default()
+                        }),
+                ]
+                .align_y(iced::Alignment::Center)
+                .spacing(8),
+            )
+            .padding([6, 12])
+            .width(Fill)
+            .style(move |_theme| container::Style {
+                background: Some(warning_bg.into()),
+                ..Default::default()
+            })
+            .into();
+            Some(banner_el)
+        } else {
+            None
+        };
 
         let mut col = Column::new().width(Fill).height(Fill);
         if let Some(b) = banner {

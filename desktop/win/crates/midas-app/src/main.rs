@@ -27,6 +27,7 @@ mod thumbnail_store;
 mod thumbnail_widget;
 mod ticker_state;
 mod toast;
+mod view_models;
 mod watchlist;
 mod watchlist_columns;
 mod window_geometry;

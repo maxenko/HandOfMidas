@@ -890,6 +890,48 @@ impl MidasApp {
         window::Position::Specific(iced::Point::new(x as f32, y as f32))
     }
 
+    /// Project the inputs needed to render an Account panel's header
+    /// chrome (tab strip badges + disconnect banner) into a self-
+    /// contained view-model. Returns `None` if `account_id` does not
+    /// resolve to an open panel.
+    ///
+    /// Pure-`&self` and side-effect free, so the projection logic is
+    /// unit-testable without booting the iced runtime.
+    pub fn account_panel_header_vm(
+        &self,
+        account_id: midas_core::AccountPanelId,
+    ) -> Option<crate::view_models::account_panel::AccountPanelHeaderVm> {
+        use crate::view_models::account_panel::AccountPanelHeaderVm;
+        let panel = self.account_panels.get(&account_id)?;
+        let broker_connected = matches!(
+            self.broker_connection_display.as_str(),
+            "Ready" | "Connected"
+        );
+        let working_count = self
+            .order_blotter
+            .rows()
+            .filter(|r| !r.status.is_terminal())
+            .count()
+            .min(AccountPanelHeaderVm::BADGE_CAP);
+        let history_count = self
+            .order_blotter
+            .terminal_row_count()
+            .min(AccountPanelHeaderVm::BADGE_CAP);
+        let positions_count = self.positions.len().min(AccountPanelHeaderVm::BADGE_CAP);
+        let recents_count = self
+            .recent_symbols
+            .len()
+            .min(AccountPanelHeaderVm::RECENTS_BADGE_CAP);
+        Some(AccountPanelHeaderVm {
+            active_tab: panel.active_tab,
+            working_count,
+            history_count,
+            positions_count,
+            recents_count,
+            show_disconnect_banner: panel.should_show_disconnect_banner(broker_connected),
+        })
+    }
+
     /// Create a new application, restoring state from config if available.
     ///
     /// Returns the app state and a `Task` that opens the main OS window
