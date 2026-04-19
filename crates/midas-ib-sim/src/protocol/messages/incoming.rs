@@ -179,7 +179,7 @@ fn parse_start_api(
 ) -> Result<IncomingMsg, ProtocolError> {
     let _inner_version = r.read_i32()?;
     let client_id = r.read_i32()?;
-    let optional_caps = if sv_.raw() > sv::OPTIONAL_CAPABILITIES {
+    let optional_caps = if sv_.raw() >= sv::OPTIONAL_CAPABILITIES {
         // If the field is present but empty, treat as Some("").
         Some(r.read_string()?)
     } else {
@@ -492,25 +492,17 @@ fn parse_place_order(
             r.read_i32()? as f64
         },
         order_type: r.read_string()?,
-        limit_price: if version < sv::ORDER_COMBO_LEGS_PRICE {
-            let v = r.read_opt_f64()?;
-            // Older encoder converted f64::MAX → 0.0; collapse back to None.
-            if v == Some(0.0) {
-                Some(0.0)
-            } else {
-                v
-            }
-        } else {
+        // Both `limit_price` and `aux_price` have unconditional `read_opt_f64`
+        // behaviour at our supported range — MIN=176 is well above
+        // `ORDER_COMBO_LEGS_PRICE (61)` and `TRAILING_PERCENT (62)`. The old
+        // conditional arms were identity copies with a misleading comment; a
+        // debug-assert guards the invariant instead.
+        limit_price: {
+            debug_assert!(version >= sv::ORDER_COMBO_LEGS_PRICE);
             r.read_opt_f64()?
         },
-        aux_price: if version < sv::TRAILING_PERCENT {
-            let v = r.read_opt_f64()?;
-            if v == Some(0.0) {
-                Some(0.0)
-            } else {
-                v
-            }
-        } else {
+        aux_price: {
+            debug_assert!(version >= sv::TRAILING_PERCENT);
             r.read_opt_f64()?
         },
         ..Default::default()

@@ -200,7 +200,7 @@ impl BasicOrderSimulator {
             last_fill_price: o.avg_fill_price,
             client_id: 0,
             why_held: String::new(),
-            mkt_cap_price: 0.0,
+            mkt_cap_price: None,
         })
     }
 }
@@ -623,7 +623,7 @@ impl BasicOrderSimulator {
                             last_fill_price: 0.0,
                             client_id: 0,
                             why_held: String::new(),
-                            mkt_cap_price: 0.0,
+                            mkt_cap_price: None,
                         });
                         activations.push((jitter, emission));
                     }
@@ -661,7 +661,7 @@ impl BasicOrderSimulator {
                             last_fill_price: 0.0,
                             client_id: 0,
                             why_held: "OCA group cancelled by sibling fill".into(),
-                            mkt_cap_price: 0.0,
+                            mkt_cap_price: None,
                         }));
                     }
                 }

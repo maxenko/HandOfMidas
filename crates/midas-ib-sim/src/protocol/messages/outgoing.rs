@@ -65,6 +65,12 @@ pub(crate) const SV_HISTORICAL_DATA_END: i32 = 196;
 /// `MIN_SERVER_VER_SYNT_REALTIME_BARS`. Before this version, HISTORICAL_DATA
 /// carried an inner version + a `hasGaps` field per bar.
 pub(crate) const SV_SYNT_REALTIME_BARS: i32 = 124;
+/// `MIN_SERVER_VER_INELIGIBILITY_REASONS`. At this version CONTRACT_DATA
+/// gains a trailing `ineligibility_reasons` list (count + entries).
+pub(crate) const SV_INELIGIBILITY_REASONS: i32 = 208;
+/// `MIN_SERVER_VER_LAST_TRADE_DATE`. At this version CONTRACT_DATA gains an
+/// extra `last_trade_date` String field inserted BEFORE `strike`.
+pub(crate) const SV_LAST_TRADE_DATE: i32 = 220;
 
 // ---------------------------------------------------------------------------
 // Message ID constants
@@ -109,6 +115,10 @@ pub struct ContractDetails {
     pub symbol: String,
     pub sec_type: String,
     pub last_trade_date_or_contract_month: String,
+    /// Emitted only when sv >= [`SV_LAST_TRADE_DATE`] (220). IB tolerates an
+    /// empty string when unknown. Real TWS populates this with the concrete
+    /// last-trade date (e.g. "20251219 16:00:00 US/Eastern").
+    pub last_trade_date: String,
     pub strike: f64,
     pub right: String,
     pub exchange: String,
@@ -552,8 +562,16 @@ fn encode_tick_price(
     w.write_i32(tick_type_code(tick));
     w.write_f64(price);
     // Size at v>=2 — we always emit since inner_version = 3.
-    // Wire format uses `f64` for this slot (rust-ibapi `next_double()`).
-    w.write_f64(size.map(|s| s as f64).unwrap_or(f64::MAX));
+    // rust-ibapi 2.10 still decodes this slot via `next_double()`, but newer
+    // IB builds treat tick sizes as `Decimal` (integral-looking strings,
+    // `""` for unset). Emitting an integral string is byte-identical to the
+    // `next_double()` path (it accepts `"100"` just fine) while staying
+    // compatible with the Decimal parser. Empty string reads back as
+    // unset / zero on both paths — use it for `None`.
+    match size {
+        Some(v) => w.write_string(&v.to_string()),
+        None => w.write_string(""),
+    };
     // Attribs mask at v>=3.
     let mut mask = 0i32;
     if sv.raw() >= SV_PAST_LIMIT {
@@ -575,8 +593,10 @@ fn encode_tick_size(w: &mut FieldWriter, req_id: ReqId, tick: TickType, size: i6
     w.write_i32(1); // inner version
     w.write_i32(req_id.0);
     w.write_i32(tick_type_code(tick));
-    // Wire slot is `double` (rust-ibapi's `next_double`). Emit integral.
-    w.write_f64(size as f64);
+    // Wire slot is decoded as `next_double()` in rust-ibapi 2.10 but as
+    // `Decimal` (integral-looking string) in newer IB builds. Emitting the
+    // integral string covers both paths byte-for-byte.
+    w.write_string(&size.to_string());
 }
 
 fn encode_tick_generic(w: &mut FieldWriter, req_id: ReqId, tick: TickType, value: f64) {
@@ -613,7 +633,7 @@ fn encode_order_status(w: &mut FieldWriter, sv: ServerVersion, s: &OrderStatus) 
     w.write_i32(s.client_id);
     w.write_string(&s.why_held);
     if sv.raw() >= SV_MARKET_CAP_PRICE {
-        w.write_f64(s.mkt_cap_price);
+        w.write_opt_f64(s.mkt_cap_price);
     }
 }
 
@@ -850,10 +870,14 @@ fn encode_contract_data(
     w.write_string(&d.symbol);
     w.write_string(&d.sec_type);
     w.write_string(&d.last_trade_date_or_contract_month);
-    // LAST_TRADE_DATE gate (server_versions::LAST_TRADE_DATE=220). Our range
-    // may be below 220; when `sv >= 220` an extra empty `last_trade_date`
-    // field precedes strike. Skipped for simplicity — most real clients are
-    // below 220. TODO: emit once we verify a 220+ client connects.
+    // LAST_TRADE_DATE gate (server_versions::LAST_TRADE_DATE=220). When the
+    // negotiated sv is >=220, rust-ibapi's decoder expects an extra
+    // `last_trade_date` String BEFORE `strike`. Omitting it causes full field
+    // misalignment on every CONTRACT_DATA frame at common negotiated versions
+    // (TWS typically negotiates 220 or 221).
+    if sv.raw() >= SV_LAST_TRADE_DATE {
+        w.write_string(&d.last_trade_date);
+    }
     w.write_f64(d.strike);
     w.write_string(&d.right);
     w.write_string(&d.exchange);
@@ -887,15 +911,15 @@ fn encode_contract_data(
     w.write_string(&d.real_expiration_date);
     w.write_string(&d.stock_type);
     // SIZE_RULES gate (162). Our minimum is 176, always emit.
-    let _ = sv;
     w.write_f64(d.min_size);
     w.write_f64(d.size_increment);
     w.write_f64(d.suggested_size_increment);
-    // INELIGIBILITY_REASONS (208). For simplicity emit count=0 always; rust-
-    // ibapi's decoder only reads it when `sv >= 208`. If we're below, the
-    // trailing zero would be a stray field — mitigated by the fact that our
-    // sim always advertises >=176 and `rust-ibapi` requires >=201. Safe.
-    w.write_i32(0);
+    // INELIGIBILITY_REASONS (208). Only emitted when sv >= 208; at sv in
+    // 176..=207 rust-ibapi's decoder doesn't consume this field, so emitting
+    // it produces a stray trailing `0\0` that drifts the frame byte-count.
+    if sv.raw() >= SV_INELIGIBILITY_REASONS {
+        w.write_i32(0);
+    }
 }
 
 fn encode_historical_data(
@@ -1325,7 +1349,7 @@ mod tests {
     }
 
     #[test]
-    fn encodes_tick_price_unset_size_serialises_sentinel() {
+    fn encodes_tick_price_unset_size_serialises_empty_decimal() {
         let msg = OutgoingMsg::TickPrice {
             req_id: ReqId(7),
             tick: TickType::Last,
@@ -1334,13 +1358,10 @@ mod tests {
             attribs: TickAttribs::default(),
         };
         let bytes = enc(&msg, ServerVersion::MAX);
-        let expected: Vec<u8> =
-            format!("1\x003\x007\x004\x00150\x00{}\x000\x00", f64::MAX).into_bytes();
-        // The f64::MAX formatted representation from our FieldWriter matches IB's
-        // canonical UNSET_DOUBLE_STR, which is what rust-ibapi emits for bare f64::MAX.
-        let canonical = b"1\x003\x007\x004\x00150\x001.7976931348623157E308\x000\x00" as &[u8];
-        // Pick whichever the writer produced (both are valid sentinel representations).
-        assert!(bytes == canonical || bytes == expected, "got={bytes:?}");
+        // Unset size is an empty `Decimal` string. rust-ibapi 2.10's
+        // `next_double()` decodes empty -> 0.0; newer Decimal-aware builds
+        // treat it as `Decimal::NONE`. Both are correct wire values.
+        assert_eq!(bytes, b"1\x003\x007\x004\x00150\x00\x000\x00");
     }
 
     // ---- TICK_SIZE / TICK_GENERIC / TICK_STRING --------------------------
@@ -1392,7 +1413,7 @@ mod tests {
             last_fill_price: 150.25,
             client_id: 1,
             why_held: String::new(),
-            mkt_cap_price: 0.0,
+            mkt_cap_price: None,
         }
     }
 
@@ -1401,11 +1422,13 @@ mod tests {
         let bytes = enc(&OutgoingMsg::OrderStatus(sample_order_status()), sv(210));
         // v>=131: no inner version; msg_id=3, order_id=42, status="Filled"
         // filled, remaining, avg_fill, perm_id, parent_id, last_fill, client_id,
-        // why_held, mkt_cap_price
-        assert_eq!(
-            bytes,
-            b"3\x0042\x00Filled\x00100\x000\x00150.25\x00987654321\x000\x00150.25\x001\x00\x000\x00"
-        );
+        // why_held, mkt_cap_price (unset -> canonical sentinel)
+        let expected: Vec<u8> = format!(
+            "3\x0042\x00Filled\x00100\x000\x00150.25\x00987654321\x000\x00150.25\x001\x00\x00{}\x00",
+            crate::protocol::messages::fields::UNSET_DOUBLE_STR
+        )
+        .into_bytes();
+        assert_eq!(bytes, expected);
     }
 
     #[test]
@@ -1629,6 +1652,98 @@ mod tests {
         assert_eq!(r.read_i32().unwrap(), 9); // req_id
         assert_eq!(r.read_string().unwrap(), "AAPL");
         assert_eq!(r.read_string().unwrap(), "STK");
+    }
+
+    /// Builds a `ContractData` frame at the requested sv, returning the raw
+    /// encoded bytes. Shared helper for the cross-version golden tests.
+    fn encode_aapl_contract_data_at(sv_raw: i32) -> Vec<u8> {
+        let details = Box::new(ContractDetails {
+            con_id: 265598,
+            symbol: "AAPL".into(),
+            sec_type: "STK".into(),
+            last_trade_date_or_contract_month: String::new(),
+            last_trade_date: "20251219 16:00:00 US/Eastern".into(),
+            strike: 0.0,
+            right: String::new(),
+            exchange: "SMART".into(),
+            currency: "USD".into(),
+            local_symbol: "AAPL".into(),
+            trading_class: "NMS".into(),
+            min_tick: 0.01,
+            min_size: 1.0,
+            size_increment: 1.0,
+            suggested_size_increment: 1.0,
+            primary_exchange: "NASDAQ".into(),
+            long_name: "APPLE INC".into(),
+            ..Default::default()
+        });
+        enc(
+            &OutgoingMsg::ContractData {
+                req_id: ReqId(9),
+                details,
+            },
+            sv(sv_raw),
+        )
+    }
+
+    /// At sv=220 / 221 the wire MUST carry an extra `last_trade_date` field
+    /// before `strike`. Reading the payload with the matching offset must
+    /// yield the populated date and the expected `strike=0` immediately
+    /// after — if the gate is missing, `strike` would be misread as the
+    /// string and every subsequent field would drift.
+    #[test]
+    fn encodes_contract_data_emits_last_trade_date_at_sv_220() {
+        for sv_raw in [220, 221] {
+            let bytes = encode_aapl_contract_data_at(sv_raw);
+            let fields: Vec<Bytes> = split_payload(&bytes);
+            let mut r = FieldReader::new(&fields);
+            assert_eq!(r.read_i32().unwrap(), 10);
+            assert_eq!(r.read_i32().unwrap(), 9);
+            assert_eq!(r.read_string().unwrap(), "AAPL");
+            assert_eq!(r.read_string().unwrap(), "STK");
+            assert_eq!(r.read_string().unwrap(), ""); // last_trade_date_or_contract_month
+            assert_eq!(
+                r.read_string().unwrap(),
+                "20251219 16:00:00 US/Eastern",
+                "sv={sv_raw}: last_trade_date must precede strike"
+            );
+            assert_eq!(r.read_f64().unwrap(), 0.0); // strike
+            assert_eq!(r.read_string().unwrap(), ""); // right
+            assert_eq!(r.read_string().unwrap(), "SMART"); // exchange
+        }
+    }
+
+    /// Below sv=220 the field is absent; `strike` must come immediately
+    /// after `last_trade_date_or_contract_month`.
+    #[test]
+    fn encodes_contract_data_omits_last_trade_date_below_sv_220() {
+        let bytes = encode_aapl_contract_data_at(219);
+        let fields: Vec<Bytes> = split_payload(&bytes);
+        let mut r = FieldReader::new(&fields);
+        assert_eq!(r.read_i32().unwrap(), 10);
+        assert_eq!(r.read_i32().unwrap(), 9);
+        assert_eq!(r.read_string().unwrap(), "AAPL");
+        assert_eq!(r.read_string().unwrap(), "STK");
+        assert_eq!(r.read_string().unwrap(), "");
+        // strike next — *no* last_trade_date slot in between.
+        assert_eq!(r.read_f64().unwrap(), 0.0);
+        assert_eq!(r.read_string().unwrap(), ""); // right
+    }
+
+    /// At sv=208 the trailing `ineligibility_reasons` count (0) MUST be
+    /// present; at sv=207 it must be absent. The only way to tell is a
+    /// total-field-count check.
+    #[test]
+    fn encodes_contract_data_ineligibility_reasons_gated_at_208() {
+        let bytes_207 = encode_aapl_contract_data_at(207);
+        let bytes_208 = encode_aapl_contract_data_at(208);
+        let n_207 = split_payload(&bytes_207).len();
+        let n_208 = split_payload(&bytes_208).len();
+        assert_eq!(
+            n_208,
+            n_207 + 1,
+            "sv=208 must emit exactly one extra trailing field (ineligibility count)"
+        );
     }
 
     // ---- POSITION / ACCOUNT_SUMMARY / ACCT_VALUE / PORTFOLIO_VALUE -------
