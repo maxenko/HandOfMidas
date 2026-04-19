@@ -29,6 +29,7 @@ mod ticker_state;
 mod toast;
 mod watchlist;
 mod watchlist_columns;
+mod window_geometry;
 
 use app::{Message, MidasApp};
 use iced::keyboard;
