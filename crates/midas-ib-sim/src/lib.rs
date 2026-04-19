@@ -30,7 +30,9 @@ pub mod server;
 // ---------------------------------------------------------------------------
 
 pub use crate::control::ControlApi;
-pub use crate::engine::clock::{Clock, ClockMode, RealClock, VirtualClock, VirtualInstant};
+pub use crate::engine::clock::{
+    AcceleratedClock, Clock, ClockMode, RealClock, SessionAnchor, VirtualClock, VirtualInstant,
+};
 pub use crate::engine::types::{
     AcctValueUpdate, Bar, Bar5s, CommissionReport, ContractDetailsReq, EngineCmd, EngineEvent,
     EngineSnapshot, Execution, ExecutionFilter, HistoricalReq, MarketDataType, MarketEmission,
