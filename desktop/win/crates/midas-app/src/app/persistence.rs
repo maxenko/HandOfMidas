@@ -132,6 +132,12 @@ impl MidasApp {
                 active_data: Some(self.providers.active_data_provider_name()),
                 active_broker: self.providers.active_broker().map(|b| b.name().to_string()),
             }),
+            // Round-trip the broker config so hand-edited TOML
+            // (e.g. users switching to LivePaper) survives the
+            // next save cycle. Currently the UI doesn't mutate this
+            // at runtime; when the settings panel lands, bumps
+            // will flow through `app.broker_cfg`.
+            broker: self.broker_cfg.clone(),
         }
     }
 

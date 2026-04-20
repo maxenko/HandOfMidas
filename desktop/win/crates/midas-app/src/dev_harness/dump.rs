@@ -21,6 +21,39 @@ pub struct StateProjection<'a> {
     pub order_blotter: OrderBlotterProjection<'a>,
     pub account_panels: Vec<AccountPanelProjection<'a>>,
     pub recent_symbols: Vec<&'a str>,
+    /// Broker-connection state projection. Exposed so devloop tests
+    /// (and human debuggers) can assert the sim-auto-spawn path
+    /// reached Ready.
+    pub broker: BrokerProjection<'a>,
+    /// Symbols with an active streaming-L1 subscription. Sorted for
+    /// determinism (the underlying `HashSet` is unordered).
+    pub active_market_subs: Vec<String>,
+    /// Watchlist projections: one entry per panel with just the
+    /// fields devloop assertions need (name + symbol list + the
+    /// cached `last_price` the watchlist row renders).
+    pub watchlists: Vec<WatchlistProjection<'a>>,
+}
+
+#[derive(Serialize)]
+pub struct BrokerProjection<'a> {
+    pub connection_display: &'a str,
+    pub has_bridge: bool,
+    pub sim_child_running: bool,
+    pub sim_tws_port: Option<u16>,
+}
+
+#[derive(Serialize)]
+pub struct WatchlistProjection<'a> {
+    pub id: u32,
+    pub name: &'a str,
+    pub tickers: Vec<WatchlistTickerProjection<'a>>,
+}
+
+#[derive(Serialize)]
+pub struct WatchlistTickerProjection<'a> {
+    pub symbol: &'a str,
+    pub last_price: Option<f64>,
+    pub change_pct: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -89,6 +122,42 @@ pub fn build(app: &MidasApp) -> serde_json::Value {
         .map(|e| e.symbol.as_str())
         .collect();
 
+    let broker = BrokerProjection {
+        connection_display: &app.broker_connection_display,
+        has_bridge: app.broker_bridge.is_some(),
+        sim_child_running: app.sim_child.is_some(),
+        sim_tws_port: app.sim_child.as_ref().map(|s| s.tws_port),
+    };
+
+    let mut active_market_subs: Vec<String> = app
+        .active_market_subs
+        .iter()
+        .map(|k| k.as_str().to_owned())
+        .collect();
+    active_market_subs.sort();
+
+    let watchlists: Vec<WatchlistProjection<'_>> = app
+        .watchlists
+        .iter()
+        .map(|(id, wl)| WatchlistProjection {
+            id: id.0,
+            name: &wl.name,
+            tickers: wl
+                .tickers
+                .iter()
+                .map(|t| {
+                    let key = crate::annotation_store::SymbolKey::new(&t.symbol);
+                    let snap = app.market_cache.get(&key);
+                    WatchlistTickerProjection {
+                        symbol: &t.symbol,
+                        last_price: snap.and_then(|s| s.last_price),
+                        change_pct: snap.and_then(|s| s.change_pct),
+                    }
+                })
+                .collect(),
+        })
+        .collect();
+
     let projection = StateProjection {
         tickers,
         active_chart_id: app.workspace.focused_chart_id().map(|id| id.0),
@@ -98,6 +167,9 @@ pub fn build(app: &MidasApp) -> serde_json::Value {
         order_blotter,
         account_panels,
         recent_symbols,
+        broker,
+        active_market_subs,
+        watchlists,
     };
 
     serde_json::to_value(&projection).unwrap_or(serde_json::Value::Null)

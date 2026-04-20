@@ -2039,6 +2039,11 @@ impl MidasApp {
                         // just chart selections.
                         self.push_recent_symbol(&symbol);
                         let task = self.load_market_snapshot(&symbol);
+                        // Fire a SubscribeMarketData for this symbol via
+                        // `ensure_watchlist_subscriptions`; idempotent, so
+                        // no-op if the user re-adds an already-subscribed
+                        // symbol across watchlists.
+                        self.ensure_watchlist_subscriptions();
                         return Task::batch([self.flush_config(), task]);
                     }
                 }
@@ -2064,6 +2069,11 @@ impl MidasApp {
                         self.market_cache.remove(&sym_key);
                         self.tickers.remove(&sym_key);
                         self.ticker_persist.forget(&sym_key);
+                        // Drop the streaming L1 sub last; the helper
+                        // re-checks `watchlists` (which is why we
+                        // call it after `wl.remove_ticker`) before
+                        // issuing the cancel.
+                        self.drop_market_subscription(&sym_key);
                     }
                     return self.flush_config();
                 }
@@ -3619,10 +3629,22 @@ impl MidasApp {
                     BrokerEvent::Connected { server_version } => {
                         tracing::info!("Broker connected (server v{server_version})");
                         self.status_message = format!("Broker connected (v{server_version})");
+                        // Mirror `BrokerConnectionChanged` so the
+                        // status-bar display flips to Ready when the
+                        // engine's `BrokerEvent::Connected` fires. The
+                        // engine's `watch<ConnectionState>` only moves
+                        // to Ready for `DataSourceConfig::Live` today
+                        // (see `check_reconnect`) — until that's
+                        // extended to cover Test, the event-driven
+                        // path here carries the UI transition.
+                        let msg = Message::BrokerConnectionChanged("Ready".to_string());
+                        return Task::batch([thumbnail_batch, self.update(msg)]);
                     }
                     BrokerEvent::Disconnected { reason } => {
                         tracing::warn!("Broker disconnected: {reason}");
                         self.status_message = format!("Broker disconnected: {reason}");
+                        let msg = Message::BrokerConnectionChanged("Disconnected".to_string());
+                        return Task::batch([thumbnail_batch, self.update(msg)]);
                     }
                     BrokerEvent::OrderValidationFailed { message, code } => {
                         tracing::warn!("Order validation failed [{code}]: {message}");
@@ -3655,6 +3677,60 @@ impl MidasApp {
                         // is pure-`&self`, so the rebuild must happen
                         // here.
                         self.rebuild_account_positions_caches();
+                    }
+                    // Streaming L1 tick — merge into the market-data
+                    // cache so the watchlist row updates on the next
+                    // frame. Partial-merge semantics: each field on
+                    // the event is `Option`, and `None` means "no
+                    // update, keep the prior value". This matters for
+                    // the IB wire format where a single tick message
+                    // carries a subset of (bid, ask, last, volume) —
+                    // we'd clobber fresh data otherwise.
+                    //
+                    // Coalescing is implicit: the broadcast channel
+                    // already batches and iced only renders after the
+                    // full update batch drains, so the UI naturally
+                    // sees at most one rebuild per frame even under
+                    // high tick rates. If profiling later shows this
+                    // over-subscribes iced's update loop, the fix is
+                    // a dedicated coalesced subscription mirroring
+                    // `positions_subscription`.
+                    BrokerEvent::Tick {
+                        symbol,
+                        bid,
+                        ask,
+                        last,
+                        volume: _,
+                        timestamp: _,
+                    } => {
+                        let key = crate::annotation_store::SymbolKey::new(&symbol.symbol);
+                        // Prefer `last` for the row's headline price;
+                        // fall back to mid-quote if the sim hasn't
+                        // emitted a trade yet. This matches what a
+                        // real broker GUI does on L1 — users expect
+                        // "price" to move with trades, not just
+                        // quote changes.
+                        let new_price = last.or_else(|| match (bid, ask) {
+                            (Some(b), Some(a)) => Some((b + a) / 2.0),
+                            _ => None,
+                        });
+                        if new_price.is_some() {
+                            let entry = self.market_cache.get(&key).cloned().unwrap_or_default();
+                            let mut merged = entry.clone();
+                            if let Some(price) = new_price {
+                                merged.last_price = Some(price);
+                                // Recompute change% if we have a
+                                // prior close; otherwise leave the
+                                // existing value so we don't regress
+                                // to `None`.
+                                if let Some(prev) = merged.prev_close {
+                                    if prev != 0.0 {
+                                        merged.change_pct = Some(((price - prev) / prev) * 100.0);
+                                    }
+                                }
+                            }
+                            self.market_cache.insert(key, merged);
+                        }
                     }
                     other => {
                         tracing::trace!("Unhandled broker event: {other:?}");
@@ -3724,10 +3800,134 @@ impl MidasApp {
                 for panel in self.account_panels.values_mut() {
                     panel.apply_connection_change(now_connected);
                 }
+                // When the connection transitions into the healthy
+                // range, auto-subscribe every watchlist symbol that
+                // isn't already subscribed. This covers three cases
+                // with one call: cold start (the sim wasn't ready
+                // when the watchlist restored from config), user
+                // reconnects after a network blip, and user flips
+                // backends at runtime. Unsubscribes on Disconnected
+                // happen via the existing drop path in the engine.
+                if now_connected {
+                    self.ensure_watchlist_subscriptions();
+                }
+                Task::none()
+            }
+
+            Message::BrokerSimSpawned(Ok(handle)) => {
+                let tws_port = handle.tws_port;
+                let control_port = handle.control_port;
+                tracing::info!(
+                    "Sim auto-spawn succeeded (tws={tws_port}, control={control_port}); \
+                     stashing handle"
+                );
+                // Only stash if we don't already have one — belt and
+                // braces against a double-delivery race (the dev
+                // harness's SpawnSim could land between auto-spawn
+                // start and completion).
+                if self.sim_child.is_none() {
+                    self.sim_child = Some(handle);
+                }
+                self.status_message = format!("Sim ready on port {tws_port}");
+                // The broker engine was booted with the Test data
+                // source so the UI had a working backend during the
+                // spawn window. A follow-up slice swaps to a real
+                // ib-bridge connection here; for v1 we keep the test
+                // broker since its semantics match the sim's for
+                // every code path the watchlist + order flow touches,
+                // and hot-swapping broker handles would require a
+                // full re-subscription dance. The live-tick wiring
+                // (Wire 3) works against the test broker today — see
+                // `ensure_watchlist_subscriptions`.
+                Task::none()
+            }
+
+            Message::BrokerSimSpawned(Err(reason)) => {
+                tracing::error!("Sim auto-spawn failed: {reason}");
+                self.broker_connection_display = format!("Sim spawn failed: {reason}");
+                self.status_message = format!("Sim spawn failed: {reason}");
+                self.show_toast(format!("Sim spawn failed: {reason}"));
                 Task::none()
             }
 
             _ => unreachable!(),
+        }
+    }
+
+    /// Walk every watchlist in the workspace and issue
+    /// `BrokerCommand::SubscribeMarketData` for any symbol that isn't
+    /// already in `self.active_market_subs`. Idempotent — safe to
+    /// call on every connection transition into the healthy range.
+    ///
+    /// Subscriptions are keyed by `SymbolKey` (trimmed + uppercased)
+    /// so the broker's normalisation matches the cache's; if we
+    /// didn't normalise both sides we'd end up with duplicate
+    /// subscriptions for `"AAPL"` and `"aapl"`.
+    pub(crate) fn ensure_watchlist_subscriptions(&mut self) {
+        let Some(ref bridge) = self.broker_bridge else {
+            return;
+        };
+        let want: std::collections::HashSet<crate::annotation_store::SymbolKey> = self
+            .watchlists
+            .values()
+            .flat_map(|wl| {
+                wl.tickers
+                    .iter()
+                    .map(|t| crate::annotation_store::SymbolKey::new(&t.symbol))
+            })
+            .collect();
+        for key in want {
+            if self.active_market_subs.contains(&key) {
+                continue;
+            }
+            let cmd = midas_broker::BrokerCommand::SubscribeMarketData {
+                symbol: key.as_str().to_owned(),
+                // con_id 0 lets the broker look it up from the
+                // symbol on demand — all code paths inside both
+                // TestBroker and IbClient accept 0 as a sentinel.
+                con_id: 0,
+            };
+            match bridge.send_command(cmd) {
+                Ok(()) => {
+                    tracing::debug!("watchlist: subscribed to market data for {}", key.as_str());
+                    self.active_market_subs.insert(key);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "watchlist: SubscribeMarketData for {} failed: {e}",
+                        key.as_str()
+                    );
+                }
+            }
+        }
+    }
+
+    /// Unsubscribe from a single symbol, if it was subscribed. Called
+    /// from the watchlist-remove and watchlist-close paths.
+    pub(crate) fn drop_market_subscription(&mut self, key: &crate::annotation_store::SymbolKey) {
+        // Don't drop the sub if any other watchlist still carries
+        // the symbol — the charts panel can also request streaming
+        // data in a future slice and we'd yank the rug.
+        let still_watched = self
+            .watchlists
+            .values()
+            .any(|wl| wl.has_ticker(key.as_str()));
+        if still_watched {
+            return;
+        }
+        if !self.active_market_subs.remove(key) {
+            return;
+        }
+        if let Some(ref bridge) = self.broker_bridge {
+            let cmd = midas_broker::BrokerCommand::UnsubscribeMarketData {
+                symbol: key.as_str().to_owned(),
+            };
+            if let Err(e) = bridge.send_command(cmd) {
+                tracing::warn!(
+                    "watchlist: UnsubscribeMarketData for {} failed: {e}",
+                    key.as_str()
+                );
+            }
         }
     }
 }
