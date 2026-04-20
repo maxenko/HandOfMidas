@@ -439,11 +439,34 @@ pub struct MidasApp {
     /// Set to `true` while processing effects; asserted `false` at
     /// entry to prevent feedback loops.
     pub ticker_dispatch_active: bool,
-    /// Running IB-simulator child process, when the devloop
-    /// `SpawnSim` command has been issued and not yet torn down.
-    /// Only populated under the `dev_harness` feature.
-    #[cfg(feature = "dev_harness")]
-    pub sim_child: Option<crate::dev_harness::sim_child::SimChildHandle>,
+    /// Running IB-simulator child process.
+    ///
+    /// Populated on startup when `config.broker.backend == Sim` (the
+    /// default). Also settable by the devloop `SpawnSim` command
+    /// under the `dev_harness` feature — both code paths converge on
+    /// the same lifecycle handle so the reaper runs in one place.
+    /// `None` means no sim is running (user is on LivePaper / Live,
+    /// or the auto-spawn failed — see `broker_connection_display`
+    /// for the surfaced reason).
+    pub sim_child: Option<crate::sim_child::SimChildHandle>,
+    /// Broker connection configuration round-tripped from
+    /// `config.toml`. The fields aren't mutated by the current UI
+    /// — they're read once on startup to decide whether to
+    /// auto-spawn the sim or connect to a real gateway — but we
+    /// keep the struct alive so `to_config` writes the same value
+    /// back and hand-edited TOML survives `cargo run` cycles.
+    pub broker_cfg: midas_core::config::BrokerConnectionConfig,
+    /// Symbols with an active streaming-L1 subscription through the
+    /// broker bridge.
+    ///
+    /// Populated when a watchlist adds a symbol and
+    /// `broker_bridge.send_command(SubscribeMarketData { .. })`
+    /// returns Ok. Emptied on symbol-remove, watchlist-close, or
+    /// broker-disconnect. `HashSet` because `SymbolKey` implements
+    /// `Hash` but not `Ord` — the few call-sites that need
+    /// deterministic order (just the devloop `DumpState` projection)
+    /// sort explicitly.
+    pub active_market_subs: std::collections::HashSet<crate::annotation_store::SymbolKey>,
 }
 
 /// Pending drag: press started but hold threshold not yet reached.
@@ -808,9 +831,17 @@ pub enum Message {
     /// child handle on the app and fire the pending responder.
     #[cfg(feature = "dev_harness")]
     DevHarnessSimSpawned {
-        handle: crate::dev_harness::sim_child::SimChildHandle,
+        handle: crate::sim_child::SimChildHandle,
         responder: crate::dev_harness::Responder,
     },
+
+    /// The app-owned auto-spawn of `midas-ib-sim-server` finished.
+    /// Fires during startup when `config.broker.backend == Sim`.
+    /// Success stashes the handle on `self.sim_child`; failure
+    /// surfaces the reason in the status bar without tearing the
+    /// app down — the user can still edit config to switch to
+    /// LivePaper and retry.
+    BrokerSimSpawned(Result<crate::sim_child::SimChildHandle, String>),
 }
 
 /// Classify messages the `wait_for_idle` tracker should NOT treat as
@@ -819,13 +850,23 @@ pub enum Message {
 #[cfg(feature = "dev_harness")]
 fn is_tick_rate_message(msg: &Message) -> bool {
     use crate::ticker_state::TickerMsg;
-    matches!(
+    // Also exclude streaming broker ticks: when the sim is live the
+    // watchlist receives continuous L1 updates, and treating each
+    // one as "real" work would prevent `wait_for_idle` from ever
+    // settling under live-sim conditions.
+    let is_broker_tick = matches!(
         msg,
-        Message::Tick
-            | Message::Ticker(_, TickerMsg::UpdateMarketData { .. })
-            | Message::RefreshMarketData
-            | Message::MarketSnapshotLoaded(..)
-    )
+        Message::BrokerEventReceived(boxed)
+            if matches!(**boxed, midas_broker::BrokerEvent::Tick { .. })
+    );
+    is_broker_tick
+        || matches!(
+            msg,
+            Message::Tick
+                | Message::Ticker(_, TickerMsg::UpdateMarketData { .. })
+                | Message::RefreshMarketData
+                | Message::MarketSnapshotLoaded(..)
+        )
 }
 
 // ── Constructor + helpers ─────────────────────────────────────────────
@@ -1773,17 +1814,70 @@ impl MidasApp {
             }
         }
 
-        // Start the broker engine with TestBroker defaults.
-        let broker_bridge = {
-            let broker_config = midas_broker::BrokerConfig::default();
-            let handle = midas_broker::start_broker_engine(broker_config);
-            let bridge = Arc::new(crate::broker_bridge::BrokerBridge::new(
-                handle,
-                "Test Broker",
-            ));
-            tracing::info!("Broker engine started (Test Broker, data_source=test)");
-            Some(bridge)
+        // Start the broker engine. The engine always comes up with
+        // `DataSourceConfig::Test` first — that keeps the watchlist
+        // + order paths functional while we boot the sim asynchronously
+        // (the sim-spawn race with iced's first frame would otherwise
+        // leave the UI hanging on "Connecting..." for seconds during
+        // every `cargo run`). When the sim-spawn task returns, we
+        // swap the test broker out for a real ib-bridge connection
+        // via `Message::BrokerSimSpawned`.
+        //
+        // `LivePaper` / `Live` skip the sim path entirely and construct
+        // a Live broker config directly with the user-provided host +
+        // port. The `allow_live` guard is the same one the broker
+        // engine enforces in `BrokerConfig::validate` — double-
+        // checking here surfaces the error in the status bar instead
+        // of panicking the engine.
+        let broker_backend = config.broker.backend;
+        let (broker_bridge, broker_label) = match broker_backend {
+            midas_core::config::BrokerBackend::Sim => {
+                let broker_config = midas_broker::BrokerConfig::default();
+                let handle = midas_broker::start_broker_engine(broker_config);
+                let bridge = Arc::new(crate::broker_bridge::BrokerBridge::new(
+                    handle,
+                    "IB Simulator",
+                ));
+                (Some(bridge), "IB Simulator")
+            }
+            midas_core::config::BrokerBackend::LivePaper
+            | midas_core::config::BrokerBackend::Live => {
+                let broker_config = midas_broker::BrokerConfig {
+                    data_source: midas_broker::config::DataSourceConfig::Live,
+                    connection: midas_broker::config::ConnectionConfig {
+                        host: config.broker.host.clone(),
+                        port: config.broker.port,
+                        client_id: config.broker.client_id,
+                        allow_live: config.broker.allow_live,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                let label =
+                    if matches!(broker_backend, midas_core::config::BrokerBackend::LivePaper) {
+                        "IB Paper"
+                    } else {
+                        "IB Live"
+                    };
+                match broker_config.validate() {
+                    Ok(()) => {
+                        let handle = midas_broker::start_broker_engine(broker_config);
+                        let bridge =
+                            Arc::new(crate::broker_bridge::BrokerBridge::new(handle, label));
+                        (Some(bridge), label)
+                    }
+                    Err(e) => {
+                        tracing::error!("Broker config rejected: {e}");
+                        (None, label)
+                    }
+                }
+            }
         };
+        tracing::info!(
+            "Broker engine started (backend={:?}, label={})",
+            broker_backend,
+            broker_label
+        );
 
         let mut app = Self {
             charts,
@@ -1842,15 +1936,22 @@ impl MidasApp {
             annotation_store: AnnotationStore::new(),
             market_cache: crate::market_cache::MarketDataCache::default(),
             broker_bridge: broker_bridge.clone(),
-            broker_connection_display: "Disconnected".to_string(),
+            // Seed the display with "Connecting" so the status bar
+            // shows the transition even during the sub-millisecond
+            // window before the engine's `Connecting` watch value
+            // propagates through `broker_conn_stream`. Without this,
+            // the first paint of the status bar briefly flashes
+            // "Disconnected" which reads as an error state.
+            broker_connection_display: "Connecting".to_string(),
             chart_views: crate::chart_view::ChartViewStore::default(),
             thumbnail_store: crate::thumbnail_store::ThumbnailStore::default(),
             thumbnail_data: crate::thumbnail_data::ThumbnailDataStore::default(),
             tickers,
             ticker_persist,
             ticker_dispatch_active: false,
-            #[cfg(feature = "dev_harness")]
             sim_child: None,
+            broker_cfg: config.broker.clone(),
+            active_market_subs: std::collections::HashSet::new(),
         };
 
         // Register broker bridge in provider registry.
@@ -2008,12 +2109,101 @@ impl MidasApp {
         // panel, not only after they click a thumbnail.
         let thumbnail_task = app.load_all_thumbnails();
 
+        // If the user is on the Sim backend (the default), kick off
+        // the sim-child spawn in the background. The broker engine
+        // already booted with the Test broker; once the sim is
+        // healthy, `Message::BrokerSimSpawned` swaps it for a real
+        // ib-bridge connection. Running this concurrently with the
+        // chart data loads keeps the cold-start timeline tight: the
+        // UI is interactive before the sim is up.
+        //
+        // `MIDAS_DISABLE_AUTO_SIM=1` turns the auto-spawn off so
+        // integration tests that script sim lifecycle via the
+        // devloop's explicit `SpawnSim` command don't race with it.
+        let auto_spawn_disabled = std::env::var("MIDAS_DISABLE_AUTO_SIM")
+            .ok()
+            .is_some_and(|v| !v.is_empty() && v != "0");
+        let sim_spawn_task = if !auto_spawn_disabled
+            && matches!(broker_backend, midas_core::config::BrokerBackend::Sim)
+        {
+            let preferred_port = config.broker.port;
+            Task::perform(
+                async move {
+                    let tws_port = match crate::sim_child::allocate_sim_port(preferred_port) {
+                        Ok(p) => p,
+                        Err(e) => return Err(e.to_string()),
+                    };
+                    // Control port sits 2000 above the TWS port — same
+                    // convention the dev-harness uses. If the computed
+                    // control port is also taken, probe for any free
+                    // port; the bearer-token handshake doesn't care
+                    // which port the control plane binds to.
+                    let control_port_preferred = tws_port.saturating_add(2000);
+                    let control_port =
+                        match crate::sim_child::allocate_sim_port(control_port_preferred) {
+                            Ok(p) => p,
+                            Err(e) => return Err(format!("control port: {e}")),
+                        };
+                    // Seed from wall-clock so re-launches produce
+                    // distinct market data but a given run stays
+                    // reproducible for screenshot comparisons within
+                    // the same process.
+                    let seed = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos() as u64)
+                        .unwrap_or(0);
+                    let opts = crate::sim_child::SpawnOptions {
+                        tws_port,
+                        control_port,
+                        scenario: None,
+                        seed: Some(seed),
+                    };
+                    crate::sim_child::spawn(opts)
+                        .await
+                        .map_err(|e| e.to_string())
+                },
+                Message::BrokerSimSpawned,
+            )
+        } else {
+            Task::none()
+        };
+
+        // Fire a synthetic "Ready" state-change a beat after app start
+        // so the status-bar transitions from "Connecting" even though
+        // the broker engine's `watch<ConnectionState>` doesn't move
+        // past `Disconnected` for the Test data source. This covers
+        // the pre-existing engine limitation (`check_reconnect` only
+        // transitions state for `DataSourceConfig::Live`) without
+        // touching the engine. The 250ms delay gives the
+        // `broker_event_stream` subscription time to activate so it
+        // can observe the real `BrokerEvent::Connected` event too —
+        // if that arrives first, the `BrokerConnectionChanged`
+        // handler is idempotent (last-write-wins on the same value).
+        let initial_conn_task = if broker_bridge.is_some() {
+            Task::perform(
+                async {
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                },
+                |_| Message::BrokerConnectionChanged("Ready".to_string()),
+            )
+        } else {
+            Task::none()
+        };
+
         let startup_task = if load_tasks.is_empty() {
-            Task::batch([open_task, watchlist_task, thumbnail_task])
+            Task::batch([
+                open_task,
+                watchlist_task,
+                thumbnail_task,
+                sim_spawn_task,
+                initial_conn_task,
+            ])
         } else {
             load_tasks.push(open_task);
             load_tasks.push(watchlist_task);
             load_tasks.push(thumbnail_task);
+            load_tasks.push(sim_spawn_task);
+            load_tasks.push(initial_conn_task);
             Task::batch(load_tasks)
         };
 
@@ -3277,7 +3467,8 @@ impl MidasApp {
             Message::BrokerBracketCreated { .. }
             | Message::BrokerBracketStatusChanged { .. }
             | Message::BrokerEventReceived(..)
-            | Message::BrokerConnectionChanged(..) => self.handle_broker_msg(message),
+            | Message::BrokerConnectionChanged(..)
+            | Message::BrokerSimSpawned(..) => self.handle_broker_msg(message),
 
             // -- Toast notifications --
             Message::Toast(m) => self.dispatch_toast(m),

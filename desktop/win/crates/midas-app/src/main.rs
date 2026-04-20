@@ -19,6 +19,7 @@ mod market_cache;
 mod order_blotter;
 mod order_panel;
 mod registry;
+mod sim_child;
 mod theme;
 mod thumbnail_data;
 mod thumbnail_store;

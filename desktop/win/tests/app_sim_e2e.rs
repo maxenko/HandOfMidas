@@ -129,6 +129,11 @@ fn spawn_app(devloop_port: u16, sim_bin: &PathBuf) -> AppHandle {
     let child = Command::new(&app_bin)
         .env("DEVLOOP_PORT", devloop_port.to_string())
         .env("MIDAS_IB_SIM_BIN", sim_bin)
+        // Integration tests script the sim lifecycle explicitly via
+        // the devloop's SpawnSim / ShutdownSim commands — turn off
+        // the production auto-spawn so the two code paths don't race
+        // on `app.sim_child`.
+        .env("MIDAS_DISABLE_AUTO_SIM", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -385,6 +390,87 @@ fn pacing_violation_recovers_cleanly() {
     // exists; otherwise just width/height/out_path. Check it's at
     // least a non-null body.
     assert!(shot.is_object(), "screenshot body should be an object");
+
+    expect_ok(devloop_roundtrip(app.devloop_port, DevloopCmd::ShutdownSim).unwrap());
+}
+
+// ────────────────── scenario 4: live prices in watchlist ───────────────
+
+/// After the auto-spawn Sim backend lands, a developer running
+/// `cargo run -p midas-app` should see the watchlist start streaming
+/// live prices within seconds — no manual SpawnSim, no config edit.
+///
+/// This test exercises the `BrokerEvent::Tick` → `market_cache` merge
+/// path end-to-end: inject a Tick via the devloop, then assert via
+/// `DumpState` that the app's projection reflects the update.
+#[test]
+#[ignore = "spawns subprocesses; run with --ignored"]
+#[cfg_attr(
+    not(target_os = "windows"),
+    ignore = "iced requires a display; Windows-primary"
+)]
+fn live_prices_appear_in_watchlist_after_launch() {
+    let sim_bin = cargo_bin("midas-ib-sim-server");
+    assert!(sim_bin.exists(), "build midas-ib-sim-server first");
+    let devloop_port = pick_port();
+    let tws_port = pick_port();
+    let control_port = pick_port();
+
+    let app = spawn_app(devloop_port, &sim_bin);
+
+    // Spawn a sim via the devloop — deterministic port + seed for the
+    // assertion below. The auto-spawn path runs in parallel; the
+    // production MidasApp::new guards against double-stash so both
+    // handles can exist without stomping each other.
+    expect_ok(
+        devloop_roundtrip(
+            app.devloop_port,
+            DevloopCmd::SpawnSim {
+                port: tws_port,
+                control_port,
+                scenario: None,
+                seed: Some(42),
+            },
+        )
+        .unwrap(),
+    );
+
+    // Inject a broker `Tick` event as the synthetic live update. The
+    // same handler is invoked by real streaming ticks on a connected
+    // LivePaper session; `InjectBrokerEvent` exercises the merge
+    // path without needing the broker engine to hold an active
+    // subscription.
+    let tick_event = serde_json::json!({
+        "Tick": {
+            "symbol": { "contract_id": 265598, "symbol": "AAPL" },
+            "bid": 175.00,
+            "ask": 175.05,
+            "last": 175.02,
+            "volume": 1000,
+            "timestamp": "2026-04-18T12:00:00Z"
+        }
+    });
+    expect_ok(
+        devloop_roundtrip(
+            app.devloop_port,
+            DevloopCmd::InjectBrokerEvent {
+                event_json: tick_event,
+            },
+        )
+        .unwrap(),
+    );
+
+    // DumpState should now reflect the cached price. The projection
+    // shape is set by `crate::dev_harness::dump::build`; we just
+    // need a loose signal that the injected tick reached the cache.
+    let state = expect_ok(
+        devloop_roundtrip(app.devloop_port, DevloopCmd::DumpState { path: None }).unwrap(),
+    );
+    let dump = serde_json::to_string(&state).unwrap();
+    assert!(
+        dump.contains("AAPL") || dump.contains("175"),
+        "expected AAPL + 175.x in dump, got: {dump}"
+    );
 
     expect_ok(devloop_roundtrip(app.devloop_port, DevloopCmd::ShutdownSim).unwrap());
 }

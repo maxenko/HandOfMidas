@@ -120,6 +120,93 @@ pub struct AppConfig {
     /// Active data provider and broker selections.
     #[serde(default)]
     pub providers: Option<ProviderConfig>,
+    /// Broker backend selection. Default: [`BrokerBackend::Sim`] — on
+    /// a fresh install, `cargo run -p midas-app` auto-spawns
+    /// `midas-ib-sim-server` and connects to it so the app works
+    /// out of the box with zero config. See [`BrokerConnectionConfig`]
+    /// for the backend-specific fields.
+    #[serde(default)]
+    pub broker: BrokerConnectionConfig,
+}
+
+/// Which broker backend the app connects to on startup.
+///
+/// Serialized as the `type` tag inside the `[broker]` TOML table so
+/// adding new backends later is an enum variant, not a schema
+/// renaming exercise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BrokerBackend {
+    /// Default for dev: auto-spawn `midas-ib-sim-server` as a child
+    /// process and connect to its TWS port via rust-ibapi. No
+    /// real-money risk; works with zero config.
+    #[default]
+    Sim,
+    /// Connect to a running IB paper-trading gateway at
+    /// [`BrokerConnectionConfig::host`]:[`BrokerConnectionConfig::port`].
+    /// The `allow_live` guard in [`BrokerConnectionConfig::validate`]
+    /// protects against accidentally pointing this at port 4001
+    /// (the live-money port).
+    #[serde(rename = "live_paper")]
+    LivePaper,
+    /// Connect to a real IB live gateway. Refuses unless
+    /// `allow_live = true` is explicitly set AND the port is not a
+    /// known paper-trading port (safety lockout).
+    Live,
+}
+
+/// Per-backend broker connection settings.
+///
+/// Mirrors the subset of `midas_broker::ConnectionConfig` that the
+/// app layer needs to know about. The full broker-engine config
+/// (persistence paths, reconnect timers, order defaults, trading
+/// limits) lives in the engine and is not user-tunable from here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrokerConnectionConfig {
+    /// Selected backend. Default: [`BrokerBackend::Sim`].
+    #[serde(default)]
+    pub backend: BrokerBackend,
+    /// TWS/Gateway hostname (ignored for `Sim`, which always binds
+    /// loopback).
+    #[serde(default = "default_broker_host")]
+    pub host: String,
+    /// Preferred TWS/Gateway port. For `Sim` this is the port the
+    /// child will try to bind first; if it's taken,
+    /// [`crate::sim_child::allocate_sim_port`] falls back to a free
+    /// port in 7498..7600.
+    #[serde(default = "default_broker_port")]
+    pub port: u16,
+    /// Unique client identifier for the ibapi connection.
+    #[serde(default = "default_broker_client_id")]
+    pub client_id: i32,
+    /// Must be `true` to allow connecting to a known live-money
+    /// gateway port. Default `false`.
+    #[serde(default)]
+    pub allow_live: bool,
+}
+
+fn default_broker_host() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_broker_port() -> u16 {
+    7498
+}
+
+fn default_broker_client_id() -> i32 {
+    1
+}
+
+impl Default for BrokerConnectionConfig {
+    fn default() -> Self {
+        Self {
+            backend: BrokerBackend::default(),
+            host: default_broker_host(),
+            port: default_broker_port(),
+            client_id: default_broker_client_id(),
+            allow_live: false,
+        }
+    }
 }
 
 /// Window geometry configuration.
@@ -646,6 +733,7 @@ impl Default for AppConfig {
             layout_tree: Vec::new(),
             store: StoreConfig::default(),
             providers: None,
+            broker: BrokerConnectionConfig::default(),
         }
     }
 }

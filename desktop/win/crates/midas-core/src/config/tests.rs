@@ -38,6 +38,63 @@ fn default_has_expected_values() {
 }
 
 #[test]
+fn default_broker_backend_is_sim() {
+    // The whole point of the sim-default experience: a fresh install
+    // (no config.toml) must boot into Sim so `cargo run -p midas-app`
+    // works without editing any files.
+    let config = AppConfig::default();
+    assert_eq!(config.broker.backend, BrokerBackend::Sim);
+    assert_eq!(config.broker.host, "127.0.0.1");
+    assert_eq!(config.broker.port, 7498);
+    assert!(!config.broker.allow_live);
+}
+
+#[test]
+fn broker_backend_serde_roundtrip() {
+    // Each variant's TOML tag is part of the stable config schema —
+    // renaming them breaks user configs. Pin them explicitly.
+    //
+    // TOML can't serialize a bare enum value at the top level, so
+    // exercise the tag through a wrapper struct (the same shape as
+    // it appears inside `BrokerConnectionConfig`).
+    #[derive(Serialize, Deserialize)]
+    struct Wrapper {
+        backend: BrokerBackend,
+    }
+    for (backend, tag_line) in [
+        (BrokerBackend::Sim, "backend = \"sim\""),
+        (BrokerBackend::LivePaper, "backend = \"live_paper\""),
+        (BrokerBackend::Live, "backend = \"live\""),
+    ] {
+        let ser = toml::to_string(&Wrapper { backend }).unwrap();
+        assert!(
+            ser.trim() == tag_line,
+            "expected {tag_line} for {backend:?}, got {ser:?}"
+        );
+        let de: Wrapper = toml::from_str(&ser).unwrap();
+        assert_eq!(de.backend, backend, "roundtrip for {backend:?}");
+    }
+}
+
+#[test]
+fn missing_broker_table_defaults_to_sim() {
+    // A config written by an older midas-app (before the Sim-default
+    // work) has no `[broker]` section. Loading it must still yield
+    // `backend = Sim` so existing users get the default experience
+    // without editing their config.
+    let toml_str = r#"
+[window]
+width = 1280
+height = 800
+
+[theme]
+mode = "dark"
+"#;
+    let config: AppConfig = toml::from_str(toml_str).unwrap();
+    assert_eq!(config.broker.backend, BrokerBackend::Sim);
+}
+
+#[test]
 fn save_load_roundtrip_preserves_all_fields() {
     let dir = temp_dir();
     let path = dir.join("roundtrip.toml");
@@ -104,6 +161,7 @@ fn save_load_roundtrip_preserves_all_fields() {
         layout_tree: Vec::new(),
         store: StoreConfig::default(),
         providers: None,
+        broker: BrokerConnectionConfig::default(),
     };
 
     config.save(&path).expect("save config");
@@ -267,6 +325,7 @@ fn chart_config_with_levels_survives_roundtrip() {
         layout_tree: Vec::new(),
         store: StoreConfig::default(),
         providers: None,
+        broker: BrokerConnectionConfig::default(),
     };
 
     config.save(&path).expect("save config");
@@ -449,6 +508,7 @@ fn atomic_write_does_not_corrupt_on_success() {
         layout_tree: Vec::new(),
         store: StoreConfig::default(),
         providers: None,
+        broker: BrokerConnectionConfig::default(),
     };
 
     // Write multiple times to ensure atomic replacement works.
@@ -570,6 +630,7 @@ fn roundtrip_with_camera_and_collapse_gaps_and_line_width() {
         layout_tree: Vec::new(),
         store: StoreConfig::default(),
         providers: None,
+        broker: BrokerConnectionConfig::default(),
     };
 
     config.save(&path).expect("save full config");
