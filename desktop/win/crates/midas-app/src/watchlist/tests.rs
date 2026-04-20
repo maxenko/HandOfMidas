@@ -71,6 +71,50 @@ fn adjust_favorite_clamps_to_range() {
 }
 
 #[test]
+fn freeze_sort_snapshots_current_favorites() {
+    let mut wl = WatchlistPanel::new(WatchlistId::new(1), "Test".into());
+    wl.add_ticker("AAPL");
+    wl.add_ticker("MSFT");
+    wl.adjust_favorite("AAPL", 3);
+    wl.adjust_favorite("MSFT", 1);
+
+    wl.freeze_sort();
+    let snap = wl
+        .sort_freeze
+        .as_ref()
+        .expect("freeze_sort populates state");
+    assert_eq!(snap.get("AAPL"), Some(&3));
+    assert_eq!(snap.get("MSFT"), Some(&1));
+
+    // Live values can change after freeze; snapshot stays put.
+    wl.adjust_favorite("AAPL", 1);
+    assert_eq!(wl.tickers[0].favorite, 4);
+    assert_eq!(wl.sort_freeze.as_ref().unwrap().get("AAPL"), Some(&3));
+
+    wl.unfreeze_sort();
+    assert!(wl.sort_freeze.is_none());
+}
+
+#[test]
+fn freeze_sort_is_idempotent_until_unfreeze() {
+    // Back-to-back on_enter events (e.g. iced redelivering on a re-render)
+    // must not overwrite the original snapshot — otherwise scrolling
+    // would still re-sort because the snapshot would track the live value.
+    let mut wl = WatchlistPanel::new(WatchlistId::new(1), "Test".into());
+    wl.add_ticker("AAPL");
+    wl.adjust_favorite("AAPL", 2);
+
+    wl.freeze_sort();
+    wl.adjust_favorite("AAPL", 1); // live=3, snap=2
+    wl.freeze_sort(); // re-entrant — must NOT re-snapshot
+    assert_eq!(wl.sort_freeze.as_ref().unwrap().get("AAPL"), Some(&2));
+
+    wl.unfreeze_sort();
+    wl.freeze_sort(); // after exit/re-enter, snapshot updates
+    assert_eq!(wl.sort_freeze.as_ref().unwrap().get("AAPL"), Some(&3));
+}
+
+#[test]
 fn has_ticker_case_insensitive() {
     let mut wl = WatchlistPanel::new(WatchlistId::new(1), "Test".into());
     wl.add_ticker("AAPL");

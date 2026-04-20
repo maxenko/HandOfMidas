@@ -82,6 +82,13 @@ pub struct WatchlistPanel {
     pub symbol_link: LinkMode,
     /// Grid UI state (column widths, sort, selection, scroll).
     pub grid_state: midas_grid::GridState,
+    /// Snapshot of favorite values used as the sort key while the
+    /// cursor is hovering a favourite cell. `None` outside hover —
+    /// the VM uses live `WatchlistTicker::favorite` for sorting.
+    /// `Some` while hovering — pins the favourites-first sort key
+    /// so multiple wheel adjustments don't reorder rows under the
+    /// cursor. Cleared on `mouse_area::on_exit`. Transient state.
+    pub sort_freeze: Option<HashMap<String, u8>>,
 }
 
 impl WatchlistPanel {
@@ -98,6 +105,7 @@ impl WatchlistPanel {
                 WATCHLIST_COLUMN_ORDER.to_vec(),
                 default_column_widths(),
             ),
+            sort_freeze: None,
         }
     }
 
@@ -135,6 +143,7 @@ impl WatchlistPanel {
             selected_symbol: None,
             symbol_link: config.symbol_link,
             grid_state: midas_grid::GridState::new(WATCHLIST_COLUMN_ORDER.to_vec(), widths),
+            sort_freeze: None,
         }
     }
 
@@ -181,6 +190,31 @@ impl WatchlistPanel {
     pub fn remove_ticker(&mut self, symbol: &str) {
         let upper = symbol.to_uppercase();
         self.tickers.retain(|t| t.symbol != upper);
+    }
+
+    /// Snapshot the current per-symbol favourite values into
+    /// [`Self::sort_freeze`]. Called from the favourite cell's
+    /// `mouse_area::on_enter` so subsequent wheel adjustments don't
+    /// reorder the row under the cursor. No-op if a freeze is
+    /// already active — back-to-back `on_enter` events (e.g. from
+    /// rapid mouse movement) keep the original snapshot.
+    pub fn freeze_sort(&mut self) {
+        if self.sort_freeze.is_some() {
+            return;
+        }
+        self.sort_freeze = Some(
+            self.tickers
+                .iter()
+                .map(|t| (t.symbol.clone(), t.favorite))
+                .collect(),
+        );
+    }
+
+    /// Release the favourites-first sort snapshot. Called from the
+    /// favourite cell's `mouse_area::on_exit` — the next render
+    /// re-sorts using live `favorite` values.
+    pub fn unfreeze_sort(&mut self) {
+        self.sort_freeze = None;
     }
 
     /// Adjust the favourite level of a ticker by `delta`, clamped to `0..=5`.

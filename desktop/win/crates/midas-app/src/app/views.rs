@@ -1170,7 +1170,13 @@ impl MidasApp {
                     };
                     Message::WatchlistAdjustFavorite(wl_id, sym.clone(), step)
                 };
-                let fav_btn = iced::widget::mouse_area(fav_widget).on_scroll(fav_scroll);
+                // `on_enter` snapshots the favourites-first sort key so
+                // back-to-back wheel ticks don't slide the row out from
+                // under the cursor; `on_exit` releases the snapshot.
+                let fav_btn = iced::widget::mouse_area(fav_widget)
+                    .on_scroll(fav_scroll)
+                    .on_enter(Message::WatchlistFavCellEnter(wl_id))
+                    .on_exit(Message::WatchlistFavCellExit(wl_id));
 
                 let del_btn = button(text("\u{00D7}").size(12))
                     .on_press(Message::WatchlistRemoveTicker(wl_id, sym_del))

@@ -645,6 +645,13 @@ pub enum Message {
     /// Adjust the favourite level of a ticker by a signed delta
     /// (scroll-wheel driven: `+1` per line up, `-1` per line down).
     WatchlistAdjustFavorite(WatchlistId, String, i8),
+    /// Mouse entered a favourite cell — pin the favourites-first
+    /// sort key so subsequent wheel adjustments don't reorder the
+    /// row under the cursor.
+    WatchlistFavCellEnter(WatchlistId),
+    /// Mouse left the favourite cell — release the sort pin so the
+    /// next render re-sorts with live `favorite` values.
+    WatchlistFavCellExit(WatchlistId),
     /// User pressed down on a ticker cell — starts the hold timer.
     WatchlistTickerPressed(WatchlistId, String),
     /// Hold threshold reached — promote pending drag to active drag.
@@ -3419,6 +3426,8 @@ impl MidasApp {
             | Message::WatchlistAddTicker(..)
             | Message::WatchlistRemoveTicker(..)
             | Message::WatchlistAdjustFavorite(..)
+            | Message::WatchlistFavCellEnter(..)
+            | Message::WatchlistFavCellExit(..)
             | Message::WatchlistTickerPressed(..)
             | Message::WatchlistDragConfirm(..)
             | Message::WatchlistDragCancel

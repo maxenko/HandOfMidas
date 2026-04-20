@@ -114,8 +114,20 @@ impl WatchlistBodyVm {
         // Favorites first (descending), then by the active grid sort.
         // Matches the prior view's two-stage sort exactly so visual
         // identity is preserved.
+        //
+        // While `wl.sort_freeze` is `Some`, the favourites-first key
+        // resolves against the frozen snapshot rather than the live
+        // `favorite` value. The cell still renders the live value —
+        // only the sort key is pinned, so wheel adjustments increment
+        // the badge without reordering the row under the cursor.
+        let fav_for_sort = |row: &WatchlistRow| -> u8 {
+            wl.sort_freeze
+                .as_ref()
+                .and_then(|m| m.get(&row.symbol).copied())
+                .unwrap_or(row.favorite)
+        };
         rows.sort_by(|a, b| {
-            let fav = b.favorite.cmp(&a.favorite);
+            let fav = fav_for_sort(b).cmp(&fav_for_sort(a));
             if fav != std::cmp::Ordering::Equal {
                 return fav;
             }
@@ -212,6 +224,43 @@ mod tests {
         let symbols: Vec<&str> = vm.rows.iter().map(|r| r.symbol.as_str()).collect();
         // Favorited MSFT comes first; AAPL/NVDA preserve insertion order.
         assert_eq!(symbols, vec!["MSFT", "AAPL", "NVDA"]);
+    }
+
+    #[test]
+    fn vm_sort_freeze_pins_order_under_changing_favorites() {
+        // Repro for "favorite jumps under cursor on scroll-wheel":
+        // - MSFT favorited (5), AAPL/NVDA at 0 → MSFT sorts to top.
+        // - Hover the AAPL favourite cell (freeze_sort).
+        // - User scrolls AAPL up to 5; without the pin AAPL would jump
+        //   above MSFT. With the pin the row order stays put.
+        let mut wl = WatchlistPanel::new(WatchlistId::new(1), "Main".into());
+        wl.tickers = vec![ticker("AAPL", 0), ticker("MSFT", 5), ticker("NVDA", 0)];
+
+        // Snapshot before the user starts scrolling.
+        wl.freeze_sort();
+
+        // Wheel ticks bump AAPL to a higher value than MSFT.
+        wl.adjust_favorite("AAPL", 5);
+        assert_eq!(wl.tickers[0].favorite, 5);
+
+        let cache = MarketDataCache::default();
+        let vm = WatchlistBodyVm::build(&wl, &cache, empty_thumbnail, false, None);
+        let symbols: Vec<&str> = vm.rows.iter().map(|r| r.symbol.as_str()).collect();
+        // Order matches the pre-scroll favorites snapshot — MSFT stays
+        // on top even though AAPL's live value is now equal/higher.
+        assert_eq!(symbols, vec!["MSFT", "AAPL", "NVDA"]);
+
+        // The displayed favorite badge still shows the live value.
+        let aapl_row = vm.rows.iter().find(|r| r.symbol == "AAPL").unwrap();
+        assert_eq!(aapl_row.favorite, 5);
+
+        // After mouse-exit, the freeze releases and rows re-sort.
+        wl.unfreeze_sort();
+        let vm2 = WatchlistBodyVm::build(&wl, &cache, empty_thumbnail, false, None);
+        let symbols2: Vec<&str> = vm2.rows.iter().map(|r| r.symbol.as_str()).collect();
+        // AAPL and MSFT both at 5 — favorites-first stable sort keeps
+        // insertion order so AAPL precedes MSFT.
+        assert_eq!(symbols2, vec!["AAPL", "MSFT", "NVDA"]);
     }
 
     #[test]

@@ -2091,6 +2091,20 @@ impl MidasApp {
                 Task::none()
             }
 
+            Message::WatchlistFavCellEnter(wl_id) => {
+                if let Some(wl) = self.watchlists.get_mut(&wl_id) {
+                    wl.freeze_sort();
+                }
+                Task::none()
+            }
+
+            Message::WatchlistFavCellExit(wl_id) => {
+                if let Some(wl) = self.watchlists.get_mut(&wl_id) {
+                    wl.unfreeze_sort();
+                }
+                Task::none()
+            }
+
             Message::WatchlistTickerPressed(wl_id, symbol) => {
                 self.pending_drag = Some(PendingDragState {
                     symbol: symbol.clone(),
