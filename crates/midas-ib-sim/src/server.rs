@@ -428,14 +428,18 @@ fn configure_stream(stream: &TcpStream) {
     let keepalive = socket2::TcpKeepalive::new()
         .with_time(KEEPALIVE_IDLE)
         .with_interval(KEEPALIVE_INTERVAL);
-    // `with_retries` is not available on every platform socket2 supports.
+    // `with_retries` mirrors socket2's own platform gating — see the
+    // `#[cfg]` on `TcpKeepalive::with_retries` in socket2 0.5.
+    // macOS/iOS/Windows expose keepalive time + interval but not retry
+    // count, so we just apply what the platform supports.
     #[cfg(any(
-        target_os = "linux",
         target_os = "android",
+        target_os = "dragonfly",
         target_os = "freebsd",
+        target_os = "fuchsia",
+        target_os = "illumos",
+        target_os = "linux",
         target_os = "netbsd",
-        target_os = "macos",
-        target_os = "ios",
     ))]
     let keepalive = keepalive.with_retries(KEEPALIVE_RETRIES);
     if let Err(e) = sock_ref.set_tcp_keepalive(&keepalive) {

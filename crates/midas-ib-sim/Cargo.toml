@@ -42,7 +42,7 @@ axum = "0.7"
 tower-http = { version = "0.5", features = ["limit", "timeout"] }
 clap = { version = "4", features = ["derive"] }
 dirs = "5"
-socket2 = "0.5"
+socket2 = { version = "0.5", features = ["all"] }  # "all" unlocks TcpKeepalive::with_retries + other platform knobs
 libc = "0.2"
 
 [dev-dependencies]
