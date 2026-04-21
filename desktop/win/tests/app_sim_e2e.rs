@@ -204,7 +204,10 @@ fn pick_port() -> u16 {
 /// state = Ready" since the app's broker-bridge wiring to sim is
 /// gated on user config and not exercised by this test.
 #[test]
-#[cfg_attr(target_os = "windows", ignore = "spawns subprocesses; run with --ignored")]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "spawns subprocesses; run with --ignored"
+)]
 #[cfg_attr(
     not(target_os = "windows"),
     ignore = "iced requires a display; Windows-primary"
@@ -248,7 +251,10 @@ fn happy_path_connects_and_shows_ready() {
 /// DSL covers the engine side; this test focuses on the app's
 /// TickerState projection). DumpState is the ground truth.
 #[test]
-#[cfg_attr(target_os = "windows", ignore = "spawns subprocesses; run with --ignored")]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "spawns subprocesses; run with --ignored"
+)]
 #[cfg_attr(
     not(target_os = "windows"),
     ignore = "iced requires a display; Windows-primary"
@@ -338,7 +344,10 @@ fn bracket_lifecycle_transitions() {
 /// (blocked on the `sim_allowed` config path landing) — so we verify
 /// the fault-injection roundtrip itself succeeds.
 #[test]
-#[cfg_attr(target_os = "windows", ignore = "spawns subprocesses; run with --ignored")]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "spawns subprocesses; run with --ignored"
+)]
 #[cfg_attr(
     not(target_os = "windows"),
     ignore = "iced requires a display; Windows-primary"
@@ -410,7 +419,10 @@ fn pacing_violation_recovers_cleanly() {
 /// path end-to-end: inject a Tick via the devloop, then assert via
 /// `DumpState` that the app's projection reflects the update.
 #[test]
-#[cfg_attr(target_os = "windows", ignore = "spawns subprocesses; run with --ignored")]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "spawns subprocesses; run with --ignored"
+)]
 #[cfg_attr(
     not(target_os = "windows"),
     ignore = "iced requires a display; Windows-primary"
