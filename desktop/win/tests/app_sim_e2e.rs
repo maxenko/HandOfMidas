@@ -22,6 +22,12 @@
 //! Xvfb but our default runner image doesn't. These tests are
 //! Windows-primary (`cfg(target_os = "windows")`). Linux runs abort
 //! early with an ignored message.
+//!
+//! Each test gates `#[ignore]` via *two* mutually-exclusive `cfg_attr`
+//! lines — one per platform. Stacking an unconditional `#[ignore]`
+//! under a conditional one emits two `#[ignore]` attributes on
+//! non-Windows targets and trips `unused_attributes` under
+//! `-D warnings`.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
@@ -198,7 +204,7 @@ fn pick_port() -> u16 {
 /// state = Ready" since the app's broker-bridge wiring to sim is
 /// gated on user config and not exercised by this test.
 #[test]
-#[ignore = "spawns subprocesses; run with --ignored"]
+#[cfg_attr(target_os = "windows", ignore = "spawns subprocesses; run with --ignored")]
 #[cfg_attr(
     not(target_os = "windows"),
     ignore = "iced requires a display; Windows-primary"
@@ -242,7 +248,7 @@ fn happy_path_connects_and_shows_ready() {
 /// DSL covers the engine side; this test focuses on the app's
 /// TickerState projection). DumpState is the ground truth.
 #[test]
-#[ignore = "spawns subprocesses; run with --ignored"]
+#[cfg_attr(target_os = "windows", ignore = "spawns subprocesses; run with --ignored")]
 #[cfg_attr(
     not(target_os = "windows"),
     ignore = "iced requires a display; Windows-primary"
@@ -332,7 +338,7 @@ fn bracket_lifecycle_transitions() {
 /// (blocked on the `sim_allowed` config path landing) — so we verify
 /// the fault-injection roundtrip itself succeeds.
 #[test]
-#[ignore = "spawns subprocesses; run with --ignored"]
+#[cfg_attr(target_os = "windows", ignore = "spawns subprocesses; run with --ignored")]
 #[cfg_attr(
     not(target_os = "windows"),
     ignore = "iced requires a display; Windows-primary"
@@ -404,7 +410,7 @@ fn pacing_violation_recovers_cleanly() {
 /// path end-to-end: inject a Tick via the devloop, then assert via
 /// `DumpState` that the app's projection reflects the update.
 #[test]
-#[ignore = "spawns subprocesses; run with --ignored"]
+#[cfg_attr(target_os = "windows", ignore = "spawns subprocesses; run with --ignored")]
 #[cfg_attr(
     not(target_os = "windows"),
     ignore = "iced requires a display; Windows-primary"
