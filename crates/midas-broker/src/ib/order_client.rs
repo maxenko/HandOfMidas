@@ -197,31 +197,21 @@ impl OrderClient for IbOrderClient {
             tif,
             outside_rth,
         } = spec;
+        // Only fields that differ from `OrderSpec::default()` are
+        // named; the rest fall through to the defaults the struct
+        // impl already provides.
         let updated = OrderSpec {
             ib_order_id,
             symbol: current.symbol.clone(),
-            con_id: 0,
             action: current.action,
             order_type: current.order_type,
             quantity: quantity.unwrap_or(current.quantity),
             limit_price: limit_price.or(current.limit_price),
             stop_price: stop_price.or(current.stop_price),
             parent_id: current.parent_id,
-            transmit: true,
             tif: tif.unwrap_or(current.tif),
             outside_rth: outside_rth.unwrap_or(false),
-            oca_group: None,
-            oca_type: None,
-            conditions: vec![],
-            algo_strategy: None,
-            algo_params: vec![],
-            good_after_time: None,
-            good_till_date: None,
-            display_size: None,
-            hidden: false,
-            trigger_method: crate::order_client::TriggerMethod::Default,
-            discretionary_amt: None,
-            sweep_to_fill: false,
+            ..OrderSpec::default()
         };
         let contract = ibapi::contracts::Contract {
             contract_id: updated.con_id,

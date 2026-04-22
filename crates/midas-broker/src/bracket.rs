@@ -103,8 +103,10 @@ impl BracketSubmitter {
         self.order_client.place_order(entry_spec).await?;
 
         // 3. Take-profit. Transmit-last only if SL is absent.
-        if let Some(tp_id) = tp_id {
-            let tp = params.take_profit.as_ref().expect("tp_id implies tp");
+        //    `zip` drops both the id and the params together, so the
+        //    "tp_id implies tp" invariant is reflected in the types
+        //    instead of an `.expect(..)`.
+        if let Some((tp_id, tp)) = tp_id.zip(params.take_profit.as_ref()) {
             let transmit = !has_sl;
             let spec = tp_spec(tp_id, entry_id, &symbol_key, &params, tp, transmit);
             if let Err(e) = self.order_client.place_order(spec).await {
@@ -116,8 +118,7 @@ impl BracketSubmitter {
 
         // 4. Stop-loss. Always transmit=true when present — triggers
         //    the whole bracket on the IB side.
-        if let Some(sl_id) = sl_id {
-            let sl = params.stop_loss.as_ref().expect("sl_id implies sl");
+        if let Some((sl_id, sl)) = sl_id.zip(params.stop_loss.as_ref()) {
             let spec = sl_spec(sl_id, entry_id, &symbol_key, &params, sl, true);
             if let Err(e) = self.order_client.place_order(spec).await {
                 let _ = self.order_client.cancel_order(entry_id, None).await;
