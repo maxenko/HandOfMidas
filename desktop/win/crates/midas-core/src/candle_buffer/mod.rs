@@ -236,38 +236,6 @@ impl CandleBuffer {
         }
     }
 
-    /// Fold a single live tick into the last candle: bumps `close` to the
-    /// tick price, widens `high`/`low` if the tick breaks either, increments
-    /// the volume by `tick_volume`, and bumps the version counter.
-    ///
-    /// No-op if the buffer is empty — callers are expected to push a real
-    /// candle (from historical data) before folding ticks into it. The
-    /// timestamp is left untouched; roll-over to a new bar is the caller's
-    /// responsibility.
-    pub fn apply_tick(&mut self, price: f64, tick_volume: u32) {
-        if self.closes.last_mut().is_none() {
-            return;
-        }
-        let p = price as f32;
-        if let Some(c) = self.closes.last_mut() {
-            *c = p;
-        }
-        if let Some(h) = self.highs.last_mut() {
-            if p > *h {
-                *h = p;
-            }
-        }
-        if let Some(l) = self.lows.last_mut() {
-            if p < *l {
-                *l = p;
-            }
-        }
-        if let Some(v) = self.volumes.last_mut() {
-            *v = v.saturating_add(tick_volume);
-        }
-        self.version.fetch_add(1, Ordering::Relaxed);
-    }
-
     /// Fold a completed (or partial) bar into the buffer.
     ///
     /// If the last candle's open timestamp matches `bar_ts_open_ms`,
@@ -281,9 +249,9 @@ impl CandleBuffer {
     /// storage is `u32` (equities rarely approach 4 B shares in a
     /// single bar).
     ///
-    /// Introduced in S7b as the replacement for [`apply_tick`]: the
-    /// router emits per-bar events (from the aggregator or the
-    /// realtime-bar publisher), not ticks.
+    /// Introduced in S7b as the replacement for the removed
+    /// `apply_tick`: the router emits per-bar events (from the
+    /// aggregator or the realtime-bar publisher), not ticks.
     pub fn apply_bar(&mut self, bar_ts_open_ms: i64, o: f32, h: f32, l: f32, c: f32, v: u32) {
         match self.timestamps.last().copied() {
             Some(ts) if ts == bar_ts_open_ms => {

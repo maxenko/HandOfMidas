@@ -4028,12 +4028,9 @@ impl MidasApp {
     /// moment `Message::RouterReady(Ok(..))` lands and
     /// `bind_chart_to_symbol` installs the first handle.
     ///
-    /// Legacy coexistence: the `BrokerEvent::Tick` central match
-    /// arm still fires the chart's live-candle fold through
-    /// `CandleBuffer::apply_tick` until S7e deletes it. Both paths
-    /// running in parallel is acceptable — the router batches are
-    /// coalesced per-frame and `Arc::make_mut` on the chart data
-    /// deduplicates naturally.
+    /// Ticks from the legacy `BrokerEvent::Tick` handler and
+    /// `CandleBuffer::apply_tick` are gone (S7e / S10h). The router's
+    /// aggregator is the sole writer into `CandleBuffer::apply_bar`.
     pub(crate) fn chart_subscriptions(&self) -> iced::Subscription<Message> {
         // NB-4: no router yet → no subscriptions.
         if self.router.is_none() {
@@ -4248,13 +4245,11 @@ impl MidasApp {
                 // re-wraps the Arc so the renderer picks up the
                 // version bump on the next frame.
                 //
-                // Legacy coexistence: the `BrokerEvent::Tick` arm
-                // still runs and mutates the same buffer via
-                // `apply_tick`. That's intentional through S7b-d
-                // while both paths coexist — the router batches
-                // are coalesced per-frame and bars always win on
-                // timestamp match because their close price is the
-                // aggregator's authoritative value.
+                // Bars are now the sole writer into CandleBuffer
+                // (S7e removed the Tick arm and S10h removed
+                // CandleBuffer::apply_tick). The aggregator's
+                // authoritative close price overwrites on timestamp
+                // match; new timestamps append.
                 if let Some(chart) = self.charts.get_mut(&chart_id) {
                     if let Some(arc) = chart.data.as_mut() {
                         let buf = std::sync::Arc::make_mut(arc);
