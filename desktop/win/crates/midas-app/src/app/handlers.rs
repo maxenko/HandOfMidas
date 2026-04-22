@@ -2040,10 +2040,10 @@ impl MidasApp {
                         self.push_recent_symbol(&symbol);
                         let task = self.load_market_snapshot(&symbol);
                         // Fire a SubscribeMarketData for this symbol via
-                        // `ensure_watchlist_subscriptions`; idempotent, so
+                        // `ensure_market_subscriptions`; idempotent, so
                         // no-op if the user re-adds an already-subscribed
                         // symbol across watchlists.
-                        self.ensure_watchlist_subscriptions();
+                        self.ensure_market_subscriptions();
                         return Task::batch([self.flush_config(), task]);
                     }
                 }
@@ -2655,6 +2655,11 @@ impl MidasApp {
                         if let Some(chart) = self.floating_charts.get_mut(&wid) {
                             crate::app::apply_symbol_to_panel(chart, &symbol, sym_key);
                         }
+                        // Floating charts don't route through
+                        // `bind_chart_to_symbol`, so reconcile streaming
+                        // subs explicitly — the newly-bound symbol may
+                        // not be in any watchlist.
+                        self.ensure_market_subscriptions();
                         self.load_floating_chart_async(wid, &symbol, tf)
                     }
                     (_, None) => Task::none(),
@@ -3728,6 +3733,11 @@ impl MidasApp {
                             (Some(b), Some(a)) => Some((b + a) / 2.0),
                             _ => None,
                         });
+                        // Track the GATR we merged into the cache so
+                        // we can dispatch it downstream without
+                        // re-reading the cache entry (which we just
+                        // moved into `insert`).
+                        let mut merged_gatr: Option<f64> = None;
                         if new_price.is_some() {
                             let entry = self.market_cache.get(&key).cloned().unwrap_or_default();
                             let mut merged = entry.clone();
@@ -3743,7 +3753,55 @@ impl MidasApp {
                                     }
                                 }
                             }
-                            self.market_cache.insert(key, merged);
+                            merged_gatr = merged.gatr_abs;
+                            self.market_cache.insert(key.clone(), merged);
+                        }
+                        // Fan the new price out to every surface that
+                        // derives from `last_price`:
+                        //   (a) TickerState — drives bracket labels,
+                        //       GATR auto-snap, decorator badges.
+                        //   (b) Every docked + floating chart's
+                        //       CandleBuffer — folds the tick into
+                        //       the current candle so the chart
+                        //       visibly drifts with the market.
+                        if let Some(price) = new_price {
+                            // (a) TickerState. Prefer the cached GATR
+                            // merged above; if none is available yet
+                            // (snapshot still loading) fall back to
+                            // 0.5% of price — same heuristic as the
+                            // snapshot-ready path in
+                            // `Message::MarketSnapshotReceived`.
+                            let gatr_val = merged_gatr.unwrap_or(price * 0.005);
+                            let _ = self.update(Message::Ticker(
+                                key.clone(),
+                                crate::ticker_state::TickerMsg::UpdateMarketData {
+                                    last_price: price,
+                                    gatr_abs: Some(gatr_val),
+                                },
+                            ));
+                            // (b) Live candle fold. `Arc::make_mut`
+                            // clones only when the Arc is actually
+                            // shared; when the app owns the only
+                            // handle it mutates in place. The chart
+                            // snapshot rebuild in `view()` re-wraps
+                            // the new Arc so the renderer picks up
+                            // the updated version on the next frame.
+                            for chart in self.charts.values_mut() {
+                                if chart.bound_symbol.as_ref() == Some(&key) {
+                                    if let Some(arc) = chart.data.as_mut() {
+                                        std::sync::Arc::make_mut(arc).apply_tick(price, 0);
+                                        chart.chart_state.dirty.mark_data();
+                                    }
+                                }
+                            }
+                            for chart in self.floating_charts.values_mut() {
+                                if chart.bound_symbol.as_ref() == Some(&key) {
+                                    if let Some(arc) = chart.data.as_mut() {
+                                        std::sync::Arc::make_mut(arc).apply_tick(price, 0);
+                                        chart.chart_state.dirty.mark_data();
+                                    }
+                                }
+                            }
                         }
                     }
                     other => {
@@ -3823,7 +3881,7 @@ impl MidasApp {
                 // backends at runtime. Unsubscribes on Disconnected
                 // happen via the existing drop path in the engine.
                 if now_connected {
-                    self.ensure_watchlist_subscriptions();
+                    self.ensure_market_subscriptions();
                 }
                 Task::none()
             }
@@ -3852,7 +3910,7 @@ impl MidasApp {
                 // and hot-swapping broker handles would require a
                 // full re-subscription dance. The live-tick wiring
                 // (Wire 3) works against the test broker today — see
-                // `ensure_watchlist_subscriptions`.
+                // `ensure_market_subscriptions`.
                 Task::none()
             }
 
@@ -3868,20 +3926,33 @@ impl MidasApp {
         }
     }
 
-    /// Walk every watchlist in the workspace and issue
-    /// `BrokerCommand::SubscribeMarketData` for any symbol that isn't
-    /// already in `self.active_market_subs`. Idempotent — safe to
-    /// call on every connection transition into the healthy range.
+    /// Reconcile market-data subscriptions with the union of every
+    /// *streaming consumer* in the current workspace:
+    ///
+    /// - every watchlist ticker, and
+    /// - every docked chart's `bound_symbol`, and
+    /// - every floating chart's `bound_symbol`.
+    ///
+    /// Any symbol in the union that isn't already subscribed gets a
+    /// `BrokerCommand::SubscribeMarketData`; any symbol currently in
+    /// `self.active_market_subs` that has dropped out of the union gets
+    /// a `BrokerCommand::UnsubscribeMarketData`. Idempotent — safe to
+    /// call on every connection transition, workspace hydration,
+    /// chart-bind, and watchlist-edit.
     ///
     /// Subscriptions are keyed by `SymbolKey` (trimmed + uppercased)
-    /// so the broker's normalisation matches the cache's; if we
-    /// didn't normalise both sides we'd end up with duplicate
-    /// subscriptions for `"AAPL"` and `"aapl"`.
-    pub(crate) fn ensure_watchlist_subscriptions(&mut self) {
+    /// so the broker's normalisation matches the cache's; if we didn't
+    /// normalise both sides we'd end up with duplicate subscriptions
+    /// for `"AAPL"` and `"aapl"`.
+    pub(crate) fn ensure_market_subscriptions(&mut self) {
         let Some(ref bridge) = self.broker_bridge else {
             return;
         };
-        let want: std::collections::HashSet<crate::annotation_store::SymbolKey> = self
+        // Union: every watchlist ticker + every docked + floating chart
+        // with a `bound_symbol`. `SymbolKey` normalisation collapses
+        // case + whitespace variants so the same symbol in two
+        // watchlists (or a watchlist + a chart) produces one entry.
+        let mut want: std::collections::HashSet<crate::annotation_store::SymbolKey> = self
             .watchlists
             .values()
             .flat_map(|wl| {
@@ -3890,10 +3961,35 @@ impl MidasApp {
                     .map(|t| crate::annotation_store::SymbolKey::new(&t.symbol))
             })
             .collect();
-        for key in want {
-            if self.active_market_subs.contains(&key) {
-                continue;
+        for chart in self.charts.values() {
+            if let Some(ref sym) = chart.bound_symbol {
+                want.insert(sym.clone());
             }
+        }
+        for chart in self.floating_charts.values() {
+            if let Some(ref sym) = chart.bound_symbol {
+                want.insert(sym.clone());
+            }
+        }
+
+        // Compute both diffs in a single pass so a chart-close that
+        // also adds a new watchlist ticker produces exactly one
+        // subscribe and one unsubscribe (rather than a spurious
+        // subscribe-then-unsubscribe on a symbol unaffected by the
+        // edit).
+        let to_subscribe: Vec<crate::annotation_store::SymbolKey> = want
+            .iter()
+            .filter(|k| !self.active_market_subs.contains(*k))
+            .cloned()
+            .collect();
+        let to_unsubscribe: Vec<crate::annotation_store::SymbolKey> = self
+            .active_market_subs
+            .iter()
+            .filter(|k| !want.contains(*k))
+            .cloned()
+            .collect();
+
+        for key in to_subscribe {
             let cmd = midas_broker::BrokerCommand::SubscribeMarketData {
                 symbol: key.as_str().to_owned(),
                 // con_id 0 lets the broker look it up from the
@@ -3903,12 +3999,30 @@ impl MidasApp {
             };
             match bridge.send_command(cmd) {
                 Ok(()) => {
-                    tracing::debug!("watchlist: subscribed to market data for {}", key.as_str());
+                    tracing::debug!("market: subscribed to market data for {}", key.as_str());
                     self.active_market_subs.insert(key);
                 }
                 Err(e) => {
                     tracing::warn!(
-                        "watchlist: SubscribeMarketData for {} failed: {e}",
+                        "market: SubscribeMarketData for {} failed: {e}",
+                        key.as_str()
+                    );
+                }
+            }
+        }
+
+        for key in to_unsubscribe {
+            let cmd = midas_broker::BrokerCommand::UnsubscribeMarketData {
+                symbol: key.as_str().to_owned(),
+            };
+            match bridge.send_command(cmd) {
+                Ok(()) => {
+                    tracing::debug!("market: unsubscribed from market data for {}", key.as_str());
+                    self.active_market_subs.remove(&key);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "market: UnsubscribeMarketData for {} failed: {e}",
                         key.as_str()
                     );
                 }
@@ -3942,6 +4056,84 @@ impl MidasApp {
                     key.as_str()
                 );
             }
+        }
+    }
+}
+
+// ── Router-refactor message handlers (S7) ────────────────────────────
+
+impl MidasApp {
+    /// Dispatch for the per-consumer router messages introduced in
+    /// S7. In S7a every arm is a conservative stub: handlers land in
+    /// follow-up sub-slices (S7b: `ChartBarBatch` / `ChartResync*`,
+    /// S7c: `QuoteBatch`, S7d: `TickerLastPrice`). `RouterReady` and
+    /// `FarmStatusChanged` settle in S7b once the router is
+    /// instantiated inside `MidasApp::new`.
+    pub(crate) fn handle_router_msg(&mut self, message: Message) -> Task<Message> {
+        match message {
+            Message::ChartBarBatch { chart_id, bars } => {
+                // S7b wires the real fold. For S7a: the legacy
+                // `BrokerEvent::Tick` path still updates chart data,
+                // so this arm short-circuits — replaced in S7b.
+                let _ = (chart_id, bars);
+                Task::none()
+            }
+            Message::ChartResync { chart_id } => {
+                // M-29 throttle — at most one resync per chart per 5 s.
+                let now = Instant::now();
+                let allow = self.resync_throttle.get(&chart_id).is_none_or(|t| {
+                    now.duration_since(*t) >= crate::app::subscription_helpers::RESYNC_THROTTLE
+                });
+                if !allow {
+                    return Task::none();
+                }
+                self.resync_throttle.insert(chart_id, now);
+                // S7b wires the actual history reload; S7a just
+                // records the throttle tick.
+                Task::none()
+            }
+            Message::ChartResyncLoaded(Ok((chart_id, bars))) => {
+                let _ = (chart_id, bars);
+                // S7b replaces chart.data with a rebuilt buffer.
+                Task::none()
+            }
+            Message::ChartResyncLoaded(Err(e)) => {
+                tracing::warn!("chart resync failed: {e}");
+                Task::none()
+            }
+            Message::QuoteBatch(batch) => {
+                // S7c wires the real fold through `market_cache`.
+                // S7a / S7b leave the legacy BrokerEvent::Tick path
+                // as the authoritative price source so the UI
+                // doesn't regress while the router subscription is
+                // being wired.
+                let _ = batch;
+                Task::none()
+            }
+            Message::TickerLastPrice { symbol, last_price } => {
+                // S7d dispatches TickerMsg::UpdateMarketData.
+                let _ = (symbol, last_price);
+                Task::none()
+            }
+            Message::FarmStatusChanged(status) => {
+                tracing::debug!("farm status: {status:?}");
+                Task::none()
+            }
+            Message::RouterReady(Ok(payload)) => {
+                tracing::info!(
+                    "router ready: source={} order={}",
+                    format!("{:?}", payload.router),
+                    payload.order_client.name(),
+                );
+                self.router = Some(payload.router);
+                self.router_order_client = Some(payload.order_client);
+                Task::none()
+            }
+            Message::RouterReady(Err(e)) => {
+                tracing::error!("router construction failed: {e}");
+                Task::none()
+            }
+            _ => unreachable!(),
         }
     }
 }
@@ -4062,6 +4254,7 @@ impl MidasApp {
                 .map(|(handle, p)| (handle, p.symbol_link)),
         );
         let sym_key = crate::annotation_store::SymbolKey::new(symbol);
+        let mut touched_floating = false;
         for handle in chart_targets {
             match handle {
                 crate::app::ChartHandle::Docked(id) => {
@@ -4076,9 +4269,16 @@ impl MidasApp {
                     if let Some(chart) = self.floating_charts.get_mut(&wid) {
                         crate::app::apply_symbol_to_panel(chart, symbol, sym_key.clone());
                     }
+                    touched_floating = true;
                     tasks.push(self.load_floating_chart_async(wid, symbol, tf));
                 }
             }
+        }
+        // Floating charts don't route through `bind_chart_to_symbol`
+        // so we reconcile market-data subs once, at the end of the
+        // loop, for the floating half.
+        if touched_floating {
+            self.ensure_market_subscriptions();
         }
 
         let order_targets: Vec<OrderPanelId> = find_link_targets(

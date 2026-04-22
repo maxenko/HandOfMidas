@@ -10,6 +10,8 @@
 mod fixture;
 mod handlers;
 mod persistence;
+mod subscription_helpers;
+mod subscription_registry;
 mod ticker_wiring;
 mod views;
 
@@ -466,7 +468,36 @@ pub struct MidasApp {
     /// `Hash` but not `Ord` — the few call-sites that need
     /// deterministic order (just the devloop `DumpState` projection)
     /// sort explicitly.
+    ///
+    /// Retired as of S7e — the per-consumer router subscriptions
+    /// (`chart_subscriptions`, `watchlist_subscription`,
+    /// `ticker_subscription`) own refcounting natively. The field and
+    /// the `ensure_market_subscriptions` / `drop_market_subscription`
+    /// helpers that drove it disappear alongside the legacy
+    /// `BrokerEvent::Tick` match arm in S7e.
     pub active_market_subs: std::collections::HashSet<crate::annotation_store::SymbolKey>,
+
+    // ── Router refactor (S7) ──────────────────────────────────────
+    /// Market-data router. `None` while an IB connection is still
+    /// being set up (NB-4 / NB-5); every subscription closure guards
+    /// `Some(router)` and returns `Subscription::none()` when the
+    /// router hasn't landed yet. iced re-diffs `subscription()` on
+    /// each `update()` so subscriptions spin up the moment
+    /// `Message::RouterReady(Ok(..))` swaps in a real router.
+    pub(crate) router: Option<std::sync::Arc<midas_market_data::MarketDataRouter>>,
+
+    /// Order client the app talks to for bracket submission and
+    /// position / account event streams (BR-14). Swapped in alongside
+    /// the router on `Message::RouterReady` for IB; constructed
+    /// synchronously for Sim.
+    pub(crate) router_order_client: Option<std::sync::Arc<dyn midas_broker::OrderClient>>,
+
+    /// M-29 throttle — at most one [`Message::ChartResync`] per chart
+    /// per 5 s. Consumers that observe `Lagged` on their bar stream
+    /// emit a `ChartResync`; without a throttle a flaky chart can DoS
+    /// IB pacing. Key: `ChartId`; value: `Instant` of the last
+    /// allowed resync. Wired by the `ChartResync` handler in S7b.
+    pub(crate) resync_throttle: std::collections::HashMap<ChartId, Instant>,
 }
 
 /// Pending drag: press started but hold threshold not yet reached.
@@ -849,6 +880,90 @@ pub enum Message {
     /// app down — the user can still edit config to switch to
     /// LivePaper and retry.
     BrokerSimSpawned(Result<crate::sim_child::SimChildHandle, String>),
+
+    // -- Router refactor (S7) --
+    /// A coalesced batch of bars from the per-chart subscription
+    /// stream (`chart_subscriptions`). Handler folds each bar into
+    /// the chart's `CandleBuffer` via `apply_bar`.
+    ChartBarBatch {
+        /// The chart this batch is for. Handler filters out
+        /// batches for charts that no longer exist.
+        chart_id: ChartId,
+        /// Bars since the last frame boundary (~16 ms). Capped to
+        /// a small number by the subscription's coalescer.
+        bars: Vec<midas_broker_core::market_data::Bar>,
+    },
+
+    /// The chart's bar stream observed a `Lagged` error; rebuild
+    /// the historical prefix. M-29 throttled to at most one resync
+    /// per chart per 5 s in the handler.
+    ChartResync {
+        /// Which chart asked to be resynced.
+        chart_id: ChartId,
+    },
+
+    /// Async completion of a resync load started by
+    /// [`Message::ChartResync`]. Replaces the chart's data buffer.
+    ChartResyncLoaded(Result<(ChartId, Vec<midas_broker_core::market_data::Bar>), String>),
+
+    /// Batch of quote updates from the watchlist subscription. Each
+    /// entry updates `market_cache` for the corresponding symbol.
+    QuoteBatch(
+        Vec<(
+            midas_broker_core::SymbolKey,
+            midas_broker_core::market_data::Quote,
+        )>,
+    ),
+
+    /// Latest price observation for a specific ticker. Drives
+    /// `TickerMsg::UpdateMarketData` on the matching
+    /// `TickerState`. Keyed by the router-era broker-core
+    /// `SymbolKey`; the handler normalises to the app's string key
+    /// via `SymbolKey::new(..symbol.as_str())`.
+    TickerLastPrice {
+        /// Broker-core symbol key (carries contract_id for wire
+        /// correlation; handler discards contract_id and keys on
+        /// the ticker string for TickerState lookup).
+        symbol: midas_broker_core::SymbolKey,
+        /// Observed last price in instrument currency.
+        last_price: f64,
+    },
+
+    /// A farm-status transition from the router's shared
+    /// `farm_status` broadcast. Used for logging + future
+    /// status-bar granularity (e.g. "hmds.us connected" vs
+    /// "hmds.us halted").
+    FarmStatusChanged(midas_broker_core::market_data::FarmStatus),
+
+    /// Router + order client became ready. Populates
+    /// `self.router` / `self.router_order_client` and kicks the
+    /// subscription re-diff so chart / watchlist / ticker subs
+    /// spin up.
+    ///
+    /// Wrapped in [`RouterReadyPayload`] because `dyn OrderClient`
+    /// is `!Debug` while `Message` derives `Debug`.
+    RouterReady(Result<RouterReadyPayload, String>),
+}
+
+/// Payload for [`Message::RouterReady`]. The inner `Arc<dyn
+/// OrderClient>` is `!Debug`, but `Message` derives `Debug`, so we
+/// wrap the pair in a struct with a manual `Debug` impl that hides
+/// the order-client trait object behind its `name()`.
+#[derive(Clone)]
+pub struct RouterReadyPayload {
+    /// The freshly-constructed router.
+    pub router: std::sync::Arc<midas_market_data::MarketDataRouter>,
+    /// The freshly-constructed order client.
+    pub order_client: std::sync::Arc<dyn midas_broker::OrderClient>,
+}
+
+impl std::fmt::Debug for RouterReadyPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RouterReadyPayload")
+            .field("router", &self.router)
+            .field("order_client", &self.order_client.name())
+            .finish()
+    }
 }
 
 /// Classify messages the `wait_for_idle` tracker should NOT treat as
@@ -873,6 +988,14 @@ fn is_tick_rate_message(msg: &Message) -> bool {
                 | Message::Ticker(_, TickerMsg::UpdateMarketData { .. })
                 | Message::RefreshMarketData
                 | Message::MarketSnapshotLoaded(..)
+                // S7: the new router-driven per-consumer
+                // streams are high-frequency; exclude them
+                // from the wait_for_idle tracker for the same
+                // reason the legacy Tick path is excluded.
+                | Message::ChartBarBatch { .. }
+                | Message::QuoteBatch(..)
+                | Message::TickerLastPrice { .. }
+                | Message::FarmStatusChanged(..)
         )
 }
 
@@ -1839,7 +1962,11 @@ impl MidasApp {
         let broker_backend = config.broker.backend;
         let (broker_bridge, broker_label) = match broker_backend {
             midas_core::config::BrokerBackend::Sim => {
-                let broker_config = midas_broker::BrokerConfig::default();
+                // Drive the simulated broker so the watchlist "last" price
+                // actually moves: 500 ms auto-ticks with ±10 bps random walk.
+                let mut broker_config = midas_broker::BrokerConfig::default();
+                broker_config.test_broker.tick_interval_ms = 500;
+                broker_config.test_broker.tick_drift_bps = 10.0;
                 let handle = midas_broker::start_broker_engine(broker_config);
                 let bridge = Arc::new(crate::broker_bridge::BrokerBridge::new(
                     handle,
@@ -1959,6 +2086,15 @@ impl MidasApp {
             sim_child: None,
             broker_cfg: config.broker.clone(),
             active_market_subs: std::collections::HashSet::new(),
+            // S7a: router fields land as `None`; the Sim / IB
+            // construction path in S7b+ populates them either
+            // synchronously (Sim) or via `Message::RouterReady`
+            // (IB). Until they're `Some`, every router-driven
+            // subscription closure short-circuits to
+            // `Subscription::none()`.
+            router: None,
+            router_order_client: None,
+            resync_throttle: std::collections::HashMap::new(),
         };
 
         // Register broker bridge in provider registry.
@@ -2080,6 +2216,16 @@ impl MidasApp {
                     .or_insert_with(|| crate::ticker_state::TickerState::new(sym_key));
             }
         }
+
+        // Workspace hydration is now complete — charts, floating
+        // charts, and watchlists all land synchronously in
+        // `MidasApp::new`. Reconcile streaming subscriptions once here
+        // so chart-bound symbols that aren't in any watchlist start
+        // receiving ticks immediately, without waiting for the
+        // synthetic 250 ms `Ready` transition (which also calls into
+        // the helper but races with any startup path that might want
+        // to consume prices earlier).
+        app.ensure_market_subscriptions();
 
         // Async-load data for all restored charts that have a symbol.
         let mut load_tasks: Vec<Task<Message>> = Vec::new();
@@ -2816,6 +2962,7 @@ impl MidasApp {
         );
         let symbol = new_symbol.trim().to_uppercase();
         let float_key = crate::annotation_store::SymbolKey::new(&symbol);
+        let had_floating_targets = !floating_targets.is_empty();
         for wid in floating_targets {
             let tf = self
                 .floating_charts
@@ -2831,6 +2978,13 @@ impl MidasApp {
                 chart.chart_state.dirty.mark_data();
             }
             tasks.push(self.load_floating_chart_async(wid, &symbol, tf));
+        }
+        // Floating-chart bind doesn't go through `bind_chart_to_symbol`,
+        // so reconcile market-data subs here too. The docked path is
+        // already covered because `load_symbol_for_chart` re-binds
+        // through the helper which calls `ensure_market_subscriptions`.
+        if had_floating_targets {
+            self.ensure_market_subscriptions();
         }
 
         // Order panels — route through handle_order_panel_symbol_change
@@ -3478,6 +3632,15 @@ impl MidasApp {
             | Message::BrokerEventReceived(..)
             | Message::BrokerConnectionChanged(..)
             | Message::BrokerSimSpawned(..) => self.handle_broker_msg(message),
+
+            // -- Router refactor (S7) --
+            Message::ChartBarBatch { .. }
+            | Message::ChartResync { .. }
+            | Message::ChartResyncLoaded(..)
+            | Message::QuoteBatch(..)
+            | Message::TickerLastPrice { .. }
+            | Message::FarmStatusChanged(..)
+            | Message::RouterReady(..) => self.handle_router_msg(message),
 
             // -- Toast notifications --
             Message::Toast(m) => self.dispatch_toast(m),

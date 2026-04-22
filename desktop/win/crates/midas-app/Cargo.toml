@@ -48,7 +48,19 @@ dirs       = { workspace = true }
 serde_json = { workspace = true }
 uuid       = { version = "1", features = ["v7", "serde"] }
 midas-broker = { workspace = true }
+# Router refactor (S7): new crate that provides MarketDataRouter +
+# SubscriptionHandle. The app subscribes to ticks / bars / quotes
+# through these handles instead of the legacy BrokerEvent::Tick
+# central match arm.
+midas-market-data = { workspace = true }
+midas-broker-core = { workspace = true }
 async-trait  = { workspace = true }
+futures      = { workspace = true }
+# Concurrent map for the chart-subscription registry. The registry
+# holds Arc<SubscriptionHandle<Bar>> keyed by (ChartId) so the
+# `fn`-pointer-only closures required by `Subscription::run_with`
+# can still reach per-instance state resolved at subscribe-time.
+dashmap      = "6"
 smallvec     = { workspace = true }
 parking_lot  = { workspace = true }
 thiserror    = { workspace = true }

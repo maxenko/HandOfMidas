@@ -98,6 +98,18 @@ uuid = { version = "1", features = ["v7", "serde"] }
 # Broker engine (root workspace crate, path dependency)
 midas-broker = { path = "../../crates/midas-broker" }
 
+# Router + per-symbol fan-out (root workspace crate, path dependency).
+# Sits between midas-broker (provider) and midas-app (consumers); the
+# app subscribes to ticks / bars / quotes through the router instead
+# of the legacy `BrokerEvent::Tick` central match arm (S7+).
+midas-market-data = { path = "../../crates/midas-market-data" }
+midas-broker-core = { path = "../../crates/midas-broker-core" }
+
+# futures helpers (iced::futures re-exports are fine for most sites,
+# but the subscription-helper streams use the crate-level `Stream` /
+# `StreamExt` bounds directly).
+futures = "0.3"
+
 # Concurrency primitives
 parking_lot = "0.12"
 
