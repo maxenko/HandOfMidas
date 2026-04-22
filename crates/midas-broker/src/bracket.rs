@@ -1,13 +1,16 @@
-//! Bracket-order submission helper (router-refactor slice 10).
+//! Bracket-order submission helper.
 //!
-//! Wraps an [`OrderClient`] with the three-leg submission semantics
-//! previously baked into the retired broker engine's bracket handler.
-//! The router-era app layer owns the equivalent here so the IB
-//! transmit-last rule and cancel-fanout logic stays encapsulated.
+//! Audit P1 refactor 4: moved from `midas-app/src/bracket_submit.rs`
+//! because the logic is pure [`OrderClient`] composition — no iced,
+//! no app types. Co-locating it with the broker abstractions lets
+//! CLI tools, dev-harness smoke scripts, and future non-UI consumers
+//! reuse the three-leg submission semantics without pulling in the
+//! whole desktop workspace.
 //!
 //! # Semantics
 //!
-//! * Pre-allocate one IB order id per leg via [`OrderClient::next_order_id`].
+//! * Pre-allocate one IB order id per leg via
+//!   [`OrderClient::next_order_id`].
 //! * Place entry first with `transmit=false` if it has children,
 //!   otherwise `transmit=true`.
 //! * Place TP (if any) next. `transmit=true` only when SL is absent;
@@ -17,32 +20,18 @@
 //!   activates the whole bracket.
 //!
 //! Any placement failure past the entry triggers a best-effort cancel
-//! of already-submitted legs, mirroring the engine's behaviour.
-//!
-//! # Event translation
-//!
-//! The app previously consumed [`midas_broker::BrokerEvent`]s emitted by
-//! the engine. The router surface emits [`OrderEvent`]s — the app-layer
-//! bridge in `app/handlers.rs` maps those back to the existing
-//! [`crate::app::Message`] variants so the UI handlers don't have to
-//! change shape.
-
-// S10a lands the helper in isolation; the call sites that consume
-// every method / field move across in S10b (bracket submission) and
-// S10c (OrderEvent subscription). Quiet the dead-code lints at module
-// scope until those slices land.
-#![allow(dead_code)]
+//! of already-submitted legs.
 
 use std::sync::Arc;
 
-use midas_broker::{
-    BracketParams, OrderAction, OrderClient, OrderError, OrderKind, OrderSpec, OrderType, Tif,
-    TimeInForce,
-};
 use midas_broker_core::SymbolKey;
 use uuid::Uuid;
 
-/// Helper that packages `OrderClient::place_order` calls into a
+use crate::orders::bracket::{BracketParams, StopLossParams, TakeProfitParams};
+use crate::orders::types::{OrderAction, OrderKind, TimeInForce};
+use crate::{OrderClient, OrderError, OrderModify, OrderSpec, OrderType, Tif, TriggerMethod};
+
+/// Helper that packages [`OrderClient::place_order`] calls into a
 /// three-leg bracket submission with IB-correct transmit semantics.
 #[derive(Clone)]
 pub struct BracketSubmitter {
@@ -51,10 +40,10 @@ pub struct BracketSubmitter {
 
 /// Handle returned by [`BracketSubmitter::place_bracket`].
 ///
-/// Callers correlate subsequent [`midas_broker::OrderEvent`]s back to
-/// the submitted bracket via the `entry_id` / `tp_id` / `sl_id` IB
-/// order ids. `parent_id` is a locally-minted UUID used by the UI
-/// annotation-link map and the TickerState bracket projection.
+/// Callers correlate subsequent [`crate::OrderEvent`]s back to the
+/// submitted bracket via the `entry_id` / `tp_id` / `sl_id` IB order
+/// ids. `parent_id` is a locally-minted UUID used by app-layer
+/// annotation-link maps.
 #[derive(Debug, Clone)]
 pub struct BracketHandle {
     /// Locally-generated bracket identity — distinct from IB ids.
@@ -156,12 +145,11 @@ impl BracketSubmitter {
     ///
     /// Per-leg cancels run under a 5 s `tokio::time::timeout` so a
     /// stuck upstream on one leg does not lock out the other two —
-    /// the app-side audit called this out as a P1: previously a
-    /// first-leg cancel that wedged would strand the remaining legs
-    /// waiting forever. On per-leg timeout / `Err(..)` we log at
-    /// `warn` and keep going; the method returns `Ok(())` as long as
-    /// we made a best-effort attempt on every leg, matching IB's
-    /// idempotent "cancel unknown leg is fine" behaviour.
+    /// previously a first-leg cancel that wedged would strand the
+    /// remaining legs waiting forever. On per-leg timeout / `Err(..)`
+    /// we log at `warn` and keep going; the method returns `Ok(())` as
+    /// long as we made a best-effort attempt on every leg, matching
+    /// IB's idempotent "cancel unknown leg is fine" behaviour.
     pub async fn cancel_bracket(&self, legs: &[i32]) -> Result<(), OrderError> {
         const CANCEL_LEG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
         for &leg in legs {
@@ -202,64 +190,13 @@ impl BracketSubmitter {
         new_price: f64,
         is_stop: bool,
     ) -> Result<(), OrderError> {
-        let modify = midas_broker::OrderModify {
+        let modify = OrderModify {
             limit_price: if is_stop { None } else { Some(new_price) },
             stop_price: if is_stop { Some(new_price) } else { None },
             ..Default::default()
         };
         self.order_client.modify_order(ib_order_id, modify).await
     }
-}
-
-// ── Subscription source for OrderEvent broadcast (S10c) ──────────────
-
-/// Source for an iced subscription that fans every
-/// [`midas_broker::OrderEvent`] emitted by the router's
-/// [`OrderClient::order_events`] broadcast into
-/// [`crate::app::Message::RouterOrderEvent`].
-///
-/// Shape mirrors [`crate::account_panel::PositionEventsSource`] —
-/// `Clone + Hash` so iced's `Subscription::run_with` diff keeps a
-/// single stream alive across `update()` iterations.
-#[derive(Clone)]
-pub struct OrderEventsSource {
-    /// Shared order-client handle; the stream builder calls
-    /// [`OrderClient::order_events`] on it each time iced re-diffs.
-    pub order_client: Arc<dyn OrderClient>,
-}
-
-impl std::hash::Hash for OrderEventsSource {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        "router-order-events-source".hash(state);
-        self.order_client.name().hash(state);
-    }
-}
-
-/// Stream builder for [`OrderEventsSource`]. Subscribes fresh to the
-/// order-client's broadcast channel on every iced re-diff, filter-maps
-/// `Lagged` errors into a `warn!` (the blotter tolerates gaps — the
-/// next status callback is authoritative), and yields each surviving
-/// [`midas_broker::OrderEvent`] wrapped in
-/// [`crate::app::Message::RouterOrderEvent`].
-pub fn order_events_stream(
-    source: &OrderEventsSource,
-) -> impl iced::futures::Stream<Item = crate::app::Message> {
-    use iced::futures::StreamExt;
-    use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
-    let rx = source.order_client.order_events();
-    let raw = tokio_stream::StreamExt::filter_map(
-        BroadcastStream::new(rx),
-        |r: Result<midas_broker::OrderEvent, BroadcastStreamRecvError>| match r {
-            Ok(ev) => Some(ev),
-            Err(BroadcastStreamRecvError::Lagged(n)) => {
-                tracing::warn!(skipped = n, "order_events_stream: broadcast lagged");
-                None
-            }
-        },
-    );
-    StreamExt::map(raw, |ev| {
-        crate::app::Message::RouterOrderEvent(Box::new(ev))
-    })
 }
 
 // ── OrderSpec builders ────────────────────────────────────────────────
@@ -293,7 +230,7 @@ fn entry_spec(
         good_till_date: None,
         display_size: None,
         hidden: false,
-        trigger_method: midas_broker::TriggerMethod::Default,
+        trigger_method: TriggerMethod::Default,
         discretionary_amt: None,
         sweep_to_fill: false,
     }
@@ -304,7 +241,7 @@ fn tp_spec(
     parent_ib_id: i32,
     symbol_key: &SymbolKey,
     params: &BracketParams,
-    tp: &midas_broker::TakeProfitParams,
+    tp: &TakeProfitParams,
     transmit: bool,
 ) -> OrderSpec {
     OrderSpec {
@@ -329,7 +266,7 @@ fn tp_spec(
         good_till_date: None,
         display_size: None,
         hidden: false,
-        trigger_method: midas_broker::TriggerMethod::Default,
+        trigger_method: TriggerMethod::Default,
         discretionary_amt: None,
         sweep_to_fill: false,
     }
@@ -340,7 +277,7 @@ fn sl_spec(
     parent_ib_id: i32,
     symbol_key: &SymbolKey,
     params: &BracketParams,
-    sl: &midas_broker::StopLossParams,
+    sl: &StopLossParams,
     transmit: bool,
 ) -> OrderSpec {
     let order_type = if sl.limit_price.is_some() {
@@ -370,7 +307,7 @@ fn sl_spec(
         good_till_date: None,
         display_size: None,
         hidden: false,
-        trigger_method: midas_broker::TriggerMethod::Default,
+        trigger_method: TriggerMethod::Default,
         discretionary_amt: None,
         sweep_to_fill: false,
     }
@@ -406,8 +343,8 @@ fn tif_from(tif: Option<TimeInForce>) -> Tif {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use midas_broker::sim::{SimConfig, SimOrderClient};
-    use midas_broker::{
+    use crate::sim::{SimConfig, SimOrderClient};
+    use crate::{
         BracketParams, OrderAction, OrderKind, SecurityType, StopLossParams, TakeProfitParams,
     };
 

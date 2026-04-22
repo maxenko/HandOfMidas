@@ -74,5 +74,11 @@ dashmap = "6"
 rand = "0.8"
 
 [dev-dependencies]
+# midas-broker's own tests use `#[cfg(test)] fn inject_for_test` on the
+# sim + IB adapters, which requires the matching trait method to be
+# present on the core `MarketDataSource`. Force the core's
+# `test_inject` feature on for dev-builds so the method is always
+# available when our tests compile.
+midas-broker-core = { path = "../midas-broker-core", features = ["test_inject"] }
 tokio-test = "0.4"
 tempfile = "3"

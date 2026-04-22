@@ -4,6 +4,7 @@
 // (sim, ib/*). No ibapi types leak through this API — the UI crate
 // never imports ibapi.
 
+pub mod bracket;
 pub mod config;
 pub mod connection;
 pub mod db;
@@ -27,6 +28,7 @@ pub mod testdata;
 // historical-only `market_data::MarketDataSource` trait still lives
 // behind a module path pending a future cleanup pass — see the
 // `market_data` module docstring for the `**OPEN**` note.
+pub use bracket::{BracketHandle, BracketSubmitter};
 pub use config::BrokerConfig;
 pub use connection::ConnectionState;
 pub use error::BrokerError;

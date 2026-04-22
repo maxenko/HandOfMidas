@@ -7,7 +7,6 @@ mod account_panel;
 mod annotation_persistence;
 mod annotation_store;
 mod app;
-mod bracket_submit;
 mod chart_view;
 mod chart_widget;
 mod column_resize;
@@ -231,12 +230,12 @@ fn subscription(state: &MidasApp) -> Subscription<Message> {
     // the app-side handler can translate IB order ids to local UUIDs
     // and drive the existing order-blotter / TickerState paths.
     if let Some(ref order_client) = state.router_order_client {
-        let source = crate::bracket_submit::OrderEventsSource {
+        let source = crate::app::order_events_subscription::OrderEventsSource {
             order_client: order_client.clone(),
         };
         subs.push(Subscription::run_with(
             source,
-            crate::bracket_submit::order_events_stream,
+            crate::app::order_events_subscription::order_events_stream,
         ));
     }
 

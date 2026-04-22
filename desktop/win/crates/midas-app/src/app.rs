@@ -10,6 +10,7 @@ mod chart_subscription;
 #[cfg(feature = "dev_harness")]
 mod fixture;
 mod handlers;
+pub mod order_events_subscription;
 mod persistence;
 mod subscription_context;
 mod subscription_helpers;
@@ -1022,7 +1023,7 @@ pub struct BracketPlaceOutcome {
     pub symbol: String,
     /// Result of the submission. `Ok(handle)` carries the IB order ids
     /// assigned to each leg; `Err(msg)` is a human-readable reason.
-    pub result: Result<crate::bracket_submit::BracketHandle, String>,
+    pub result: Result<midas_broker::BracketHandle, String>,
 }
 
 /// Classify messages the `wait_for_idle` tracker should NOT treat as
@@ -3550,10 +3551,10 @@ impl MidasApp {
     ///
     /// Returned by value (cheap `Arc` clone) so callers can move it
     /// into `Task::perform` futures without borrowing `self`.
-    pub(crate) fn bracket_submitter(&self) -> Option<crate::bracket_submit::BracketSubmitter> {
+    pub(crate) fn bracket_submitter(&self) -> Option<midas_broker::BracketSubmitter> {
         self.router_order_client
             .clone()
-            .map(crate::bracket_submit::BracketSubmitter::new)
+            .map(midas_broker::BracketSubmitter::new)
     }
 }
 
