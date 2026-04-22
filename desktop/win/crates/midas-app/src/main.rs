@@ -237,5 +237,11 @@ fn subscription(state: &MidasApp) -> Subscription<Message> {
         ));
     }
 
+    // Router-refactor: per-consumer subscriptions (S7). Each returns
+    // `Subscription::none()` until `self.router` is `Some(..)` and a
+    // handle has been installed in the relevant registry, so adding
+    // them now is a no-op on every existing code path.
+    subs.push(state.chart_subscriptions());
+
     Subscription::batch(subs)
 }

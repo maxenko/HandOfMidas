@@ -4060,6 +4060,134 @@ impl MidasApp {
     }
 }
 
+// ── Router-refactor per-consumer subscriptions (S7) ──────────────────
+
+impl MidasApp {
+    /// Aggregated chart subscription (S7b).
+    ///
+    /// One `iced::Subscription` per visible chart bound to a
+    /// symbol — docked *and* floating. The per-chart closure picks
+    /// up its `SubscriptionHandle<Bar>` from the static
+    /// `subscription_registry::CHART_REGISTRY`. Returning
+    /// `Subscription::none()` here when the router hasn't landed
+    /// yet is intentional: iced re-diffs `subscription()` on every
+    /// `update()`, so the chart streams spin up automatically the
+    /// moment `Message::RouterReady(Ok(..))` lands and
+    /// `bind_chart_to_symbol` installs the first handle.
+    ///
+    /// Legacy coexistence: the `BrokerEvent::Tick` central match
+    /// arm still fires the chart's live-candle fold through
+    /// `CandleBuffer::apply_tick` until S7e deletes it. Both paths
+    /// running in parallel is acceptable — the router batches are
+    /// coalesced per-frame and `Arc::make_mut` on the chart data
+    /// deduplicates naturally.
+    pub(crate) fn chart_subscriptions(&self) -> iced::Subscription<Message> {
+        // NB-4: no router yet → no subscriptions.
+        let Some(_router) = self.router.as_ref() else {
+            return iced::Subscription::none();
+        };
+        let mut subs = Vec::<iced::Subscription<Message>>::new();
+        for (chart_id, chart) in &self.charts {
+            let Some(ref sym) = chart.bound_symbol else {
+                continue;
+            };
+            let broker_sym = midas_broker_core::SymbolKey {
+                contract_id: 0,
+                symbol: sym.as_str().to_string(),
+            };
+            let key = crate::app::chart_subscription::ChartSubKey {
+                chart_id: *chart_id,
+                symbol: broker_sym,
+                timeframe: chart_timeframe_to_broker_core(chart.timeframe),
+            };
+            subs.push(iced::Subscription::run_with(
+                key,
+                crate::app::chart_subscription::chart_stream_builder,
+            ));
+        }
+        for (window_id, chart) in &self.floating_charts {
+            let Some(ref sym) = chart.bound_symbol else {
+                continue;
+            };
+            let broker_sym = midas_broker_core::SymbolKey {
+                contract_id: 0,
+                symbol: sym.as_str().to_string(),
+            };
+            let synthetic_id = floating_window_synthetic_id(*window_id);
+            let key = crate::app::chart_subscription::ChartSubKey {
+                chart_id: synthetic_id,
+                symbol: broker_sym,
+                timeframe: chart_timeframe_to_broker_core(chart.timeframe),
+            };
+            subs.push(iced::Subscription::run_with(
+                key,
+                crate::app::chart_subscription::chart_stream_builder,
+            ));
+        }
+        if subs.is_empty() {
+            iced::Subscription::none()
+        } else {
+            iced::Subscription::batch(subs)
+        }
+    }
+}
+
+/// Map the app's `midas_core::Timeframe` to the broker-core
+/// `Timeframe` the router speaks. The two enums are value-identical
+/// but live in different crates, so an explicit match keeps the
+/// desktop side free of a `From` impl in `midas-core`.
+fn chart_timeframe_to_broker_core(tf: midas_core::Timeframe) -> midas_broker_core::Timeframe {
+    use midas_broker_core::Timeframe as B;
+    use midas_core::Timeframe as A;
+    match tf {
+        A::S1 => B::S1,
+        A::S5 => B::S5,
+        A::S15 => B::S15,
+        A::S30 => B::S30,
+        A::M1 => B::M1,
+        A::M5 => B::M5,
+        A::M15 => B::M15,
+        A::M30 => B::M30,
+        A::H1 => B::H1,
+        A::H4 => B::H4,
+        A::D1 => B::D1,
+        A::W1 => B::W1,
+        A::MN1 => B::MN1,
+    }
+}
+
+/// Derive a deterministic `ChartId` for a floating chart's iced
+/// `window::Id`. Two different windows never hash to the same id
+/// within a single process lifetime; the high bit is reserved so
+/// synthetic ids never collide with docked-chart ids (which start
+/// at 1 and grow linearly).
+fn floating_window_synthetic_id(wid: iced::window::Id) -> midas_core::ChartId {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    wid.hash(&mut h);
+    let raw = (h.finish() as u32) | 0x8000_0000;
+    midas_core::ChartId::new(raw)
+}
+
+/// Fold a single `Bar` (router-era) into a `CandleBuffer` via
+/// `apply_bar`. Narrows the `u64` volume to `u32` with saturation.
+fn apply_bar_to_buffer(
+    buf: &mut midas_core::CandleBuffer,
+    bar: &midas_broker_core::market_data::Bar,
+) {
+    let ts_ms = bar.ts_open.timestamp_millis();
+    let volume = bar.volume.min(u32::MAX as u64) as u32;
+    buf.apply_bar(
+        ts_ms,
+        bar.o as f32,
+        bar.h as f32,
+        bar.l as f32,
+        bar.c as f32,
+        volume,
+    );
+}
+
 // ── Router-refactor message handlers (S7) ────────────────────────────
 
 impl MidasApp {
@@ -4072,10 +4200,45 @@ impl MidasApp {
     pub(crate) fn handle_router_msg(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::ChartBarBatch { chart_id, bars } => {
-                // S7b wires the real fold. For S7a: the legacy
-                // `BrokerEvent::Tick` path still updates chart data,
-                // so this arm short-circuits — replaced in S7b.
-                let _ = (chart_id, bars);
+                // Fold each bar into the chart's CandleBuffer via
+                // `apply_bar` (which overwrites-in-place on
+                // matching ts_open, pushes otherwise). `Arc::make_mut`
+                // clones only when the Arc is actually shared — when
+                // this app owns the only handle the update is in
+                // place. The chart snapshot rebuild in `view()`
+                // re-wraps the Arc so the renderer picks up the
+                // version bump on the next frame.
+                //
+                // Legacy coexistence: the `BrokerEvent::Tick` arm
+                // still runs and mutates the same buffer via
+                // `apply_tick`. That's intentional through S7b-d
+                // while both paths coexist — the router batches
+                // are coalesced per-frame and bars always win on
+                // timestamp match because their close price is the
+                // aggregator's authoritative value.
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    if let Some(arc) = chart.data.as_mut() {
+                        let buf = std::sync::Arc::make_mut(arc);
+                        for bar in &bars {
+                            apply_bar_to_buffer(buf, bar);
+                        }
+                        chart.chart_state.dirty.mark_data();
+                    }
+                } else {
+                    // Floating chart? Look up by synthetic id.
+                    for (wid, chart) in self.floating_charts.iter_mut() {
+                        if floating_window_synthetic_id(*wid) == chart_id {
+                            if let Some(arc) = chart.data.as_mut() {
+                                let buf = std::sync::Arc::make_mut(arc);
+                                for bar in &bars {
+                                    apply_bar_to_buffer(buf, bar);
+                                }
+                                chart.chart_state.dirty.mark_data();
+                            }
+                            break;
+                        }
+                    }
+                }
                 Task::none()
             }
             Message::ChartResync { chart_id } => {

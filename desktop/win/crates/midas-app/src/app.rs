@@ -6,6 +6,7 @@
 //! - `views`: widget tree construction (toolbar, pane grid, status bar)
 //! - `persistence`: config build, save, and debounce
 
+mod chart_subscription;
 #[cfg(feature = "dev_harness")]
 mod fixture;
 mod handlers;
