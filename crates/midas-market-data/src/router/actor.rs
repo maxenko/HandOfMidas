@@ -150,15 +150,9 @@ pub(crate) async fn run_control_actor(
                 let result = handle_open_hub_for_watch(&state, &guard_ctrl, &symbol).await;
                 let _ = reply.send(result);
             }
-            RouterMsg::DecTickRef { symbol } => {
-                handle_dec_tick(&state, &symbol);
-            }
-            RouterMsg::DecRtBarRef { symbol } => {
-                handle_dec_rt_bar(&state, &symbol);
-            }
-            RouterMsg::DecWatchRef { symbol } => {
-                handle_dec_watch(&state, &symbol);
-            }
+            RouterMsg::DecTickRef { symbol } => handle_dec_ref(&state, &symbol, DecKind::Tick),
+            RouterMsg::DecRtBarRef { symbol } => handle_dec_ref(&state, &symbol, DecKind::RtBar),
+            RouterMsg::DecWatchRef { symbol } => handle_dec_ref(&state, &symbol, DecKind::Watch),
             RouterMsg::DebugDump { reply } => {
                 let snap = collect_debug_dump(&state);
                 let _ = reply.send(snap);
@@ -216,51 +210,96 @@ async fn handle_subscribe_ticks(
         ensure_tick_publisher(state, &hub).await?;
         hub.tick_refcount.fetch_add(1, Ordering::Relaxed);
         let rx = hub.ticks_tx.subscribe();
-        let guard: Box<dyn Guard> = Box::new(TickSubGuard {
-            symbol: symbol.clone(),
-            ctrl: guard_ctrl.clone(),
-        });
-        return Ok(SubscriptionHandle::new(rx, guard));
+        return Ok(SubscriptionHandle::new(rx, tick_guard(symbol, guard_ctrl)));
     }
 
     // First subscribe for this symbol. NM-3: call source FIRST; on
     // Err, insert nothing.
-    let con_id = match resolve_con_id(state, symbol).await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(symbol = %symbol, error = %e, "resolve_contract failed; rolling back");
-            return Err(e);
-        }
-    };
+    let con_id = resolve_con_id(state, symbol).await.inspect_err(
+        |e| tracing::warn!(symbol = %symbol, error = %e, "resolve_contract failed; rolling back"),
+    )?;
+    let upstream = subscribe_ticks_upstream(state, symbol, con_id)
+        .await
+        .inspect_err(|e| tracing::warn!(symbol = %symbol, error = %e, "source.subscribe_ticks failed; rolling back"))?;
 
-    let upstream = match with_op_timeout(
+    let hub = SymbolHub::new(symbol.clone());
+    hub.tick_refcount.store(1, Ordering::Relaxed);
+    spawn_tick_publisher_on(&hub, upstream);
+    state.per_symbol.insert(symbol.clone(), hub.clone());
+
+    let rx = hub.ticks_tx.subscribe();
+    Ok(SubscriptionHandle::new(rx, tick_guard(symbol, guard_ctrl)))
+}
+
+/// Boxed `TickSubGuard` constructor — every tick-subscribe path needs
+/// the same three-line `Box::new(TickSubGuard { … })` body.
+fn tick_guard(symbol: &SymbolKey, guard_ctrl: &GuardCtrl) -> Box<dyn Guard> {
+    Box::new(TickSubGuard {
+        symbol: symbol.clone(),
+        ctrl: guard_ctrl.clone(),
+    })
+}
+
+/// Boxed `RtBarSubGuard` constructor.
+fn rt_bar_guard(symbol: &SymbolKey, guard_ctrl: &GuardCtrl) -> Box<dyn Guard> {
+    Box::new(RtBarSubGuard {
+        symbol: symbol.clone(),
+        ctrl: guard_ctrl.clone(),
+    })
+}
+
+/// Run the upstream `subscribe_ticks` with default generic-ticks
+/// under the actor's per-handler timeout.
+async fn subscribe_ticks_upstream(
+    state: &Arc<RouterState>,
+    symbol: &SymbolKey,
+    con_id: i32,
+) -> Result<midas_broker_core::provider::TickStream, MarketDataError> {
+    with_op_timeout(
         "subscribe_ticks",
         state
             .source
             .subscribe_ticks(symbol, con_id, Default::default()),
     )
     .await
-    {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(symbol = %symbol, error = %e, "source.subscribe_ticks failed; rolling back");
-            return Err(e);
-        }
-    };
+}
 
-    let hub = SymbolHub::new(symbol.clone());
-    hub.tick_refcount.store(1, Ordering::Relaxed);
+/// Run the upstream `subscribe_realtime_bars` with `WhatToShow::Trades`
+/// under the actor's per-handler timeout.
+async fn subscribe_rt_bars_upstream(
+    state: &Arc<RouterState>,
+    symbol: &SymbolKey,
+    con_id: i32,
+) -> Result<midas_broker_core::provider::RealtimeBarStream, MarketDataError> {
+    with_op_timeout(
+        "subscribe_realtime_bars",
+        state
+            .source
+            .subscribe_realtime_bars(symbol, con_id, WhatToShow::Trades),
+    )
+    .await
+}
+
+/// Spawn the tick publisher task against `hub` + `upstream` and stash
+/// the join handle in `hub.tick_publisher_task`.
+fn spawn_tick_publisher_on(
+    hub: &Arc<SymbolHub>,
+    upstream: midas_broker_core::provider::TickStream,
+) {
     let hub_for_task = hub.clone();
     let handle = tokio::spawn(async move { run_tick_publisher(hub_for_task, upstream).await });
     *hub.tick_publisher_task.lock() = Some(handle);
-    state.per_symbol.insert(symbol.clone(), hub.clone());
+}
 
-    let rx = hub.ticks_tx.subscribe();
-    let guard: Box<dyn Guard> = Box::new(TickSubGuard {
-        symbol: symbol.clone(),
-        ctrl: guard_ctrl.clone(),
-    });
-    Ok(SubscriptionHandle::new(rx, guard))
+/// Spawn the RT-bar publisher task against `hub` + `upstream` and
+/// stash the join handle in `hub.rt_bar_publisher_task`.
+fn spawn_rt_bar_publisher_on(
+    hub: &Arc<SymbolHub>,
+    upstream: midas_broker_core::provider::RealtimeBarStream,
+) {
+    let hub_for_task = hub.clone();
+    let handle = tokio::spawn(async move { run_rt_bar_publisher(hub_for_task, upstream).await });
+    *hub.rt_bar_publisher_task.lock() = Some(handle);
 }
 
 /// Ensure a tick publisher task is running on `hub`. Idempotent.
@@ -272,26 +311,18 @@ async fn ensure_tick_publisher(
     hub: &Arc<SymbolHub>,
 ) -> Result<(), MarketDataError> {
     // Fast path: a publisher is already running.
+    if hub
+        .tick_publisher_task
+        .lock()
+        .as_ref()
+        .is_some_and(|h| !h.is_finished())
     {
-        let slot = hub.tick_publisher_task.lock();
-        if let Some(h) = slot.as_ref() {
-            if !h.is_finished() {
-                return Ok(());
-            }
-        }
+        return Ok(());
     }
     // Need to spawn. Resolve + subscribe + stash.
     let con_id = resolve_con_id(state, &hub.symbol).await?;
-    let upstream = with_op_timeout(
-        "subscribe_ticks",
-        state
-            .source
-            .subscribe_ticks(&hub.symbol, con_id, Default::default()),
-    )
-    .await?;
-    let hub_for_task = hub.clone();
-    let handle = tokio::spawn(async move { run_tick_publisher(hub_for_task, upstream).await });
-    *hub.tick_publisher_task.lock() = Some(handle);
+    let upstream = subscribe_ticks_upstream(state, &hub.symbol, con_id).await?;
+    spawn_tick_publisher_on(hub, upstream);
     Ok(())
 }
 
@@ -309,59 +340,39 @@ async fn handle_subscribe_rt_bars(
         let hub = hub_entry.clone();
         drop(hub_entry);
         // Is the rt-bar publisher already running?
-        let need_spawn = {
-            let slot = hub.rt_bar_publisher_task.lock();
-            slot.as_ref().map(|h| h.is_finished()).unwrap_or(true)
-        };
+        let need_spawn = hub
+            .rt_bar_publisher_task
+            .lock()
+            .as_ref()
+            .is_none_or(|h| h.is_finished());
         if need_spawn {
             let con_id = resolve_con_id(state, symbol).await?;
-            let upstream = with_op_timeout(
-                "subscribe_realtime_bars",
-                state
-                    .source
-                    .subscribe_realtime_bars(symbol, con_id, WhatToShow::Trades),
-            )
-            .await?;
+            let upstream = subscribe_rt_bars_upstream(state, symbol, con_id).await?;
             hub.ensure_rt_bars_tx();
-            let hub_for_task = hub.clone();
-            let handle =
-                tokio::spawn(async move { run_rt_bar_publisher(hub_for_task, upstream).await });
-            *hub.rt_bar_publisher_task.lock() = Some(handle);
+            spawn_rt_bar_publisher_on(&hub, upstream);
         }
         hub.rt_bar_refcount.fetch_add(1, Ordering::Relaxed);
-        let tx = hub.ensure_rt_bars_tx();
-        let rx = tx.subscribe();
-        let guard: Box<dyn Guard> = Box::new(RtBarSubGuard {
-            symbol: symbol.clone(),
-            ctrl: guard_ctrl.clone(),
-        });
-        return Ok(SubscriptionHandle::new(rx, guard));
+        let rx = hub.ensure_rt_bars_tx().subscribe();
+        return Ok(SubscriptionHandle::new(
+            rx,
+            rt_bar_guard(symbol, guard_ctrl),
+        ));
     }
 
     // First subscribe for this symbol. NM-3 rollback order.
     let con_id = resolve_con_id(state, symbol).await?;
-    let upstream = with_op_timeout(
-        "subscribe_realtime_bars",
-        state
-            .source
-            .subscribe_realtime_bars(symbol, con_id, WhatToShow::Trades),
-    )
-    .await?;
+    let upstream = subscribe_rt_bars_upstream(state, symbol, con_id).await?;
 
     let hub = SymbolHub::new(symbol.clone());
     hub.rt_bar_refcount.store(1, Ordering::Relaxed);
-    let tx = hub.ensure_rt_bars_tx();
-    let rx = tx.subscribe();
-    let hub_for_task = hub.clone();
-    let handle = tokio::spawn(async move { run_rt_bar_publisher(hub_for_task, upstream).await });
-    *hub.rt_bar_publisher_task.lock() = Some(handle);
+    let rx = hub.ensure_rt_bars_tx().subscribe();
+    spawn_rt_bar_publisher_on(&hub, upstream);
     state.per_symbol.insert(symbol.clone(), hub.clone());
 
-    let guard: Box<dyn Guard> = Box::new(RtBarSubGuard {
-        symbol: symbol.clone(),
-        ctrl: guard_ctrl.clone(),
-    });
-    Ok(SubscriptionHandle::new(rx, guard))
+    Ok(SubscriptionHandle::new(
+        rx,
+        rt_bar_guard(symbol, guard_ctrl),
+    ))
 }
 
 async fn handle_open_hub_for_watch(
@@ -383,84 +394,75 @@ async fn handle_open_hub_for_watch(
         ensure_tick_publisher(state, &hub).await?;
         hub.watch_refcount.fetch_add(1, Ordering::Relaxed);
         let rx = hub.last_quote_tx.subscribe();
-        let guard = WatchGuard {
-            symbol: symbol.clone(),
-            ctrl: guard_ctrl.clone(),
-        };
-        return Ok(QuoteHandle::new(rx, guard));
+        return Ok(QuoteHandle::new(rx, watch_guard(symbol, guard_ctrl)));
     }
 
     // First watcher on this symbol — lazy-open a tick publisher.
     let con_id = resolve_con_id(state, symbol).await?;
-    let upstream = with_op_timeout(
-        "subscribe_ticks",
-        state
-            .source
-            .subscribe_ticks(symbol, con_id, Default::default()),
-    )
-    .await?;
+    let upstream = subscribe_ticks_upstream(state, symbol, con_id).await?;
 
     let hub = SymbolHub::new(symbol.clone());
     hub.watch_refcount.store(1, Ordering::Relaxed);
-    let hub_for_task = hub.clone();
-    let handle = tokio::spawn(async move { run_tick_publisher(hub_for_task, upstream).await });
-    *hub.tick_publisher_task.lock() = Some(handle);
+    spawn_tick_publisher_on(&hub, upstream);
     let rx = hub.last_quote_tx.subscribe();
     state.per_symbol.insert(symbol.clone(), hub);
-    let guard = WatchGuard {
+
+    Ok(QuoteHandle::new(rx, watch_guard(symbol, guard_ctrl)))
+}
+
+/// `WatchGuard` constructor — QuoteHandle needs the concrete type (not
+/// the boxed trait) so this keeps the call sites symmetric with
+/// [`tick_guard`] / [`rt_bar_guard`].
+fn watch_guard(symbol: &SymbolKey, guard_ctrl: &GuardCtrl) -> WatchGuard {
+    WatchGuard {
         symbol: symbol.clone(),
         ctrl: guard_ctrl.clone(),
-    };
-    Ok(QuoteHandle::new(rx, guard))
+    }
 }
 
-fn handle_dec_tick(state: &RouterState, symbol: &SymbolKey) {
+/// Refcount field a `DecRef` message targets.
+///
+/// Each variant points at one of `SymbolHub`'s three `AtomicU32`
+/// refcounts; [`handle_dec_ref`] dispatches the decrement-and-maybe-reap
+/// logic uniformly so the three `DecRef` handlers share one body.
+#[derive(Clone, Copy)]
+enum DecKind {
+    Tick,
+    RtBar,
+    Watch,
+}
+
+impl DecKind {
+    fn refcount(self, hub: &SymbolHub) -> &std::sync::atomic::AtomicU32 {
+        match self {
+            Self::Tick => &hub.tick_refcount,
+            Self::RtBar => &hub.rt_bar_refcount,
+            Self::Watch => &hub.watch_refcount,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Tick => "tick",
+            Self::RtBar => "rt-bar",
+            Self::Watch => "watch",
+        }
+    }
+}
+
+/// Shared DecRef handler — decrements the chosen refcount, recovers
+/// from underflow, and reaps the hub when the count hits zero.
+fn handle_dec_ref(state: &RouterState, symbol: &SymbolKey, kind: DecKind) {
     let Some(hub_entry) = state.per_symbol.get(symbol) else {
         return;
     };
     let hub = hub_entry.clone();
     drop(hub_entry);
-    let prev = hub.tick_refcount.fetch_sub(1, Ordering::Relaxed);
+    let slot = kind.refcount(&hub);
+    let prev = slot.fetch_sub(1, Ordering::Relaxed);
     if prev == 0 {
-        // Underflow — log and carry on.
-        tracing::warn!(symbol = %symbol, "tick refcount underflow on dec");
-        hub.tick_refcount.store(0, Ordering::Relaxed);
-        return;
-    }
-    if prev == 1 {
-        // Hit zero ticks. If there is also no watcher, kill the tick
-        // publisher. If rt-bars are also idle, drop the hub entirely.
-        maybe_reap(state, &hub);
-    }
-}
-
-fn handle_dec_rt_bar(state: &RouterState, symbol: &SymbolKey) {
-    let Some(hub_entry) = state.per_symbol.get(symbol) else {
-        return;
-    };
-    let hub = hub_entry.clone();
-    drop(hub_entry);
-    let prev = hub.rt_bar_refcount.fetch_sub(1, Ordering::Relaxed);
-    if prev == 0 {
-        tracing::warn!(symbol = %symbol, "rt-bar refcount underflow on dec");
-        hub.rt_bar_refcount.store(0, Ordering::Relaxed);
-        return;
-    }
-    if prev == 1 {
-        maybe_reap(state, &hub);
-    }
-}
-
-fn handle_dec_watch(state: &RouterState, symbol: &SymbolKey) {
-    let Some(hub_entry) = state.per_symbol.get(symbol) else {
-        return;
-    };
-    let hub = hub_entry.clone();
-    drop(hub_entry);
-    let prev = hub.watch_refcount.fetch_sub(1, Ordering::Relaxed);
-    if prev == 0 {
-        tracing::warn!(symbol = %symbol, "watch refcount underflow on dec");
-        hub.watch_refcount.store(0, Ordering::Relaxed);
+        tracing::warn!(symbol = %symbol, kind = kind.label(), "refcount underflow on dec");
+        slot.store(0, Ordering::Relaxed);
         return;
     }
     if prev == 1 {
@@ -519,26 +521,22 @@ fn collect_debug_dump(state: &RouterState) -> Vec<SymbolDebugInfo> {
         .iter()
         .map(|entry| {
             let hub = entry.value();
-            let tick_alive = hub
-                .tick_publisher_task
-                .lock()
-                .as_ref()
-                .map(|h| !h.is_finished())
-                .unwrap_or(false);
-            let rt_alive = hub
-                .rt_bar_publisher_task
-                .lock()
-                .as_ref()
-                .map(|h| !h.is_finished())
-                .unwrap_or(false);
             SymbolDebugInfo {
                 symbol: hub.symbol.clone(),
                 tick_refcount: hub.tick_refcount.load(Ordering::Relaxed),
                 rt_bar_refcount: hub.rt_bar_refcount.load(Ordering::Relaxed),
                 watch_refcount: hub.watch_refcount.load(Ordering::Relaxed),
                 last_tick_ts_ms: hub.last_tick_ts.load(Ordering::Relaxed),
-                tick_publisher_alive: tick_alive,
-                rt_bar_publisher_alive: rt_alive,
+                tick_publisher_alive: hub
+                    .tick_publisher_task
+                    .lock()
+                    .as_ref()
+                    .is_some_and(|h| !h.is_finished()),
+                rt_bar_publisher_alive: hub
+                    .rt_bar_publisher_task
+                    .lock()
+                    .as_ref()
+                    .is_some_and(|h| !h.is_finished()),
             }
         })
         .collect()
