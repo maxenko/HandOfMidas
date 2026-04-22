@@ -20,6 +20,7 @@ pub mod market_data_source;
 pub mod order_client;
 pub mod orders;
 pub mod persist;
+pub mod sim;
 pub mod stream;
 pub mod test_broker;
 pub mod testdata;
