@@ -4156,12 +4156,20 @@ impl MidasApp {
                     format!("{:?}", payload.router),
                     payload.order_client.name(),
                 );
+                // Install the router in the subscription-registry's
+                // `OnceLock` so the `fn`-pointer stream builders can
+                // resolve it. First install wins; subsequent
+                // `RouterReady` messages (e.g. a reconnect after a
+                // second IB failure) are no-ops at the registry
+                // level.
+                crate::app::subscription_registry::install_router(payload.router.clone());
                 self.router = Some(payload.router);
                 self.router_order_client = Some(payload.order_client);
                 Task::none()
             }
             Message::RouterReady(Err(e)) => {
                 tracing::error!("router construction failed: {e}");
+                self.show_toast(format!("IB connection failed: {e}"));
                 Task::none()
             }
             _ => unreachable!(),

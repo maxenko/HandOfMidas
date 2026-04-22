@@ -1004,6 +1004,51 @@ fn is_tick_rate_message(msg: &Message) -> bool {
         )
 }
 
+/// Single-retry connect helper used by the IB router startup task
+/// (S8b).
+///
+/// Tries `IbMarketData::new + connect` once, sleeps 5 s on failure,
+/// tries again, and wraps the `(router, order_client)` pair in a
+/// `RouterReadyPayload` on success. Returning `Err(String)` from
+/// both attempts means the user must reconnect manually via the
+/// status bar — iced's subscription diff sees `self.router = None`
+/// and emits no subscriptions until a real router lands.
+async fn build_ib_router(
+    cfg: midas_broker::ib::IbMarketDataConfig,
+) -> Result<RouterReadyPayload, String> {
+    use std::sync::Arc;
+
+    async fn try_connect(
+        cfg: midas_broker::ib::IbMarketDataConfig,
+    ) -> Result<RouterReadyPayload, String> {
+        let market = Arc::new(midas_broker::ib::IbMarketData::new(cfg));
+        market
+            .connect()
+            .await
+            .map_err(|e| format!("IB connect: {e}"))?;
+        let order_client: Arc<dyn midas_broker::OrderClient> =
+            Arc::new(midas_broker::ib::IbOrderClient::new(Arc::clone(&market)));
+        let router = midas_market_data::MarketDataRouter::new(
+            market as Arc<dyn midas_broker::MarketDataSource>,
+        );
+        Ok(RouterReadyPayload {
+            router,
+            order_client,
+        })
+    }
+
+    match try_connect(cfg.clone()).await {
+        Ok(p) => Ok(p),
+        Err(first) => {
+            tracing::warn!("IB connect attempt 1 failed: {first}; retrying in 5 s");
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            try_connect(cfg)
+                .await
+                .map_err(|second| format!("{first}; retry: {second}"))
+        }
+    }
+}
+
 // ── Constructor + helpers ─────────────────────────────────────────────
 
 impl MidasApp {
@@ -2018,14 +2063,20 @@ impl MidasApp {
             broker_label
         );
 
-        // Router construction (S7e). For the Sim backend the
-        // `SimMarketData` + `SimOrderClient` pair is synchronous, so
-        // we can build the router inline and hand it to the app's
-        // subscription closures on first frame. The LivePaper / Live
-        // paths still leave the router as `None` at startup; a
-        // follow-up slice wires an async `Task::perform` that
-        // delivers `Message::RouterReady` after the IB handshake
-        // settles.
+        // Router construction (S7e + S8b).
+        //
+        // * Sim: `SimMarketData` + `SimOrderClient` are synchronous
+        //   so the router goes into `self.router = Some(_)` before
+        //   `new` returns.
+        // * LivePaper / Live: `IbMarketData::connect()` is async and
+        //   fallible, so `self.router = None` at startup and a
+        //   `Task::perform` drives the connect sequence; the
+        //   `Message::RouterReady(Ok((router, order_client)))`
+        //   handler swaps in the real router on the next iced diff,
+        //   which spins up the chart / watchlist / ticker
+        //   subscriptions. Failure shows a toast and leaves
+        //   `router = None` — user can re-connect via the status
+        //   bar.
         let (router, router_order_client) = match broker_backend {
             midas_core::config::BrokerBackend::Sim => {
                 use midas_broker::sim::{SimConfig, SimMarketData, SimOrderClient};
@@ -2358,13 +2409,48 @@ impl MidasApp {
         // `Connecting → Connected → Ready` driven by the IB
         // handshake.
 
+        // S8b: spawn the IB connect task if the user picked a live
+        // backend. The task constructs `IbMarketData` + its
+        // `IbOrderClient`, awaits `connect()`, and — on success —
+        // wraps the pair in `Message::RouterReady(Ok(_))`. The
+        // sub-handler assigns `self.router` / `self.router_order_client`
+        // and iced's next diff picks up the subscriptions.
+        //
+        // Retry policy: one retry after 5 s on connect failure. If
+        // the second attempt also fails, surface a toast and leave
+        // `router = None` so the user can reconnect manually via
+        // the status bar. See plan/market-data-router/09-slice-8-...
+        let ib_router_task = match broker_backend {
+            midas_core::config::BrokerBackend::LivePaper
+            | midas_core::config::BrokerBackend::Live => {
+                let ib_cfg = midas_broker::ib::IbMarketDataConfig {
+                    host: config.broker.host.clone(),
+                    port: config.broker.port,
+                    client_id: config.broker.client_id,
+                    ..Default::default()
+                };
+                Task::perform(build_ib_router(ib_cfg), |result| match result {
+                    Ok(payload) => Message::RouterReady(Ok(payload)),
+                    Err(e) => Message::RouterReady(Err(e)),
+                })
+            }
+            _ => Task::none(),
+        };
+
         let startup_task = if load_tasks.is_empty() {
-            Task::batch([open_task, watchlist_task, thumbnail_task, sim_spawn_task])
+            Task::batch([
+                open_task,
+                watchlist_task,
+                thumbnail_task,
+                sim_spawn_task,
+                ib_router_task,
+            ])
         } else {
             load_tasks.push(open_task);
             load_tasks.push(watchlist_task);
             load_tasks.push(thumbnail_task);
             load_tasks.push(sim_spawn_task);
+            load_tasks.push(ib_router_task);
             Task::batch(load_tasks)
         };
 
