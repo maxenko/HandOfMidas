@@ -107,10 +107,10 @@ pub enum Command {
     },
 
     /// Synthesise a `BrokerEvent` and feed it through the desktop's
-    /// event-receiving pipeline, bypassing the broker engine. Useful
-    /// for scripted fill / status-change journeys that the `TestBroker`
-    /// wouldn't drive on its own (e.g. a Limit leg that needs a price
-    /// tick to fill, or testing `OrderRejected` handling).
+    /// event-receiving pipeline, bypassing the router. Useful for
+    /// scripted fill / status-change journeys the sim wouldn't drive
+    /// on its own (e.g. a Limit leg that needs a price tick to fill,
+    /// or testing `OrderRejected` handling).
     ///
     /// Hand-parsed on the harness side — internally-tagged JSON
     /// matching the [`InjectTickerMsg`] convention:

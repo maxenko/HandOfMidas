@@ -77,7 +77,7 @@ impl Default for SimMarketDataConfig {
 
 /// Tunables for [`SimOrderClient`](crate::sim::SimOrderClient).
 ///
-/// Mirrors the knobs that lived on [`TestBrokerConfig`](crate::test_broker::TestBrokerConfig) —
+/// Mirrors the knobs that used to live on the retired `TestBrokerConfig` —
 /// the new client reuses the same simulation semantics.
 #[derive(Debug, Clone)]
 pub struct SimOrderConfig {

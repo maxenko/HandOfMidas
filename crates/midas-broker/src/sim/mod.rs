@@ -1,10 +1,9 @@
-//! Slice 3: IB-faithful sim implementation of [`MarketDataSource`] and
+//! IB-faithful sim implementation of [`MarketDataSource`] and
 //! [`OrderClient`].
 //!
-//! See `plan/market-data-router/04-slice-3-sim-backend.md` for the
-//! authoritative design. The sim lives alongside — but does not
-//! replace — the legacy [`TestBroker`](crate::test_broker::TestBroker);
-//! both compile simultaneously until slice 9 retires the legacy path.
+//! See `plan/archive/market-data-router/04-slice-3-sim-backend.md` for
+//! the authoritative design. Replaces the retired `TestBroker` after
+//! the router refactor.
 //!
 //! Module layout:
 //!

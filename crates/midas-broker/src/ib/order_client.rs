@@ -13,12 +13,12 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use tokio::sync::{broadcast, mpsc, watch};
 
-use crate::client::PlaceOrderResult;
 use crate::ib::market_data::IbMarketData;
 use crate::ib::translation as tr;
 use crate::order_client::{
     AccountEvent, CancelOrderEvent, CancelOrderStream, CompletedOrder, OpenOrder, OrderClient,
-    OrderError, OrderEvent, OrderModify, OrderSpec, OrderType, PositionUpdate, Tif,
+    OrderError, OrderEvent, OrderModify, OrderSpec, OrderType, PlaceOrderResult, PositionUpdate,
+    Tif,
 };
 use crate::orders::state::OrderStatus;
 use crate::orders::types::OrderAction;

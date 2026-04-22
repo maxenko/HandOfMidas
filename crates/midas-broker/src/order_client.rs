@@ -1,23 +1,20 @@
-//! Slice 2: new [`OrderClient`] trait and supporting types.
+//! Router-era [`OrderClient`] trait and supporting types.
 //!
 //! Companion to [`MarketDataSource`](crate::MarketDataSource). Same
 //! object-safe shape via `#[async_trait]`, IB-faithful order semantics
-//! per M-18 / M-19 / M-21. The sim (slice 3) and the IB adapter
-//! (slice 4) both implement this; the legacy
-//! [`BrokerClient`](crate::BrokerClient) stays in place behind a
-//! `#[deprecated]` marker until slice 9 removes it.
+//! per M-18 / M-19 / M-21. The sim (`sim/order_client.rs`) and the IB
+//! adapter (`ib/order_client.rs`) both implement this.
 //!
 //! Some types are deliberately new (e.g. [`OrderType`]) rather than
 //! reusing the older [`OrderKind`](crate::OrderKind) so the router-era
-//! IB surface can carry variants the legacy engine never modeled
-//! (`MarketOnClose`, `MarketIfTouched`, `LimitIfTouched`, …).
+//! IB surface can carry variants the retired broker engine never
+//! modeled (`MarketOnClose`, `MarketIfTouched`, `LimitIfTouched`, …).
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use midas_broker_core::market_data::{ErrorCode, SymbolKey};
 use tokio::sync::{broadcast, mpsc};
 
-use crate::client::PlaceOrderResult;
 use crate::orders::state::OrderStatus;
 use crate::orders::types::OrderAction;
 
@@ -38,6 +35,25 @@ use crate::orders::types::OrderAction;
 /// of an order `side` without renaming the canonical enum.
 pub type OrderSide = OrderAction;
 
+/// Result of [`OrderClient::place_order`]. Carries the IB order id the
+/// backend assigned (either pre-allocated via `next_order_id` or minted
+/// here).
+#[derive(Debug, Clone)]
+pub struct PlaceOrderResult {
+    /// IB-assigned order id tagged onto the submitted order.
+    pub ib_order_id: i32,
+}
+
+/// Result of [`OrderClient::cancel_order`]. Mirrors
+/// [`PlaceOrderResult`] — the backend echoes the IB order id so the
+/// caller can correlate the cancel acknowledgement with the original
+/// submission.
+#[derive(Debug, Clone)]
+pub struct CancelOrderResult {
+    /// IB order id the cancel was dispatched for.
+    pub ib_order_id: i32,
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 // Order placement spec (M-18)
 // ───────────────────────────────────────────────────────────────────────────
@@ -45,7 +61,7 @@ pub type OrderSide = OrderAction;
 /// IB order type (M-18).
 ///
 /// Superset of [`OrderKind`](crate::OrderKind) — the router-era surface
-/// needs variants the legacy `BrokerClient` path never modeled.
+/// needs variants the retired broker engine never modeled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OrderType {
     /// Market order (`MKT`).

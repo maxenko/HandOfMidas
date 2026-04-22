@@ -1,11 +1,10 @@
 //! IB-faithful [`OrderClient`] sim backend.
 //!
-//! Ports the order-lifecycle logic from
-//! [`TestBroker`](crate::test_broker::TestBroker) to the new trait
-//! surface. The key architectural swap is the event transport: the
-//! legacy path used `poll_callbacks` on a 10 ms drain loop; the new
-//! path emits `OrderEvent` directly on a `broadcast::Sender` the
-//! moment the lifecycle transition occurs.
+//! Ports the order-lifecycle logic from the retired `test_broker` to
+//! the router-era trait surface. The key architectural swap is the
+//! event transport: the legacy path used `poll_callbacks` on a 10 ms
+//! drain loop; the new path emits `OrderEvent` directly on a
+//! `broadcast::Sender` the moment the lifecycle transition occurs.
 //!
 //! Behaviour preserved from the legacy broker:
 //!
@@ -29,11 +28,11 @@ use midas_broker_core::market_data::{ConnectionState, ErrorCode, SymbolKey};
 use parking_lot::Mutex;
 use tokio::sync::{broadcast, mpsc, watch};
 
-use crate::client::PlaceOrderResult;
 use crate::market_data_source::MarketDataSource;
 use crate::order_client::{
     AccountEvent, CancelOrderEvent, CancelOrderStream, CompletedOrder, OpenOrder, OrderClient,
-    OrderError, OrderEvent, OrderModify, OrderSpec, OrderType, PositionUpdate, Tif,
+    OrderError, OrderEvent, OrderModify, OrderSpec, OrderType, PlaceOrderResult, PositionUpdate,
+    Tif,
 };
 use crate::orders::state::OrderStatus;
 use crate::orders::types::OrderAction;
@@ -626,8 +625,8 @@ impl SimOrderClient {
     }
 
     /// Set the market price for a symbol, driving limit and stop
-    /// triggers. Parity with
-    /// [`TestBroker::set_market_price`](crate::test_broker::TestBroker::set_market_price).
+    /// triggers. Parity with the retired `TestBroker::set_market_price`
+    /// helper.
     pub fn set_market_price(&self, symbol: &str, price: f64) {
         let mut inner = self.inner.lock();
         inner.market_prices.insert(symbol.to_string(), price);

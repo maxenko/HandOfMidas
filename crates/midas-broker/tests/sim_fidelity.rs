@@ -249,6 +249,95 @@ async fn tick_cadence_is_in_range() {
 }
 
 // ────────────────────────────────────────────────────────────────────────
+// 4b. Tick drift — random-walk behaviour
+// (ports the `auto_tick_with_*` tests retired with `TestBroker` in 10f).
+// ────────────────────────────────────────────────────────────────────────
+
+/// Collect every `Last` price emitted on `stream` while advancing paused
+/// time in `step`-sized chunks for `total`. Mirrors the legacy
+/// `poll_for` + `tick_last_values` pair but against the router-era
+/// broadcast channel.
+async fn collect_last_prices(
+    rx: &mut tokio::sync::broadcast::Receiver<std::sync::Arc<midas_broker_core::market_data::Tick>>,
+    total: Duration,
+    step: Duration,
+) -> Vec<f64> {
+    use midas_broker_core::market_data::{TickType, TickValue};
+    // Drain whatever was buffered before starting the window (init burst).
+    while rx.try_recv().is_ok() {}
+    advance_stepped(total, step).await;
+    let mut out = Vec::new();
+    while let Ok(tick) = rx.try_recv() {
+        if tick.tick_type == TickType::Last {
+            if let TickValue::PriceSize { price, .. } = tick.value {
+                out.push(price);
+            }
+        }
+    }
+    out
+}
+
+#[tokio::test(start_paused = true)]
+async fn tick_drift_moves_price_when_positive() {
+    // Non-trivial drift plus a deterministic seed → consecutive `Last`
+    // ticks should walk away from the initial price.
+    let mut cfg = fast_config();
+    cfg.tick_drift_bps = 100.0; // 1% peak drift so the walk is visible
+    let sim = SimMarketData::new(cfg);
+    // Burn off Ready + initial burst.
+    advance(Duration::from_millis(300)).await;
+    let stream = sim
+        .subscribe_ticks(&aapl(), 1, GenericTicks::new())
+        .await
+        .unwrap();
+    let mut rx = stream.resubscribe();
+
+    let lasts =
+        collect_last_prices(&mut rx, Duration::from_secs(2), Duration::from_millis(250)).await;
+    drop(stream);
+    assert!(
+        lasts.len() >= 2,
+        "expected ≥2 Last ticks over 2 s at 250 ms cadence, got {}",
+        lasts.len()
+    );
+    let any_differ = lasts
+        .iter()
+        .any(|&a| lasts.iter().any(|&b| (a - b).abs() > f64::EPSILON));
+    assert!(
+        any_differ,
+        "tick_drift_bps > 0 should produce distinct Last prices, got {lasts:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn tick_drift_zero_keeps_price_constant() {
+    let mut cfg = fast_config();
+    cfg.tick_drift_bps = 0.0;
+    let sim = SimMarketData::new(cfg);
+    advance(Duration::from_millis(300)).await;
+    let stream = sim
+        .subscribe_ticks(&aapl(), 1, GenericTicks::new())
+        .await
+        .unwrap();
+    let mut rx = stream.resubscribe();
+
+    let lasts =
+        collect_last_prices(&mut rx, Duration::from_secs(2), Duration::from_millis(250)).await;
+    drop(stream);
+    assert!(
+        !lasts.is_empty(),
+        "expected ≥1 Last tick even with zero drift"
+    );
+    let first = lasts[0];
+    for (i, v) in lasts.iter().enumerate() {
+        assert!(
+            (*v - first).abs() < f64::EPSILON,
+            "tick {i} last={v} should equal first tick last={first} when drift is zero"
+        );
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────
 // 5. historical_stream transitions
 // ────────────────────────────────────────────────────────────────────────
 #[tokio::test(start_paused = true)]

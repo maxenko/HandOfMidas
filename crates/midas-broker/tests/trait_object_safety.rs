@@ -12,7 +12,7 @@ use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use midas_broker::client::PlaceOrderResult;
+use midas_broker::order_client::PlaceOrderResult;
 use midas_broker::stream::{HistoricalStream, RealtimeBarStream, TickStream};
 use midas_broker::{
     AccountEvent, CancelOrderStream, CompletedOrder, HistoricalBarsResult, MarketDataSource,

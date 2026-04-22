@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::error::BrokerError;
-use crate::test_broker::TestBrokerConfig;
 
 /// Selects the market data source for the broker engine.
 #[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
@@ -38,10 +37,6 @@ pub struct BrokerConfig {
     /// Engine-level order size limits. Hard reject before IB submission.
     #[serde(default)]
     pub trading_limits: TradingLimits,
-
-    /// Test broker simulation configuration.
-    #[serde(default)]
-    pub test_broker: TestBrokerConfig,
 }
 
 /// Engine-level maximum order size validation.

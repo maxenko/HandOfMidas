@@ -1,7 +1,10 @@
 //! Parsers for IB-style duration and bar-size strings.
 //!
-//! Converts the string formats used in `BrokerCommand::RequestHistoricalData`
-//! into typed `Timeframe` values and epoch timestamps.
+//! Converts IB's canonical string formats (e.g. `"30 D"`, `"1 min"`)
+//! into typed `Timeframe` values and epoch timestamps. Kept
+//! workspace-local so future IB-wiring work (e.g. a thin
+//! historical-bars shim) can reuse the parse logic without pulling
+//! it into `midas_broker_core`.
 
 use chrono::{DateTime, Months, Utc};
 use midas_broker_core::Timeframe;
