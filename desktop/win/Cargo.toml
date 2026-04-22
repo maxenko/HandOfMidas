@@ -18,7 +18,6 @@ members = [
     "crates/midas-ui",
     "crates/midas-grid",
     "crates/midas-app",
-    "crates/mailbox_processor",
     "crates/midas-store",
     "crates/midas-devloop-proto",
 ]

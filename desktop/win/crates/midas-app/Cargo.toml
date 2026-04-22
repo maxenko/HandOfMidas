@@ -25,7 +25,7 @@ midas-feed   = { path = "../midas-feed" }
 midas-store  = { path = "../midas-store" }
 midas-grid   = { path = "../midas-grid" }
 midas-ui     = { path = "../midas-ui" }
-mailbox_processor = { path = "../mailbox_processor" }
+mailbox_processor = { path = "../../../../crates/mailbox_processor" }
 midas-devloop-proto = { path = "../midas-devloop-proto", optional = true }
 image = { workspace = true, optional = true }
 image-compare = { workspace = true, optional = true }

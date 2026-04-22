@@ -7,7 +7,7 @@ publish = false
 [dependencies]
 midas-core = { path = "../midas-core" }
 midas-data = { path = "../midas-data" }
-mailbox_processor = { path = "../mailbox_processor" }
+mailbox_processor = { path = "../../../../crates/mailbox_processor" }
 duckdb = { version = "1", features = ["bundled"] }
 tokio = { workspace = true }
 thiserror = { workspace = true }
