@@ -1,14 +1,13 @@
 // midas-broker: IB trading engine for Hand of Midas
 //
-// Public API: start_broker_engine() returns a BrokerHandle with channels.
-// No ibapi types leak through this API — the UI crate never imports ibapi.
+// Public API: per-backend `MarketDataSource` + `OrderClient` impls
+// (sim, ib/*). No ibapi types leak through this API — the UI crate
+// never imports ibapi.
 
 pub mod client;
-pub mod commands;
 pub mod config;
 pub mod connection;
 pub mod db;
-pub mod engine;
 pub mod error;
 pub mod events;
 pub mod ib;
@@ -30,13 +29,12 @@ pub mod testdata;
 // The router-era traits + types from slice 2 take the unqualified
 // names (`MarketDataSource`, `OrderClient`, stream handles). The
 // legacy `BrokerClient` + historical-only `market_data::MarketDataSource`
-// stay behind module paths until slice 9 removes them.
+// live on behind module paths until slices 10f / 10g finish off their
+// standalone adapters.
 #[allow(deprecated)]
 pub use client::{AccountSummary, BrokerCallback, BrokerClient, PositionRecord, TestBrokerClient};
-pub use commands::BrokerCommand;
 pub use config::BrokerConfig;
 pub use connection::ConnectionState;
-pub use engine::BrokerHandle;
 pub use error::BrokerError;
 pub use events::BrokerEvent;
 pub use market_data_source::{DynMarketDataSource, HistoricalBarsResult, MarketDataSource};
@@ -53,6 +51,5 @@ pub use orders::types::{BracketRole, LocalOrder, OrderKind};
 pub use stream::{HistoricalStream, HistoricalStreamEvent, RealtimeBarStream, TickStream};
 pub use test_broker::{TestBroker, TestBrokerConfig};
 
-pub use engine::start_broker_engine;
 pub use midas_broker_core::SecurityType;
 pub use orders::types::{OrderAction, TimeInForce};

@@ -14,9 +14,9 @@ pub enum PositionsMsg {
     /// stale data.
     ///
     /// **Stub in v1.** The handler logs intent and sets a status
-    /// message; it never constructs a `BrokerCommand`. A unit test
-    /// pins that guarantee so a future refactor can't accidentally
-    /// wire it up to the broker.
+    /// message; it never dispatches to the broker. A unit test pins
+    /// that guarantee so a future refactor can't accidentally wire it
+    /// up.
     CloseRequested(String),
     /// Passthrough for grid chrome events (row select, future sort /
     /// resize).
@@ -58,12 +58,13 @@ impl CloseDecision {
         }
     }
 
-    /// Whether a `BrokerCommand` is permitted for this decision.
+    /// Whether a broker call is permitted for this decision.
     ///
     /// **Always `false`** in v1 — both paths are stub only. A future
     /// slice wiring the close-position action to the broker must flip
     /// this to `true` only for the `Logged` arm, in a separate commit,
-    /// accompanied by the corresponding `BrokerCommand::Cancel*` call.
+    /// accompanied by the corresponding `OrderClient::cancel_order`
+    /// call.
     pub fn may_emit_command(&self) -> bool {
         false
     }

@@ -1840,8 +1840,8 @@ impl MidasApp {
     /// - `CloseRequested(symbol)`: **stub only in v1.** Guards on
     ///   broker connectivity at the handler level (UI disable is not
     ///   sufficient per CLAUDE.md rule #3 — dev-harness can inject the
-    ///   message directly). Never constructs a `BrokerCommand`. A unit
-    ///   test pins that guarantee.
+    ///   message directly). Never dispatches to the broker. A unit test
+    ///   pins that guarantee.
     /// - `Grid(msg)`: forwarded to the tab's grid state for row
     ///   selection / future resize. No effect on the store.
     pub(crate) fn handle_account_positions_msg(
@@ -1881,7 +1881,7 @@ impl MidasApp {
     /// Close-position request handler.
     ///
     /// **Stub in v1.** Guards on broker connectivity and writes an
-    /// intent status message. Never constructs a `BrokerCommand`;
+    /// intent status message. Never dispatches to the broker;
     /// the plan's non-goals explicitly list "Close-position wired to
     /// broker (stub only v1)". The decision function
     /// [`crate::account_panel::positions_msg::CloseDecision`] is
@@ -1917,7 +1917,7 @@ impl MidasApp {
         }
         self.status_message = decision.status_message();
         Task::none()
-        // NO BrokerCommand emitted. Stub only.
+        // NO broker call emitted. Stub only.
     }
 
     /// Re-select the clicked Recent Instrument on the focused chart.
