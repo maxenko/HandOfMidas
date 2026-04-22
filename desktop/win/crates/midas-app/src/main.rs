@@ -243,6 +243,19 @@ fn subscription(state: &MidasApp) -> Subscription<Message> {
     // them now is a no-op on every existing code path.
     subs.push(state.chart_subscriptions());
     subs.push(state.watchlist_subscription());
+    subs.push(state.ticker_subscription());
+
+    // Router-era positions subscription (BR-14). Runs in parallel
+    // with the legacy `positions_subscription` above through S7d;
+    // the legacy one is removed in S9 alongside `BrokerBridge`.
+    if let Some(ref order_client) = state.router_order_client {
+        let source = crate::account_panel::PositionEventsSource {
+            order_client: order_client.clone(),
+        };
+        let positions_sub = crate::account_panel::router_positions_subscription(source)
+            .map(Message::AccountPositionsBatch);
+        subs.push(positions_sub);
+    }
 
     Subscription::batch(subs)
 }

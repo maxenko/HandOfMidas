@@ -108,6 +108,69 @@ pub fn positions_stream(
     StreamExt::map(batched, fold_latest_per_symbol)
 }
 
+// ── Router-era path (S7d / BR-14) ────────────────────────────────────
+
+/// Router-era positions subscription source. Wraps an
+/// `Arc<dyn OrderClient>` so the stream builder can call
+/// `position_events()` to obtain a fresh broadcast receiver each
+/// time iced re-diffs. Parallel to [`BrokerEventSource`]; the
+/// legacy variant is removed in S9.
+#[derive(Clone)]
+pub struct PositionEventsSource {
+    pub order_client: std::sync::Arc<dyn midas_broker::OrderClient>,
+}
+
+impl std::hash::Hash for PositionEventsSource {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Name-based identity is stable across Arc clones of the
+        // same order client; iced uses this to decide whether two
+        // consecutive subscription calls reference the same stream.
+        "router-position-events-source".hash(state);
+        self.order_client.name().hash(state);
+    }
+}
+
+/// Router-era positions subscription (BR-14).
+///
+/// Same fold + window shape as [`positions_subscription`] but sourced
+/// from `OrderClient::position_events()` instead of the legacy
+/// `BrokerEventSource`.
+pub fn router_positions_subscription(
+    source: PositionEventsSource,
+) -> Subscription<Vec<PositionRaw>> {
+    Subscription::run_with(source, router_positions_stream)
+}
+
+pub fn router_positions_stream(
+    source: &PositionEventsSource,
+) -> impl iced::futures::Stream<Item = Vec<PositionRaw>> {
+    let rx = source.order_client.position_events();
+    let raw = tokio_stream::StreamExt::filter_map(
+        BroadcastStream::new(rx),
+        |r: Result<midas_broker::PositionUpdate, BroadcastStreamRecvError>| match r {
+            Ok(ev) => Some(ev),
+            Err(BroadcastStreamRecvError::Lagged(n)) => {
+                tracing::warn!(
+                    skipped = n,
+                    "router_positions_subscription: broadcast lagged"
+                );
+                None
+            }
+        },
+    );
+    let positions =
+        tokio_stream::StreamExt::map(raw, |update: midas_broker::PositionUpdate| PositionRaw {
+            symbol: update.symbol,
+            qty: update.quantity,
+            avg_cost: update.avg_cost,
+            last_price: None,
+            last_price_ts: None,
+            session_open_price: None,
+        });
+    let batched = positions.chunks_timeout(CHUNK_CAP, CHUNK_INTERVAL);
+    StreamExt::map(batched, fold_latest_per_symbol)
+}
+
 /// Collapse a window of `PositionRaw` updates so each symbol appears at
 /// most once. Later entries win — `PositionUpdate` is a full snapshot
 /// of the current position, not a delta, so discarding intermediate

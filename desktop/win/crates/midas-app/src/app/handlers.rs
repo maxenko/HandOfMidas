@@ -4168,6 +4168,38 @@ impl MidasApp {
             crate::app::watchlist_subscription::watchlist_stream_builder,
         )
     }
+
+    /// Per-active-symbol tick subscription (S7d).
+    ///
+    /// One `Subscription::run_with` per symbol that has a
+    /// `TickerState` entry, keyed on the symbol. The stream emits
+    /// at most one `Message::TickerLastPrice` per 33 ms window
+    /// carrying the latest `Last`-typed price observed in that
+    /// window. Drives `TickerMsg::UpdateMarketData` inside the
+    /// handler, which the ticker state machine folds into bracket
+    /// labels / GATR snap / decorator badges.
+    pub(crate) fn ticker_subscription(&self) -> iced::Subscription<Message> {
+        let Some(_router) = self.router.as_ref() else {
+            return iced::Subscription::none();
+        };
+        let mut subs = Vec::<iced::Subscription<Message>>::new();
+        for sym in self.tickers.keys() {
+            let broker_sym = midas_broker_core::SymbolKey {
+                contract_id: 0,
+                symbol: sym.as_str().to_string(),
+            };
+            let key = crate::app::ticker_subscription::TickerSubKey { symbol: broker_sym };
+            subs.push(iced::Subscription::run_with(
+                key,
+                crate::app::ticker_subscription::ticker_stream_builder,
+            ));
+        }
+        if subs.is_empty() {
+            iced::Subscription::none()
+        } else {
+            iced::Subscription::batch(subs)
+        }
+    }
 }
 
 /// Map the app's `midas_core::Timeframe` to the broker-core
@@ -4331,9 +4363,21 @@ impl MidasApp {
                 Task::none()
             }
             Message::TickerLastPrice { symbol, last_price } => {
-                // S7d dispatches TickerMsg::UpdateMarketData.
-                let _ = (symbol, last_price);
-                Task::none()
+                // Dispatch through the existing TickerState path.
+                // GATR fallback: prefer the cached gatr if we have
+                // one, otherwise 0.5% of price — same heuristic as
+                // the legacy `BrokerEvent::Tick` arm in
+                // `handle_broker_msg`.
+                let key = crate::annotation_store::SymbolKey::new(&symbol.symbol);
+                let cached_gatr = self.market_cache.get(&key).and_then(|s| s.gatr_abs);
+                let gatr_val = cached_gatr.unwrap_or(last_price * 0.005);
+                self.update(Message::Ticker(
+                    key,
+                    crate::ticker_state::TickerMsg::UpdateMarketData {
+                        last_price,
+                        gatr_abs: Some(gatr_val),
+                    },
+                ))
             }
             Message::FarmStatusChanged(status) => {
                 tracing::debug!("farm status: {status:?}");
