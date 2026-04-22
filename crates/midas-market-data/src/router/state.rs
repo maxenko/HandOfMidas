@@ -12,10 +12,11 @@
 //! consulted by the control actor on subscribe/unsubscribe.
 
 use std::sync::atomic::{AtomicI64, AtomicU32, AtomicUsize};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, OnceLock, Weak};
 
 use dashmap::DashMap;
 use midas_broker_core::market_data::{Bar, ContractDetails, Quote, SymbolKey, Tick};
+use parking_lot::Mutex;
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
 

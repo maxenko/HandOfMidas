@@ -31,6 +31,11 @@ async-trait = "0.1"
 thiserror = "2"
 futures = "0.3"
 dashmap = "6"
+# Direct dep so `SymbolHub`'s task-slot mutexes can use
+# `parking_lot::Mutex` (no poison semantics) and drop the
+# `.lock().unwrap()` pattern in the control actor. Already pulled in
+# transitively via `dashmap` — make it direct for clarity.
+parking_lot = "0.12"
 mailbox_processor = { path = "../mailbox_processor" }
 tracing = "0.1"
 chrono = "0.4"

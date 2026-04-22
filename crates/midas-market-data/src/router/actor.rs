@@ -252,7 +252,7 @@ async fn handle_subscribe_ticks(
     hub.tick_refcount.store(1, Ordering::Relaxed);
     let hub_for_task = hub.clone();
     let handle = tokio::spawn(async move { run_tick_publisher(hub_for_task, upstream).await });
-    *hub.tick_publisher_task.lock().unwrap() = Some(handle);
+    *hub.tick_publisher_task.lock() = Some(handle);
     state.per_symbol.insert(symbol.clone(), hub.clone());
 
     let rx = hub.ticks_tx.subscribe();
@@ -273,7 +273,7 @@ async fn ensure_tick_publisher(
 ) -> Result<(), MarketDataError> {
     // Fast path: a publisher is already running.
     {
-        let slot = hub.tick_publisher_task.lock().unwrap();
+        let slot = hub.tick_publisher_task.lock();
         if let Some(h) = slot.as_ref() {
             if !h.is_finished() {
                 return Ok(());
@@ -291,7 +291,7 @@ async fn ensure_tick_publisher(
     .await?;
     let hub_for_task = hub.clone();
     let handle = tokio::spawn(async move { run_tick_publisher(hub_for_task, upstream).await });
-    *hub.tick_publisher_task.lock().unwrap() = Some(handle);
+    *hub.tick_publisher_task.lock() = Some(handle);
     Ok(())
 }
 
@@ -310,7 +310,7 @@ async fn handle_subscribe_rt_bars(
         drop(hub_entry);
         // Is the rt-bar publisher already running?
         let need_spawn = {
-            let slot = hub.rt_bar_publisher_task.lock().unwrap();
+            let slot = hub.rt_bar_publisher_task.lock();
             slot.as_ref().map(|h| h.is_finished()).unwrap_or(true)
         };
         if need_spawn {
@@ -326,7 +326,7 @@ async fn handle_subscribe_rt_bars(
             let hub_for_task = hub.clone();
             let handle =
                 tokio::spawn(async move { run_rt_bar_publisher(hub_for_task, upstream).await });
-            *hub.rt_bar_publisher_task.lock().unwrap() = Some(handle);
+            *hub.rt_bar_publisher_task.lock() = Some(handle);
         }
         hub.rt_bar_refcount.fetch_add(1, Ordering::Relaxed);
         let tx = hub.ensure_rt_bars_tx();
@@ -354,7 +354,7 @@ async fn handle_subscribe_rt_bars(
     let rx = tx.subscribe();
     let hub_for_task = hub.clone();
     let handle = tokio::spawn(async move { run_rt_bar_publisher(hub_for_task, upstream).await });
-    *hub.rt_bar_publisher_task.lock().unwrap() = Some(handle);
+    *hub.rt_bar_publisher_task.lock() = Some(handle);
     state.per_symbol.insert(symbol.clone(), hub.clone());
 
     let guard: Box<dyn Guard> = Box::new(RtBarSubGuard {
@@ -404,7 +404,7 @@ async fn handle_open_hub_for_watch(
     hub.watch_refcount.store(1, Ordering::Relaxed);
     let hub_for_task = hub.clone();
     let handle = tokio::spawn(async move { run_tick_publisher(hub_for_task, upstream).await });
-    *hub.tick_publisher_task.lock().unwrap() = Some(handle);
+    *hub.tick_publisher_task.lock() = Some(handle);
     let rx = hub.last_quote_tx.subscribe();
     state.per_symbol.insert(symbol.clone(), hub);
     let guard = WatchGuard {
@@ -481,14 +481,14 @@ fn maybe_reap(state: &RouterState, hub: &Arc<SymbolHub>) {
     // Abort the tick publisher once both broadcast AND watch are idle
     // (NB-3). If rt-bars are still live, the hub stays in the map.
     if ticks == 0 && watches == 0 {
-        if let Some(h) = hub.tick_publisher_task.lock().unwrap().take() {
+        if let Some(h) = hub.tick_publisher_task.lock().take() {
             tracing::info!(symbol = %hub.symbol, "aborting tick publisher on last DecRef");
             h.abort();
         }
     }
 
     if rt_bars == 0 {
-        if let Some(h) = hub.rt_bar_publisher_task.lock().unwrap().take() {
+        if let Some(h) = hub.rt_bar_publisher_task.lock().take() {
             tracing::info!(symbol = %hub.symbol, "aborting rt-bar publisher on last DecRef");
             h.abort();
         }
@@ -503,10 +503,10 @@ fn maybe_reap(state: &RouterState, hub: &Arc<SymbolHub>) {
 fn abort_all_publishers(state: &RouterState) {
     for entry in state.per_symbol.iter() {
         let hub = entry.value();
-        if let Some(h) = hub.tick_publisher_task.lock().unwrap().take() {
+        if let Some(h) = hub.tick_publisher_task.lock().take() {
             h.abort();
         }
-        if let Some(h) = hub.rt_bar_publisher_task.lock().unwrap().take() {
+        if let Some(h) = hub.rt_bar_publisher_task.lock().take() {
             h.abort();
         }
     }
@@ -522,14 +522,12 @@ fn collect_debug_dump(state: &RouterState) -> Vec<SymbolDebugInfo> {
             let tick_alive = hub
                 .tick_publisher_task
                 .lock()
-                .unwrap()
                 .as_ref()
                 .map(|h| !h.is_finished())
                 .unwrap_or(false);
             let rt_alive = hub
                 .rt_bar_publisher_task
                 .lock()
-                .unwrap()
                 .as_ref()
                 .map(|h| !h.is_finished())
                 .unwrap_or(false);
