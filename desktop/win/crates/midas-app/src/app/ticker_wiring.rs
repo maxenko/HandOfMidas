@@ -36,20 +36,37 @@ impl MidasApp {
     /// through this helper.
     pub(crate) fn bind_chart_to_symbol(&mut self, chart_id: ChartId, symbol: SymbolKey) {
         // 1. Set bound_symbol + backward-compat fields.
-        if let Some(chart) = self.charts.get_mut(&chart_id) {
+        let timeframe = if let Some(chart) = self.charts.get_mut(&chart_id) {
             chart.bound_symbol = Some(symbol.clone());
             chart.symbol = symbol.as_str().to_string();
             chart.symbol_input = symbol.as_str().to_string();
+            chart.timeframe
+        } else {
+            // Chart dropped before we got here — skip pre-warm.
+            midas_core::Timeframe::M1
+        };
+
+        // S8c: eagerly pre-install the bar subscription handle in
+        // the chart registry so the chart_stream_builder sees it on
+        // first poll instead of going through its lazy-subscribe
+        // fallback. Reduces the "bind → first bar painted" latency
+        // by the actor round-trip the subscribe_bars call would
+        // otherwise add inside the iced poll itself.
+        if self.charts.contains_key(&chart_id) {
+            self.prewarm_chart_bar_sub(chart_id, symbol.as_str(), timeframe);
         }
 
-        // S7e: per-chart subscriptions spawn on the next iced
-        // re-diff via `chart_subscriptions`; no eager reconcile
-        // needed.
-
-        // 2. Lazy-create TickerState.
+        // 2. Lazy-create TickerState. On first-insert pre-warm the
+        // per-symbol tick subscription so the ticker stream builder
+        // finds its handle pre-populated on iced's first poll
+        // (S8c).
+        let ticker_freshly_created = !self.tickers.contains_key(&symbol);
         self.tickers
             .entry(symbol.clone())
             .or_insert_with(|| crate::ticker_state::TickerState::new(symbol.clone()));
+        if ticker_freshly_created {
+            self.prewarm_ticker_tick_sub(symbol.as_str());
+        }
 
         // 3. Seed market data from cache.
         let (price, gatr) = self
@@ -98,6 +115,123 @@ impl MidasApp {
                 ));
             }
         }
+    }
+
+    /// Pre-warm the bar subscription for a chart's (symbol, tf).
+    ///
+    /// S8c: fires `router.subscribe_bars(..)` off-thread via
+    /// `tokio::spawn`; on success it parks the handle in the
+    /// `subscription_registry::CHART_REGISTRY` so the
+    /// `chart_stream_builder` finds it pre-populated on iced's
+    /// first poll — no actor round-trip inside the polling task.
+    ///
+    /// No-op when the router isn't ready yet: iced will re-diff
+    /// `chart_subscriptions()` each `update()` and the lazy path
+    /// inside the stream builder covers that gap.
+    pub(crate) fn prewarm_chart_bar_sub(
+        &self,
+        chart_id: ChartId,
+        symbol_str: &str,
+        timeframe: midas_core::Timeframe,
+    ) {
+        let Some(router) = self.router.clone() else {
+            return;
+        };
+        let broker_sym = midas_broker_core::SymbolKey {
+            contract_id: 0,
+            symbol: symbol_str.to_string(),
+        };
+        let router_tf = match timeframe {
+            midas_core::Timeframe::S1 => midas_broker_core::Timeframe::S1,
+            midas_core::Timeframe::S5 => midas_broker_core::Timeframe::S5,
+            midas_core::Timeframe::S15 => midas_broker_core::Timeframe::S15,
+            midas_core::Timeframe::S30 => midas_broker_core::Timeframe::S30,
+            midas_core::Timeframe::M1 => midas_broker_core::Timeframe::M1,
+            midas_core::Timeframe::M5 => midas_broker_core::Timeframe::M5,
+            midas_core::Timeframe::M15 => midas_broker_core::Timeframe::M15,
+            midas_core::Timeframe::M30 => midas_broker_core::Timeframe::M30,
+            midas_core::Timeframe::H1 => midas_broker_core::Timeframe::H1,
+            midas_core::Timeframe::H4 => midas_broker_core::Timeframe::H4,
+            midas_core::Timeframe::D1 => midas_broker_core::Timeframe::D1,
+            midas_core::Timeframe::W1 => midas_broker_core::Timeframe::W1,
+            midas_core::Timeframe::MN1 => midas_broker_core::Timeframe::MN1,
+        };
+        let sym_cl = broker_sym.clone();
+        tokio::spawn(async move {
+            match router.subscribe_bars(sym_cl.clone(), router_tf).await {
+                Ok(handle) => {
+                    crate::app::subscription_registry::install_chart_handle(
+                        crate::app::subscription_registry::ChartKey {
+                            symbol: sym_cl,
+                            timeframe: router_tf,
+                            chart_id,
+                        },
+                        handle,
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        chart_id = ?chart_id,
+                        "prewarm subscribe_bars failed: {e}; stream builder will lazy-subscribe"
+                    );
+                }
+            }
+        });
+    }
+
+    /// Pre-warm the quote subscription for a watchlist symbol
+    /// (S8c). Same pattern as [`Self::prewarm_chart_bar_sub`] but
+    /// opens a `QuoteHandle` via `router.last_quote(..)` and parks
+    /// it in the watchlist registry.
+    pub(crate) fn prewarm_watchlist_quote_sub(&self, symbol_str: &str) {
+        let Some(router) = self.router.clone() else {
+            return;
+        };
+        let broker_sym = midas_broker_core::SymbolKey {
+            contract_id: 0,
+            symbol: symbol_str.to_string(),
+        };
+        let sym_cl = broker_sym.clone();
+        tokio::spawn(async move {
+            match router.last_quote(sym_cl.clone()).await {
+                Ok(handle) => {
+                    crate::app::watchlist_subscription::install_quote_handle(sym_cl, handle);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        symbol = %broker_sym.symbol,
+                        "prewarm last_quote failed: {e}; watchlist stream will lazy-subscribe"
+                    );
+                }
+            }
+        });
+    }
+
+    /// Pre-warm the tick subscription backing a `TickerState`
+    /// (S8c). Parks the handle in the ticker registry so the
+    /// `ticker_stream_builder` lights up on first poll.
+    pub(crate) fn prewarm_ticker_tick_sub(&self, symbol_str: &str) {
+        let Some(router) = self.router.clone() else {
+            return;
+        };
+        let broker_sym = midas_broker_core::SymbolKey {
+            contract_id: 0,
+            symbol: symbol_str.to_string(),
+        };
+        let sym_cl = broker_sym.clone();
+        tokio::spawn(async move {
+            match router.subscribe_ticks(sym_cl.clone()).await {
+                Ok(handle) => {
+                    crate::app::subscription_registry::install_ticker_handle(sym_cl, handle);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        symbol = %broker_sym.symbol,
+                        "prewarm subscribe_ticks failed: {e}; ticker stream will lazy-subscribe"
+                    );
+                }
+            }
+        });
     }
 
     /// Bind an order panel to a symbol.

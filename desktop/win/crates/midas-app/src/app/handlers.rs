@@ -2039,10 +2039,11 @@ impl MidasApp {
                         // just chart selections.
                         self.push_recent_symbol(&symbol);
                         let task = self.load_market_snapshot(&symbol);
-                        // S7e: router-driven subscriptions spawn per-
-                        // watchlist via `watchlist_subscription()` on
-                        // the next iced re-diff; no eager reconciliation
-                        // needed.
+                        // S8c: eagerly pre-install the quote handle
+                        // so the watchlist stream builder finds it
+                        // populated on first poll instead of going
+                        // through its lazy-subscribe fallback.
+                        self.prewarm_watchlist_quote_sub(&symbol);
                         return Task::batch([self.flush_config(), task]);
                     }
                 }
