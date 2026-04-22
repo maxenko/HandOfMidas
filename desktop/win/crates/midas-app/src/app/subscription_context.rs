@@ -24,7 +24,7 @@
 //! extendable (single place to add new subscription registries,
 //! single place to drop state at shutdown).
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, RwLock};
 
 use dashmap::DashMap;
 use midas_broker_core::SymbolKey;
@@ -59,24 +59,52 @@ impl SubscriptionContext {
     }
 }
 
-static CTX: OnceLock<Arc<SubscriptionContext>> = OnceLock::new();
+// `RwLock<Option<_>>` not `OnceLock<_>`: the production lifecycle is
+// still "install once", but test code needs to swap the context so
+// each `#[test]` fn can stand up its own router + tokio runtime
+// without leaking task handles into sibling tests.
+static CTX: RwLock<Option<Arc<SubscriptionContext>>> = RwLock::new(None);
 
-/// Install the process-scoped context. First call wins (mirrors the
-/// old `ROUTER`/`LazyLock<DashMap>` semantics); subsequent calls are
-/// silent no-ops.
+/// Install the process-scoped context. First production call wins
+/// (mirrors the old `ROUTER`/`LazyLock<DashMap>` semantics); any
+/// subsequent production install is a silent no-op. Test code uses
+/// [`install_for_test`] / [`clear_for_test`] to swap instead.
 pub fn install(router: Arc<MarketDataRouter>) {
-    let _ = CTX.set(SubscriptionContext::new(router));
+    let mut guard = CTX.write().expect("subscription context RwLock poisoned");
+    if guard.is_some() {
+        return;
+    }
+    *guard = Some(SubscriptionContext::new(router));
 }
 
 /// Fetch the current process-scoped context, or `None` if the router
 /// hasn't been installed yet (subscription builders race the
 /// `RouterReady` handshake on IB boot).
 pub fn current() -> Option<Arc<SubscriptionContext>> {
-    CTX.get().cloned()
+    CTX.read()
+        .expect("subscription context RwLock poisoned")
+        .clone()
 }
 
 /// Convenience: the current router, if any. Shorter than
 /// `current().map(|c| c.router.clone())`.
 pub fn router() -> Option<Arc<MarketDataRouter>> {
-    CTX.get().map(|c| c.router.clone())
+    current().map(|c| c.router.clone())
+}
+
+/// Test-only: replace the process-scoped context with a fresh one
+/// around `router`, dropping any previously-installed context. Gated
+/// to `#[cfg(test)]` so production code can't accidentally swap the
+/// context mid-flight.
+#[cfg(test)]
+pub fn install_for_test(router: Arc<MarketDataRouter>) {
+    let mut guard = CTX.write().expect("subscription context RwLock poisoned");
+    *guard = Some(SubscriptionContext::new(router));
+}
+
+/// Test-only: clear the process-scoped context. Pairs with
+/// [`install_for_test`] in test teardown.
+#[cfg(test)]
+pub fn clear_for_test() {
+    *CTX.write().expect("subscription context RwLock poisoned") = None;
 }

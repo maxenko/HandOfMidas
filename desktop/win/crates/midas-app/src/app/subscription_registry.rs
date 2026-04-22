@@ -197,24 +197,29 @@ mod tests {
         MarketDataRouter::new(src)
     }
 
-    /// Install the shared context once for the test process. The
-    /// `OnceLock` accepts only the first router, so every test in
-    /// this module shares the same context; each test keys its
-    /// `SymbolKey`s with a unique suffix so they can't collide.
-    fn ensure_ctx() -> Arc<MarketDataRouter> {
-        if let Some(ctx) = super::super::subscription_context::current() {
-            return ctx.router.clone();
-        }
+    /// Build a fresh router and install it into the process-scoped
+    /// context for the duration of this test. The caller holds
+    /// [`REGISTRY_TEST_LOCK`] for serialisation and calls
+    /// `clear_for_test` in teardown.
+    fn install_test_ctx() -> Arc<MarketDataRouter> {
         let router = build_test_router();
-        super::super::subscription_context::install(router.clone());
+        super::super::subscription_context::install_for_test(router.clone());
         router
     }
 
+    /// Serialise the two registry tests. Each test installs a fresh
+    /// `SubscriptionContext` + tokio `Runtime`; running them
+    /// concurrently would leave one test's router attached to the
+    /// other's tokio runtime, which is killed on `Runtime::drop`.
+    /// The mutex makes the install→use→clear sequence atomic.
+    static REGISTRY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn remove_chart_handles_for_chart_evicts_every_entry_for_that_chart() {
+        let _guard = REGISTRY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let rt = Runtime::new().expect("tokio rt");
         rt.block_on(async {
-            let router = ensure_ctx();
+            let router = install_test_ctx();
             let chart_id = ChartId::new(9_001);
             let other_id = ChartId::new(9_002);
             let aapl = midas_broker_core::SymbolKey {
@@ -278,6 +283,7 @@ mod tests {
             // registry don't observe leftover entries.
             remove_chart_handles_for_chart(other_id);
         });
+        super::super::subscription_context::clear_for_test();
     }
 
     #[test]
@@ -286,9 +292,10 @@ mod tests {
         // to MSFT@M1 must leave exactly one CHART_REGISTRY entry,
         // not two. We emulate `bind_chart_to_symbol` by
         // install-then-evict-then-install.
+        let _guard = REGISTRY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let rt = Runtime::new().expect("tokio rt");
         rt.block_on(async {
-            let router = ensure_ctx();
+            let router = install_test_ctx();
             let chart_id = ChartId::new(9_101);
             let aapl = midas_broker_core::SymbolKey {
                 contract_id: 0,
@@ -337,5 +344,6 @@ mod tests {
 
             remove_chart_handles_for_chart(chart_id);
         });
+        super::super::subscription_context::clear_for_test();
     }
 }
