@@ -9,6 +9,13 @@ edition = "2021"
 # automatically for the crate's own tests.
 test_inject = []
 
+# Slice 4: un-ignores the live-IB integration tests in `tests/ib_live.rs`.
+# The feature only toggles `#[ignore]`; compilation of the IB backend
+# always happens (CI has a non-blocking clippy job that exercises it with
+# this feature enabled). Requires a local TWS/IB Gateway paper session
+# on port 4002 to actually run the tests.
+ib_live_tests = []
+
 [dependencies]
 # Workspace crates
 midas-broker-core = { path = "../midas-broker-core" }
@@ -38,6 +45,9 @@ uuid = { version = "1", features = ["v7", "serde"] }
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
+# rust-ibapi uses `time::OffsetDateTime` on its API surface; we need the
+# crate for the chrono↔time bridging in `ib::translation`.
+time = "0.3"
 
 # Logging
 tracing = "0.1"
@@ -53,6 +63,10 @@ dirs = "5"
 
 # Mutex without poisoning
 parking_lot = "0.12"
+
+# Concurrent map — used by the router-era IB adapter (`ib::pacing`) for
+# per-identical-key token buckets and by the sim backend.
+dashmap = "6"
 
 # Random (test data generation)
 rand = "0.8"

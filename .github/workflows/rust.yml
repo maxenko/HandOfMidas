@@ -37,6 +37,32 @@ jobs:
       - name: Test
         run: cargo test --workspace --verbose
 
+  broker_ib_live_feature_lint:
+    # M-31: keeps the `ib_live_tests`-gated code compile-clean even though
+    # the tests themselves are NEVER run in CI (no TWS connection). The
+    # feature only toggles `#[ignore]` on the test bodies in
+    # `crates/midas-broker/tests/ib_live.rs`; clippy with `-D warnings`
+    # under this feature flag catches drift in the live-IB-only code
+    # paths. Non-blocking: `continue-on-error: true` prevents rust-ibapi
+    # API-surface churn from red-walling unrelated PRs.
+    name: Broker IB-live feature lint (non-blocking)
+    runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
+    needs: broker
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: broker
+      - name: Clippy with ib_live_tests
+        run: cargo clippy -p midas-broker --features ib_live_tests --all-targets -- -D warnings
+
   desktop:
     name: Desktop workspace
     runs-on: ubuntu-latest
