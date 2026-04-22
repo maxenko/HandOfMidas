@@ -2868,10 +2868,12 @@ dependencies = [
 name = "midas-broker-core"
 version = "0.2.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "ordered-float 4.6.0",
  "serde",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
@@ -2972,8 +2974,8 @@ dependencies = [
  "dashmap",
  "futures",
  "mailbox_processor",
- "midas-broker",
  "midas-broker-core",
+ "parking_lot",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",

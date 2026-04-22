@@ -45,16 +45,12 @@ use state::RouterState;
 /// can work against this alias instead.
 pub type DynMarketDataSource = Arc<dyn MarketDataSourceTrait>;
 
-/// Local re-statement of the provider trait (imported from
-/// `midas-broker::MarketDataSource`) so the router doesn't need a
-/// compile-time dependency on `midas-broker`. In practice callers
-/// pass `Arc<dyn midas_broker::MarketDataSource>` which trivially
-/// implements this local alias thanks to the identical method set.
+/// Re-export of the provider trait from `midas-broker-core::provider`.
 ///
-/// In S5 we simply re-use the `midas-broker` trait; this alias exists
-/// to document intent. If a future refactor pushes the provider trait
-/// into `midas-broker-core`, this alias retargets there.
-pub use midas_broker::MarketDataSource as MarketDataSourceTrait;
+/// Post-audit-P1 the trait lives in the neutral core crate so the
+/// router no longer depends on `midas-broker`. The alias name is kept
+/// to minimise churn at existing call sites inside `midas-market-data`.
+pub use midas_broker_core::provider::MarketDataSource as MarketDataSourceTrait;
 
 /// Refcounted per-symbol market-data router.
 ///

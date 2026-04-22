@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 pub mod market_data;
+pub mod provider;
 
 // ---------------------------------------------------------------------------
 // ContractSpec — simplified, serializable instrument identifier

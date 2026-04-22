@@ -12,8 +12,8 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use midas_broker::stream::{RealtimeBarStream, TickStream};
 use midas_broker_core::market_data::{Quote, Tick, TickKind, TickType, TickValue};
+use midas_broker_core::provider::{RealtimeBarStream, TickStream};
 use tokio::sync::broadcast::error::RecvError;
 
 use super::state::{SymbolHub, PUBLISHER_AUTO_EXIT_STREAK};
