@@ -2850,6 +2850,7 @@ dependencies = [
  "chrono",
  "ordered-float 4.6.0",
  "serde",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

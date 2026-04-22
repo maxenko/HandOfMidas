@@ -2,6 +2,8 @@ use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+pub mod market_data;
+
 // ---------------------------------------------------------------------------
 // ContractSpec — simplified, serializable instrument identifier
 // ---------------------------------------------------------------------------

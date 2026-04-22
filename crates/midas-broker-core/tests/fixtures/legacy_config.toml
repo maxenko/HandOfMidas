@@ -1,0 +1,9 @@
+# Legacy config fixture for M-33 serde-stability test.
+#
+# Captures the serialized form of `Timeframe` and a few neighbouring
+# types as they were stored on disk before the market-data router
+# refactor. Any change that breaks this file's byte-round-trip must
+# bump the config schema version, not silently migrate.
+
+default_timeframe = "M5"
+alt_timeframes = ["S1", "S5", "M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1", "MN1"]
