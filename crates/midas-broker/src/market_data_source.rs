@@ -1,16 +1,15 @@
-//! Slice 2: new [`MarketDataSource`] provider trait.
+//! Router-era [`MarketDataSource`] provider trait.
 //!
-//! This is the router-era trait — object-safe via
-//! `#[async_trait::async_trait]`, IB-faithful semantics. Both the sim
-//! (slice 3) and the IB adapter (slice 4) will implement it. Returns
-//! [`TickStream`] / [`RealtimeBarStream`] / [`HistoricalStream`] handle
-//! types that auto-cancel upstream on drop (BR-2).
+//! Object-safe via `#[async_trait::async_trait]`, IB-faithful
+//! semantics. The sim (`sim/market_data.rs`) and the IB adapter
+//! (`ib/market_data.rs`) both implement it. Returns [`TickStream`] /
+//! [`RealtimeBarStream`] / [`HistoricalStream`] handle types that
+//! auto-cancel upstream on drop (BR-2).
 //!
 //! The pre-existing historical-only trait in
 //! [`crate::market_data`](crate::market_data) (also called
-//! `MarketDataSource` inside that module) is retained untouched and
-//! stays in use by the legacy `BrokerEngine` path until it is
-//! deleted in slice 9.
+//! `MarketDataSource` inside that module) is unused after slice 10g;
+//! see that module's **OPEN (post-refactor)** note.
 
 use std::sync::Arc;
 

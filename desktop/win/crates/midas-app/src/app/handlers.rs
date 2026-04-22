@@ -219,15 +219,14 @@ impl MidasApp {
             }
 
             Message::OrderBrokerSelected(name) => {
-                let idx = if name == "None" {
-                    None
-                } else {
-                    self.providers.find_broker_index(&name)
-                };
-                if self.providers.set_active_broker(idx) {
-                    tracing::info!(broker = %name, "switched order broker");
-                    self.mark_config_dirty();
-                }
+                // The toolbar broker picker is inert after the router
+                // refactor — the `OrderBroker` registry side was
+                // retired. Log and drop so a stray click doesn't
+                // assert `unreachable!()`.
+                tracing::debug!(
+                    broker = %name,
+                    "OrderBrokerSelected ignored — broker registry retired"
+                );
                 Task::none()
             }
 

@@ -130,7 +130,11 @@ impl MidasApp {
             store: midas_core::config::StoreConfig::default(),
             providers: Some(ProviderConfig {
                 active_data: Some(self.providers.active_data_provider_name()),
-                active_broker: self.providers.active_broker().map(|b| b.name().to_string()),
+                // `active_broker` persistence was tied to the retired
+                // `OrderBroker` registry. Route-era connection state
+                // is derived from `broker_cfg.backend`; nothing needs
+                // to round-trip through the providers section.
+                active_broker: None,
             }),
             // Round-trip the broker config so hand-edited TOML
             // (e.g. users switching to LivePaper) survives the

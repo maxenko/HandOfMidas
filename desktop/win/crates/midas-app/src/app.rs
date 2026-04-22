@@ -38,7 +38,7 @@ use midas_core::{
     WatchlistId,
 };
 
-use crate::registry::ProviderRegistry;
+use crate::registry::HistoricalDataRegistry;
 
 use crate::annotation_store::AnnotationStore;
 use crate::layout::{LayoutPresetKind, PanelContent, WorkspaceLayout};
@@ -359,8 +359,13 @@ pub struct MidasApp {
     /// When set, sibling charts (same symbol, different chart) render
     /// ghost crosshair lines at the corresponding timestamp and price.
     pub crosshair_sync: Option<(ChartId, i64, f64, String)>,
-    /// Registry of all available data providers and order brokers.
-    pub providers: ProviderRegistry,
+    /// Registry of historical-data providers feeding chart loads,
+    /// market snapshots, and thumbnails. Router-era streaming goes
+    /// through [`MarketDataRouter`](midas_market_data::MarketDataRouter)
+    /// directly; see `registry.rs` for the **OPEN (post-refactor)**
+    /// note on retiring this registry once every `DataProvider`
+    /// call site migrates to `MarketDataSource::historical_bars`.
+    pub providers: HistoricalDataRegistry,
     /// DuckDB persistent cache handle. None if disabled or failed to open.
     #[allow(dead_code)] // part of planned API
     pub store: Option<midas_store::DbHandle>,
@@ -1390,14 +1395,21 @@ impl MidasApp {
 
     /// Project the top-toolbar provider drop-down inputs into a VM.
     /// Resolves both lists + active selections off `self.providers`
-    /// in one place so the view doesn't reach into the registry four
-    /// times.
+    /// in one place so the view doesn't reach into the registry
+    /// multiple times.
+    ///
+    /// The broker-picker side is inert after the router refactor
+    /// (no broker backends register through this registry any more);
+    /// the VM carries a singleton `"None"` list so the iced pick_list
+    /// renders with its disabled-looking default. A future Phase 1
+    /// slice wires live IB selection through the router's
+    /// `ConnectionState` watch directly.
     pub fn toolbar_vm(&self) -> crate::view_models::toolbar::ToolbarVm {
         crate::view_models::toolbar::ToolbarVm {
             data_provider_names: self.providers.data_provider_names(),
             active_data_provider: self.providers.active_data_provider_name(),
-            broker_names: self.providers.order_broker_names(),
-            active_broker: self.providers.active_broker_display_name(),
+            broker_names: vec!["None".to_string()],
+            active_broker: "None".to_string(),
         }
     }
 
@@ -1493,14 +1505,14 @@ impl MidasApp {
 
         let broker_connection = match self.broker_connection_display.as_str() {
             "Ready" => {
-                let broker_name = self
-                    .providers
-                    .active_broker()
-                    .map(|b| b.name().to_string())
-                    .unwrap_or_else(|| "Broker".to_string());
+                // Router refactor retired the `OrderBroker` trait
+                // registry; the status bar now shows a generic
+                // "Broker: Ready" label until a future slice surfaces
+                // the router-era backend name through
+                // `router_order_client.name()`.
                 ConnectionBlockVm {
                     dot_color: Color::from_rgb(0.2, 0.8, 0.2),
-                    label: format!("Broker: {broker_name}"),
+                    label: "Broker: Ready".to_string(),
                 }
             }
             "Disconnected" => ConnectionBlockVm {
@@ -3156,8 +3168,8 @@ impl MidasApp {
 
     /// Build the provider registry, registering all available providers
     /// and restoring the active selection from config.
-    fn build_provider_registry(config: &AppConfig) -> ProviderRegistry {
-        let mut registry = ProviderRegistry::new();
+    fn build_provider_registry(config: &AppConfig) -> HistoricalDataRegistry {
+        let mut registry = HistoricalDataRegistry::new();
         let test_provider: Arc<dyn DataProvider> = Arc::new(midas_feed::TestProvider::new());
         registry.register_data_provider(test_provider);
         if let Some(ref prov_cfg) = config.providers {

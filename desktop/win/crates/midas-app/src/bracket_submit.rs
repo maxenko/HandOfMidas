@@ -1,10 +1,9 @@
 //! Bracket-order submission helper (router-refactor slice 10).
 //!
 //! Wraps an [`OrderClient`] with the three-leg submission semantics
-//! previously baked into `midas-broker::BrokerEngine::handle_create_bracket`.
-//! The engine is being retired; this module owns the app-layer
-//! equivalent so the IB transmit-last rule and cancel-fanout logic
-//! stays encapsulated.
+//! previously baked into the retired broker engine's bracket handler.
+//! The router-era app layer owns the equivalent here so the IB
+//! transmit-last rule and cancel-fanout logic stays encapsulated.
 //!
 //! # Semantics
 //!
