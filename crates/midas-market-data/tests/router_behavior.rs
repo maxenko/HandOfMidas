@@ -554,3 +554,106 @@ async fn iced_subscription_teardown_propagates_dec_ref() {
         sleep(Duration::from_millis(20)).await;
     }
 }
+
+// ---------------------------------------------------------------------------
+// Bugs 3 + 4: Refcount leak on ensure_tick_publisher failure
+// ---------------------------------------------------------------------------
+//
+// Regression coverage for the existing-hub paths of
+// `handle_subscribe_ticks` and `handle_open_hub_for_watch`. If
+// `ensure_tick_publisher.await?` returns Err AFTER the IncRef has
+// landed, no `SubscriptionHandle` reaches the caller, so no
+// `Tick/WatchSubGuard` exists to DecRef on drop — the refcount is
+// orphaned. The fix moves the `fetch_add(1)` below the fallible
+// `.await?`, matching the pattern already used correctly in
+// `handle_subscribe_rt_bars`.
+
+/// Open a hub via `subscribe_rt_bars` (no tick publisher spawned),
+/// then call `subscribe_ticks` with the sim armed to fail. The
+/// existing-hub branch runs `ensure_tick_publisher` → upstream fails
+/// → `?` returns Err. The hub's `tick_refcount` must remain 0, not
+/// leak to 1.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn subscribe_ticks_existing_hub_path_does_not_leak_refcount_on_upstream_error() {
+    let (router, sim) = build_router();
+    let sym = aapl();
+
+    // Prime a hub with ONLY an rt-bar publisher.
+    let _rt = router
+        .subscribe_rt_bars(sym.clone())
+        .await
+        .expect("rt-bar subscribe");
+
+    let dump = router.debug_dump().await;
+    let pre = dump
+        .iter()
+        .find(|d| d.symbol == sym)
+        .expect("rt-bar subscribe should register a hub");
+    assert_eq!(pre.tick_refcount, 0);
+
+    // Arm the next `source.subscribe_ticks` to fail — this is what
+    // `ensure_tick_publisher` calls internally when it has to spawn
+    // a tick publisher on a hub that doesn't have one yet.
+    sim.arm_next_subscribe_ticks_error(MarketDataError::NoPermission {
+        symbol: sym.symbol.clone(),
+    });
+
+    // The tick-subscribe call should return Err. Without the fix,
+    // `tick_refcount` was bumped to 1 before the `?` unwind, and
+    // stays there forever.
+    let err = router.subscribe_ticks(sym.clone()).await.err();
+    assert!(matches!(err, Some(MarketDataError::NoPermission { .. })));
+
+    drain().await;
+
+    let dump = router.debug_dump().await;
+    let post = dump
+        .iter()
+        .find(|d| d.symbol == sym)
+        .expect("hub still present (rt-bar handle alive)");
+    assert_eq!(
+        post.tick_refcount, 0,
+        "tick_refcount must not leak on existing-hub upstream failure"
+    );
+    assert_eq!(
+        post.rt_bar_refcount, 1,
+        "rt-bar refcount must survive the failed tick subscribe"
+    );
+}
+
+/// Same shape for `handle_open_hub_for_watch`: prime an rt-bar-only
+/// hub, arm a subscribe_ticks error, open a watch, expect Err with
+/// `watch_refcount` staying at 0.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn open_hub_for_watch_existing_hub_path_does_not_leak_refcount_on_upstream_error() {
+    let (router, sim) = build_router();
+    let sym = aapl();
+
+    let _rt = router
+        .subscribe_rt_bars(sym.clone())
+        .await
+        .expect("rt-bar subscribe");
+
+    sim.arm_next_subscribe_ticks_error(MarketDataError::NoPermission {
+        symbol: sym.symbol.clone(),
+    });
+
+    let err = router.last_quote(sym.clone()).await.err();
+    assert!(matches!(err, Some(MarketDataError::NoPermission { .. })));
+
+    drain().await;
+
+    let dump = router.debug_dump().await;
+    let post = dump
+        .iter()
+        .find(|d| d.symbol == sym)
+        .expect("hub still present (rt-bar handle alive)");
+    assert_eq!(
+        post.watch_refcount, 0,
+        "watch_refcount must not leak on existing-hub upstream failure"
+    );
+    assert_eq!(
+        post.rt_bar_refcount, 1,
+        "rt-bar refcount must survive the failed watch open"
+    );
+}

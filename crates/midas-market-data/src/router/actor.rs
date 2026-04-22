@@ -157,10 +157,16 @@ async fn handle_subscribe_ticks(
     if let Some(hub_entry) = state.per_symbol.get(symbol) {
         let hub = hub_entry.clone();
         drop(hub_entry);
-        hub.tick_refcount.fetch_add(1, Ordering::Relaxed);
+        // NB: we must not bump `tick_refcount` BEFORE
+        // `ensure_tick_publisher.await?` — on an upstream error the
+        // `?` returns without constructing a SubscriptionHandle, so
+        // no TickSubGuard exists to fire `DecTickRef` on drop and
+        // the refcount would leak forever. Order: fallible work
+        // first, IncRef + handle construction last.
         // If the hub exists but no tick publisher is running (pure
         // rt-bar / watch-only hub), we still need one.
         ensure_tick_publisher(state, &hub).await?;
+        hub.tick_refcount.fetch_add(1, Ordering::Relaxed);
         let rx = hub.ticks_tx.subscribe();
         let guard: Box<dyn Guard> = Box::new(TickSubGuard {
             symbol: symbol.clone(),
@@ -307,10 +313,15 @@ async fn handle_open_hub_for_watch(
     if let Some(hub_entry) = state.per_symbol.get(symbol) {
         let hub = hub_entry.clone();
         drop(hub_entry);
-        hub.watch_refcount.fetch_add(1, Ordering::Relaxed);
+        // Same ordering constraint as `handle_subscribe_ticks`:
+        // defer `fetch_add` until after the fallible publisher
+        // spawn. On `Err(..)?` no `QuoteHandle` is returned to the
+        // caller, so no `WatchGuard` exists to decrement on drop —
+        // bumping the refcount before the await would leak it.
         // Make sure a tick publisher is running so the watch keeps
         // updating (NB-3 lazy-open).
         ensure_tick_publisher(state, &hub).await?;
+        hub.watch_refcount.fetch_add(1, Ordering::Relaxed);
         let rx = hub.last_quote_tx.subscribe();
         let guard = WatchGuard {
             symbol: symbol.clone(),
