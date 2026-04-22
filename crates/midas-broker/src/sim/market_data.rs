@@ -21,7 +21,7 @@
 //! `tokio::time::pause()` drives the emitter deterministically in
 //! tests (BR-20).
 
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -162,6 +162,30 @@ pub struct SimMarketData {
     /// Tracks the most-recent farm loss so a subsequent reconnect can
     /// decide whether to prepend `ConnectionRestoredDataLost`.
     last_loss: Arc<Mutex<Option<FarmCode>>>,
+    /// Test-introspection counters + failure injection. Always live
+    /// (cheap atomics) so the `pub` observability methods that read
+    /// them don't need feature gating. Routers/apps that don't touch
+    /// these methods pay only the single extra Arc clone at
+    /// construction time.
+    test_counters: Arc<SimTestCounters>,
+}
+
+/// Test-only introspection counters and one-shot error injection hook.
+///
+/// Held behind `Arc` so the router behaviour tests can share the
+/// counters across tasks.
+#[derive(Default)]
+pub(crate) struct SimTestCounters {
+    /// Cumulative successful `subscribe_ticks` calls.
+    pub(crate) tick_subscribe_calls: AtomicU64,
+    /// Cumulative successful `subscribe_realtime_bars` calls.
+    pub(crate) rt_bar_subscribe_calls: AtomicU64,
+    /// Cumulative `resolve_contract` calls.
+    pub(crate) resolve_contract_calls: AtomicU64,
+    /// One-shot next-call error for `subscribe_ticks`. Cleared on
+    /// use — the arm-then-fire pattern matches the NM-3 rollback
+    /// test.
+    pub(crate) next_subscribe_error: Mutex<Option<MarketDataError>>,
 }
 
 /// Minimal local mirror of the `MarketEvent::OrderingReady` variant so
@@ -236,6 +260,7 @@ impl SimMarketData {
             tick_loop,
             reconnect_attempt: Arc::new(AtomicU32::new(0)),
             last_loss: Arc::new(Mutex::new(None)),
+            test_counters: Arc::new(SimTestCounters::default()),
         });
 
         // Eagerly drive the connect sequence (NM-2).
@@ -453,6 +478,58 @@ impl SimMarketData {
             .count()
     }
 
+    /// Count of live tick subscriptions for `symbol`. Used by
+    /// downstream router tests (S5) to assert the fan-out invariant
+    /// "one upstream per symbol regardless of consumer count".
+    pub fn live_subscription_count_for(&self, symbol: &SymbolKey) -> usize {
+        self.subscriptions
+            .iter()
+            .filter(|e| !e.cancelled.load(Ordering::SeqCst) && e.symbol == *symbol)
+            .count()
+    }
+
+    /// Count of live realtime-bar subscriptions for `symbol`. Mirrors
+    /// [`Self::live_subscription_count_for`] on the RT-bar fan-out.
+    pub fn live_rt_bar_subscription_count_for(&self, symbol: &SymbolKey) -> usize {
+        self.rt_bar_subs
+            .iter()
+            .filter(|e| !e.cancelled.load(Ordering::SeqCst) && e.symbol == *symbol)
+            .count()
+    }
+
+    /// Cumulative number of successful `subscribe_ticks` calls. Used
+    /// by the router behaviour tests to assert the "single upstream
+    /// per first-subscribe" invariant.
+    pub fn tick_subscribe_call_count(&self) -> u64 {
+        self.test_counters
+            .tick_subscribe_calls
+            .load(Ordering::SeqCst)
+    }
+
+    /// Cumulative number of successful `subscribe_realtime_bars`
+    /// calls. Mirror of [`Self::tick_subscribe_call_count`] for the
+    /// RT-bar path.
+    pub fn rt_bar_subscribe_call_count(&self) -> u64 {
+        self.test_counters
+            .rt_bar_subscribe_calls
+            .load(Ordering::SeqCst)
+    }
+
+    /// Cumulative number of `resolve_contract` calls. Used to verify
+    /// the router's contract-cache memoisation (NM-1).
+    pub fn resolve_contract_call_count(&self) -> u64 {
+        self.test_counters
+            .resolve_contract_calls
+            .load(Ordering::SeqCst)
+    }
+
+    /// Force the next `subscribe_ticks` call to return the configured
+    /// error — once-shot. Consumed on use. Used by the router test
+    /// for NM-3 source-failure rollback.
+    pub fn arm_next_subscribe_ticks_error(&self, err: MarketDataError) {
+        *self.test_counters.next_subscribe_error.lock() = Some(err);
+    }
+
     /// M-20: simulate a farm-level connection event.
     ///
     /// * [`FarmCode::ConnectionRestoredDataLost`] (1101): emit
@@ -652,6 +729,10 @@ impl MarketDataSource for SimMarketData {
         con_id: i32,
         _generic_ticks: GenericTicks,
     ) -> Result<TickStream, MarketDataError> {
+        // One-shot error injection (used by NM-3 rollback test).
+        if let Some(err) = self.test_counters.next_subscribe_error.lock().take() {
+            return Err(err);
+        }
         let req_id = self.next_req_id();
         let (tx, rx) = broadcast::channel::<Arc<Tick>>(4096);
         let last_error = Arc::new(OnceLock::new());
@@ -671,6 +752,9 @@ impl MarketDataSource for SimMarketData {
         // Nudge the emitter loop so its interval re-aligns with the new sub.
         self.tick_loop.wake.notify_one();
         let cancel = self.build_tick_cancel_closure(sub);
+        self.test_counters
+            .tick_subscribe_calls
+            .fetch_add(1, Ordering::SeqCst);
         Ok(TickStream::new(req_id, rx, last_error, cancel))
     }
 
@@ -773,6 +857,9 @@ impl MarketDataSource for SimMarketData {
             sub.cancelled.store(true, Ordering::SeqCst);
             rt_subs.remove(&req_id);
         });
+        self.test_counters
+            .rt_bar_subscribe_calls
+            .fetch_add(1, Ordering::SeqCst);
         Ok(RealtimeBarStream::new(req_id, rx, last_error, cancel))
     }
 
@@ -893,6 +980,9 @@ impl MarketDataSource for SimMarketData {
         sec_type: SecurityType,
         exchange: &str,
     ) -> Result<ContractDetails, MarketDataError> {
+        self.test_counters
+            .resolve_contract_calls
+            .fetch_add(1, Ordering::SeqCst);
         // Sim is permissive: every symbol resolves to a SMART-routed
         // stock quoted in USD with a 1-cent min tick.
         Ok(ContractDetails {

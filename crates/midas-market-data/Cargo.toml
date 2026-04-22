@@ -1,0 +1,34 @@
+[package]
+name = "midas-market-data"
+# Slice 5 introduces the `MarketDataRouter` — refcounted per-symbol
+# fan-out hub with RAII subscription handles sitting between
+# `midas-broker` (provider) and the app consumers. This crate depends
+# only on `midas-broker-core` types; `midas-broker` is a dev-dep so the
+# router stays independent of any concrete backend.
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+midas-broker-core = { path = "../midas-broker-core" }
+# `midas-broker` is a runtime dep ONLY for the `MarketDataSource` +
+# stream-handle types (TickStream / RealtimeBarStream). S5 treats
+# these as the "provider trait" surface; a later slice is expected to
+# hoist the trait into `midas-broker-core` and drop this edge
+# altogether. The router never touches concrete `midas-broker`
+# backends directly — always through `Arc<dyn MarketDataSource>`.
+midas-broker = { path = "../midas-broker" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+async-trait = "0.1"
+thiserror = "2"
+futures = "0.3"
+dashmap = "6"
+mailbox_processor = { path = "../mailbox_processor" }
+tracing = "0.1"
+chrono = "0.4"
+
+[dev-dependencies]
+midas-broker = { path = "../midas-broker", features = ["test_inject"] }
+tokio = { version = "1", features = ["test-util"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures = "0.3"

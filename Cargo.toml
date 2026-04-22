@@ -5,6 +5,7 @@ members = [
     "crates/midas-broker",
     "crates/midas-ib-sim",
     "crates/mailbox_processor",
+    "crates/midas-market-data",
 ]
 exclude = [
     "desktop/win/duckdb-spike",
