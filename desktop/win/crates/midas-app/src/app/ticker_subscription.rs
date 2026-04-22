@@ -34,27 +34,26 @@ pub struct TickerSubKey {
 pub fn ticker_stream_builder(key: &TickerSubKey) -> impl iced::futures::Stream<Item = Message> {
     let key = key.clone();
     iced::stream::channel(128, async move |output| {
-        let entry = match subscription_registry::get_ticker_handle(&key.symbol) {
-            Some(e) => e,
-            None => {
-                let Some(router) = subscription_registry::router() else {
-                    return;
-                };
-                match router.subscribe_ticks(key.symbol.clone()).await {
-                    Ok(handle) => {
-                        subscription_registry::install_ticker_handle(key.symbol.clone(), handle);
-                        match subscription_registry::get_ticker_handle(&key.symbol) {
-                            Some(e) => e,
-                            None => return,
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            symbol = %key.symbol.symbol,
-                            "subscribe_ticks failed: {e}"
-                        );
+        let entry = if let Some(e) = subscription_registry::get_ticker_handle(&key.symbol) {
+            e
+        } else {
+            let Some(router) = subscription_registry::router() else {
+                return;
+            };
+            match router.subscribe_ticks(key.symbol.clone()).await {
+                Ok(handle) => {
+                    subscription_registry::install_ticker_handle(key.symbol.clone(), handle);
+                    let Some(e) = subscription_registry::get_ticker_handle(&key.symbol) else {
                         return;
-                    }
+                    };
+                    e
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        symbol = %key.symbol.symbol,
+                        "subscribe_ticks failed: {e}"
+                    );
+                    return;
                 }
             }
         };

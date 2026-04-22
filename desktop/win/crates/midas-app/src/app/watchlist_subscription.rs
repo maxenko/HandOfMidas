@@ -45,9 +45,7 @@ impl QuoteEntry {
 
     /// Read the current snapshot under the mutex.
     pub async fn snapshot(&self) -> Quote {
-        let guard = self.inner.lock().await;
-        let q = guard.borrow().clone();
-        q
+        self.inner.lock().await.borrow().clone()
     }
 
     /// Wait for the next change on the underlying watch. Drops the
@@ -111,17 +109,17 @@ fn prune_closed(
         return;
     }
     let closed_set: std::collections::HashSet<&SymbolKey> = closed.iter().collect();
-    let mut new_entries: Vec<(SymbolKey, Arc<QuoteEntry>)> = Vec::with_capacity(entries.len());
-    let mut new_last: Vec<Option<Quote>> = Vec::with_capacity(last.len());
-    for (idx, (sym, entry)) in entries.drain(..).enumerate() {
-        if closed_set.contains(&sym) {
-            continue;
-        }
-        new_entries.push((sym, entry));
-        new_last.push(last[idx].clone());
-    }
-    *entries = new_entries;
-    *last = new_last;
+    // Rebuild both vecs index-aligned via a single `unzip` pass. Two
+    // separate `retain` calls would desync them — the first call
+    // shrinks `entries`, so by the time we retain `last` the indices
+    // no longer line up.
+    let (kept_entries, kept_last): (Vec<_>, Vec<_>) = std::mem::take(entries)
+        .into_iter()
+        .zip(std::mem::take(last))
+        .filter(|((sym, _), _)| !closed_set.contains(sym))
+        .unzip();
+    *entries = kept_entries;
+    *last = kept_last;
 }
 
 pub fn watchlist_stream_builder(
@@ -170,18 +168,12 @@ pub fn watchlist_stream_builder(
                 // consumer DecRef'd and the publisher was torn
                 // down). On `Err(Closed)` emit `QuoteResync` so the
                 // handler can re-open via `last_quote`.
-                match entry.has_changed().await {
-                    Ok(_) => {}
-                    Err(_) => {
-                        closed.push(sym.clone());
-                        continue;
-                    }
+                if entry.has_changed().await.is_err() {
+                    closed.push(sym.clone());
+                    continue;
                 }
                 let q = entry.snapshot().await;
-                let should_emit = match &last[idx] {
-                    None => true,
-                    Some(prev) => prev != &q,
-                };
+                let should_emit = last[idx].as_ref() != Some(&q);
                 if should_emit {
                     last[idx] = Some(q.clone());
                     batch.push((sym.clone(), q));

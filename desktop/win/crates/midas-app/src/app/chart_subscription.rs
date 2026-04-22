@@ -56,31 +56,30 @@ pub fn chart_stream_builder(key: &ChartSubKey) -> impl iced::futures::Stream<Ite
         // process-scoped `subscription_registry::router()` slot
         // and call `subscribe_bars` on first run. Subsequent
         // re-diffs for the same key reuse the installed handle.
-        let entry = match subscription_registry::get_chart_handle(&reg_key) {
-            Some(e) => e,
-            None => {
-                let Some(router) = subscription_registry::router() else {
-                    return;
-                };
-                match router
-                    .subscribe_bars(key.symbol.clone(), key.timeframe)
-                    .await
-                {
-                    Ok(handle) => {
-                        subscription_registry::install_chart_handle(reg_key.clone(), handle);
-                        match subscription_registry::get_chart_handle(&reg_key) {
-                            Some(e) => e,
-                            None => return,
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            chart_id = ?key.chart_id,
-                            symbol = %key.symbol.symbol,
-                            "subscribe_bars failed: {e}"
-                        );
+        let entry = if let Some(e) = subscription_registry::get_chart_handle(&reg_key) {
+            e
+        } else {
+            let Some(router) = subscription_registry::router() else {
+                return;
+            };
+            match router
+                .subscribe_bars(key.symbol.clone(), key.timeframe)
+                .await
+            {
+                Ok(handle) => {
+                    subscription_registry::install_chart_handle(reg_key.clone(), handle);
+                    let Some(e) = subscription_registry::get_chart_handle(&reg_key) else {
                         return;
-                    }
+                    };
+                    e
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        chart_id = ?key.chart_id,
+                        symbol = %key.symbol.symbol,
+                        "subscribe_bars failed: {e}"
+                    );
+                    return;
                 }
             }
         };
