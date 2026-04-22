@@ -250,6 +250,23 @@ impl MarketDataRouter {
         &*self.state.source
     }
 
+    /// Test-only accessor for the underlying provider (S8d).
+    ///
+    /// Returns the same `Arc<dyn MarketDataSource>` the router holds
+    /// internally so callers can reach the provider's
+    /// `inject_for_test(event)` method. Gated on the `test_inject`
+    /// Cargo feature (plus `cfg(test)`) so production builds of the
+    /// crate never see it — the feature is forwarded to
+    /// `midas-broker/test_inject` by Cargo so the provider-side
+    /// `inject_for_test` stays compiled in.
+    ///
+    /// Real IB sources' `inject_for_test` is a no-op; only
+    /// `SimMarketData` routes events through its hubs.
+    #[cfg(any(test, feature = "test_inject"))]
+    pub fn source_for_test(&self) -> DynMarketDataSource {
+        Arc::clone(&self.state.source)
+    }
+
     /// Memoised `resolve_contract`. Pub-crate only — used by the
     /// seam utility.
     pub(crate) async fn resolve_or_cached(

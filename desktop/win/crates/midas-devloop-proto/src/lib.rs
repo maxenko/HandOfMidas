@@ -117,6 +117,20 @@ pub enum Command {
     /// `{"type": "BracketCreated", "parent_id": "...", ...}`
     InjectBrokerEvent { event_json: serde_json::Value },
 
+    /// Synthesise a `MarketEvent` and push it through the router's
+    /// underlying provider (S8d).
+    ///
+    /// Wire shape is the externally-tagged JSON that
+    /// `midas_broker_core::market_data::MarketEvent` serialises to
+    /// — `{"Tick": {...}}`, `{"Bar": {...}}`, `{"FarmStatus": {...}}`,
+    /// etc. The harness deserialises the value into a `MarketEvent`
+    /// and calls `router.source_for_test().inject_for_test(event)`.
+    ///
+    /// Only the sim provider implements `inject_for_test`; the real
+    /// IB provider is a no-op. Requires the `test_inject` feature on
+    /// `midas-market-data`, which `dev_harness` enables transitively.
+    InjectMarketEvent { event_json: serde_json::Value },
+
     /// Open a new Orders blotter pane in the workspace. Equivalent to
     /// clicking the "Orders" toolbar button. Lets scripted journeys set
     /// up the panel without a manual click.
@@ -588,6 +602,36 @@ mod tests {
         assert!(json.contains(r#""cmd":"inject_sim_fault""#));
         assert!(json.contains(r#""type":"pacing_violation""#));
         let _back: Command = serde_json::from_str(&json).unwrap();
+    }
+
+    #[test]
+    fn inject_market_event_command_roundtrips() {
+        // Mirrors the `MarketEvent::Tick(..)` wire shape produced by
+        // `midas-broker-core`: externally-tagged JSON with the
+        // variant name as the outer key.
+        let cmd = Command::InjectMarketEvent {
+            event_json: serde_json::json!({
+                "Tick": {
+                    "symbol": {"contract_id": 265598, "symbol": "AAPL"},
+                    "req_id": 1,
+                    "kind": "Price",
+                    "tick_type": "Last",
+                    "value": {"Price": 184.5},
+                    "attrs": {},
+                    "ts": "2026-04-18T12:00:00Z"
+                }
+            }),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains(r#""cmd":"inject_market_event""#));
+        assert!(json.contains(r#""Tick""#));
+        let back: Command = serde_json::from_str(&json).unwrap();
+        match back {
+            Command::InjectMarketEvent { event_json } => {
+                assert!(event_json.get("Tick").is_some());
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 
     #[test]

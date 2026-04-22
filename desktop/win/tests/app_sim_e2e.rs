@@ -492,3 +492,61 @@ fn live_prices_appear_in_watchlist_after_launch() {
 
     expect_ok(devloop_roundtrip(app.devloop_port, DevloopCmd::ShutdownSim).unwrap());
 }
+
+// ──────────────── scenario 4: InjectMarketEvent round-trip (S8d) ──────
+
+/// Feed a synthetic `MarketEvent::Tick` through the router's
+/// provider via `DevloopCmd::InjectMarketEvent`. The response body
+/// carries the variant name — confirming the proto variant
+/// round-trips and the sim provider's `inject_for_test` was
+/// reached. Asserts the router-era inject path works.
+#[test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "spawns subprocesses; run with --ignored"
+)]
+#[cfg_attr(
+    not(target_os = "windows"),
+    ignore = "iced requires a display; Windows-primary"
+)]
+fn inject_market_event_round_trips_to_router() {
+    let sim_bin = cargo_bin("midas-ib-sim-server");
+    assert!(sim_bin.exists(), "build midas-ib-sim-server first");
+    let devloop_port = pick_port();
+    let app = spawn_app(devloop_port, &sim_bin);
+
+    // Externally-tagged JSON matching the `MarketEvent::Tick`
+    // serde shape.
+    let market_event = serde_json::json!({
+        "Tick": {
+            "symbol": {"contract_id": 265598, "symbol": "AAPL"},
+            "req_id": 1,
+            "kind": "Price",
+            "tick_type": "Last",
+            "value": {"Price": 184.25},
+            "attrs": {
+                "can_auto_execute": false,
+                "past_limit": false,
+                "pre_open": false,
+                "unreported": false,
+                "bid_past_low": false,
+                "ask_past_high": false,
+            },
+            "ts": "2026-04-18T12:00:00Z"
+        }
+    });
+    let resp = expect_ok(
+        devloop_roundtrip(
+            app.devloop_port,
+            DevloopCmd::InjectMarketEvent {
+                event_json: market_event,
+            },
+        )
+        .unwrap(),
+    );
+    let body = serde_json::to_string(&resp).unwrap();
+    assert!(
+        body.contains("\"Tick\""),
+        "expected variant 'Tick' in response body: {body}"
+    );
+}

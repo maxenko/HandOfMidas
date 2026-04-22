@@ -10,10 +10,15 @@ default = []
 # save/load, input injection. Zero cost when disabled — the `dev_harness`
 # module and the `midas-devloop-proto` / `image` / `image-compare` deps
 # are all feature-gated.
+#
+# S8d: also enables `midas-market-data/test_inject` so the harness's
+# `InjectMarketEvent` command can reach
+# `MarketDataRouter::source_for_test(..).inject_for_test(..)`.
 dev_harness = [
     "dep:midas-devloop-proto",
     "dep:image",
     "dep:image-compare",
+    "midas-market-data/test_inject",
 ]
 
 [dependencies]

@@ -24,6 +24,7 @@ pub mod idle;
 pub mod inject;
 pub mod input;
 pub mod listener;
+pub mod router_inject;
 pub mod screenshot;
 pub mod sim_child;
 pub mod variant_names;
@@ -295,6 +296,17 @@ pub fn handle_command(
                 let variant = variant_names::broker_event_variant(&event);
                 responder.ok(serde_json::json!({ "variant": variant }), cursor_now());
                 app.update(Message::BrokerEventReceived(Box::new(event)))
+            }
+            Err(e) => {
+                responder.err(ErrorKind::Internal, e.to_string(), cursor_now());
+                iced::Task::none()
+            }
+        },
+
+        Command::InjectMarketEvent { event_json } => match router_inject::apply(app, &event_json) {
+            Ok(variant) => {
+                responder.ok(serde_json::json!({ "variant": variant }), cursor_now());
+                iced::Task::none()
             }
             Err(e) => {
                 responder.err(ErrorKind::Internal, e.to_string(), cursor_now());

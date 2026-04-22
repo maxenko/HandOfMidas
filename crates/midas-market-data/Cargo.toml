@@ -8,6 +8,14 @@ name = "midas-market-data"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# S8d: exposes `MarketDataRouter::source_for_test()` so downstream
+# test harnesses (midas-app's dev_harness InjectMarketEvent path) can
+# reach the underlying provider to `inject_for_test(event)`. Forwards
+# to the matching `test_inject` feature on `midas-broker` so the trait
+# method itself stays compiled in.
+test_inject = ["midas-broker/test_inject"]
+
 [dependencies]
 midas-broker-core = { path = "../midas-broker-core" }
 # `midas-broker` is a runtime dep ONLY for the `MarketDataSource` +
