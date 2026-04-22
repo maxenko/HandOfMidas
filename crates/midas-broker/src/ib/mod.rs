@@ -1,11 +1,9 @@
-//! Slice 4 — router-era IB backend adapter.
+//! Router-era IB backend adapter.
 //!
-//! Parallel path to the legacy
-//! [`IbClient`](crate::ib_client::IbClient): this module implements the
-//! new [`MarketDataSource`](crate::MarketDataSource) and
+//! Implements the [`MarketDataSource`](crate::MarketDataSource) and
 //! [`OrderClient`](crate::OrderClient) traits directly on top of
-//! `rust-ibapi` 2.10. The legacy adapter stays in place behind the
-//! `#[deprecated]` shim until slice 9.
+//! `rust-ibapi` 2.10. Successor to the retired `IbClient` /
+//! `IbDataSource` standalone adapters.
 //!
 //! Submodule map:
 //!

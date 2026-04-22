@@ -10,7 +10,6 @@ pub mod db;
 pub mod error;
 pub mod events;
 pub mod ib;
-pub mod ib_data_source;
 pub mod ib_strings;
 pub mod market_data;
 pub mod market_data_source;
@@ -25,9 +24,9 @@ pub mod testdata;
 //
 // The router-era traits + types (`MarketDataSource`, `OrderClient`,
 // stream handles, order-event types) take the unqualified names. The
-// historical-only `market_data::MarketDataSource` trait still
-// lives behind a module path until slice 10g retires
-// `ib_data_source`.
+// historical-only `market_data::MarketDataSource` trait still lives
+// behind a module path pending a future cleanup pass — see the
+// `market_data` module docstring for the `**OPEN**` note.
 pub use config::BrokerConfig;
 pub use connection::ConnectionState;
 pub use error::BrokerError;

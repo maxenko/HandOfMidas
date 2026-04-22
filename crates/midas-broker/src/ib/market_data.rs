@@ -1,9 +1,8 @@
 //! [`IbMarketData`] — router-era IB adapter implementing
-//! [`MarketDataSource`](crate::MarketDataSource) (slice 4).
+//! [`MarketDataSource`](crate::MarketDataSource).
 //!
-//! This is a parallel path to the existing
-//! [`IbClient`](crate::ib_client::IbClient) — the legacy adapter stays
-//! in place until slice 9. The new path differs in three ways:
+//! Successor to the retired standalone `IbClient` / `IbDataSource`
+//! adapters. The path differs in three ways:
 //!
 //! 1. Object-safe `#[async_trait]` trait surface (M-1).
 //! 2. Per-subscription publisher tasks owning the rust-ibapi
