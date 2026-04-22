@@ -165,6 +165,13 @@ impl MidasApp {
                     ));
         }
 
+        // S7e: market-data subscriptions are driven by the
+        // per-consumer iced subscriptions; loading a fixture
+        // rewrites `self.charts` / `self.watchlists`, iced re-diffs
+        // `subscription()` on the next `update()`, and the new set
+        // of chart / watchlist / ticker subscriptions spawns
+        // automatically.
+
         // Kick off async data loads; `DataRestoredFromStartup` preserves
         // the camera the fixture just set.
         let load_tasks: Vec<Task<Message>> = self

@@ -42,6 +42,10 @@ impl MidasApp {
             chart.symbol_input = symbol.as_str().to_string();
         }
 
+        // S7e: per-chart subscriptions spawn on the next iced
+        // re-diff via `chart_subscriptions`; no eager reconcile
+        // needed.
+
         // 2. Lazy-create TickerState.
         self.tickers
             .entry(symbol.clone())

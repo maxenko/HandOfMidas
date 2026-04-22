@@ -119,3 +119,20 @@ pub fn remove_ticker_handle(sym: &SymbolKey) {
 pub fn get_ticker_handle(sym: &SymbolKey) -> Option<Arc<TickEntry>> {
     TICKER_REGISTRY.get(sym).map(|r| r.clone())
 }
+
+/// Global router pointer. Installed from `MidasApp::new` (Sim) or
+/// after `Message::RouterReady` (IB) so the `fn`-pointer
+/// subscription builders can resolve the router without capturing
+/// it in the closure. `OnceLock` because the router is constructed
+/// once per process and never replaced; subsequent install
+/// attempts silently no-op.
+static ROUTER: std::sync::OnceLock<Arc<midas_market_data::MarketDataRouter>> =
+    std::sync::OnceLock::new();
+
+pub fn install_router(router: Arc<midas_market_data::MarketDataRouter>) {
+    let _ = ROUTER.set(router);
+}
+
+pub fn router() -> Option<Arc<midas_market_data::MarketDataRouter>> {
+    ROUTER.get().cloned()
+}

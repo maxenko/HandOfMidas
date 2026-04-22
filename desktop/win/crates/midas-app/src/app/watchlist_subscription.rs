@@ -90,14 +90,29 @@ pub fn watchlist_stream_builder(
 ) -> impl iced::futures::Stream<Item = Message> {
     let key = key.clone();
     iced::stream::channel(256, async move |mut output| {
-        // Snapshot entries up front; symbols missing from the
-        // registry are skipped, not failed — the bind path will
-        // install them and iced will re-diff on the next frame.
-        let entries: Vec<(SymbolKey, Arc<QuoteEntry>)> = key
-            .symbols
-            .iter()
-            .filter_map(|sym| get_quote_handle(sym).map(|e| (sym.clone(), e)))
-            .collect();
+        // Lazy-subscribe missing handles via the process-scoped
+        // router slot, same pattern as `chart_stream_builder`.
+        let Some(router) = super::subscription_registry::router() else {
+            return;
+        };
+        let mut entries: Vec<(SymbolKey, Arc<QuoteEntry>)> = Vec::with_capacity(key.symbols.len());
+        for sym in &key.symbols {
+            if let Some(e) = get_quote_handle(sym) {
+                entries.push((sym.clone(), e));
+                continue;
+            }
+            match router.last_quote(sym.clone()).await {
+                Ok(handle) => {
+                    install_quote_handle(sym.clone(), handle);
+                    if let Some(e) = get_quote_handle(sym) {
+                        entries.push((sym.clone(), e));
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(symbol = %sym.symbol, "last_quote failed: {e}");
+                }
+            }
+        }
         if entries.is_empty() {
             return;
         }

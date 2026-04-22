@@ -52,9 +52,38 @@ pub fn chart_stream_builder(key: &ChartSubKey) -> impl iced::futures::Stream<Ite
             timeframe: key.timeframe,
             chart_id: key.chart_id,
         };
+        // Look up or lazy-subscribe: iced's `fn`-pointer builders
+        // can't capture the router, so we resolve it out of the
+        // process-scoped `subscription_registry::router()` slot
+        // and call `subscribe_bars` on first run. Subsequent
+        // re-diffs for the same key reuse the installed handle.
         let entry = match subscription_registry::get_chart_handle(&reg_key) {
             Some(e) => e,
-            None => return,
+            None => {
+                let Some(router) = subscription_registry::router() else {
+                    return;
+                };
+                match router
+                    .subscribe_bars(key.symbol.clone(), key.timeframe)
+                    .await
+                {
+                    Ok(handle) => {
+                        subscription_registry::install_chart_handle(reg_key.clone(), handle);
+                        match subscription_registry::get_chart_handle(&reg_key) {
+                            Some(e) => e,
+                            None => return,
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            chart_id = ?key.chart_id,
+                            symbol = %key.symbol.symbol,
+                            "subscribe_bars failed: {e}"
+                        );
+                        return;
+                    }
+                }
+            }
         };
         let mut rx = entry.resubscribe().await;
         let mut pending: Vec<Bar> = Vec::with_capacity(8);

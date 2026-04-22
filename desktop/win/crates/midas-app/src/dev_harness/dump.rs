@@ -25,13 +25,32 @@ pub struct StateProjection<'a> {
     /// (and human debuggers) can assert the sim-auto-spawn path
     /// reached Ready.
     pub broker: BrokerProjection<'a>,
-    /// Symbols with an active streaming-L1 subscription. Sorted for
-    /// determinism (the underlying `HashSet` is unordered).
-    pub active_market_subs: Vec<String>,
+    /// Router state snapshot (S7e / BR-15). Replaces the legacy
+    /// `active_market_subs` field; the router owns refcounting
+    /// natively and the app no longer tracks a diff-set.
+    pub router_state: RouterStateProjection,
     /// Watchlist projections: one entry per panel with just the
     /// fields devloop assertions need (name + symbol list + the
     /// cached `last_price` the watchlist row renders).
     pub watchlists: Vec<WatchlistProjection<'a>>,
+}
+
+/// Router state projection for the devloop dump (S7e / BR-15).
+///
+/// Sourced from `MarketDataRouter::debug_dump`; exposes the set of
+/// symbols the router is currently serving and aggregator counts
+/// so integration tests can assert subscription bookkeeping
+/// without reaching into router internals.
+#[derive(Serialize)]
+pub struct RouterStateProjection {
+    /// Whether the router has been constructed yet (`false` while
+    /// an IB connection is still handshaking).
+    pub ready: bool,
+    /// Sorted list of symbols with at least one live refcount.
+    pub subscribed_symbols: Vec<String>,
+    /// Count of live symbol hubs — matches
+    /// `router.state.per_symbol.len()`.
+    pub active_symbol_count: usize,
 }
 
 #[derive(Serialize)]
@@ -129,12 +148,25 @@ pub fn build(app: &MidasApp) -> serde_json::Value {
         sim_tws_port: app.sim_child.as_ref().map(|s| s.tws_port),
     };
 
-    let mut active_market_subs: Vec<String> = app
-        .active_market_subs
-        .iter()
-        .map(|k| k.as_str().to_owned())
-        .collect();
-    active_market_subs.sort();
+    let router_state = if let Some(router) = app.router.as_ref() {
+        // `debug_dump` is async; the devloop uses a blocking shim
+        // since this projection is built from an iced `update()`
+        // context where spawning a runtime is cheap.
+        let debug = futures::executor::block_on(router.debug_dump());
+        let mut syms: Vec<String> = debug.iter().map(|d| d.symbol.symbol.clone()).collect();
+        syms.sort();
+        RouterStateProjection {
+            ready: true,
+            active_symbol_count: debug.len(),
+            subscribed_symbols: syms,
+        }
+    } else {
+        RouterStateProjection {
+            ready: false,
+            active_symbol_count: 0,
+            subscribed_symbols: Vec::new(),
+        }
+    };
 
     let watchlists: Vec<WatchlistProjection<'_>> = app
         .watchlists
@@ -168,7 +200,7 @@ pub fn build(app: &MidasApp) -> serde_json::Value {
         account_panels,
         recent_symbols,
         broker,
-        active_market_subs,
+        router_state,
         watchlists,
     };
 

@@ -2039,11 +2039,10 @@ impl MidasApp {
                         // just chart selections.
                         self.push_recent_symbol(&symbol);
                         let task = self.load_market_snapshot(&symbol);
-                        // Fire a SubscribeMarketData for this symbol via
-                        // `ensure_market_subscriptions`; idempotent, so
-                        // no-op if the user re-adds an already-subscribed
-                        // symbol across watchlists.
-                        self.ensure_market_subscriptions();
+                        // S7e: router-driven subscriptions spawn per-
+                        // watchlist via `watchlist_subscription()` on
+                        // the next iced re-diff; no eager reconciliation
+                        // needed.
                         return Task::batch([self.flush_config(), task]);
                     }
                 }
@@ -2069,11 +2068,10 @@ impl MidasApp {
                         self.market_cache.remove(&sym_key);
                         self.tickers.remove(&sym_key);
                         self.ticker_persist.forget(&sym_key);
-                        // Drop the streaming L1 sub last; the helper
-                        // re-checks `watchlists` (which is why we
-                        // call it after `wl.remove_ticker`) before
-                        // issuing the cancel.
-                        self.drop_market_subscription(&sym_key);
+                        // S7e: router-side cleanup happens through
+                        // the subscription handles dropping when iced
+                        // stops issuing the matching subscription on
+                        // the next re-diff.
                     }
                     return self.flush_config();
                 }
@@ -2655,11 +2653,8 @@ impl MidasApp {
                         if let Some(chart) = self.floating_charts.get_mut(&wid) {
                             crate::app::apply_symbol_to_panel(chart, &symbol, sym_key);
                         }
-                        // Floating charts don't route through
-                        // `bind_chart_to_symbol`, so reconcile streaming
-                        // subs explicitly — the newly-bound symbol may
-                        // not be in any watchlist.
-                        self.ensure_market_subscriptions();
+                        // S7e: per-chart subscriptions spawn on the
+                        // next iced re-diff.
                         self.load_floating_chart_async(wid, &symbol, tf)
                     }
                     (_, None) => Task::none(),
@@ -3697,113 +3692,14 @@ impl MidasApp {
                         // here.
                         self.rebuild_account_positions_caches();
                     }
-                    // Streaming L1 tick — merge into the market-data
-                    // cache so the watchlist row updates on the next
-                    // frame. Partial-merge semantics: each field on
-                    // the event is `Option`, and `None` means "no
-                    // update, keep the prior value". This matters for
-                    // the IB wire format where a single tick message
-                    // carries a subset of (bid, ask, last, volume) —
-                    // we'd clobber fresh data otherwise.
-                    //
-                    // Coalescing is implicit: the broadcast channel
-                    // already batches and iced only renders after the
-                    // full update batch drains, so the UI naturally
-                    // sees at most one rebuild per frame even under
-                    // high tick rates. If profiling later shows this
-                    // over-subscribes iced's update loop, the fix is
-                    // a dedicated coalesced subscription mirroring
-                    // `positions_subscription`.
-                    BrokerEvent::Tick {
-                        symbol,
-                        bid,
-                        ask,
-                        last,
-                        volume: _,
-                        timestamp: _,
-                    } => {
-                        let key = crate::annotation_store::SymbolKey::new(&symbol.symbol);
-                        // Prefer `last` for the row's headline price;
-                        // fall back to mid-quote if the sim hasn't
-                        // emitted a trade yet. This matches what a
-                        // real broker GUI does on L1 — users expect
-                        // "price" to move with trades, not just
-                        // quote changes.
-                        let new_price = last.or_else(|| match (bid, ask) {
-                            (Some(b), Some(a)) => Some((b + a) / 2.0),
-                            _ => None,
-                        });
-                        // Track the GATR we merged into the cache so
-                        // we can dispatch it downstream without
-                        // re-reading the cache entry (which we just
-                        // moved into `insert`).
-                        let mut merged_gatr: Option<f64> = None;
-                        if new_price.is_some() {
-                            let entry = self.market_cache.get(&key).cloned().unwrap_or_default();
-                            let mut merged = entry.clone();
-                            if let Some(price) = new_price {
-                                merged.last_price = Some(price);
-                                // Recompute change% if we have a
-                                // prior close; otherwise leave the
-                                // existing value so we don't regress
-                                // to `None`.
-                                if let Some(prev) = merged.prev_close {
-                                    if prev != 0.0 {
-                                        merged.change_pct = Some(((price - prev) / prev) * 100.0);
-                                    }
-                                }
-                            }
-                            merged_gatr = merged.gatr_abs;
-                            self.market_cache.insert(key.clone(), merged);
-                        }
-                        // Fan the new price out to every surface that
-                        // derives from `last_price`:
-                        //   (a) TickerState — drives bracket labels,
-                        //       GATR auto-snap, decorator badges.
-                        //   (b) Every docked + floating chart's
-                        //       CandleBuffer — folds the tick into
-                        //       the current candle so the chart
-                        //       visibly drifts with the market.
-                        if let Some(price) = new_price {
-                            // (a) TickerState. Prefer the cached GATR
-                            // merged above; if none is available yet
-                            // (snapshot still loading) fall back to
-                            // 0.5% of price — same heuristic as the
-                            // snapshot-ready path in
-                            // `Message::MarketSnapshotReceived`.
-                            let gatr_val = merged_gatr.unwrap_or(price * 0.005);
-                            let _ = self.update(Message::Ticker(
-                                key.clone(),
-                                crate::ticker_state::TickerMsg::UpdateMarketData {
-                                    last_price: price,
-                                    gatr_abs: Some(gatr_val),
-                                },
-                            ));
-                            // (b) Live candle fold. `Arc::make_mut`
-                            // clones only when the Arc is actually
-                            // shared; when the app owns the only
-                            // handle it mutates in place. The chart
-                            // snapshot rebuild in `view()` re-wraps
-                            // the new Arc so the renderer picks up
-                            // the updated version on the next frame.
-                            for chart in self.charts.values_mut() {
-                                if chart.bound_symbol.as_ref() == Some(&key) {
-                                    if let Some(arc) = chart.data.as_mut() {
-                                        std::sync::Arc::make_mut(arc).apply_tick(price, 0);
-                                        chart.chart_state.dirty.mark_data();
-                                    }
-                                }
-                            }
-                            for chart in self.floating_charts.values_mut() {
-                                if chart.bound_symbol.as_ref() == Some(&key) {
-                                    if let Some(arc) = chart.data.as_mut() {
-                                        std::sync::Arc::make_mut(arc).apply_tick(price, 0);
-                                        chart.chart_state.dirty.mark_data();
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    // S7e: the `BrokerEvent::Tick` arm was deleted.
+                    // Streaming L1 now flows through the router's
+                    // `watchlist_subscription` (watch-based quotes →
+                    // `Message::QuoteBatch` → market_cache update),
+                    // `ticker_subscription` (tick-driven
+                    // `TickerMsg::UpdateMarketData`), and
+                    // `chart_subscriptions` (aggregator bars →
+                    // `Message::ChartBarBatch` → `apply_bar`).
                     other => {
                         tracing::trace!("Unhandled broker event: {other:?}");
                     }
@@ -3872,17 +3768,12 @@ impl MidasApp {
                 for panel in self.account_panels.values_mut() {
                     panel.apply_connection_change(now_connected);
                 }
-                // When the connection transitions into the healthy
-                // range, auto-subscribe every watchlist symbol that
-                // isn't already subscribed. This covers three cases
-                // with one call: cold start (the sim wasn't ready
-                // when the watchlist restored from config), user
-                // reconnects after a network blip, and user flips
-                // backends at runtime. Unsubscribes on Disconnected
-                // happen via the existing drop path in the engine.
-                if now_connected {
-                    self.ensure_market_subscriptions();
-                }
+                // S7e: router-driven subscriptions are independent
+                // of the legacy broker-engine connection state. They
+                // spawn/despawn automatically via iced's
+                // subscription re-diff loop based on which symbols
+                // appear in watchlists / charts.
+                let _ = now_connected;
                 Task::none()
             }
 
@@ -3901,16 +3792,9 @@ impl MidasApp {
                     self.sim_child = Some(handle);
                 }
                 self.status_message = format!("Sim ready on port {tws_port}");
-                // The broker engine was booted with the Test data
-                // source so the UI had a working backend during the
-                // spawn window. A follow-up slice swaps to a real
-                // ib-bridge connection here; for v1 we keep the test
-                // broker since its semantics match the sim's for
-                // every code path the watchlist + order flow touches,
-                // and hot-swapping broker handles would require a
-                // full re-subscription dance. The live-tick wiring
-                // (Wire 3) works against the test broker today — see
-                // `ensure_market_subscriptions`.
+                // S7e: streaming L1 is now driven by the router's
+                // per-consumer subscriptions, independent of the
+                // test broker / sim-bridge swap.
                 Task::none()
             }
 
@@ -3923,139 +3807,6 @@ impl MidasApp {
             }
 
             _ => unreachable!(),
-        }
-    }
-
-    /// Reconcile market-data subscriptions with the union of every
-    /// *streaming consumer* in the current workspace:
-    ///
-    /// - every watchlist ticker, and
-    /// - every docked chart's `bound_symbol`, and
-    /// - every floating chart's `bound_symbol`.
-    ///
-    /// Any symbol in the union that isn't already subscribed gets a
-    /// `BrokerCommand::SubscribeMarketData`; any symbol currently in
-    /// `self.active_market_subs` that has dropped out of the union gets
-    /// a `BrokerCommand::UnsubscribeMarketData`. Idempotent — safe to
-    /// call on every connection transition, workspace hydration,
-    /// chart-bind, and watchlist-edit.
-    ///
-    /// Subscriptions are keyed by `SymbolKey` (trimmed + uppercased)
-    /// so the broker's normalisation matches the cache's; if we didn't
-    /// normalise both sides we'd end up with duplicate subscriptions
-    /// for `"AAPL"` and `"aapl"`.
-    pub(crate) fn ensure_market_subscriptions(&mut self) {
-        let Some(ref bridge) = self.broker_bridge else {
-            return;
-        };
-        // Union: every watchlist ticker + every docked + floating chart
-        // with a `bound_symbol`. `SymbolKey` normalisation collapses
-        // case + whitespace variants so the same symbol in two
-        // watchlists (or a watchlist + a chart) produces one entry.
-        let mut want: std::collections::HashSet<crate::annotation_store::SymbolKey> = self
-            .watchlists
-            .values()
-            .flat_map(|wl| {
-                wl.tickers
-                    .iter()
-                    .map(|t| crate::annotation_store::SymbolKey::new(&t.symbol))
-            })
-            .collect();
-        for chart in self.charts.values() {
-            if let Some(ref sym) = chart.bound_symbol {
-                want.insert(sym.clone());
-            }
-        }
-        for chart in self.floating_charts.values() {
-            if let Some(ref sym) = chart.bound_symbol {
-                want.insert(sym.clone());
-            }
-        }
-
-        // Compute both diffs in a single pass so a chart-close that
-        // also adds a new watchlist ticker produces exactly one
-        // subscribe and one unsubscribe (rather than a spurious
-        // subscribe-then-unsubscribe on a symbol unaffected by the
-        // edit).
-        let to_subscribe: Vec<crate::annotation_store::SymbolKey> = want
-            .iter()
-            .filter(|k| !self.active_market_subs.contains(*k))
-            .cloned()
-            .collect();
-        let to_unsubscribe: Vec<crate::annotation_store::SymbolKey> = self
-            .active_market_subs
-            .iter()
-            .filter(|k| !want.contains(*k))
-            .cloned()
-            .collect();
-
-        for key in to_subscribe {
-            let cmd = midas_broker::BrokerCommand::SubscribeMarketData {
-                symbol: key.as_str().to_owned(),
-                // con_id 0 lets the broker look it up from the
-                // symbol on demand — all code paths inside both
-                // TestBroker and IbClient accept 0 as a sentinel.
-                con_id: 0,
-            };
-            match bridge.send_command(cmd) {
-                Ok(()) => {
-                    tracing::debug!("market: subscribed to market data for {}", key.as_str());
-                    self.active_market_subs.insert(key);
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "market: SubscribeMarketData for {} failed: {e}",
-                        key.as_str()
-                    );
-                }
-            }
-        }
-
-        for key in to_unsubscribe {
-            let cmd = midas_broker::BrokerCommand::UnsubscribeMarketData {
-                symbol: key.as_str().to_owned(),
-            };
-            match bridge.send_command(cmd) {
-                Ok(()) => {
-                    tracing::debug!("market: unsubscribed from market data for {}", key.as_str());
-                    self.active_market_subs.remove(&key);
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "market: UnsubscribeMarketData for {} failed: {e}",
-                        key.as_str()
-                    );
-                }
-            }
-        }
-    }
-
-    /// Unsubscribe from a single symbol, if it was subscribed. Called
-    /// from the watchlist-remove and watchlist-close paths.
-    pub(crate) fn drop_market_subscription(&mut self, key: &crate::annotation_store::SymbolKey) {
-        // Don't drop the sub if any other watchlist still carries
-        // the symbol — the charts panel can also request streaming
-        // data in a future slice and we'd yank the rug.
-        let still_watched = self
-            .watchlists
-            .values()
-            .any(|wl| wl.has_ticker(key.as_str()));
-        if still_watched {
-            return;
-        }
-        if !self.active_market_subs.remove(key) {
-            return;
-        }
-        if let Some(ref bridge) = self.broker_bridge {
-            let cmd = midas_broker::BrokerCommand::UnsubscribeMarketData {
-                symbol: key.as_str().to_owned(),
-            };
-            if let Err(e) = bridge.send_command(cmd) {
-                tracing::warn!(
-                    "watchlist: UnsubscribeMarketData for {} failed: {e}",
-                    key.as_str()
-                );
-            }
         }
     }
 }
@@ -4538,12 +4289,9 @@ impl MidasApp {
                 }
             }
         }
-        // Floating charts don't route through `bind_chart_to_symbol`
-        // so we reconcile market-data subs once, at the end of the
-        // loop, for the floating half.
-        if touched_floating {
-            self.ensure_market_subscriptions();
-        }
+        // S7e: per-chart subscriptions spawn on the next iced
+        // re-diff.
+        let _ = touched_floating;
 
         let order_targets: Vec<OrderPanelId> = find_link_targets(
             source_link,

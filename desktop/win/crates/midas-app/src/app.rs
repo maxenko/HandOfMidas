@@ -461,25 +461,6 @@ pub struct MidasApp {
     /// keep the struct alive so `to_config` writes the same value
     /// back and hand-edited TOML survives `cargo run` cycles.
     pub broker_cfg: midas_core::config::BrokerConnectionConfig,
-    /// Symbols with an active streaming-L1 subscription through the
-    /// broker bridge.
-    ///
-    /// Populated when a watchlist adds a symbol and
-    /// `broker_bridge.send_command(SubscribeMarketData { .. })`
-    /// returns Ok. Emptied on symbol-remove, watchlist-close, or
-    /// broker-disconnect. `HashSet` because `SymbolKey` implements
-    /// `Hash` but not `Ord` — the few call-sites that need
-    /// deterministic order (just the devloop `DumpState` projection)
-    /// sort explicitly.
-    ///
-    /// Retired as of S7e — the per-consumer router subscriptions
-    /// (`chart_subscriptions`, `watchlist_subscription`,
-    /// `ticker_subscription`) own refcounting natively. The field and
-    /// the `ensure_market_subscriptions` / `drop_market_subscription`
-    /// helpers that drove it disappear alongside the legacy
-    /// `BrokerEvent::Tick` match arm in S7e.
-    pub active_market_subs: std::collections::HashSet<crate::annotation_store::SymbolKey>,
-
     // ── Router refactor (S7) ──────────────────────────────────────
     /// Market-data router. `None` while an IB connection is still
     /// being set up (NB-4 / NB-5); every subscription closure guards
@@ -2016,6 +1997,40 @@ impl MidasApp {
             broker_label
         );
 
+        // Router construction (S7e). For the Sim backend the
+        // `SimMarketData` + `SimOrderClient` pair is synchronous, so
+        // we can build the router inline and hand it to the app's
+        // subscription closures on first frame. The LivePaper / Live
+        // paths still leave the router as `None` at startup; a
+        // follow-up slice wires an async `Task::perform` that
+        // delivers `Message::RouterReady` after the IB handshake
+        // settles.
+        let (router, router_order_client) = match broker_backend {
+            midas_core::config::BrokerBackend::Sim => {
+                use midas_broker::sim::{SimConfig, SimMarketData, SimOrderClient};
+                let sim_cfg = SimConfig::default();
+                let sim_md = SimMarketData::new(sim_cfg.market_data.clone());
+                let sim_order = SimOrderClient::new(sim_cfg.orders.clone(), Some(sim_md.clone()));
+                let router = midas_market_data::MarketDataRouter::new(
+                    sim_md as std::sync::Arc<dyn midas_broker::MarketDataSource>,
+                );
+                let order_client: std::sync::Arc<dyn midas_broker::OrderClient> = sim_order;
+                (Some(router), Some(order_client))
+            }
+            _ => (None, None),
+        };
+        tracing::info!(
+            "router: constructed={}, order_client={}",
+            router.is_some(),
+            router_order_client.is_some(),
+        );
+        // Install the router in the subscription-registry's
+        // `OnceLock` so the `fn`-pointer stream builders can
+        // resolve it without capturing.
+        if let Some(ref r) = router {
+            crate::app::subscription_registry::install_router(r.clone());
+        }
+
         let mut app = Self {
             charts,
             workspace,
@@ -2088,15 +2103,8 @@ impl MidasApp {
             ticker_dispatch_active: false,
             sim_child: None,
             broker_cfg: config.broker.clone(),
-            active_market_subs: std::collections::HashSet::new(),
-            // S7a: router fields land as `None`; the Sim / IB
-            // construction path in S7b+ populates them either
-            // synchronously (Sim) or via `Message::RouterReady`
-            // (IB). Until they're `Some`, every router-driven
-            // subscription closure short-circuits to
-            // `Subscription::none()`.
-            router: None,
-            router_order_client: None,
+            router,
+            router_order_client,
             resync_throttle: std::collections::HashMap::new(),
         };
 
@@ -2220,15 +2228,12 @@ impl MidasApp {
             }
         }
 
-        // Workspace hydration is now complete — charts, floating
-        // charts, and watchlists all land synchronously in
-        // `MidasApp::new`. Reconcile streaming subscriptions once here
-        // so chart-bound symbols that aren't in any watchlist start
-        // receiving ticks immediately, without waiting for the
-        // synthetic 250 ms `Ready` transition (which also calls into
-        // the helper but races with any startup path that might want
-        // to consume prices earlier).
-        app.ensure_market_subscriptions();
+        // S7e: market-data subscriptions are now driven by the
+        // per-consumer iced subscriptions (`chart_subscriptions`,
+        // `watchlist_subscription`, `ticker_subscription`). Each
+        // spawns itself when the corresponding symbol surfaces and
+        // the router-backed `subscription_registry::router()` is
+        // available. No eager reconciliation needed.
 
         // Async-load data for all restored charts that have a symbol.
         let mut load_tasks: Vec<Task<Message>> = Vec::new();
@@ -2324,42 +2329,21 @@ impl MidasApp {
             Task::none()
         };
 
-        // Fire a synthetic "Ready" state-change a beat after app start
-        // so the status-bar transitions from "Connecting" even though
-        // the broker engine's `watch<ConnectionState>` doesn't move
-        // past `Disconnected` for the Test data source. This covers
-        // the pre-existing engine limitation (`check_reconnect` only
-        // transitions state for `DataSourceConfig::Live`) without
-        // touching the engine. The 250ms delay gives the
-        // `broker_event_stream` subscription time to activate so it
-        // can observe the real `BrokerEvent::Connected` event too —
-        // if that arrives first, the `BrokerConnectionChanged`
-        // handler is idempotent (last-write-wins on the same value).
-        let initial_conn_task = if broker_bridge.is_some() {
-            Task::perform(
-                async {
-                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                },
-                |_| Message::BrokerConnectionChanged("Ready".to_string()),
-            )
-        } else {
-            Task::none()
-        };
+        // S7e: the 250 ms synthetic `BrokerConnectionChanged(Ready)`
+        // hack is deleted. The router's own
+        // `ConnectionState` watch dispatches the real transition
+        // natively — the sim source reaches `Ready` immediately on
+        // construction, and the IB source moves through
+        // `Connecting → Connected → Ready` driven by the IB
+        // handshake.
 
         let startup_task = if load_tasks.is_empty() {
-            Task::batch([
-                open_task,
-                watchlist_task,
-                thumbnail_task,
-                sim_spawn_task,
-                initial_conn_task,
-            ])
+            Task::batch([open_task, watchlist_task, thumbnail_task, sim_spawn_task])
         } else {
             load_tasks.push(open_task);
             load_tasks.push(watchlist_task);
             load_tasks.push(thumbnail_task);
             load_tasks.push(sim_spawn_task);
-            load_tasks.push(initial_conn_task);
             Task::batch(load_tasks)
         };
 
@@ -2982,13 +2966,10 @@ impl MidasApp {
             }
             tasks.push(self.load_floating_chart_async(wid, &symbol, tf));
         }
-        // Floating-chart bind doesn't go through `bind_chart_to_symbol`,
-        // so reconcile market-data subs here too. The docked path is
-        // already covered because `load_symbol_for_chart` re-binds
-        // through the helper which calls `ensure_market_subscriptions`.
-        if had_floating_targets {
-            self.ensure_market_subscriptions();
-        }
+        // S7e: router-driven subscriptions spawn per-chart in
+        // `chart_subscriptions` on the next iced re-diff; no eager
+        // reconciliation needed.
+        let _ = had_floating_targets;
 
         // Order panels — route through handle_order_panel_symbol_change
         // for bracket lifecycle (cancel old, create new), then bind.
