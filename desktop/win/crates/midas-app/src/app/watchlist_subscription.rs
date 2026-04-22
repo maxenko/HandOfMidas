@@ -17,9 +17,8 @@
 
 #![allow(dead_code)]
 
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
-use dashmap::DashMap;
 use iced::futures::SinkExt;
 use midas_broker_core::market_data::Quote;
 use midas_broker_core::SymbolKey;
@@ -70,23 +69,23 @@ impl QuoteEntry {
     }
 }
 
-/// Global watchlist quote registry. Keyed on broker-core
-/// `SymbolKey` (wire form). Entries are inserted when the app first
-/// binds the router + a watchlist symbol; removed when the last
-/// watchlist panel drops the symbol.
-pub static WATCHLIST_REGISTRY: LazyLock<DashMap<SymbolKey, Arc<QuoteEntry>>> =
-    LazyLock::new(DashMap::new);
-
+/// Install a quote handle into the process-scoped
+/// [`super::subscription_context::SubscriptionContext`]. No-op if the
+/// context hasn't been installed yet.
 pub fn install_quote_handle(sym: SymbolKey, handle: QuoteHandle) {
-    WATCHLIST_REGISTRY.insert(sym, Arc::new(QuoteEntry::new(handle)));
+    if let Some(ctx) = super::subscription_context::current() {
+        ctx.watchlist.insert(sym, Arc::new(QuoteEntry::new(handle)));
+    }
 }
 
 pub fn remove_quote_handle(sym: &SymbolKey) {
-    WATCHLIST_REGISTRY.remove(sym);
+    if let Some(ctx) = super::subscription_context::current() {
+        ctx.watchlist.remove(sym);
+    }
 }
 
 pub fn get_quote_handle(sym: &SymbolKey) -> Option<Arc<QuoteEntry>> {
-    WATCHLIST_REGISTRY.get(sym).map(|r| r.clone())
+    super::subscription_context::current().and_then(|ctx| ctx.watchlist.get(sym).map(|r| r.clone()))
 }
 
 /// Hashable key for `Subscription::run_with`. M-7: sort the

@@ -11,6 +11,7 @@ mod chart_subscription;
 mod fixture;
 mod handlers;
 mod persistence;
+mod subscription_context;
 mod subscription_helpers;
 mod subscription_registry;
 mod subscription_stream;

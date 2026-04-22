@@ -3,6 +3,11 @@
 // the actual bind call-sites land in S7b (charts) and S7d (ticker
 // states). Suppressing dead_code here keeps the S7a commit clean
 // without hacking a feature flag onto every identifier.
+//
+// Audit P1 refactor 3: the four previously-per-module statics
+// (CHART_REGISTRY, TICKER_REGISTRY, WATCHLIST_REGISTRY, ROUTER)
+// moved behind a single `SubscriptionContext`. The free functions
+// below remain as thin shims so call sites don't churn.
 #![allow(dead_code)]
 
 //! Keyed registry of live router subscription handles.
@@ -11,19 +16,19 @@
 //! so the per-instance `SubscriptionHandle<Bar>` / `SubscriptionHandle<Tick>`
 //! returned from the router cannot be captured directly. Instead, the
 //! app subscribe path (S7b: chart bind; S7d: ticker activate) parks
-//! the handle in a static registry keyed by a hashable identifier,
-//! and the builder function looks it up inside the closure.
+//! the handle in the process-scoped [`SubscriptionContext`] keyed by
+//! a hashable identifier, and the builder function looks it up inside
+//! the closure.
 //!
-//! The handle lives behind an `Arc<Mutex<_>>` so the registry keeps
+//! The handle lives behind an `Arc<Mutex<_>>` so the context keeps
 //! the guard alive for the lifetime of the keyed entry while each
 //! subscription-stream invocation calls `resubscribe()` to obtain a
 //! fresh `broadcast::Receiver`. Dropping the entry from the registry
 //! drops the `SubscriptionHandle`, which in turn `DecRef`s upstream
 //! through the router's RAII guard.
 
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
-use dashmap::DashMap;
 use midas_broker_core::market_data::{Bar, Tick};
 use midas_broker_core::{SymbolKey, Timeframe};
 use midas_core::ChartId;
@@ -79,23 +84,20 @@ impl TickEntry {
     }
 }
 
-/// Global bar-subscription registry.
-pub static CHART_REGISTRY: LazyLock<DashMap<ChartKey, Arc<BarEntry>>> = LazyLock::new(DashMap::new);
-
-/// Global tick-subscription registry.
-pub static TICKER_REGISTRY: LazyLock<DashMap<SymbolKey, Arc<TickEntry>>> =
-    LazyLock::new(DashMap::new);
-
-/// Install a chart bar handle into the registry. Replaces any
+/// Install a chart bar handle into the context. Replaces any
 /// previous entry for the same key, dropping its guard.
 pub fn install_chart_handle(key: ChartKey, handle: SubscriptionHandle<Bar>) {
-    CHART_REGISTRY.insert(key, Arc::new(BarEntry::new(handle)));
+    if let Some(ctx) = super::subscription_context::current() {
+        ctx.charts.insert(key, Arc::new(BarEntry::new(handle)));
+    }
 }
 
 /// Remove a chart bar handle — called from the chart-close and
 /// symbol/tf switch paths. Dropping the entry `DecRef`s upstream.
 pub fn remove_chart_handle(key: &ChartKey) {
-    CHART_REGISTRY.remove(key);
+    if let Some(ctx) = super::subscription_context::current() {
+        ctx.charts.remove(key);
+    }
 }
 
 /// Remove every chart bar handle bound to `chart_id`, regardless of
@@ -104,46 +106,47 @@ pub fn remove_chart_handle(key: &ChartKey) {
 /// its lifetime. Each removed entry drops its `SubscriptionHandle`
 /// which `DecRef`s upstream through the router's RAII guard.
 pub fn remove_chart_handles_for_chart(chart_id: ChartId) {
-    CHART_REGISTRY.retain(|k, _| k.chart_id != chart_id);
+    if let Some(ctx) = super::subscription_context::current() {
+        ctx.charts.retain(|k, _| k.chart_id != chart_id);
+    }
 }
 
 /// Look up a chart bar handle (shared-ref to the entry, not a clone
 /// of the inner handle — the entry owns the guard).
 pub fn get_chart_handle(key: &ChartKey) -> Option<Arc<BarEntry>> {
-    CHART_REGISTRY.get(key).map(|r| r.clone())
+    super::subscription_context::current().and_then(|ctx| ctx.charts.get(key).map(|r| r.clone()))
 }
 
-/// Install a ticker tick handle into the registry.
+/// Install a ticker tick handle into the context.
 pub fn install_ticker_handle(sym: SymbolKey, handle: SubscriptionHandle<Tick>) {
-    TICKER_REGISTRY.insert(sym, Arc::new(TickEntry::new(handle)));
+    if let Some(ctx) = super::subscription_context::current() {
+        ctx.tickers.insert(sym, Arc::new(TickEntry::new(handle)));
+    }
 }
 
 /// Remove a ticker tick handle — called when the last chart /
 /// ticker-state consumer for a symbol goes away.
 pub fn remove_ticker_handle(sym: &SymbolKey) {
-    TICKER_REGISTRY.remove(sym);
+    if let Some(ctx) = super::subscription_context::current() {
+        ctx.tickers.remove(sym);
+    }
 }
 
 /// Look up a ticker tick handle.
 pub fn get_ticker_handle(sym: &SymbolKey) -> Option<Arc<TickEntry>> {
-    TICKER_REGISTRY.get(sym).map(|r| r.clone())
+    super::subscription_context::current().and_then(|ctx| ctx.tickers.get(sym).map(|r| r.clone()))
 }
 
-/// Global router pointer. Installed from `MidasApp::new` (Sim) or
-/// after `Message::RouterReady` (IB) so the `fn`-pointer
-/// subscription builders can resolve the router without capturing
-/// it in the closure. `OnceLock` because the router is constructed
-/// once per process and never replaced; subsequent install
-/// attempts silently no-op.
-static ROUTER: std::sync::OnceLock<Arc<midas_market_data::MarketDataRouter>> =
-    std::sync::OnceLock::new();
-
+/// Install the process-scoped router inside a fresh
+/// [`SubscriptionContext`]. First call wins.
 pub fn install_router(router: Arc<midas_market_data::MarketDataRouter>) {
-    let _ = ROUTER.set(router);
+    super::subscription_context::install(router);
 }
 
+/// Accessor for the process-scoped router, if a context has been
+/// installed. Defers to [`super::subscription_context::router`].
 pub fn router() -> Option<Arc<midas_market_data::MarketDataRouter>> {
-    ROUTER.get().cloned()
+    super::subscription_context::router()
 }
 
 #[cfg(test)]
@@ -194,11 +197,24 @@ mod tests {
         MarketDataRouter::new(src)
     }
 
+    /// Install the shared context once for the test process. The
+    /// `OnceLock` accepts only the first router, so every test in
+    /// this module shares the same context; each test keys its
+    /// `SymbolKey`s with a unique suffix so they can't collide.
+    fn ensure_ctx() -> Arc<MarketDataRouter> {
+        if let Some(ctx) = super::super::subscription_context::current() {
+            return ctx.router.clone();
+        }
+        let router = build_test_router();
+        super::super::subscription_context::install(router.clone());
+        router
+    }
+
     #[test]
     fn remove_chart_handles_for_chart_evicts_every_entry_for_that_chart() {
         let rt = Runtime::new().expect("tokio rt");
         rt.block_on(async {
-            let router = build_test_router();
+            let router = ensure_ctx();
             let chart_id = ChartId::new(9_001);
             let other_id = ChartId::new(9_002);
             let aapl = midas_broker_core::SymbolKey {
@@ -272,7 +288,7 @@ mod tests {
         // install-then-evict-then-install.
         let rt = Runtime::new().expect("tokio rt");
         rt.block_on(async {
-            let router = build_test_router();
+            let router = ensure_ctx();
             let chart_id = ChartId::new(9_101);
             let aapl = midas_broker_core::SymbolKey {
                 contract_id: 0,
@@ -308,7 +324,9 @@ mod tests {
                 make_bar_handle(&router, "MSFT_BIND_T1", Timeframe::M1).await,
             );
 
-            let live = CHART_REGISTRY
+            let ctx = super::super::subscription_context::current().expect("ctx installed");
+            let live = ctx
+                .charts
                 .iter()
                 .filter(|r| r.key().chart_id == chart_id)
                 .count();
