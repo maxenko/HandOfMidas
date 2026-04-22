@@ -15,6 +15,7 @@ mod subscription_helpers;
 mod subscription_registry;
 mod ticker_wiring;
 mod views;
+mod watchlist_subscription;
 
 #[cfg(feature = "dev_harness")]
 pub use fixture::FixtureError;

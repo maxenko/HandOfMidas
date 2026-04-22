@@ -4130,6 +4130,44 @@ impl MidasApp {
             iced::Subscription::batch(subs)
         }
     }
+
+    /// Aggregated watchlist subscription (S7c).
+    ///
+    /// One `iced::Subscription` covering the union of every open
+    /// watchlist's ticker symbols, keyed on the *sorted* symbol
+    /// list (M-7) so the subscription identity stays stable across
+    /// re-renders that don't change the symbol set. The stream
+    /// polls each symbol's `QuoteHandle` at 50 ms and batches
+    /// changed quotes into `Message::QuoteBatch`.
+    ///
+    /// As with `chart_subscriptions`, returns
+    /// `Subscription::none()` while the router is absent — the
+    /// registry only becomes populated after the router lands.
+    pub(crate) fn watchlist_subscription(&self) -> iced::Subscription<Message> {
+        let Some(_router) = self.router.as_ref() else {
+            return iced::Subscription::none();
+        };
+        let mut symbols: std::collections::HashSet<midas_broker_core::SymbolKey> =
+            std::collections::HashSet::new();
+        for wl in self.watchlists.values() {
+            for t in &wl.tickers {
+                symbols.insert(midas_broker_core::SymbolKey {
+                    contract_id: 0,
+                    symbol: t.symbol.clone(),
+                });
+            }
+        }
+        let mut symbols: Vec<midas_broker_core::SymbolKey> = symbols.into_iter().collect();
+        symbols.sort();
+        if symbols.is_empty() {
+            return iced::Subscription::none();
+        }
+        let key = crate::app::watchlist_subscription::WatchlistSubKey { symbols };
+        iced::Subscription::run_with(
+            key,
+            crate::app::watchlist_subscription::watchlist_stream_builder,
+        )
+    }
 }
 
 /// Map the app's `midas_core::Timeframe` to the broker-core
@@ -4265,12 +4303,31 @@ impl MidasApp {
                 Task::none()
             }
             Message::QuoteBatch(batch) => {
-                // S7c wires the real fold through `market_cache`.
-                // S7a / S7b leave the legacy BrokerEvent::Tick path
-                // as the authoritative price source so the UI
-                // doesn't regress while the router subscription is
-                // being wired.
-                let _ = batch;
+                // Fold each (symbol, quote) into market_cache.
+                // Prefer `last` for the row's headline price; fall
+                // back to mid-quote if the broker hasn't emitted a
+                // trade yet — same rule as the legacy
+                // `BrokerEvent::Tick` arm so the UI behaves
+                // identically regardless of which path drove the
+                // update.
+                for (sym, quote) in &batch {
+                    let key = crate::annotation_store::SymbolKey::new(&sym.symbol);
+                    let new_price = quote.last.or_else(|| match (quote.bid, quote.ask) {
+                        (Some(b), Some(a)) => Some((b + a) / 2.0),
+                        _ => None,
+                    });
+                    if let Some(price) = new_price {
+                        let entry = self.market_cache.get(&key).cloned().unwrap_or_default();
+                        let mut merged = entry;
+                        merged.last_price = Some(price);
+                        if let Some(prev) = merged.prev_close {
+                            if prev != 0.0 {
+                                merged.change_pct = Some(((price - prev) / prev) * 100.0);
+                            }
+                        }
+                        self.market_cache.insert(key, merged);
+                    }
+                }
                 Task::none()
             }
             Message::TickerLastPrice { symbol, last_price } => {

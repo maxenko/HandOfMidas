@@ -242,6 +242,7 @@ fn subscription(state: &MidasApp) -> Subscription<Message> {
     // handle has been installed in the relevant registry, so adding
     // them now is a no-op on every existing code path.
     subs.push(state.chart_subscriptions());
+    subs.push(state.watchlist_subscription());
 
     Subscription::batch(subs)
 }
