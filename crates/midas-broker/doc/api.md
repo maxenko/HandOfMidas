@@ -2,6 +2,8 @@
 
 Trading engine crate wrapping Interactive Brokers via `rust-ibapi`.
 
+> **Router note.** The market-data streaming pipeline now flows through `midas-market-data::MarketDataRouter` (root workspace). The router holds `Arc<dyn MarketDataSource>` where the backend is either `SimMarketData` (`midas-broker::sim`) or `IbMarketData` (`midas-broker::ib`). Order flow is on a parallel `OrderClient` trait with the same sim/IB split. The legacy `BrokerEngine` + `BrokerCallback` + `BrokerClient` path documented in `engine.md` is still live for bracket-order management and will be retired in a follow-up slice (see `plan/archive/market-data-router/10-slice-9-cleanup.md`). New consumers should go through the router + `OrderClient` traits, not through `BrokerEngine`.
+
 ## Documentation Files
 
 | File | Covers |

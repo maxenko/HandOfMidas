@@ -21,8 +21,10 @@ This is a Cargo workspace with 11 crates under `crates/`:
 | `midas-ui` | lib | Custom iced widgets: buttons, labels, tooltips, button groups | midas-core |
 | `midas-grid` | lib | Headless grid/table widget for iced | none |
 | `midas-store` | lib | DuckDB persistence layer, actor-based async ops | midas-core, midas-data |
-| `midas-app` | bin | iced application shell, TickerState machine, ties everything together | all above |
-| `mailbox_processor` | lib | Async actor pattern with request-reply channels | none |
+| `midas-devloop-proto` | lib | Devloop IPC command schema (shared between app + devloop scripts) | none |
+| `midas-app` | bin | iced application shell, TickerState machine, market-data subscriptions, ties everything together | all above + `midas-market-data` (root) |
+
+`mailbox_processor` and `midas-market-data` live in the root workspace (they're consumed by both the broker engine and the desktop app).
 
 Dependency flows strictly downward. No circular dependencies.
 
@@ -82,6 +84,9 @@ cargo build --workspace --profile release-debug
 - SoA (Structure of Arrays) layout for candle data, not AoS.
 - Shaders are WGSL files in `crates/midas-render/shaders/`, included via `include_str!()`.
 - Configuration is TOML (not JSON, not YAML).
+
+### Market-data pipeline
+Live market data flows through the root-workspace `midas-market-data::MarketDataRouter` (per-symbol fan-out with refcounted RAII subscription handles), not through a central `BrokerEvent::Tick` match arm. Each UI consumer (chart widget, watchlist row, `TickerState`) owns its own `iced::Subscription::channel` that wraps a `SubscriptionHandle`; dropping the handle on the last ref cascades an upstream cancel through the router back to the backend. The backend (sim or IB) is accessed through the `MarketDataSource` + `OrderClient` traits; the app never touches concrete backend types. The bar aggregator registry (also in `midas-market-data`) lazily spawns per-(symbol, timeframe) aggregator actors off the shared tick stream.
 
 ### File locations
 - Shaders: `crates/midas-render/shaders/*.wgsl`

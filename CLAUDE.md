@@ -39,10 +39,13 @@ Two independent Cargo workspaces share a single git repo:
 
 ```
 HandOfMidas/
-├── Cargo.toml                     # Root workspace: broker engine
+├── Cargo.toml                     # Root workspace: broker engine + market-data router
 ├── crates/
-│   ├── midas-broker-core/         # Shared domain types (OrderId, SecurityType, etc.) — root workspace leaf
-│   └── midas-broker/              # Trading engine — wraps IB via rust-ibapi
+│   ├── midas-broker-core/         # Shared domain types (OrderId, SecurityType, market-data events)
+│   ├── midas-broker/              # Trading engine — sim + IB backends behind MarketDataSource / OrderClient traits
+│   ├── midas-market-data/         # Per-symbol router + bar aggregator registry + RAII subscription handles
+│   ├── midas-ib-sim/              # In-process IB-gateway simulator for integration tests
+│   └── mailbox_processor/         # Async actor pattern (request-reply channels)
 ├── desktop/win/                   # Desktop workspace (11 crates)
 │   ├── Cargo.toml                 # Workspace root with shared dependency versions
 │   └── crates/
@@ -65,6 +68,23 @@ HandOfMidas/
 
 ## Key Architecture Patterns
 
+### MarketDataRouter (streaming topology)
+Market data flows through a single per-symbol fan-out router (`crates/midas-market-data`) that sits between the broker backend and UI consumers. The `MarketDataSource` trait abstracts the provider (sim or IB); the router holds `Arc<dyn MarketDataSource>` and never sees concrete types. For each active symbol the router spawns a `SymbolHub` with three broadcast lanes (ticks, realtime bars, quote watch) plus refcounted RAII subscription handles — drop a handle and the last-ref decrement cascades an upstream cancel. A lazily spawned `BarAggregator` actor registry fans (symbol, timeframe) aggregates off the shared tick stream.
+
+```
+midas-broker (SimMarketData | IbMarketData : MarketDataSource)
+      ↓ Arc<dyn MarketDataSource>
+midas-market-data::MarketDataRouter
+   ├─ per-symbol SymbolHub (ticks / rt-bars / quote watch, refcounted)
+   └─ BarAggregatorRegistry (lazy per (sym, tf) — subscribes once, fans out)
+      ↓
+midas-app consumers (chart / watchlist / ticker-state), each holding its
+own SubscriptionHandle via a per-widget iced::Subscription::channel
+with frame-rate coalescing
+```
+
+Order flow (place, cancel, modify, positions, account events) is on a separate `OrderClient` trait with its own broadcast channels; the sim and IB backends each implement both traits.
+
 ### TickerState (single source of truth)
 All per-ticker state lives in `TickerState` (`midas-app/src/ticker_state/`). Mutations go through `apply(TickerMsg) -> Vec<TickerEffect>` — fields are private, read via getters. Manages: order brackets, entry-type memory, GATR anchors, price levels, and camera position. Every UI surface renders from TickerState.
 
@@ -82,14 +102,15 @@ Session-scoped per-(symbol, timeframe) camera state (`midas-app/src/chart_view.r
 
 ## Architecture Rules
 
-1. **No ibapi types in public API.** UI crate never imports ibapi.
-2. **Split channel architecture.** Market data on `broadcast(4096)`, order events on `broadcast(8192)`, connection state on `watch`.
+1. **No ibapi types in public API.** UI crate never imports ibapi; the `midas-market-data` router never imports `midas-broker` concrete types — it holds `Arc<dyn MarketDataSource>`.
+2. **Split channel architecture.** Market data goes through the router's per-symbol fan-out; order events on `broadcast(8192)`; connection state on `watch`.
 3. **Live-trading guard.** Config refuses port 4001 unless `allow_live = true`.
 4. **Two-tier DB writes.** Critical (orders, fills) awaited; non-critical fire-and-forget.
 5. **SecurityType enum over strings.** Use `SecurityType::Stock` not `"STK"`.
-6. **MarketDataSource trait.** Test data and future IB both implement this.
-7. **All bracket mutations through TickerState.** No direct bracket modification outside `apply()`.
-8. **Dependency flow is strictly downward.** No circular crate dependencies.
+6. **`MarketDataSource` + `OrderClient` traits.** Sim and IB backends both implement these; the router and UI never see concrete backends.
+7. **RAII subscription handles.** Every market-data consumer holds a `SubscriptionHandle`; drop cascades upstream cancellation via the router's refcount.
+8. **All bracket mutations through TickerState.** No direct bracket modification outside `apply()`.
+9. **Dependency flow is strictly downward.** `midas-broker-core` → `midas-broker` / `midas-market-data` → `midas-app`. No circular crate dependencies.
 
 ## Build & Test
 

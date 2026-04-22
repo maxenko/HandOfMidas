@@ -33,8 +33,15 @@ Hand of Midas is a native Windows desktop application written entirely in Rust. 
            midas-feed         midas-store         mailbox_processor
         (CSV, providers)      (DuckDB cache)      (actor channel)
 
-                         midas-broker
-                  (IB engine, rusqlite)
+                    midas-market-data
+              (per-symbol router + RAII handles
+               + bar aggregator registry)
+                         |
+                         v
+                    midas-broker
+                  (IB engine, rusqlite,
+                   MarketDataSource + OrderClient
+                   traits; sim + IB backends)
                          |
                   midas-broker-core
                 (shared domain types)
@@ -59,7 +66,7 @@ The chart core (`midas-chart`) is a pure state machine with zero GPU or framewor
 | Candle storage | Custom binary format, SoA layout, memmap2 |
 | Math | glam 0.29 (SIMD) |
 
-Two Cargo workspaces, 14 crates total (broker engine + desktop app + shared domain types). Dependency flows strictly downward -- no cycles, no leaky abstractions. The broker's IB types never reach the UI layer; a dedicated `midas-broker-core` crate carries shared domain enums (`SecurityType`, `OrderAction`, `OptionRight`) so they can be consumed without pulling the `ibapi` transport.
+Two Cargo workspaces, 16 crates total (broker engine + market-data router + IB-gateway simulator + desktop app + shared domain types). Dependency flows strictly downward -- no cycles, no leaky abstractions. The broker's IB types never reach the UI layer; a dedicated `midas-broker-core` crate carries shared domain enums (`SecurityType`, `OrderAction`, `OptionRight`) so they can be consumed without pulling the `ibapi` transport. Market data flows through the `midas-market-data::MarketDataRouter` per-symbol fan-out, which holds `Arc<dyn MarketDataSource>` and never imports concrete backend types.
 
 ---
 
