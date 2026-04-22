@@ -58,7 +58,7 @@ pub struct PositionRaw {
 /// - The single-event path inside `Message::BrokerEventReceived`
 ///   ([`Self::apply`]) — used during reconnect backfills where events
 ///   arrive one-at-a-time.
-/// - The coalesced path from `positions_subscription`
+/// - The coalesced path from `router_positions_subscription`
 ///   ([`Self::apply_batch`]) — used during steady-state updates.
 ///
 /// Both paths are idempotent: last write wins. The store is always

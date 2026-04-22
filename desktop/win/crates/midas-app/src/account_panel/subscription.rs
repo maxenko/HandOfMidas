@@ -1,21 +1,18 @@
-//! Coalesced broker-event subscription for the Positions store.
+//! Coalesced positions subscription for the `PositionStore`.
 //!
-//! Wraps the broker engine's broadcast channel in a `BroadcastStream`,
-//! filters for [`midas_broker::BrokerEvent::PositionUpdate`]s, and buckets
-//! them into 50 ms windows of up to 256 events. Each window is folded
-//! into a last-wins-per-symbol `Vec<PositionRaw>` so the iced `update()`
-//! loop receives at most one message per window even during a reconnect
-//! backfill storm.
+//! Wraps the router-era [`OrderClient::position_events`] broadcast
+//! channel in a `BroadcastStream`, buckets updates into 50 ms windows
+//! of up to 256 events, and folds each window to a last-wins-per-symbol
+//! `Vec<PositionRaw>` so the iced `update()` loop receives at most one
+//! message per window even during a reconnect backfill storm.
 //!
 //! Wire this via iced's `Subscription::run_with` at the `main.rs` sub
 //! site, mapping each batch to the top-level
 //! `Message::AccountPositionsBatch(batch)` variant.
 //!
 //! Lagged `BroadcastStream` items are silently dropped for v1 —
-//! if the `PositionStore` ever falls behind we'll add a resubscribe
-//! primitive. In the meantime the broker-events subscription in
-//! `broker_bridge::broker_event_stream` logs a `warn!` on lag, so the
-//! condition is still observable.
+//! `PositionUpdate` is a full snapshot (not a delta), so the next event
+//! restores the correct state.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -25,10 +22,6 @@ use iced::Subscription;
 use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
 use tokio_stream::StreamExt as TokioStreamExt;
 
-use midas_broker::BrokerEvent;
-
-use crate::broker_bridge::BrokerEventSource;
-
 use super::positions_store::PositionRaw;
 
 /// Maximum events per coalesced window. Large enough to swallow a full
@@ -36,94 +29,27 @@ use super::positions_store::PositionRaw;
 const CHUNK_CAP: usize = 256;
 
 /// Window duration for batching. Matches the plan's 50 ms target; short
-/// enough to keep Positions tab snappy, long enough to collapse a burst.
+/// enough to keep the Positions tab snappy, long enough to collapse a
+/// burst.
 const CHUNK_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Build the Positions subscription stream.
-///
-/// The caller is responsible for mapping each yielded `Vec<PositionRaw>`
-/// into whatever top-level `Message` variant carries the batch — this
-/// module intentionally stays agnostic of the app's `Message` enum.
-pub fn positions_subscription(source: BrokerEventSource) -> Subscription<Vec<PositionRaw>> {
-    Subscription::run_with(source, positions_stream)
-}
+// ── Router-era path (BR-14) ─────────────────────────────────────────
 
-/// Implementation hook for `Subscription::run_with`. Public so iced's
-/// internal typing can name it; not intended for direct callers.
-///
-/// NOTE: `Subscription::run_with` requires a `fn` pointer (not a
-/// closure), which is why this is a free function rather than a
-/// method on `BrokerEventSource`.
-pub fn positions_stream(
-    source: &BrokerEventSource,
-) -> impl iced::futures::Stream<Item = Vec<PositionRaw>> {
-    let rx = source.sender.subscribe();
-    // Use the tokio_stream method name explicitly — `StreamExt` is in
-    // scope from both `iced::futures` and `tokio_stream`, and they both
-    // provide `filter_map`. The tokio variant accepts an `async` closure
-    // body, which is what we want here.
-    //
-    // `Lagged(n)` surfaces when the broadcast receiver falls behind the
-    // 4096-slot channel. For ops visibility we log a `warn!` — the
-    // positions store tolerates gaps because `PositionUpdate` is a full
-    // snapshot, not a delta, so the next event restores the correct
-    // state. The broker-event subscription in `broker_bridge` logs the
-    // same condition but on its own stream; we log here so Positions
-    // operators aren't blind to their receiver lagging independently.
-    let raw = tokio_stream::StreamExt::filter_map(
-        BroadcastStream::new(rx),
-        |r: Result<BrokerEvent, BroadcastStreamRecvError>| match r {
-            Ok(ev) => Some(ev),
-            Err(BroadcastStreamRecvError::Lagged(n)) => {
-                tracing::warn!(
-                    skipped = n,
-                    "positions_subscription: broadcast lagged; \
-                     next PositionUpdate will refresh from broker"
-                );
-                None
-            }
-        },
-    );
-    let positions = tokio_stream::StreamExt::filter_map(raw, |event: BrokerEvent| {
-        if let BrokerEvent::PositionUpdate {
-            symbol,
-            quantity,
-            avg_cost,
-            ..
-        } = event
-        {
-            Some(PositionRaw {
-                symbol,
-                qty: quantity,
-                avg_cost,
-                last_price: None,
-                last_price_ts: None,
-                session_open_price: None,
-            })
-        } else {
-            None
-        }
-    });
-    let batched = positions.chunks_timeout(CHUNK_CAP, CHUNK_INTERVAL);
-    StreamExt::map(batched, fold_latest_per_symbol)
-}
-
-// ── Router-era path (S7d / BR-14) ────────────────────────────────────
-
-/// Router-era positions subscription source. Wraps an
+/// Source for the router-era positions subscription. Wraps an
 /// `Arc<dyn OrderClient>` so the stream builder can call
-/// `position_events()` to obtain a fresh broadcast receiver each
-/// time iced re-diffs. Parallel to [`BrokerEventSource`]; the
-/// legacy variant is removed in S9.
+/// `position_events()` to obtain a fresh broadcast receiver each time
+/// iced re-diffs.
 #[derive(Clone)]
 pub struct PositionEventsSource {
+    /// Shared order client the app swapped in on `Message::RouterReady`
+    /// (sim constructs synchronously).
     pub order_client: std::sync::Arc<dyn midas_broker::OrderClient>,
 }
 
 impl std::hash::Hash for PositionEventsSource {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        // Name-based identity is stable across Arc clones of the
-        // same order client; iced uses this to decide whether two
+        // Name-based identity is stable across Arc clones of the same
+        // order client; iced uses this to decide whether two
         // consecutive subscription calls reference the same stream.
         "router-position-events-source".hash(state);
         self.order_client.name().hash(state);
@@ -132,15 +58,16 @@ impl std::hash::Hash for PositionEventsSource {
 
 /// Router-era positions subscription (BR-14).
 ///
-/// Same fold + window shape as [`positions_subscription`] but sourced
-/// from `OrderClient::position_events()` instead of the legacy
-/// `BrokerEventSource`.
+/// Coalesces `OrderClient::position_events()` into 50 ms windows of at
+/// most 256 events, folding each window to one update per symbol.
 pub fn router_positions_subscription(
     source: PositionEventsSource,
 ) -> Subscription<Vec<PositionRaw>> {
     Subscription::run_with(source, router_positions_stream)
 }
 
+/// Implementation hook for `Subscription::run_with`. Public so iced's
+/// internal typing can name it; not intended for direct callers.
 pub fn router_positions_stream(
     source: &PositionEventsSource,
 ) -> impl iced::futures::Stream<Item = Vec<PositionRaw>> {

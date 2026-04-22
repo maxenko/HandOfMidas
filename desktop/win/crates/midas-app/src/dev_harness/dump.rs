@@ -56,7 +56,6 @@ pub struct RouterStateProjection {
 #[derive(Serialize)]
 pub struct BrokerProjection<'a> {
     pub connection_display: &'a str,
-    pub has_bridge: bool,
     pub sim_child_running: bool,
     pub sim_tws_port: Option<u16>,
 }
@@ -143,7 +142,6 @@ pub fn build(app: &MidasApp) -> serde_json::Value {
 
     let broker = BrokerProjection {
         connection_display: &app.broker_connection_display,
-        has_bridge: app.broker_bridge.is_some(),
         sim_child_running: app.sim_child.is_some(),
         sim_tws_port: app.sim_child.as_ref().map(|s| s.tws_port),
     };

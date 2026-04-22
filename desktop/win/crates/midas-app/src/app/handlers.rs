@@ -1157,8 +1157,8 @@ impl MidasApp {
                     ));
                 }
 
-                // ConfirmYes needs broader access to self (broker_bridge, market_cache),
-                // so handle it outside the panel borrow.
+                // ConfirmYes needs broader access to self (market_cache,
+                // bracket submitter), so handle it outside the panel borrow.
                 if matches!(action, OrderPanelAction::ConfirmYes) {
                     let panel = match self.order_panels.get(&panel_id) {
                         Some(p) => p,
@@ -1738,10 +1738,11 @@ impl MidasApp {
             }
 
             Message::AccountPositionsBatch(batch) => {
-                // App-wide variant emitted by `positions_subscription`.
-                // Identical effect to the per-panel
-                // `PositionsBatchApplied` path — both paths land in the
-                // same store so last-write-wins is idempotent.
+                // App-wide variant emitted by
+                // `router_positions_subscription`. Identical effect
+                // to the per-panel `PositionsBatchApplied` path — both
+                // paths land in the same store so last-write-wins is
+                // idempotent.
                 self.positions.apply_batch(&batch);
                 self.rebuild_account_positions_caches();
                 Task::none()
@@ -1888,10 +1889,12 @@ impl MidasApp {
     /// refactor can't accidentally wire it up.
     pub(crate) fn handle_account_close_requested(&mut self, symbol: String) -> Task<Message> {
         use crate::account_panel::positions_msg::CloseDecision;
-        let connected = self
-            .broker_bridge
-            .as_ref()
-            .is_some_and(|b| b.is_engine_connected());
+        // Router-era connectivity check: an installed OrderClient signals
+        // the broker path is wired (sim is synchronous on startup; IB
+        // flips on `RouterReady`). The banner-ack flag on Account panels
+        // still flips off `Message::BrokerConnectionChanged`, so v1
+        // retains that UX independent of this guard.
+        let connected = self.router_order_client.is_some();
         let decision = CloseDecision::compute(connected, &symbol);
         // `may_emit_command()` is `false` in v1 for both decision
         // variants — the assertion below documents the intent at the
@@ -2808,9 +2811,6 @@ impl MidasApp {
             }
 
             Message::WindowCloseRequested => {
-                if let Some(ref bridge) = self.broker_bridge {
-                    let _ = bridge.shutdown();
-                }
                 // Blocking shutdown of the ticker-state persistence
                 // layer. Signals the flush thread to perform a final
                 // `Immediate` commit and blocks until it exits.
@@ -3589,7 +3589,12 @@ impl MidasApp {
                     } => {
                         // Reconcile: find the existing annotation created locally
                         // by matching symbol + side + quantity using cached fields.
-                        let side = crate::broker_bridge::translate_action_to_side(&action);
+                        use midas_broker::OrderAction;
+                        use midas_chart::widget::order_bracket::BracketSide;
+                        let side = match action {
+                            OrderAction::Buy => BracketSide::Long,
+                            OrderAction::Sell => BracketSide::Short,
+                        };
 
                         let mut candidates: Vec<_> = self
                             .order_annotation_links
@@ -3719,8 +3724,8 @@ impl MidasApp {
                     }
                     // Eager single-event position apply. Fires during
                     // reconnect backfills where events arrive before
-                    // the coalesced `positions_subscription` has time
-                    // to bucket them. The coalesced path
+                    // the coalesced `router_positions_subscription`
+                    // has time to bucket them. The coalesced path
                     // (`Message::AccountPositionsBatch`) and this path
                     // both write to `self.positions`; last-write-wins
                     // is idempotent, so double-delivery is harmless.

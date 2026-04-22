@@ -399,8 +399,8 @@ pub struct MidasApp {
     /// + cap invariants intact.
     pub recent_symbols: VecDeque<RecentEntry>,
     /// App-wide live-position store. Fed by:
-    /// - The coalesced `positions_subscription` stream (steady-state),
-    ///   which delivers `Message::AccountPositionsBatch`.
+    /// - The coalesced `router_positions_subscription` stream
+    ///   (steady-state), which delivers `Message::AccountPositionsBatch`.
     /// - The single-event `BrokerEvent::PositionUpdate` path inside
     ///   `handle_broker_msg` (reconnect backfills). Both paths are
     ///   idempotent; last write wins.
@@ -434,8 +434,6 @@ pub struct MidasApp {
     pub annotation_store: AnnotationStore,
     /// In-memory market data cache for watchlist columns.
     pub market_cache: crate::market_cache::MarketDataCache,
-    /// Bridge to the midas-broker engine. None if engine failed to start.
-    pub broker_bridge: Option<Arc<crate::broker_bridge::BrokerBridge>>,
     /// Current broker connection state display string.
     pub broker_connection_display: String,
     // Session-scoped per-symbol flags (GATR snap-once guard, anchor-seed
@@ -2043,74 +2041,7 @@ impl MidasApp {
             }
         }
 
-        // Start the broker engine. The engine always comes up with
-        // `DataSourceConfig::Test` first — that keeps the watchlist
-        // + order paths functional while we boot the sim asynchronously
-        // (the sim-spawn race with iced's first frame would otherwise
-        // leave the UI hanging on "Connecting..." for seconds during
-        // every `cargo run`). When the sim-spawn task returns, we
-        // swap the test broker out for a real ib-bridge connection
-        // via `Message::BrokerSimSpawned`.
-        //
-        // `LivePaper` / `Live` skip the sim path entirely and construct
-        // a Live broker config directly with the user-provided host +
-        // port. The `allow_live` guard is the same one the broker
-        // engine enforces in `BrokerConfig::validate` — double-
-        // checking here surfaces the error in the status bar instead
-        // of panicking the engine.
         let broker_backend = config.broker.backend;
-        let (broker_bridge, broker_label) = match broker_backend {
-            midas_core::config::BrokerBackend::Sim => {
-                // Drive the simulated broker so the watchlist "last" price
-                // actually moves: 500 ms auto-ticks with ±10 bps random walk.
-                let mut broker_config = midas_broker::BrokerConfig::default();
-                broker_config.test_broker.tick_interval_ms = 500;
-                broker_config.test_broker.tick_drift_bps = 10.0;
-                let handle = midas_broker::start_broker_engine(broker_config);
-                let bridge = Arc::new(crate::broker_bridge::BrokerBridge::new(
-                    handle,
-                    "IB Simulator",
-                ));
-                (Some(bridge), "IB Simulator")
-            }
-            midas_core::config::BrokerBackend::LivePaper
-            | midas_core::config::BrokerBackend::Live => {
-                let broker_config = midas_broker::BrokerConfig {
-                    data_source: midas_broker::config::DataSourceConfig::Live,
-                    connection: midas_broker::config::ConnectionConfig {
-                        host: config.broker.host.clone(),
-                        port: config.broker.port,
-                        client_id: config.broker.client_id,
-                        allow_live: config.broker.allow_live,
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                };
-                let label =
-                    if matches!(broker_backend, midas_core::config::BrokerBackend::LivePaper) {
-                        "IB Paper"
-                    } else {
-                        "IB Live"
-                    };
-                match broker_config.validate() {
-                    Ok(()) => {
-                        let handle = midas_broker::start_broker_engine(broker_config);
-                        let bridge =
-                            Arc::new(crate::broker_bridge::BrokerBridge::new(handle, label));
-                        (Some(bridge), label)
-                    }
-                    Err(e) => {
-                        tracing::error!("Broker config rejected: {e}");
-                        (None, label)
-                    }
-                }
-            }
-        };
-        tracing::info!(
-            "Broker engine started (backend={:?}, label={})",
-            broker_backend,
-            broker_label
-        );
 
         // Router construction (S7e + S8b).
         //
@@ -2208,13 +2139,10 @@ impl MidasApp {
             bracket_context_menu: None,
             annotation_store: AnnotationStore::new(),
             market_cache: crate::market_cache::MarketDataCache::default(),
-            broker_bridge: broker_bridge.clone(),
             // Seed the display with "Connecting" so the status bar
-            // shows the transition even during the sub-millisecond
-            // window before the engine's `Connecting` watch value
-            // propagates through `broker_conn_stream`. Without this,
-            // the first paint of the status bar briefly flashes
-            // "Disconnected" which reads as an error state.
+            // shows the transition until `Message::RouterReady` flips
+            // it to "Ready". Without this, the first paint briefly
+            // flashes "Disconnected" which reads as an error state.
             broker_connection_display: "Connecting".to_string(),
             chart_views: crate::chart_view::ChartViewStore::default(),
             thumbnail_store: crate::thumbnail_store::ThumbnailStore::default(),
@@ -2229,20 +2157,6 @@ impl MidasApp {
             resync_throttle: std::collections::HashMap::new(),
             ib_to_uuid: std::collections::HashMap::new(),
         };
-
-        // Register broker bridge in provider registry.
-        if let Some(ref bridge) = app.broker_bridge {
-            app.providers.register_order_broker(bridge.clone());
-            app.providers.set_active_broker(Some(0));
-        }
-
-        // Connect to broker (TestBroker auto-connects, but the command
-        // ensures the engine state machine transitions properly).
-        if let Some(ref bridge) = app.broker_bridge {
-            if let Err(e) = bridge.connect() {
-                tracing::warn!("Failed to send initial Connect: {e}");
-            }
-        }
 
         // Restore bracket annotations from persistence.
         let data_dir = app

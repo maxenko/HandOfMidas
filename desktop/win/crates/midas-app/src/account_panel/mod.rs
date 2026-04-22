@@ -31,8 +31,6 @@ pub use positions_store::{PositionRaw, PositionStore};
 pub use positions_tab::PositionsTab;
 #[allow(unused_imports)] // Re-exported for callers outside the module tree.
 pub use recents_tab::RecentsTab;
-pub use subscription::positions_subscription;
-#[allow(unused_imports)] // Wired in S7d/e; until the router is constructed both paths coexist.
 pub use subscription::{router_positions_subscription, PositionEventsSource};
 
 use midas_core::config::{AccountPanelConfig, AccountTab};

@@ -8,7 +8,6 @@ mod annotation_persistence;
 mod annotation_store;
 mod app;
 mod bracket_submit;
-mod broker_bridge;
 mod chart_view;
 mod chart_widget;
 mod column_resize;
@@ -197,35 +196,6 @@ fn subscription(state: &MidasApp) -> Subscription<Message> {
         subs.push(mouse_up_sub);
     }
 
-    // Broker order event subscription.
-    if let Some(ref bridge) = state.broker_bridge {
-        let source = bridge.event_source();
-        let broker_sub = Subscription::run_with(source, crate::broker_bridge::broker_event_stream);
-        subs.push(broker_sub);
-    }
-
-    // Broker connection state subscription.
-    if let Some(ref bridge) = state.broker_bridge {
-        let conn_source = bridge.conn_source();
-        let conn_sub =
-            Subscription::run_with(conn_source, crate::broker_bridge::broker_conn_stream);
-        subs.push(conn_sub);
-    }
-
-    // Coalesced positions subscription (Slice 4). Buckets
-    // `BrokerEvent::PositionUpdate`s into 50 ms windows of at most 256
-    // events and folds each window to one update per symbol. Runs
-    // independently of the raw broker-event subscription above — the
-    // single-event path in `handle_broker_msg` applies each update
-    // eagerly for reconnect backfills; this path keeps steady-state
-    // updates batched so the iced `update()` loop doesn't stall.
-    if let Some(ref bridge) = state.broker_bridge {
-        let source = bridge.event_source();
-        let positions_sub = crate::account_panel::positions_subscription(source)
-            .map(Message::AccountPositionsBatch);
-        subs.push(positions_sub);
-    }
-
     // Dev harness subscription (feature-gated).
     #[cfg(feature = "dev_harness")]
     {
@@ -246,9 +216,7 @@ fn subscription(state: &MidasApp) -> Subscription<Message> {
     subs.push(state.watchlist_subscription());
     subs.push(state.ticker_subscription());
 
-    // Router-era positions subscription (BR-14). Runs in parallel
-    // with the legacy `positions_subscription` above through S7d;
-    // the legacy one is removed in S9 alongside `BrokerBridge`.
+    // Router-era positions subscription (BR-14).
     if let Some(ref order_client) = state.router_order_client {
         let source = crate::account_panel::PositionEventsSource {
             order_client: order_client.clone(),
