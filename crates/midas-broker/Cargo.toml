@@ -8,7 +8,10 @@ edition = "2021"
 midas-broker-core = { path = "../midas-broker-core" }
 
 # IB connectivity
-ibapi = "2.10"
+# Pinned to =2.10 for the market-data router refactor (plan/market-data-router).
+# The S1-S6 slices are coded against 2.10's exact `market_data` / historical
+# surface; a separate follow-up may un-pin once 2.11+ is audited.
+ibapi = "=2.10"
 
 # Database
 rusqlite = { version = "0.32", features = ["bundled"] }
