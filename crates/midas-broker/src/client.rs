@@ -1,5 +1,10 @@
 //! Broker client abstraction. Decouples the engine from ibapi for testing.
 
+// The `BrokerClient` trait defined here is `#[deprecated]` pending slice 9.
+// It and its `TestBrokerClient` impl still live in this module — silence the
+// self-referential deprecation warning at module scope.
+#![allow(deprecated)]
+
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 
@@ -110,6 +115,10 @@ pub enum BrokerCallback {
 /// Optional methods have default no-op implementations so that simple
 /// test stubs (like `TestBrokerClient`) don't need to implement them.
 #[allow(clippy::too_many_arguments)]
+#[deprecated(
+    since = "0.2.0",
+    note = "router-refactor slice 2: use the new `MarketDataSource` + `OrderClient` traits; this trait will be removed in slice 9"
+)]
 pub trait BrokerClient: Send + Sync {
     /// Get the next available order ID from the broker.
     fn next_order_id(&self) -> i32;

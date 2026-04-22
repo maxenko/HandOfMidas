@@ -1,3 +1,8 @@
+// The legacy `BrokerClient` trait is `#[deprecated]` pending slice 9
+// (router refactor). Until then the engine is its sole consumer — silence
+// the warning at module scope rather than sprinkling allows.
+#![allow(deprecated)]
+
 use std::collections::{HashMap, VecDeque};
 
 use tokio::sync::{broadcast, mpsc, watch};

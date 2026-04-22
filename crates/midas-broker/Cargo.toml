@@ -3,6 +3,12 @@ name = "midas-broker"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# Slice 2: enables the test-only `MarketDataSource::inject_for_test` hook on
+# the router-era provider trait. Off by default; `cfg(test)` turns it on
+# automatically for the crate's own tests.
+test_inject = []
+
 [dependencies]
 # Workspace crates
 midas-broker-core = { path = "../midas-broker-core" }
@@ -12,6 +18,9 @@ midas-broker-core = { path = "../midas-broker-core" }
 # The S1-S6 slices are coded against 2.10's exact `market_data` / historical
 # surface; a separate follow-up may un-pin once 2.11+ is audited.
 ibapi = "=2.10"
+
+# Object-safe async traits (router-era `MarketDataSource` + `OrderClient`).
+async-trait = "0.1"
 
 # Database
 rusqlite = { version = "0.32", features = ["bundled"] }

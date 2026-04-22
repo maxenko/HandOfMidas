@@ -17,6 +17,10 @@
 //! // cbs contains: Submitted, Execution, Filled
 //! ```
 
+// Legacy `BrokerClient` trait is `#[deprecated]` pending slice 9;
+// this module implements it. Silence the warning module-wide until then.
+#![allow(deprecated)]
+
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};

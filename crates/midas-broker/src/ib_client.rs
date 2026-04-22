@@ -4,6 +4,9 @@
 //! the TWS API. The client runs on the tokio runtime and queues callbacks
 //! for the engine to poll via [`BrokerClient::poll_callbacks`].
 
+// Legacy `BrokerClient` trait is `#[deprecated]` pending slice 9.
+#![allow(deprecated)]
+
 use std::sync::{Arc, Mutex};
 
 use tokio::runtime::Handle;
