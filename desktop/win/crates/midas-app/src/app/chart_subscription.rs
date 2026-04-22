@@ -8,22 +8,21 @@
 // is a `fn` pointer — `Subscription::run_with`'s constraint — and
 // therefore cannot capture an `Arc<MarketDataRouter>` directly.
 //
-// Legacy coexistence: this module is brought online alongside the
-// existing `BrokerEvent::Tick` central match arm. Both paths run
-// in parallel through S7b/c/d; S7e deletes the legacy path.
+// Audit P1 refactor 2: the select-loop scaffolding moved to
+// `subscription_stream::drive_subscription`; this file now owns
+// only the chart-specific resolve + message-shaping glue.
 
 #![allow(dead_code)]
 
 use std::time::Duration;
 
-use iced::futures::SinkExt;
 use midas_broker_core::market_data::Bar;
 use midas_broker_core::{SymbolKey, Timeframe};
 use midas_core::ChartId;
-use tokio::sync::broadcast::error::RecvError;
 
 use super::subscription_helpers::{FrameCoalescer, FRAME_COALESCE_MS};
 use super::subscription_registry;
+use super::subscription_stream::{drive_subscription, BatchEmit};
 use crate::app::Message;
 
 /// Hashable key carried into `Subscription::run_with` as the `data`
@@ -46,7 +45,7 @@ pub struct ChartSubKey {
 /// and re-runs the builder if the chart is still alive.
 pub fn chart_stream_builder(key: &ChartSubKey) -> impl iced::futures::Stream<Item = Message> {
     let key = key.clone();
-    iced::stream::channel(64, async move |mut output| {
+    iced::stream::channel(64, async move |output| {
         let reg_key = subscription_registry::ChartKey {
             symbol: key.symbol.clone(),
             timeframe: key.timeframe,
@@ -85,49 +84,21 @@ pub fn chart_stream_builder(key: &ChartSubKey) -> impl iced::futures::Stream<Ite
                 }
             }
         };
-        let mut rx = entry.resubscribe().await;
-        let mut coalescer: FrameCoalescer<Bar> = FrameCoalescer::with_capacity(8);
-        let mut interval = tokio::time::interval(FRAME_COALESCE_MS);
-        // First tick is immediate; we want the first coalesce to fire
-        // ~16 ms after the first bar arrives.
-        interval.tick().await;
+        let rx = entry.resubscribe().await;
         let chart_id = key.chart_id;
-        loop {
-            tokio::select! {
-                r = rx.recv() => match r {
-                    Ok(arc_bar) => {
-                        coalescer.push((*arc_bar).clone());
-                        // M-30: size-based early flush so bursty
-                        // backfills (large per-symbol lookback on
-                        // reconnect) don't sit in the buffer for a
-                        // full 16 ms window.
-                        if coalescer.should_flush_early() {
-                            let bars = coalescer.drain();
-                            if output.send(Message::ChartBarBatch { chart_id, bars }).await.is_err() {
-                                break;
-                            }
-                        }
-                    }
-                    Err(RecvError::Lagged(n)) => {
-                        tracing::warn!(
-                            chart_id = ?chart_id,
-                            skipped = n,
-                            "chart bar stream lagged; requesting resync"
-                        );
-                        let _ = output.send(Message::ChartResync { chart_id }).await;
-                    }
-                    Err(RecvError::Closed) => break,
-                },
-                _ = interval.tick() => {
-                    if coalescer.has_pending() {
-                        let bars = coalescer.drain();
-                        if output.send(Message::ChartBarBatch { chart_id, bars }).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
+        drive_subscription(
+            output,
+            rx,
+            FrameCoalescer::<Bar>::with_capacity(8),
+            FRAME_COALESCE_MS,
+            |buf, arc_bar| buf.push((*arc_bar).clone()),
+            |buf| {
+                let bars = buf.drain();
+                BatchEmit::One(Message::ChartBarBatch { chart_id, bars })
+            },
+            move |_n| Some(Message::ChartResync { chart_id }),
+        )
+        .await;
     })
 }
 

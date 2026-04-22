@@ -13,6 +13,7 @@ mod handlers;
 mod persistence;
 mod subscription_helpers;
 mod subscription_registry;
+mod subscription_stream;
 mod ticker_subscription;
 mod ticker_wiring;
 mod views;
