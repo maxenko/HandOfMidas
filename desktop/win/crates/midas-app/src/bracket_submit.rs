@@ -153,12 +153,43 @@ impl BracketSubmitter {
     /// callers typically pass only the ids they're still tracking.
     /// Cancel requests for unknown/terminal orders are tolerated by
     /// both the sim and the IB adapter.
+    ///
+    /// Per-leg cancels run under a 5 s `tokio::time::timeout` so a
+    /// stuck upstream on one leg does not lock out the other two —
+    /// the app-side audit called this out as a P1: previously a
+    /// first-leg cancel that wedged would strand the remaining legs
+    /// waiting forever. On per-leg timeout / `Err(..)` we log at
+    /// `warn` and keep going; the method returns `Ok(())` as long as
+    /// we made a best-effort attempt on every leg, matching IB's
+    /// idempotent "cancel unknown leg is fine" behaviour.
     pub async fn cancel_bracket(&self, legs: &[i32]) -> Result<(), OrderError> {
+        const CANCEL_LEG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
         for &leg in legs {
             // Drop the stream immediately — we don't need the
             // per-cancel ack here; the main order_events subscription
             // reports the terminal Cancelled event.
-            let _ = self.order_client.cancel_order(leg, None).await?;
+            match tokio::time::timeout(
+                CANCEL_LEG_TIMEOUT,
+                self.order_client.cancel_order(leg, None),
+            )
+            .await
+            {
+                Ok(Ok(_stream)) => {}
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        ib_order_id = leg,
+                        error = %e,
+                        "cancel_bracket: per-leg cancel failed, continuing"
+                    );
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        ib_order_id = leg,
+                        timeout = ?CANCEL_LEG_TIMEOUT,
+                        "cancel_bracket: per-leg cancel timed out, continuing"
+                    );
+                }
+            }
         }
         Ok(())
     }

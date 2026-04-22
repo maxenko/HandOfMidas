@@ -2,6 +2,8 @@
 //! [`IbMarketData`](super::market_data::IbMarketData) and
 //! [`IbOrderClient`](super::order_client::IbOrderClient).
 
+use std::time::Duration;
+
 use super::pacing::PacingConfig;
 
 /// Configuration for the router-era IB adapter.
@@ -28,6 +30,19 @@ pub struct IbMarketDataConfig {
     /// [`SymbolKey`](midas_broker_core::SymbolKey) without a prior
     /// `resolve_contract` round-trip.
     pub default_exchange: String,
+    /// Per-operation upstream deadline for every `client.xxx().await`
+    /// call routed through `rust-ibapi`. The router already wraps
+    /// provider methods with its own 10 s actor timeout
+    /// (`ROUTER_ACTOR_OP_TIMEOUT`), but the provider itself also
+    /// needs a hard deadline so a stuck TWS handshake / place_order
+    /// doesn't hold the router's handler past its own budget. 10 s
+    /// is the default, matching the router.
+    pub ib_op_timeout: Duration,
+    /// Per-leg deadline applied by `BracketSubmitter::cancel_bracket`
+    /// on each individual `OrderClient::cancel_order` await. Kept
+    /// shorter than `ib_op_timeout` so a stuck leg doesn't lock out
+    /// cancellation of the other two.
+    pub cancel_leg_timeout: Duration,
 }
 
 impl Default for IbMarketDataConfig {
@@ -38,6 +53,8 @@ impl Default for IbMarketDataConfig {
             client_id: 100,
             pacing: PacingConfig::default(),
             default_exchange: "SMART".to_string(),
+            ib_op_timeout: Duration::from_secs(10),
+            cancel_leg_timeout: Duration::from_secs(5),
         }
     }
 }
@@ -55,5 +72,33 @@ impl IbMarketDataConfig {
     /// The `host:port` string expected by rust-ibapi's `Client::connect`.
     pub fn address(&self) -> String {
         format!("{}:{}", self.host, self.port)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_ib_op_timeout_is_ten_seconds() {
+        let cfg = IbMarketDataConfig::default();
+        assert_eq!(cfg.ib_op_timeout, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn default_cancel_leg_timeout_is_five_seconds() {
+        let cfg = IbMarketDataConfig::default();
+        assert_eq!(cfg.cancel_leg_timeout, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn timeouts_are_configurable() {
+        let cfg = IbMarketDataConfig {
+            ib_op_timeout: Duration::from_millis(250),
+            cancel_leg_timeout: Duration::from_millis(100),
+            ..IbMarketDataConfig::default()
+        };
+        assert_eq!(cfg.ib_op_timeout, Duration::from_millis(250));
+        assert_eq!(cfg.cancel_leg_timeout, Duration::from_millis(100));
     }
 }

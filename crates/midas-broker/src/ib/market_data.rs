@@ -34,6 +34,28 @@ use crate::ib::translation as tr;
 use crate::market_data_source::{HistoricalBarsResult, MarketDataSource};
 use crate::stream::{HistoricalStream, HistoricalStreamEvent, RealtimeBarStream, TickStream};
 
+/// Wrap a rust-ibapi await with [`IbMarketDataConfig::ib_op_timeout`].
+///
+/// The async branch returns whatever the inner future returns; on
+/// `Elapsed` we synthesise a `MarketDataError::Other` carrying the
+/// call label so logs can distinguish which provider call blew the
+/// budget.
+async fn with_ib_timeout<F, T>(
+    timeout: Duration,
+    label: &'static str,
+    fut: F,
+) -> Result<T, MarketDataError>
+where
+    F: std::future::Future<Output = Result<T, MarketDataError>>,
+{
+    match tokio::time::timeout(timeout, fut).await {
+        Ok(inner) => inner,
+        Err(_) => Err(MarketDataError::Other(format!(
+            "ib {label} timed out after {timeout:?}"
+        ))),
+    }
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 // IbMarketData
 // ───────────────────────────────────────────────────────────────────────────
@@ -87,9 +109,13 @@ impl IbMarketData {
     pub async fn connect(&self) -> Result<(), MarketDataError> {
         let _ = self.conn_state_tx.send(ConnectionState::Connecting);
         let address = self.config.address();
-        let client = ibapi::Client::connect(&address, self.config.client_id)
-            .await
-            .map_err(|e| MarketDataError::Other(format!("ib connect: {e}")))?;
+        let ib_timeout = self.config.ib_op_timeout;
+        let client = with_ib_timeout(ib_timeout, "connect", async {
+            ibapi::Client::connect(&address, self.config.client_id)
+                .await
+                .map_err(|e| MarketDataError::Other(format!("ib connect: {e}")))
+        })
+        .await?;
         let server_version = client.server_version();
         {
             let mut w = self.client.write().await;
@@ -101,7 +127,12 @@ impl IbMarketData {
         // M-14/M-23: fetch nextValidId once connected so OrderClient
         // callers block on `ordering_ready_tx` getting `Some(_)`.
         if let Some(c) = self.client.read().await.clone() {
-            if let Ok(id) = c.next_valid_order_id().await {
+            let id_fut = async {
+                c.next_valid_order_id()
+                    .await
+                    .map_err(|e| MarketDataError::Other(format!("next_valid_order_id: {e}")))
+            };
+            if let Ok(id) = with_ib_timeout(ib_timeout, "next_valid_order_id", id_fut).await {
                 let _ = self.ordering_ready_tx.send(Some(id));
             }
             // Mark Ready once we have nextValidId; farm-up notifications
@@ -146,6 +177,29 @@ impl IbMarketData {
         self.client.read().await.clone()
     }
 
+    /// Per-operation upstream deadline taken from
+    /// [`IbMarketDataConfig::ib_op_timeout`]. Exposed crate-wide so
+    /// [`super::order_client::IbOrderClient`] can wrap its own
+    /// rust-ibapi awaits with the same budget.
+    pub(crate) fn ib_op_timeout(&self) -> Duration {
+        self.config.ib_op_timeout
+    }
+
+    /// Per-leg deadline for bracket cancels, taken from
+    /// [`IbMarketDataConfig::cancel_leg_timeout`]. Exposed crate-wide
+    /// so the bracket-submission helper can apply it uniformly.
+    ///
+    /// Lives on the market adapter rather than the order client so
+    /// both the router and the bracket submitter can reach the same
+    /// knob through whichever handle they already carry. Currently
+    /// the desktop-side `bracket_submit::cancel_bracket` uses its
+    /// own module-local constant — this accessor is plumbed so a
+    /// future slice can plumb the config knob all the way through.
+    #[allow(dead_code)]
+    pub(crate) fn cancel_leg_timeout(&self) -> Duration {
+        self.config.cancel_leg_timeout
+    }
+
     fn next_req_id(&self) -> ReqId {
         ReqId::next(&self.req_id_counter)
     }
@@ -173,12 +227,15 @@ impl MarketDataSource for IbMarketData {
         let contract = tr::build_ib_stock_contract(symbol, &self.config.default_exchange);
         let tick_strings: Vec<String> = tr::generic_ticks_as_vec(&generic_ticks);
         let tick_refs: Vec<&str> = tick_strings.iter().map(|s| s.as_str()).collect();
-        let ib_sub = client
-            .market_data(&contract)
-            .generic_ticks(&tick_refs)
-            .subscribe()
-            .await
-            .map_err(|e| ib_error_to_market_data_error(&e, &symbol_owned.symbol))?;
+        let ib_sub = with_ib_timeout(self.config.ib_op_timeout, "subscribe_ticks", async {
+            client
+                .market_data(&contract)
+                .generic_ticks(&tick_refs)
+                .subscribe()
+                .await
+                .map_err(|e| ib_error_to_market_data_error(&e, &symbol_owned.symbol))
+        })
+        .await?;
         let task = spawn_tick_publisher(
             ib_sub,
             symbol_owned,
@@ -209,12 +266,16 @@ impl MarketDataSource for IbMarketData {
         let (tx, rx) = broadcast::channel::<Arc<Tick>>(4096);
         let last_error: Arc<OnceLock<MarketDataError>> = Arc::new(OnceLock::new());
         let contract = tr::build_ib_stock_contract(symbol, &self.config.default_exchange);
+        let ib_timeout = self.config.ib_op_timeout;
         let task: JoinHandle<()> = match kind {
             TickByTickKind::Last => {
-                let sub = client
-                    .tick_by_tick_last(&contract, 0, false)
-                    .await
-                    .map_err(|e| ib_error_to_market_data_error(&e, &symbol_owned.symbol))?;
+                let sub = with_ib_timeout(ib_timeout, "tick_by_tick_last", async {
+                    client
+                        .tick_by_tick_last(&contract, 0, false)
+                        .await
+                        .map_err(|e| ib_error_to_market_data_error(&e, &symbol_owned.symbol))
+                })
+                .await?;
                 spawn_tbt_trade_publisher(
                     sub,
                     symbol_owned,
@@ -226,10 +287,13 @@ impl MarketDataSource for IbMarketData {
                 )
             }
             TickByTickKind::AllLast => {
-                let sub = client
-                    .tick_by_tick_all_last(&contract, 0, false)
-                    .await
-                    .map_err(|e| ib_error_to_market_data_error(&e, &symbol_owned.symbol))?;
+                let sub = with_ib_timeout(ib_timeout, "tick_by_tick_all_last", async {
+                    client
+                        .tick_by_tick_all_last(&contract, 0, false)
+                        .await
+                        .map_err(|e| ib_error_to_market_data_error(&e, &symbol_owned.symbol))
+                })
+                .await?;
                 spawn_tbt_trade_publisher(
                     sub,
                     symbol_owned,
@@ -241,10 +305,13 @@ impl MarketDataSource for IbMarketData {
                 )
             }
             TickByTickKind::BidAsk => {
-                let sub = client
-                    .tick_by_tick_bid_ask(&contract, 0, false)
-                    .await
-                    .map_err(|e| ib_error_to_market_data_error(&e, &symbol_owned.symbol))?;
+                let sub = with_ib_timeout(ib_timeout, "tick_by_tick_bid_ask", async {
+                    client
+                        .tick_by_tick_bid_ask(&contract, 0, false)
+                        .await
+                        .map_err(|e| ib_error_to_market_data_error(&e, &symbol_owned.symbol))
+                })
+                .await?;
                 spawn_tbt_bidask_publisher(
                     sub,
                     symbol_owned,
@@ -255,10 +322,13 @@ impl MarketDataSource for IbMarketData {
                 )
             }
             TickByTickKind::MidPoint => {
-                let sub = client
-                    .tick_by_tick_midpoint(&contract, 0, false)
-                    .await
-                    .map_err(|e| ib_error_to_market_data_error(&e, &symbol_owned.symbol))?;
+                let sub = with_ib_timeout(ib_timeout, "tick_by_tick_midpoint", async {
+                    client
+                        .tick_by_tick_midpoint(&contract, 0, false)
+                        .await
+                        .map_err(|e| ib_error_to_market_data_error(&e, &symbol_owned.symbol))
+                })
+                .await?;
                 spawn_tbt_midpoint_publisher(
                     sub,
                     symbol_owned,
@@ -291,15 +361,22 @@ impl MarketDataSource for IbMarketData {
         let (tx, rx) = broadcast::channel::<Arc<Bar>>(2048);
         let last_error: Arc<OnceLock<MarketDataError>> = Arc::new(OnceLock::new());
         let contract = tr::build_ib_stock_contract(symbol, &self.config.default_exchange);
-        let ib_sub = client
-            .realtime_bars(
-                &contract,
-                tr::to_ib_realtime_bar_size(Timeframe::S5),
-                tr::to_ib_realtime_what_to_show(what_to_show),
-                ibapi::market_data::TradingHours::Regular,
-            )
-            .await
-            .map_err(|e| ib_error_to_market_data_error(&e, &symbol_owned.symbol))?;
+        let ib_sub = with_ib_timeout(
+            self.config.ib_op_timeout,
+            "subscribe_realtime_bars",
+            async {
+                client
+                    .realtime_bars(
+                        &contract,
+                        tr::to_ib_realtime_bar_size(Timeframe::S5),
+                        tr::to_ib_realtime_what_to_show(what_to_show),
+                        ibapi::market_data::TradingHours::Regular,
+                    )
+                    .await
+                    .map_err(|e| ib_error_to_market_data_error(&e, &symbol_owned.symbol))
+            },
+        )
+        .await?;
         let task = spawn_rt_bar_publisher(
             ib_sub,
             symbol_owned,
@@ -331,21 +408,24 @@ impl MarketDataSource for IbMarketData {
         self.pacing.acquire_historical(key).await?;
         let contract = tr::build_ib_stock_contract(symbol, &self.config.default_exchange);
         let end_ib = tr::chrono_to_offsetdatetime(end);
-        let data = client
-            .historical_data(
-                &contract,
-                Some(end_ib),
-                tr::to_ib_historical_duration(duration),
-                tr::to_ib_historical_bar_size(bar_size),
-                Some(tr::to_ib_historical_what_to_show(what_to_show)),
-                if use_rth {
-                    ibapi::market_data::TradingHours::Regular
-                } else {
-                    ibapi::market_data::TradingHours::Extended
-                },
-            )
-            .await
-            .map_err(|e| ib_error_to_market_data_error(&e, &symbol.symbol))?;
+        let data = with_ib_timeout(self.config.ib_op_timeout, "historical_data", async {
+            client
+                .historical_data(
+                    &contract,
+                    Some(end_ib),
+                    tr::to_ib_historical_duration(duration),
+                    tr::to_ib_historical_bar_size(bar_size),
+                    Some(tr::to_ib_historical_what_to_show(what_to_show)),
+                    if use_rth {
+                        ibapi::market_data::TradingHours::Regular
+                    } else {
+                        ibapi::market_data::TradingHours::Extended
+                    },
+                )
+                .await
+                .map_err(|e| ib_error_to_market_data_error(&e, &symbol.symbol))
+        })
+        .await?;
         let bars = tr::translate_historical_payload(symbol, bar_size, &data);
         if bars.is_empty() {
             return Err(MarketDataError::Other(
@@ -376,21 +456,28 @@ impl MarketDataSource for IbMarketData {
         let req_id = self.next_req_id();
         let symbol_owned = symbol.clone();
         let contract = tr::build_ib_stock_contract(symbol, &self.config.default_exchange);
-        let ib_sub = client
-            .historical_data_streaming(
-                &contract,
-                tr::to_ib_historical_duration(duration),
-                tr::to_ib_historical_bar_size(bar_size),
-                Some(tr::to_ib_historical_what_to_show(what_to_show)),
-                if use_rth {
-                    ibapi::market_data::TradingHours::Regular
-                } else {
-                    ibapi::market_data::TradingHours::Extended
-                },
-                true, // keep_up_to_date: emit live updates after initial batch
-            )
-            .await
-            .map_err(|e| ib_error_to_market_data_error(&e, &symbol_owned.symbol))?;
+        let ib_sub = with_ib_timeout(
+            self.config.ib_op_timeout,
+            "historical_data_streaming",
+            async {
+                client
+                    .historical_data_streaming(
+                        &contract,
+                        tr::to_ib_historical_duration(duration),
+                        tr::to_ib_historical_bar_size(bar_size),
+                        Some(tr::to_ib_historical_what_to_show(what_to_show)),
+                        if use_rth {
+                            ibapi::market_data::TradingHours::Regular
+                        } else {
+                            ibapi::market_data::TradingHours::Extended
+                        },
+                        true, // keep_up_to_date: emit live updates after initial batch
+                    )
+                    .await
+                    .map_err(|e| ib_error_to_market_data_error(&e, &symbol_owned.symbol))
+            },
+        )
+        .await?;
         let (tx, rx) = mpsc::channel::<HistoricalStreamEvent>(256);
         let task = spawn_historical_publisher(ib_sub, symbol_owned, bar_size, tx);
         Ok(HistoricalStream::new(
@@ -415,10 +502,13 @@ impl MarketDataSource for IbMarketData {
             currency: "USD".into(),
             ..ibapi::contracts::Contract::default()
         };
-        let details = client
-            .contract_details(&contract)
-            .await
-            .map_err(|e| ib_error_to_market_data_error(&e, &symbol.symbol))?;
+        let details = with_ib_timeout(self.config.ib_op_timeout, "contract_details", async {
+            client
+                .contract_details(&contract)
+                .await
+                .map_err(|e| ib_error_to_market_data_error(&e, &symbol.symbol))
+        })
+        .await?;
         details
             .first()
             .map(tr::translate_contract_details)

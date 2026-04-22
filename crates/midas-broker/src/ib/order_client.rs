@@ -8,6 +8,7 @@
 //! `order_events` / `position_events` / `account_events` broadcasts.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -22,6 +23,25 @@ use crate::order_client::{
 };
 use crate::orders::state::OrderStatus;
 use crate::orders::types::OrderAction;
+
+/// Wrap a rust-ibapi await routed through the order client with a
+/// hard deadline. On `Elapsed` we surface an `OrderError::Other`
+/// carrying the call label so logs can pin down which call stalled.
+async fn with_order_timeout<F, T>(
+    timeout: Duration,
+    label: &'static str,
+    fut: F,
+) -> Result<T, OrderError>
+where
+    F: std::future::Future<Output = Result<T, OrderError>>,
+{
+    match tokio::time::timeout(timeout, fut).await {
+        Ok(inner) => inner,
+        Err(_) => Err(OrderError::Other(format!(
+            "ib {label} timed out after {timeout:?}"
+        ))),
+    }
+}
 
 // ───────────────────────────────────────────────────────────────────────────
 // IbOrderClient
@@ -83,25 +103,31 @@ impl IbOrderClient {
 #[async_trait]
 impl OrderClient for IbOrderClient {
     async fn next_order_id(&self) -> Result<i32, OrderError> {
-        // Wait for `ordering_ready` to carry `Some(_)`.
-        let mut rx = self.ordering_ready.clone();
-        loop {
-            let snapshot = *rx.borrow();
-            if let Some(id) = snapshot {
-                // Advance the rust-ibapi client's counter and return
-                // the current value atomically.
-                let client = self.client().await?;
-                return Ok(client
-                    .next_valid_order_id()
-                    .await
-                    .map_err(|e| OrderError::Other(format!("next_valid_order_id: {e}")))
-                    .unwrap_or(id));
+        // Wait for `ordering_ready` to carry `Some(_)`. The whole
+        // wait + fetch is bounded by `ib_op_timeout` so a stalled
+        // TWS never pegs a caller forever.
+        let budget = self.market.ib_op_timeout();
+        with_order_timeout(budget, "next_order_id", async {
+            let mut rx = self.ordering_ready.clone();
+            loop {
+                let snapshot = *rx.borrow();
+                if let Some(id) = snapshot {
+                    // Advance the rust-ibapi client's counter and
+                    // return the current value atomically.
+                    let client = self.client().await?;
+                    return Ok(client
+                        .next_valid_order_id()
+                        .await
+                        .map_err(|e| OrderError::Other(format!("next_valid_order_id: {e}")))
+                        .unwrap_or(id));
+                }
+                // Block until the watch ticks.
+                if rx.changed().await.is_err() {
+                    return Err(OrderError::Disconnected);
+                }
             }
-            // Block until the watch ticks.
-            if rx.changed().await.is_err() {
-                return Err(OrderError::Disconnected);
-            }
-        }
+        })
+        .await
     }
 
     async fn place_order(&self, spec: OrderSpec) -> Result<PlaceOrderResult, OrderError> {
@@ -116,10 +142,13 @@ impl OrderClient for IbOrderClient {
             ..ibapi::contracts::Contract::default()
         };
         let order = build_ib_order(&spec);
-        let ib_sub = client
-            .place_order(order_id, &contract, &order)
-            .await
-            .map_err(|e| OrderError::Other(format!("place_order: {e}")))?;
+        let ib_sub = with_order_timeout(self.market.ib_op_timeout(), "place_order", async {
+            client
+                .place_order(order_id, &contract, &order)
+                .await
+                .map_err(|e| OrderError::Other(format!("place_order: {e}")))
+        })
+        .await?;
         let order_tx = self.order_tx.clone();
         let _ = spec;
         tokio::spawn(order_event_pump(ib_sub, order_id, order_tx));
@@ -137,10 +166,13 @@ impl OrderClient for IbOrderClient {
         let stamp = manual_cancel_time
             .map(|t| t.format("%Y%m%d %H:%M:%S").to_string())
             .unwrap_or_default();
-        let ib_sub = client
-            .cancel_order(ib_order_id, &stamp)
-            .await
-            .map_err(|e| OrderError::Other(format!("cancel_order: {e}")))?;
+        let ib_sub = with_order_timeout(self.market.ib_op_timeout(), "cancel_order", async {
+            client
+                .cancel_order(ib_order_id, &stamp)
+                .await
+                .map_err(|e| OrderError::Other(format!("cancel_order: {e}")))
+        })
+        .await?;
         let (tx, rx) = mpsc::channel::<CancelOrderEvent>(16);
         let handle = tokio::spawn(cancel_event_pump(ib_sub, ib_order_id, tx));
         Ok(CancelOrderStream::new(rx, Box::new(move || handle.abort())))
@@ -200,49 +232,60 @@ impl OrderClient for IbOrderClient {
             ..ibapi::contracts::Contract::default()
         };
         let order = build_ib_order(&updated);
-        let ib_sub = client
-            .place_order(ib_order_id, &contract, &order)
-            .await
-            .map_err(|e| OrderError::Other(format!("modify via place_order: {e}")))?;
+        let ib_sub = with_order_timeout(self.market.ib_op_timeout(), "modify_order", async {
+            client
+                .place_order(ib_order_id, &contract, &order)
+                .await
+                .map_err(|e| OrderError::Other(format!("modify via place_order: {e}")))
+        })
+        .await?;
         tokio::spawn(order_event_pump(ib_sub, ib_order_id, self.order_tx.clone()));
         Ok(())
     }
 
     async fn open_orders(&self) -> Result<Vec<OpenOrder>, OrderError> {
         let client = self.client().await?;
-        let mut sub = client
-            .all_open_orders()
-            .await
-            .map_err(|e| OrderError::Other(format!("all_open_orders: {e}")))?;
-        let mut out = Vec::new();
-        while let Some(r) = sub.next().await {
-            match r {
-                Ok(ibapi::orders::Orders::OrderData(od)) => out.push(translate_open_order(&od)),
-                Ok(ibapi::orders::Orders::OrderStatus(_)) => {}
-                Ok(ibapi::orders::Orders::Notice(_)) => {}
-                Err(_) => break,
+        let budget = self.market.ib_op_timeout();
+        with_order_timeout(budget, "open_orders", async {
+            let mut sub = client
+                .all_open_orders()
+                .await
+                .map_err(|e| OrderError::Other(format!("all_open_orders: {e}")))?;
+            let mut out = Vec::new();
+            while let Some(r) = sub.next().await {
+                match r {
+                    Ok(ibapi::orders::Orders::OrderData(od)) => out.push(translate_open_order(&od)),
+                    Ok(ibapi::orders::Orders::OrderStatus(_)) => {}
+                    Ok(ibapi::orders::Orders::Notice(_)) => {}
+                    Err(_) => break,
+                }
             }
-        }
-        Ok(out)
+            Ok(out)
+        })
+        .await
     }
 
     async fn completed_orders(&self) -> Result<Vec<CompletedOrder>, OrderError> {
         let client = self.client().await?;
-        let mut sub = client
-            .completed_orders(true)
-            .await
-            .map_err(|e| OrderError::Other(format!("completed_orders: {e}")))?;
-        let mut out = Vec::new();
-        while let Some(r) = sub.next().await {
-            match r {
-                Ok(ibapi::orders::Orders::OrderData(od)) => {
-                    out.push(translate_completed_order(&od));
+        let budget = self.market.ib_op_timeout();
+        with_order_timeout(budget, "completed_orders", async {
+            let mut sub = client
+                .completed_orders(true)
+                .await
+                .map_err(|e| OrderError::Other(format!("completed_orders: {e}")))?;
+            let mut out = Vec::new();
+            while let Some(r) = sub.next().await {
+                match r {
+                    Ok(ibapi::orders::Orders::OrderData(od)) => {
+                        out.push(translate_completed_order(&od));
+                    }
+                    Ok(_) => {}
+                    Err(_) => break,
                 }
-                Ok(_) => {}
-                Err(_) => break,
             }
-        }
-        Ok(out)
+            Ok(out)
+        })
+        .await
     }
 
     fn order_events(&self) -> broadcast::Receiver<OrderEvent> {
