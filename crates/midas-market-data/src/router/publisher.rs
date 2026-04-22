@@ -39,15 +39,13 @@ pub(crate) async fn run_tick_publisher(hub: Arc<SymbolHub>, mut upstream: TickSt
                 let _ = hub.ticks_tx.send(tick.clone());
 
                 // Update the coalesced watch on price ticks only.
+                // Size-only ticks carry no price information — the
+                // `(Size, LastSize)` arm in `update_last_quote`
+                // never matched anyway, and the previous branch
+                // that blindly refreshed `next.ts` guaranteed a
+                // no-op spam at the tick cadence. Keep the watch
+                // strictly price-driven.
                 if matches!(tick.kind, TickKind::Price | TickKind::PriceSize) {
-                    update_last_quote(&hub.last_quote_tx, &tick);
-                }
-                if matches!(tick.kind, TickKind::Size) && tick.tick_type == TickType::LastSize {
-                    // Size on a trade tick bumps the watch timestamp
-                    // (so consumers polling `last` see the quote
-                    // refresh even if `last_size` arrived without a
-                    // preceding `last` tick). Harmless if value is
-                    // absent.
                     update_last_quote(&hub.last_quote_tx, &tick);
                 }
 
@@ -140,26 +138,47 @@ pub(crate) async fn run_rt_bar_publisher(hub: Arc<SymbolHub>, mut upstream: Real
 
 /// Coalesce a single tick into the last-quote watch.
 ///
-/// Writes only when a field actually changes, to avoid unnecessary
-/// `watch::Sender::send` wakeups.
+/// Writes only when a price field actually changes, to avoid
+/// unnecessary `watch::Sender::send` wakeups. The timestamp is
+/// advanced only inside the branches that mutate a price so
+/// size-only ticks (which carry no price information anyway) don't
+/// spam every watch consumer at the tick cadence — that was Bug 6:
+/// the previous `next.ts = tick.ts` refresh fired unconditionally,
+/// guaranteeing `next != current` for every tick and waking all
+/// watchers even when nothing semantically changed.
 fn update_last_quote(tx: &tokio::sync::watch::Sender<Quote>, tick: &Tick) {
     let current = tx.borrow().clone();
     let mut next = current.clone();
 
     match (tick.tick_type, &tick.value) {
-        (TickType::Bid, TickValue::Price(p)) => next.bid = Some(*p),
-        (TickType::Ask, TickValue::Price(p)) => next.ask = Some(*p),
-        (TickType::Last, TickValue::Price(p)) => next.last = Some(*p),
-        (TickType::Last, TickValue::PriceSize { price, .. }) => next.last = Some(*price),
+        (TickType::Bid, TickValue::Price(p)) => {
+            next.bid = Some(*p);
+            next.ts = tick.ts;
+        }
+        (TickType::Ask, TickValue::Price(p)) => {
+            next.ask = Some(*p);
+            next.ts = tick.ts;
+        }
+        (TickType::Last, TickValue::Price(p)) => {
+            next.last = Some(*p);
+            next.ts = tick.ts;
+        }
+        (TickType::Last, TickValue::PriceSize { price, .. }) => {
+            next.last = Some(*price);
+            next.ts = tick.ts;
+        }
         // `PriceSize` atomic ticks most commonly carry the last
         // trade; the `tick_type` discriminates bid/ask/last.
-        (TickType::Bid, TickValue::PriceSize { price, .. }) => next.bid = Some(*price),
-        (TickType::Ask, TickValue::PriceSize { price, .. }) => next.ask = Some(*price),
+        (TickType::Bid, TickValue::PriceSize { price, .. }) => {
+            next.bid = Some(*price);
+            next.ts = tick.ts;
+        }
+        (TickType::Ask, TickValue::PriceSize { price, .. }) => {
+            next.ask = Some(*price);
+            next.ts = tick.ts;
+        }
         _ => {}
     }
-
-    // Always refresh ts so consumers see the quote as "fresh".
-    next.ts = tick.ts;
 
     if next != current {
         let _ = tx.send(next);

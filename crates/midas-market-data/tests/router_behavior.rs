@@ -251,6 +251,87 @@ async fn last_quote_watch_coalesces() {
 }
 
 // ---------------------------------------------------------------------------
+// Bug 6: update_last_quote only sends on actual price change
+// ---------------------------------------------------------------------------
+//
+// The publisher previously called `update_last_quote` for every
+// Size/LastSize tick AND refreshed `next.ts = tick.ts`
+// unconditionally, guaranteeing `next != current` for every tick and
+// waking all watch consumers on every update — even size-only ticks
+// that carried no price information. Fix: refresh `ts` only inside
+// the price-mutating match arms, and skip the `update_last_quote`
+// call entirely on `Size` ticks.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn size_only_ticks_do_not_wake_watch_consumers() {
+    use midas_broker_core::market_data::{
+        MarketEvent, ReqId, Tick, TickAttributes, TickKind, TickType, TickValue,
+    };
+
+    let (router, sim) = build_router();
+    let sym = aapl();
+
+    let mut watch = router.last_quote(sym.clone()).await.expect("watch");
+
+    // Seed a baseline `last` price so the next identical price tick
+    // won't be the first-write-wakeup.
+    let base_ts = Utc.with_ymd_and_hms(2026, 1, 2, 14, 30, 0).unwrap();
+    sim.inject_for_test(MarketEvent::Tick(Tick {
+        symbol: sym.clone(),
+        req_id: ReqId(0),
+        kind: TickKind::Price,
+        tick_type: TickType::Last,
+        value: TickValue::Price(100.50),
+        attrs: TickAttributes::default(),
+        ts: base_ts,
+    }));
+    // Drain the first wakeup.
+    let _ = tokio::time::timeout(Duration::from_millis(200), watch.changed()).await;
+    assert_eq!(watch.borrow().last, Some(100.50));
+
+    // Now emit a storm of size-only ticks with advancing
+    // timestamps. NONE of them should wake the watch consumer —
+    // `last` (and bid/ask) never change.
+    for i in 1..=50 {
+        sim.inject_for_test(MarketEvent::Tick(Tick {
+            symbol: sym.clone(),
+            req_id: ReqId(0),
+            kind: TickKind::Size,
+            tick_type: TickType::LastSize,
+            value: TickValue::Size(100 + i as i64),
+            attrs: TickAttributes::default(),
+            ts: base_ts + chrono::Duration::milliseconds(i as i64 * 10),
+        }));
+    }
+    sleep(Duration::from_millis(100)).await;
+
+    // No change should have landed on the watch.
+    assert!(
+        !watch.has_changed().unwrap_or(true),
+        "size-only ticks must not wake the watch"
+    );
+
+    // And a real price change DOES still wake the consumer — this
+    // protects against the opposite regression of silencing all
+    // updates.
+    sim.inject_for_test(MarketEvent::Tick(Tick {
+        symbol: sym.clone(),
+        req_id: ReqId(0),
+        kind: TickKind::Price,
+        tick_type: TickType::Last,
+        value: TickValue::Price(101.25),
+        attrs: TickAttributes::default(),
+        ts: base_ts + chrono::Duration::seconds(1),
+    }));
+    let changed = tokio::time::timeout(Duration::from_millis(500), watch.changed()).await;
+    assert!(
+        changed.is_ok(),
+        "a genuine price change must still fire the watch"
+    );
+    assert_eq!(watch.borrow().last, Some(101.25));
+}
+
+// ---------------------------------------------------------------------------
 // 6. Watch-only consumer keeps publisher alive
 // ---------------------------------------------------------------------------
 
