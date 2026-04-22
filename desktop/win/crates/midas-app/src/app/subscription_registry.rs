@@ -98,6 +98,15 @@ pub fn remove_chart_handle(key: &ChartKey) {
     CHART_REGISTRY.remove(key);
 }
 
+/// Remove every chart bar handle bound to `chart_id`, regardless of
+/// symbol / timeframe. Used by the chart-close paths, which don't
+/// know the exact `(sym, tf)` pairing(s) the chart accumulated over
+/// its lifetime. Each removed entry drops its `SubscriptionHandle`
+/// which `DecRef`s upstream through the router's RAII guard.
+pub fn remove_chart_handles_for_chart(chart_id: ChartId) {
+    CHART_REGISTRY.retain(|k, _| k.chart_id != chart_id);
+}
+
 /// Look up a chart bar handle (shared-ref to the entry, not a clone
 /// of the inner handle — the entry owns the guard).
 pub fn get_chart_handle(key: &ChartKey) -> Option<Arc<BarEntry>> {
@@ -135,4 +144,180 @@ pub fn install_router(router: Arc<midas_market_data::MarketDataRouter>) {
 
 pub fn router() -> Option<Arc<midas_market_data::MarketDataRouter>> {
     ROUTER.get().cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit coverage for the chart-registry cleanup helpers.
+    //!
+    //! The full `MidasApp` bind-then-switch regression is expensive
+    //! to stand up (requires a `SimMarketData` router and an iced
+    //! runtime), so we isolate the cleanup contract here: a chart
+    //! that rebinds from one `(symbol, timeframe)` to another must
+    //! leave exactly one registry entry behind, not two.
+    use midas_broker_core::Timeframe;
+    use midas_market_data::{MarketDataRouter, SubscriptionHandle};
+    use std::sync::Arc;
+    use tokio::runtime::Runtime;
+
+    use super::*;
+
+    /// Brew a real `SubscriptionHandle<Bar>` off a `SimMarketData`
+    /// router so the guard's `DecRef` path survives the test —
+    /// synthesising a fake `Guard` would let the test pass even if
+    /// the DecRef wiring was broken upstream.
+    async fn make_bar_handle(
+        router: &Arc<MarketDataRouter>,
+        sym: &str,
+        tf: Timeframe,
+    ) -> SubscriptionHandle<midas_broker_core::market_data::Bar> {
+        let key = midas_broker_core::SymbolKey {
+            contract_id: 0,
+            symbol: sym.to_string(),
+        };
+        router
+            .subscribe_bars(key, tf)
+            .await
+            .expect("subscribe_bars")
+    }
+
+    fn build_test_router() -> Arc<MarketDataRouter> {
+        use midas_broker::sim::{SimMarketData, SimMarketDataConfig};
+        let sim = SimMarketData::new(SimMarketDataConfig {
+            farm_up_delay_ms: 1,
+            burst_enabled: false,
+            tick_drift_bps: 0.0,
+            tick_cadence_ms: 60_000,
+            ..SimMarketDataConfig::default()
+        });
+        let src: Arc<dyn midas_broker::MarketDataSource> = sim.clone();
+        MarketDataRouter::new(src)
+    }
+
+    #[test]
+    fn remove_chart_handles_for_chart_evicts_every_entry_for_that_chart() {
+        let rt = Runtime::new().expect("tokio rt");
+        rt.block_on(async {
+            let router = build_test_router();
+            let chart_id = ChartId::new(9_001);
+            let other_id = ChartId::new(9_002);
+            let aapl = midas_broker_core::SymbolKey {
+                contract_id: 0,
+                symbol: "AAPL_REG_T1".to_string(),
+            };
+            let msft = midas_broker_core::SymbolKey {
+                contract_id: 0,
+                symbol: "MSFT_REG_T1".to_string(),
+            };
+
+            // Two entries for `chart_id` (different symbols), one
+            // entry for `other_id` that must survive.
+            install_chart_handle(
+                ChartKey {
+                    symbol: aapl.clone(),
+                    timeframe: Timeframe::M1,
+                    chart_id,
+                },
+                make_bar_handle(&router, "AAPL_REG_T1", Timeframe::M1).await,
+            );
+            install_chart_handle(
+                ChartKey {
+                    symbol: msft.clone(),
+                    timeframe: Timeframe::M1,
+                    chart_id,
+                },
+                make_bar_handle(&router, "MSFT_REG_T1", Timeframe::M1).await,
+            );
+            install_chart_handle(
+                ChartKey {
+                    symbol: aapl.clone(),
+                    timeframe: Timeframe::M1,
+                    chart_id: other_id,
+                },
+                make_bar_handle(&router, "AAPL_REG_T1", Timeframe::M1).await,
+            );
+
+            remove_chart_handles_for_chart(chart_id);
+
+            assert!(get_chart_handle(&ChartKey {
+                symbol: aapl.clone(),
+                timeframe: Timeframe::M1,
+                chart_id,
+            })
+            .is_none());
+            assert!(get_chart_handle(&ChartKey {
+                symbol: msft.clone(),
+                timeframe: Timeframe::M1,
+                chart_id,
+            })
+            .is_none());
+            assert!(get_chart_handle(&ChartKey {
+                symbol: aapl.clone(),
+                timeframe: Timeframe::M1,
+                chart_id: other_id,
+            })
+            .is_some());
+
+            // Cleanup so later tests that share the global
+            // registry don't observe leftover entries.
+            remove_chart_handles_for_chart(other_id);
+        });
+    }
+
+    #[test]
+    fn bind_switch_leaves_one_entry_not_two() {
+        // Direct cover for Bug 1: a chart that rebinds from AAPL@M1
+        // to MSFT@M1 must leave exactly one CHART_REGISTRY entry,
+        // not two. We emulate `bind_chart_to_symbol` by
+        // install-then-evict-then-install.
+        let rt = Runtime::new().expect("tokio rt");
+        rt.block_on(async {
+            let router = build_test_router();
+            let chart_id = ChartId::new(9_101);
+            let aapl = midas_broker_core::SymbolKey {
+                contract_id: 0,
+                symbol: "AAPL_BIND_T1".to_string(),
+            };
+            let msft = midas_broker_core::SymbolKey {
+                contract_id: 0,
+                symbol: "MSFT_BIND_T1".to_string(),
+            };
+
+            install_chart_handle(
+                ChartKey {
+                    symbol: aapl.clone(),
+                    timeframe: Timeframe::M1,
+                    chart_id,
+                },
+                make_bar_handle(&router, "AAPL_BIND_T1", Timeframe::M1).await,
+            );
+            // Switching to MSFT: the bind path evicts the old
+            // (AAPL, M1, chart_id) entry, then installs the new
+            // (MSFT, M1, chart_id) entry.
+            remove_chart_handle(&ChartKey {
+                symbol: aapl.clone(),
+                timeframe: Timeframe::M1,
+                chart_id,
+            });
+            install_chart_handle(
+                ChartKey {
+                    symbol: msft.clone(),
+                    timeframe: Timeframe::M1,
+                    chart_id,
+                },
+                make_bar_handle(&router, "MSFT_BIND_T1", Timeframe::M1).await,
+            );
+
+            let live = CHART_REGISTRY
+                .iter()
+                .filter(|r| r.key().chart_id == chart_id)
+                .count();
+            assert_eq!(
+                live, 1,
+                "after symbol switch exactly one registry entry must remain"
+            );
+
+            remove_chart_handles_for_chart(chart_id);
+        });
+    }
 }

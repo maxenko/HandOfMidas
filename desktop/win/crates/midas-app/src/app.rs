@@ -3119,6 +3119,9 @@ impl MidasApp {
                 .get(&id)
                 .map(|c| c.symbol.clone())
                 .unwrap_or_default();
+            if self.charts.get(&id).is_some_and(|c| c.timeframe != new_tf) {
+                self.evict_chart_handle_for_current_binding(id);
+            }
             if let Some(chart) = self.charts.get_mut(&id) {
                 chart.timeframe = new_tf;
                 chart.gatr_hover = false;
@@ -3833,6 +3836,9 @@ impl MidasApp {
                 .map(|c| c.symbol.clone())
                 .unwrap_or_default();
 
+            if self.charts.get(&id).is_some_and(|c| c.timeframe != tf) {
+                self.evict_chart_handle_for_current_binding(id);
+            }
             if let Some(chart) = self.charts.get_mut(&id) {
                 chart.timeframe = tf;
                 chart.chart_state.dirty.mark_camera();

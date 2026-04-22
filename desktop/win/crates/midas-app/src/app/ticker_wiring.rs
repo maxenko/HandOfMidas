@@ -35,6 +35,17 @@ impl MidasApp {
     /// Every user-facing path that changes a chart's symbol must route
     /// through this helper.
     pub(crate) fn bind_chart_to_symbol(&mut self, chart_id: ChartId, symbol: SymbolKey) {
+        // 0. Capture the chart's PREVIOUS (bound_symbol, timeframe) so
+        //    we can evict the stale CHART_REGISTRY entry before the
+        //    new prewarm installs a fresh one. Without this, every
+        //    symbol switch accumulates a leaked handle whose RAII
+        //    guard keeps pinning one upstream RT-bar subscription,
+        //    eventually tripping StreamingLineLimitExceeded.
+        let prev_bound = self
+            .charts
+            .get(&chart_id)
+            .and_then(|c| c.bound_symbol.as_ref().map(|s| (s.clone(), c.timeframe)));
+
         // 1. Set bound_symbol + backward-compat fields.
         let timeframe = if let Some(chart) = self.charts.get_mut(&chart_id) {
             chart.bound_symbol = Some(symbol.clone());
@@ -45,6 +56,25 @@ impl MidasApp {
             // Chart dropped before we got here — skip pre-warm.
             midas_core::Timeframe::M1
         };
+
+        // Evict the previous entry if the (sym, tf) pair actually
+        // differs from the new one. A no-op rebind to the same
+        // symbol must not trigger an upstream decref → re-subscribe
+        // thrash.
+        if let Some((old_sym, old_tf)) = prev_bound {
+            let same_binding = old_sym == symbol && old_tf == timeframe;
+            if !same_binding {
+                let old_key = crate::app::subscription_registry::ChartKey {
+                    symbol: midas_broker_core::SymbolKey {
+                        contract_id: 0,
+                        symbol: old_sym.as_str().to_string(),
+                    },
+                    timeframe: super::handlers::chart_timeframe_to_broker_core(old_tf),
+                    chart_id,
+                };
+                crate::app::subscription_registry::remove_chart_handle(&old_key);
+            }
+        }
 
         // S8c: eagerly pre-install the bar subscription handle in
         // the chart registry so the chart_stream_builder sees it on
@@ -115,6 +145,29 @@ impl MidasApp {
                 ));
             }
         }
+    }
+
+    /// Evict the CHART_REGISTRY entry matching the chart's *current*
+    /// `(bound_symbol, timeframe)`. Call this before mutating either
+    /// field so the registry doesn't leak a handle keyed on the old
+    /// tuple. Dropping the entry `DecRef`s upstream through the
+    /// router's RAII guard.
+    pub(crate) fn evict_chart_handle_for_current_binding(&self, chart_id: ChartId) {
+        let Some(chart) = self.charts.get(&chart_id) else {
+            return;
+        };
+        let Some(ref sym) = chart.bound_symbol else {
+            return;
+        };
+        let key = crate::app::subscription_registry::ChartKey {
+            symbol: midas_broker_core::SymbolKey {
+                contract_id: 0,
+                symbol: sym.as_str().to_string(),
+            },
+            timeframe: super::handlers::chart_timeframe_to_broker_core(chart.timeframe),
+            chart_id,
+        };
+        crate::app::subscription_registry::remove_chart_handle(&key);
     }
 
     /// Pre-warm the bar subscription for a chart's (symbol, tf).

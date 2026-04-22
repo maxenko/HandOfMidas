@@ -53,6 +53,17 @@ impl MidasApp {
                     .map(|c| c.symbol.clone())
                     .unwrap_or_default();
 
+                // Evict the CHART_REGISTRY entry keyed on the OLD
+                // (sym, tf) before switching — otherwise the handle
+                // lingers and leaks its RAII DecRef.
+                if self
+                    .charts
+                    .get(&chart_id)
+                    .is_some_and(|c| c.timeframe != tf)
+                {
+                    self.evict_chart_handle_for_current_binding(chart_id);
+                }
+
                 if let Some(chart) = self.charts.get_mut(&chart_id) {
                     chart.timeframe = tf;
                     chart.gatr_hover = false;
@@ -258,6 +269,9 @@ impl MidasApp {
                 if let Some(pane) = self.workspace.find_pane(id) {
                     if let Some(PanelContent::Chart(closed_id)) = self.workspace.close(pane) {
                         self.charts.remove(&closed_id);
+                        crate::app::subscription_registry::remove_chart_handles_for_chart(
+                            closed_id,
+                        );
                         if matches!(self.link_picker_open, Some((PickerTarget::Docked(pid), _)) if pid == closed_id)
                         {
                             self.link_picker_open = None;
@@ -395,6 +409,9 @@ impl MidasApp {
                 match self.workspace.close(pane) {
                     Some(PanelContent::Chart(closed_id)) => {
                         self.charts.remove(&closed_id);
+                        crate::app::subscription_registry::remove_chart_handles_for_chart(
+                            closed_id,
+                        );
                         if matches!(self.link_picker_open, Some((PickerTarget::Docked(pid), _)) if pid == closed_id)
                         {
                             self.link_picker_open = None;
@@ -1052,6 +1069,7 @@ impl MidasApp {
                         }
                         // Remove the chart entry that split() created.
                         self.charts.remove(&chart_id);
+                        crate::app::subscription_registry::remove_chart_handles_for_chart(chart_id);
                         let symbol = self
                             .active_chart_id()
                             .and_then(|id| self.charts.get(&id))
@@ -1966,6 +1984,7 @@ impl MidasApp {
                 state.content = PanelContent::Account(account_id);
             }
             self.charts.remove(&chart_id);
+            crate::app::subscription_registry::remove_chart_handles_for_chart(chart_id);
             self.account_panels.insert(
                 account_id,
                 crate::account_panel::AccountPanel::new(account_id, "Account"),
@@ -2027,6 +2046,7 @@ impl MidasApp {
                         }
                         // Remove the chart entry that split() created.
                         self.charts.remove(&chart_id);
+                        crate::app::subscription_registry::remove_chart_handles_for_chart(chart_id);
                         self.watchlists
                             .insert(wl_id, WatchlistPanel::new(wl_id, "Watchlist".into()));
                         self.status_message = format!("Added {wl_id}");
@@ -2085,10 +2105,15 @@ impl MidasApp {
                         self.market_cache.remove(&sym_key);
                         self.tickers.remove(&sym_key);
                         self.ticker_persist.forget(&sym_key);
-                        // S7e: router-side cleanup happens through
-                        // the subscription handles dropping when iced
-                        // stops issuing the matching subscription on
-                        // the next re-diff.
+                        // Drop the TICKER_REGISTRY handle so the
+                        // router's RAII guard fires DecTickRef for
+                        // this symbol — no consumer is left on the
+                        // app side.
+                        let broker_sym = midas_broker_core::SymbolKey {
+                            contract_id: 0,
+                            symbol: symbol_upper.clone(),
+                        };
+                        crate::app::subscription_registry::remove_ticker_handle(&broker_sym);
                     }
                     return self.flush_config();
                 }
@@ -2737,6 +2762,9 @@ impl MidasApp {
                     };
                     match handle {
                         crate::app::ChartHandle::Docked(id) => {
+                            if self.charts.get(&id).is_some_and(|c| c.timeframe != tf) {
+                                self.evict_chart_handle_for_current_binding(id);
+                            }
                             if let Some(chart) = self.charts.get_mut(&id) {
                                 chart.timeframe = tf;
                             }
@@ -2854,6 +2882,12 @@ impl MidasApp {
                 }
                 if let Some(chart) = self.floating_charts.remove(&id) {
                     tracing::info!("Floating window closed for {}", chart.symbol);
+                    // Chart-subscription keys for floating charts use
+                    // a synthetic `ChartId` derived from the window
+                    // handle; purge any lingering CHART_REGISTRY
+                    // entries so the RAII DecRef fires.
+                    let synthetic = floating_window_synthetic_id(id);
+                    crate::app::subscription_registry::remove_chart_handles_for_chart(synthetic);
                 }
                 // If the main window was closed, exit the application.
                 if self.window.main_window() == Some(id) {
@@ -4176,7 +4210,9 @@ impl MidasApp {
 /// `Timeframe` the router speaks. The two enums are value-identical
 /// but live in different crates, so an explicit match keeps the
 /// desktop side free of a `From` impl in `midas-core`.
-fn chart_timeframe_to_broker_core(tf: midas_core::Timeframe) -> midas_broker_core::Timeframe {
+pub(crate) fn chart_timeframe_to_broker_core(
+    tf: midas_core::Timeframe,
+) -> midas_broker_core::Timeframe {
     use midas_broker_core::Timeframe as B;
     use midas_core::Timeframe as A;
     match tf {
