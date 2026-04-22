@@ -258,5 +258,19 @@ fn subscription(state: &MidasApp) -> Subscription<Message> {
         subs.push(positions_sub);
     }
 
+    // Router-era order-lifecycle subscription (slice 10c). Fans every
+    // `midas_broker::OrderEvent` into `Message::RouterOrderEvent` so
+    // the app-side handler can translate IB order ids to local UUIDs
+    // and drive the existing order-blotter / TickerState paths.
+    if let Some(ref order_client) = state.router_order_client {
+        let source = crate::bracket_submit::OrderEventsSource {
+            order_client: order_client.clone(),
+        };
+        subs.push(Subscription::run_with(
+            source,
+            crate::bracket_submit::order_events_stream,
+        ));
+    }
+
     Subscription::batch(subs)
 }

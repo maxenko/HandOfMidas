@@ -503,6 +503,16 @@ pub struct MidasApp {
     /// IB pacing. Key: `ChartId`; value: `Instant` of the last
     /// allowed resync. Wired by the `ChartResync` handler in S7b.
     pub(crate) resync_throttle: std::collections::HashMap<ChartId, Instant>,
+
+    /// Translation map: IB order id (i32, from the router's
+    /// `OrderClient`) → local UUID (used by `order_blotter` and
+    /// `order_annotation_links`). Populated when
+    /// `Message::BracketPlaceResult` lands the real IB ids for a
+    /// freshly-submitted bracket; consulted from
+    /// `Message::RouterOrderEvent` to synthesise `BrokerEvent`-shaped
+    /// order status / fill / rejection messages the existing UI
+    /// handlers consume. (Router refactor slice 10c.)
+    pub(crate) ib_to_uuid: std::collections::HashMap<i32, uuid::Uuid>,
 }
 
 /// Pending drag: press started but hold threshold not yet reached.
@@ -804,6 +814,14 @@ pub enum Message {
     /// the user; success is driven by the subsequent `OrderEvent`
     /// stream which reconciles to the provisional annotation.
     BracketPlaceResult(BracketPlaceOutcome),
+
+    /// Order-lifecycle event from the router's
+    /// [`midas_broker::OrderClient::order_events`] broadcast (router
+    /// refactor slice 10c). Carries the raw [`midas_broker::OrderEvent`];
+    /// the handler translates IB order ids back to local UUIDs using
+    /// the `order_annotation_links` map and fans out to the existing
+    /// order-blotter / TickerState handlers.
+    RouterOrderEvent(Box<midas_broker::OrderEvent>),
 
     // -- Toast notifications --
     /// All toast traffic routes through one wrapper variant.
@@ -2209,6 +2227,7 @@ impl MidasApp {
             router,
             router_order_client,
             resync_throttle: std::collections::HashMap::new(),
+            ib_to_uuid: std::collections::HashMap::new(),
         };
 
         // Register broker bridge in provider registry.
@@ -3766,6 +3785,7 @@ impl MidasApp {
             | Message::BrokerEventReceived(..)
             | Message::BrokerConnectionChanged(..)
             | Message::BracketPlaceResult(..)
+            | Message::RouterOrderEvent(..)
             | Message::BrokerSimSpawned(..) => self.handle_broker_msg(message),
 
             // -- Router refactor (S7) --

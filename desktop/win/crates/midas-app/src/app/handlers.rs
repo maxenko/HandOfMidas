@@ -3785,10 +3785,25 @@ impl MidasApp {
                             .max_by_key(|(_, link)| link.created_at)
                             .map(|(k, _)| *k);
                         if let Some(key) = key {
-                            if let Some(link) = self.order_annotation_links.get_mut(&key) {
+                            let link_copy = self.order_annotation_links.get_mut(&key).map(|link| {
                                 link.entry_ib_id = Some(handle.entry_id);
                                 link.tp_ib_id = handle.tp_id;
                                 link.sl_ib_id = handle.sl_id;
+                                (link.parent_order_id, link.tp_order_id, link.sl_order_id)
+                            });
+                            if let Some((parent_uuid, tp_uuid, sl_uuid)) = link_copy {
+                                // Populate the ib-id → uuid translation
+                                // map so RouterOrderEvent can synthesise
+                                // BrokerEvent-shaped messages the
+                                // existing blotter + TickerState handlers
+                                // consume.
+                                self.ib_to_uuid.insert(handle.entry_id, parent_uuid);
+                                if let (Some(ib), Some(u)) = (handle.tp_id, tp_uuid) {
+                                    self.ib_to_uuid.insert(ib, u);
+                                }
+                                if let (Some(ib), Some(u)) = (handle.sl_id, sl_uuid) {
+                                    self.ib_to_uuid.insert(ib, u);
+                                }
                                 tracing::info!(
                                     "Bracket submission confirmed: symbol={} \
                                      entry={} tp={:?} sl={:?}",
@@ -3818,6 +3833,78 @@ impl MidasApp {
                             crate::ticker_state::TickerMsg::OrderRejected { reason: msg },
                         ));
                     }
+                }
+                Task::none()
+            }
+
+            Message::RouterOrderEvent(boxed) => {
+                // Slice 10c: translate OrderClient::order_events into
+                // the BrokerEvent shape the existing app handlers
+                // consume. The translation uses `ib_to_uuid` (populated
+                // by `BracketPlaceResult`) to map i32 IB ids back to
+                // local UUIDs.
+                use midas_broker::OrderEvent;
+                let translated: Option<midas_broker::BrokerEvent> = match *boxed {
+                    OrderEvent::Submitted { ib_order_id } => {
+                        self.ib_to_uuid.get(&ib_order_id).copied().map(|uuid| {
+                            midas_broker::BrokerEvent::OrderSubmitted {
+                                order_id: uuid,
+                                ib_order_id,
+                                ib_perm_id: 0,
+                            }
+                        })
+                    }
+                    OrderEvent::StatusChanged {
+                        ib_order_id,
+                        status,
+                        filled,
+                        remaining,
+                        avg_fill_price,
+                    } => self.ib_to_uuid.get(&ib_order_id).copied().map(|uuid| {
+                        midas_broker::BrokerEvent::OrderStatusChanged {
+                            order_id: uuid,
+                            old_status: String::new(),
+                            new_status: status.to_string(),
+                            filled_qty: filled,
+                            remaining_qty: remaining,
+                            avg_fill_price,
+                        }
+                    }),
+                    OrderEvent::ExecutionDetails {
+                        ib_order_id,
+                        exec_id,
+                        shares,
+                        price,
+                    } => self.ib_to_uuid.get(&ib_order_id).copied().map(|uuid| {
+                        midas_broker::BrokerEvent::OrderFilled {
+                            order_id: uuid,
+                            ib_exec_id: exec_id,
+                            shares,
+                            price,
+                            commission: None,
+                        }
+                    }),
+                    OrderEvent::Commission { .. } => None,
+                    OrderEvent::Rejected {
+                        ib_order_id,
+                        reason,
+                    } => self.ib_to_uuid.get(&ib_order_id).copied().map(|uuid| {
+                        midas_broker::BrokerEvent::OrderRejected {
+                            order_id: uuid,
+                            reason,
+                        }
+                    }),
+                    OrderEvent::Cancelled { ib_order_id } => {
+                        self.ib_to_uuid.get(&ib_order_id).copied().map(|uuid| {
+                            midas_broker::BrokerEvent::OrderCancelled {
+                                order_id: uuid,
+                                reason: "cancelled".into(),
+                            }
+                        })
+                    }
+                };
+                if let Some(event) = translated {
+                    return self.update(Message::BrokerEventReceived(Box::new(event)));
                 }
                 Task::none()
             }
