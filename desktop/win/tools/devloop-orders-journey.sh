@@ -13,7 +13,7 @@
 # What it does:
 #   - Drives a full bracket submission through inject_ticker_msg
 #   - Uses InjectBrokerEvent (D3) to fabricate a full fill chain that
-#     TestBroker's default "instant" timing doesn't fire for Limit legs
+#     the sim's default "instant" timing doesn't fire for Limit legs
 #   - Screenshots the populated blotter
 #   - Verifies the rows exist via dump_state
 
