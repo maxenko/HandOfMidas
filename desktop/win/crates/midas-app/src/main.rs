@@ -7,6 +7,7 @@ mod account_panel;
 mod annotation_persistence;
 mod annotation_store;
 mod app;
+mod bracket_submit;
 mod broker_bridge;
 mod chart_view;
 mod chart_widget;
