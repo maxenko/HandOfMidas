@@ -642,10 +642,10 @@ pub fn sync_panel_from_bracket(
 
 /// Normalize a bracket so its data matches its `entry_type` rules.
 ///
-/// Called after loading from disk or recalling a saved bracket to ensure
-/// stale data from old code versions doesn't produce incorrect chart lines.
-/// This is the single source of truth for what a bracket of each type
-/// should contain.
+/// Called after loading from disk or recalling a saved bracket to
+/// ensure stale data from old code versions doesn't produce incorrect
+/// chart lines. This is the single source of truth for what a bracket
+/// of each type should contain in terms of the **entry** shape.
 ///
 /// **Entry lines by type:**
 /// - Market: entry at last price, NOT draggable. No stop trigger.
@@ -653,13 +653,18 @@ pub fn sync_panel_from_bracket(
 /// - Stop: entry at stop price, draggable. No stop trigger.
 /// - StopLimit: entry at limit price + stop trigger line, both draggable.
 ///
-/// **TP/SL legs:** Preserved as-is (user-controlled via panel toggles).
-/// Only cleared if they have degenerate values (price <= 0).
+/// **TP/SL legs:** Preserved as-is (user-controlled via panel toggles
+/// and chart drags). The only modification is clearing degenerate
+/// legs — a `price <= 0.0` TP/SL is replaced with `None` so it does
+/// not render a ghost line at zero.
 ///
-/// **Side constraints:** TP/SL on wrong side of entry are mirrored
-/// to the correct side (preserves offset distance from entry).
+/// **Side constraints:** This function does **not** enforce TP/SL
+/// direction any more. Brackets are free-form; legs that cross entry
+/// are classified visually by the decorator layer via
+/// [`midas_chart::widget::order_bracket::is_leg_on_wrong_side`]
+/// (see `plan/live-sim-and-free-brackets.md`).
 pub fn normalize_bracket(bracket: &mut midas_chart::widget::order_bracket::OrderBracket) {
-    use midas_chart::widget::order_bracket::{BracketSide, EntryType};
+    use midas_chart::widget::order_bracket::EntryType;
 
     // ── Entry stop_price by type ───────────────────────────────────
     match bracket.entry_type {
@@ -673,33 +678,19 @@ pub fn normalize_bracket(bracket: &mut midas_chart::widget::order_bracket::Order
         }
     }
 
-    // ── Validate TP leg ────────────────────────────────────────────
-    // Long TP must be above entry; Short TP must be below entry.
-    // If on wrong side (e.g., after a side flip), mirror it.
-    if let Some(ref mut tp) = bracket.take_profit {
+    // ── Clear degenerate TP leg ────────────────────────────────────
+    // A non-positive price is a sentinel for "no leg"; strip it so the
+    // decorator layer doesn't try to render a ghost line at zero.
+    if let Some(ref tp) = bracket.take_profit {
         if tp.line.price <= 0.0 {
             bracket.take_profit = None;
-        } else {
-            let offset = (tp.line.price - bracket.entry.line.price).abs();
-            tp.line.price = match bracket.side {
-                BracketSide::Long => bracket.entry.line.price + offset,
-                BracketSide::Short => bracket.entry.line.price - offset,
-            };
         }
     }
 
-    // ── Validate SL leg ────────────────────────────────────────────
-    // Long SL must be below entry; Short SL must be above entry.
-    // If on wrong side (e.g., after a side flip), mirror it.
-    if let Some(ref mut sl) = bracket.stop_loss {
+    // ── Clear degenerate SL leg ────────────────────────────────────
+    if let Some(ref sl) = bracket.stop_loss {
         if sl.line.price <= 0.0 {
             bracket.stop_loss = None;
-        } else {
-            let offset = (sl.line.price - bracket.entry.line.price).abs();
-            sl.line.price = match bracket.side {
-                BracketSide::Long => bracket.entry.line.price - offset,
-                BracketSide::Short => bracket.entry.line.price + offset,
-            };
         }
     }
 

@@ -400,6 +400,129 @@ fn validate_bracket_zero_quantity() {
     );
 }
 
+// -- normalize_bracket tests (free-form brackets) --
+//
+// `normalize_bracket` used to mirror TP/SL that landed on the wrong
+// side of entry to the opposite side. Brackets are now free-form — the
+// function only clears degenerate legs (`price <= 0.0`) and preserves
+// user-chosen TP/SL positions verbatim. Wrong-side placements are
+// classified visually by the decorator layer, not corrected here.
+
+fn normalize_test_leg(
+    price: f64,
+    role: midas_chart::widget::order_bracket::LegRole,
+) -> midas_chart::widget::order_bracket::BracketLeg {
+    use midas_chart::widget::level::LineStyle;
+    use midas_chart::widget::order_bracket::*;
+    BracketLeg {
+        line: midas_chart::widget::PriceLine {
+            price,
+            extent: midas_chart::widget::LineExtent::FullWidth,
+            stroke: midas_chart::widget::LineStroke {
+                color: [0.0, 0.0, 0.0, 1.0],
+                width: 1.5,
+                style: LineStyle::Solid,
+            },
+        },
+        role,
+        projected_pnl: None,
+        projected_pnl_pct: None,
+    }
+}
+
+fn normalize_test_long_bracket(
+    entry_price: f64,
+    tp_price: Option<f64>,
+    sl_price: Option<f64>,
+) -> midas_chart::widget::order_bracket::OrderBracket {
+    use midas_chart::widget::order_bracket::*;
+    OrderBracket {
+        entry: normalize_test_leg(entry_price, LegRole::Entry),
+        take_profit: tp_price.map(|p| normalize_test_leg(p, LegRole::TakeProfit)),
+        stop_loss: sl_price.map(|p| normalize_test_leg(p, LegRole::StopLoss)),
+        side: BracketSide::Long,
+        status: BracketStatus::Draft,
+        quantity: None,
+        saved: false,
+        filled_qty: None,
+        entry_type: EntryType::Market,
+        entry_stop_price: None,
+        wrong_side_warning: false,
+    }
+}
+
+#[test]
+fn normalize_bracket_preserves_tp_below_long_entry() {
+    // Long entry=100, TP clicked at 95 (wrong side). The legacy
+    // implementation would have mirrored TP to 105. The new contract
+    // is pass-through — the user-chosen price survives normalization.
+    let mut bracket = normalize_test_long_bracket(100.0, Some(95.0), None);
+    normalize_bracket(&mut bracket);
+    let tp_price = bracket
+        .take_profit
+        .as_ref()
+        .expect("TP leg present")
+        .line
+        .price;
+    assert!(
+        (tp_price - 95.0).abs() < f64::EPSILON,
+        "TP below entry must be preserved, got {tp_price}"
+    );
+}
+
+#[test]
+fn normalize_bracket_preserves_sl_above_long_entry() {
+    // Mirror case for SL: Long entry=100, SL clicked at 106.
+    let mut bracket = normalize_test_long_bracket(100.0, None, Some(106.0));
+    normalize_bracket(&mut bracket);
+    let sl_price = bracket
+        .stop_loss
+        .as_ref()
+        .expect("SL leg present")
+        .line
+        .price;
+    assert!(
+        (sl_price - 106.0).abs() < f64::EPSILON,
+        "SL above entry must be preserved, got {sl_price}"
+    );
+}
+
+#[test]
+fn normalize_bracket_clears_degenerate_tp() {
+    // Price <= 0.0 is still a sentinel for "no leg".
+    let mut bracket = normalize_test_long_bracket(100.0, Some(-1.0), Some(90.0));
+    normalize_bracket(&mut bracket);
+    assert!(
+        bracket.take_profit.is_none(),
+        "TP with price <= 0 must be cleared"
+    );
+    // Valid SL survives unchanged.
+    assert!(bracket.stop_loss.is_some(), "valid SL must be preserved");
+}
+
+#[test]
+fn normalize_bracket_clears_degenerate_sl() {
+    let mut bracket = normalize_test_long_bracket(100.0, Some(110.0), Some(0.0));
+    normalize_bracket(&mut bracket);
+    assert!(
+        bracket.stop_loss.is_none(),
+        "SL with price <= 0 must be cleared"
+    );
+    assert!(bracket.take_profit.is_some(), "valid TP must be preserved");
+}
+
+#[test]
+fn normalize_bracket_preserves_correct_side_legs() {
+    // Sanity: legs that are already on the correct side survive
+    // unchanged (no hidden rounding / mirroring).
+    let mut bracket = normalize_test_long_bracket(100.0, Some(110.0), Some(90.0));
+    normalize_bracket(&mut bracket);
+    let tp_price = bracket.take_profit.as_ref().unwrap().line.price;
+    let sl_price = bracket.stop_loss.as_ref().unwrap().line.price;
+    assert!((tp_price - 110.0).abs() < f64::EPSILON);
+    assert!((sl_price - 90.0).abs() < f64::EPSILON);
+}
+
 #[test]
 fn validate_bracket_long_sl_above_entry() {
     use midas_chart::widget::level::LineStyle;

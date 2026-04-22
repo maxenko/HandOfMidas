@@ -1736,3 +1736,135 @@ fn stoplimit_draft_renders_two_distinct_lines() {
         "StopLimit draft must emit a BracketStopTrigger hit zone"
     );
 }
+
+// ── is_leg_on_wrong_side ────────────────────────────────────────────
+
+#[test]
+fn wrong_side_long_tp_below_entry_is_true() {
+    assert!(is_leg_on_wrong_side(
+        BracketSide::Long,
+        LegRole::TakeProfit,
+        95.0,
+        100.0,
+    ));
+}
+
+#[test]
+fn wrong_side_long_sl_above_entry_is_true() {
+    assert!(is_leg_on_wrong_side(
+        BracketSide::Long,
+        LegRole::StopLoss,
+        105.0,
+        100.0,
+    ));
+}
+
+#[test]
+fn wrong_side_short_tp_above_entry_is_true() {
+    assert!(is_leg_on_wrong_side(
+        BracketSide::Short,
+        LegRole::TakeProfit,
+        105.0,
+        100.0,
+    ));
+}
+
+#[test]
+fn wrong_side_short_sl_below_entry_is_true() {
+    assert!(is_leg_on_wrong_side(
+        BracketSide::Short,
+        LegRole::StopLoss,
+        95.0,
+        100.0,
+    ));
+}
+
+#[test]
+fn wrong_side_long_tp_above_entry_is_false() {
+    assert!(!is_leg_on_wrong_side(
+        BracketSide::Long,
+        LegRole::TakeProfit,
+        110.0,
+        100.0,
+    ));
+}
+
+#[test]
+fn wrong_side_long_sl_below_entry_is_false() {
+    assert!(!is_leg_on_wrong_side(
+        BracketSide::Long,
+        LegRole::StopLoss,
+        90.0,
+        100.0,
+    ));
+}
+
+#[test]
+fn wrong_side_short_tp_below_entry_is_false() {
+    assert!(!is_leg_on_wrong_side(
+        BracketSide::Short,
+        LegRole::TakeProfit,
+        90.0,
+        100.0,
+    ));
+}
+
+#[test]
+fn wrong_side_short_sl_above_entry_is_false() {
+    assert!(!is_leg_on_wrong_side(
+        BracketSide::Short,
+        LegRole::StopLoss,
+        110.0,
+        100.0,
+    ));
+}
+
+#[test]
+fn wrong_side_entry_leg_is_always_false() {
+    // Entry legs are defined by bracket mechanics, not TP/SL direction.
+    for side in [BracketSide::Long, BracketSide::Short] {
+        assert!(!is_leg_on_wrong_side(side, LegRole::Entry, 95.0, 100.0));
+        assert!(!is_leg_on_wrong_side(side, LegRole::Entry, 105.0, 100.0));
+        assert!(!is_leg_on_wrong_side(side, LegRole::Entry, 100.0, 100.0));
+    }
+}
+
+#[test]
+fn wrong_side_stop_trigger_leg_is_always_false() {
+    for side in [BracketSide::Long, BracketSide::Short] {
+        assert!(!is_leg_on_wrong_side(
+            side,
+            LegRole::StopTrigger,
+            95.0,
+            100.0
+        ));
+        assert!(!is_leg_on_wrong_side(
+            side,
+            LegRole::StopTrigger,
+            105.0,
+            100.0
+        ));
+    }
+}
+
+#[test]
+fn wrong_side_long_tp_at_entry_is_true() {
+    // TP at entry is considered on the wrong side (zero reward).
+    assert!(is_leg_on_wrong_side(
+        BracketSide::Long,
+        LegRole::TakeProfit,
+        100.0,
+        100.0,
+    ));
+}
+
+#[test]
+fn wrong_side_long_sl_at_entry_is_true() {
+    // SL at entry is considered on the wrong side (zero risk buffer).
+    assert!(is_leg_on_wrong_side(
+        BracketSide::Long,
+        LegRole::StopLoss,
+        100.0,
+        100.0,
+    ));
+}

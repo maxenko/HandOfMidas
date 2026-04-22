@@ -24,9 +24,10 @@
 //! badge are gone — both replaced by the cleaner V2 layout.
 
 use super::{
-    BracketSide, BracketStatus, EntryType, OrderBracket, BRACKET_LONG_ENTRY_COLOR,
-    BRACKET_LONG_STOP_COLOR, BRACKET_LONG_STOP_LIMIT_COLOR, BRACKET_SHORT_ENTRY_COLOR,
-    BRACKET_SHORT_STOP_COLOR, BRACKET_SHORT_STOP_LIMIT_COLOR, BRACKET_SL_COLOR, BRACKET_TP_COLOR,
+    is_leg_on_wrong_side, BracketSide, BracketStatus, EntryType, LegRole, OrderBracket,
+    BRACKET_LONG_ENTRY_COLOR, BRACKET_LONG_STOP_COLOR, BRACKET_LONG_STOP_LIMIT_COLOR,
+    BRACKET_SHORT_ENTRY_COLOR, BRACKET_SHORT_STOP_COLOR, BRACKET_SHORT_STOP_LIMIT_COLOR,
+    BRACKET_SL_COLOR, BRACKET_TP_COLOR, BRACKET_WARNING_COLOR,
 };
 use crate::widget::decorator::{
     Badge, BadgeSegment, BadgeShape, Button, DecoratorAction, DecoratorAnchor, DecoratorGroup,
@@ -157,6 +158,15 @@ pub(crate) fn format_quantity(q: Option<f64>) -> String {
 /// `DecoratorAction` variants.
 pub fn entry_decorator_group(bracket: &OrderBracket) -> DecoratorGroup {
     let body_color = entry_badge_fill(bracket);
+    // Tint the entry badge amber when the app layer has flagged the
+    // entry as mispriced relative to the current market (e.g., a Limit
+    // BUY priced above the current ask). The leg still renders at its
+    // user-chosen price; only the badge changes color.
+    let body_color = if bracket.wrong_side_warning {
+        BRACKET_WARNING_COLOR
+    } else {
+        body_color
+    };
     let is_draft = bracket.status == BracketStatus::Draft;
     let is_position = is_filled_position(bracket);
 
@@ -306,7 +316,21 @@ pub fn entry_decorator_group(bracket: &OrderBracket) -> DecoratorGroup {
 /// hover-only close button sits to the right.
 pub fn tp_decorator_group(bracket: &OrderBracket) -> Option<DecoratorGroup> {
     let tp = bracket.take_profit.as_ref()?;
-    let main = BRACKET_TP_COLOR;
+    // Amber-tint the TP badge (and its hover close-X) when the leg is
+    // on the wrong side of entry for the bracket's direction. The leg
+    // itself still renders at its user-chosen price; only the decorator
+    // colors change so the trader sees the inappropriateness at a glance.
+    let wrong_side = is_leg_on_wrong_side(
+        bracket.side,
+        LegRole::TakeProfit,
+        tp.line.price,
+        bracket.entry.line.price,
+    );
+    let main = if wrong_side {
+        BRACKET_WARNING_COLOR
+    } else {
+        BRACKET_TP_COLOR
+    };
 
     let pct_text = {
         let entry_price = bracket.entry.line.price;
@@ -423,7 +447,19 @@ fn tp_position_count(bracket: &OrderBracket) -> u32 {
 /// to the right of the badge.
 pub fn sl_decorator_group(bracket: &OrderBracket) -> Option<DecoratorGroup> {
     let sl = bracket.stop_loss.as_ref()?;
-    let main = BRACKET_SL_COLOR;
+    // See `tp_decorator_group` for the rationale — amber-tint the badge
+    // when the SL leg is on the wrong side of entry for the bracket.
+    let wrong_side = is_leg_on_wrong_side(
+        bracket.side,
+        LegRole::StopLoss,
+        sl.line.price,
+        bracket.entry.line.price,
+    );
+    let main = if wrong_side {
+        BRACKET_WARNING_COLOR
+    } else {
+        BRACKET_SL_COLOR
+    };
 
     Some(DecoratorGroup {
         group_id: SL_GROUP_ID,

@@ -157,64 +157,66 @@ fn full_short_bracket_correct_order() {
     assert_eq!(tool.mode, BracketToolMode::Idle);
 }
 
-// ── Constraint enforcement: auto-swap ────────────────────────
+// ── Pass-through: no directional enforcement ─────────────────
+//
+// The bracket tool no longer swaps or sorts TP/SL relative to entry.
+// The second click always becomes TP, the third always becomes SL,
+// wherever the trader clicked. Wrong-side placements are classified
+// visually at render time (see
+// `crate::widget::order_bracket::is_leg_on_wrong_side`).
 
 #[test]
-fn long_bracket_swaps_when_tp_below_sl_above() {
+fn long_bracket_accepts_tp_below_sl_above_unchanged() {
     // User clicks TP below entry and SL above entry for a Long.
-    // Tool should swap them.
+    // The tool used to swap them; now it preserves the raw clicks.
     let mut tool = BracketTool::default();
     tool.activate();
     tool.click(100.0); // entry
-    tool.click(95.0); // "TP" below entry (wrong for Long)
-    let result = tool.click(110.0); // "SL" above entry (wrong for Long)
+    tool.click(95.0); // second click → TP (wrong side for Long)
+    let result = tool.click(110.0); // third click → SL (wrong side for Long)
 
-    // After swap: tp=110, sl=95 (correct for Long: TP > entry > SL)
     assert_eq!(
         result,
         Some(BracketToolResult::Complete {
             entry: 100.0,
-            tp: 110.0,
-            sl: 95.0,
+            tp: 95.0,
+            sl: 110.0,
             side: BracketSide::Long,
         })
     );
 }
 
 #[test]
-fn short_bracket_swaps_when_tp_above_sl_below() {
-    // User clicks TP above entry and SL below entry for a Short.
-    // Tool should swap them.
+fn short_bracket_accepts_tp_above_sl_below_unchanged() {
+    // Mirror of the Long case on a Short bracket.
     let mut tool = BracketTool {
         side: BracketSide::Short,
         ..Default::default()
     };
     tool.activate();
     tool.click(100.0); // entry
-    tool.click(110.0); // "TP" above entry (wrong for Short)
-    let result = tool.click(90.0); // "SL" below entry (wrong for Short)
+    tool.click(110.0); // second click → TP (wrong side for Short)
+    let result = tool.click(90.0); // third click → SL (wrong side for Short)
 
-    // After swap: tp=90, sl=110 (correct for Short: SL > entry > TP)
     assert_eq!(
         result,
         Some(BracketToolResult::Complete {
             entry: 100.0,
-            tp: 90.0,
-            sl: 110.0,
+            tp: 110.0,
+            sl: 90.0,
             side: BracketSide::Short,
         })
     );
 }
 
 #[test]
-fn long_bracket_both_above_entry_sorts_correctly() {
-    // Both TP and SL clicked above entry for a Long.
-    // Higher one should be TP, lower one should be SL.
+fn long_bracket_both_above_entry_preserved_unchanged() {
+    // Both TP and SL clicked above entry for a Long — no sorting.
     let mut tool = BracketTool::default();
     tool.activate();
     tool.click(100.0); // entry
-    tool.click(108.0); // "TP" above entry
-    let result = tool.click(105.0); // "SL" also above entry
+    tool.click(108.0); // second click → TP
+    let result = tool.click(105.0); // third click → SL (wrong side for Long)
 
     assert_eq!(
         result,
@@ -228,66 +230,58 @@ fn long_bracket_both_above_entry_sorts_correctly() {
 }
 
 #[test]
-fn long_bracket_both_below_entry_sorts_correctly() {
-    // Both TP and SL clicked below entry for a Long.
-    // Higher one becomes TP, lower one becomes SL.
+fn long_bracket_both_below_entry_preserved_unchanged() {
+    // Both TP and SL clicked below entry for a Long — no sorting.
     let mut tool = BracketTool::default();
     tool.activate();
     tool.click(100.0); // entry
-    tool.click(92.0); // "TP" below entry
-    let result = tool.click(95.0); // "SL" also below entry
+    tool.click(92.0); // second click → TP (wrong side for Long)
+    let result = tool.click(95.0); // third click → SL
 
-    // Higher of the two (95) is TP, lower (92) is SL
     assert_eq!(
         result,
         Some(BracketToolResult::Complete {
             entry: 100.0,
-            tp: 95.0,
-            sl: 92.0,
+            tp: 92.0,
+            sl: 95.0,
             side: BracketSide::Long,
         })
     );
 }
 
 #[test]
-fn short_bracket_both_above_entry_sorts_correctly() {
-    // Both TP and SL clicked above entry for a Short.
-    // Lower one becomes TP, higher one becomes SL.
+fn short_bracket_both_above_entry_preserved_unchanged() {
     let mut tool = BracketTool {
         side: BracketSide::Short,
         ..Default::default()
     };
     tool.activate();
     tool.click(100.0); // entry
-    tool.click(108.0); // "TP" above entry
-    let result = tool.click(105.0); // "SL" also above entry
+    tool.click(108.0); // second click → TP (wrong side for Short)
+    let result = tool.click(105.0); // third click → SL
 
-    // For Short: lower (105) is TP, higher (108) is SL
     assert_eq!(
         result,
         Some(BracketToolResult::Complete {
             entry: 100.0,
-            tp: 105.0,
-            sl: 108.0,
+            tp: 108.0,
+            sl: 105.0,
             side: BracketSide::Short,
         })
     );
 }
 
 #[test]
-fn short_bracket_both_below_entry_sorts_correctly() {
-    // Both TP and SL clicked below entry for a Short.
-    // Lower one becomes TP, higher one becomes SL.
+fn short_bracket_both_below_entry_preserved_unchanged() {
     let mut tool = BracketTool {
         side: BracketSide::Short,
         ..Default::default()
     };
     tool.activate();
     tool.click(100.0); // entry
-    tool.click(92.0); // "TP" below entry
-    let result = tool.click(95.0); // "SL" also below entry
+    tool.click(92.0); // second click → TP
+    let result = tool.click(95.0); // third click → SL (wrong side for Short)
 
-    // For Short: lower (92) is TP, higher (95) is SL
     assert_eq!(
         result,
         Some(BracketToolResult::Complete {
@@ -466,64 +460,66 @@ fn all_three_at_same_price_no_panic() {
     assert_eq!(tool.mode, BracketToolMode::Idle);
 }
 
-// ── enforce_constraints unit tests ───────────────────────────
+// ── enforce_constraints unit tests (identity pass-through) ───
+//
+// `enforce_constraints` used to swap / sort TP and SL so Long had
+// TP > entry > SL and Short had SL > entry > TP. It is now the
+// identity function — the second click is always TP and the third
+// click is always SL — so every case below asserts the inputs flow
+// through unchanged regardless of `side`.
 
 #[test]
-fn enforce_long_already_correct() {
+fn enforce_long_correct_side_is_pass_through() {
     let (tp, sl) = enforce_constraints(100.0, 110.0, 95.0, BracketSide::Long);
     assert_eq!(tp, 110.0);
     assert_eq!(sl, 95.0);
 }
 
 #[test]
-fn enforce_long_needs_swap() {
+fn enforce_long_wrong_side_is_pass_through() {
     let (tp, sl) = enforce_constraints(100.0, 95.0, 110.0, BracketSide::Long);
-    assert_eq!(tp, 110.0);
-    assert_eq!(sl, 95.0);
+    assert_eq!(tp, 95.0);
+    assert_eq!(sl, 110.0);
 }
 
 #[test]
-fn enforce_short_already_correct() {
+fn enforce_short_correct_side_is_pass_through() {
     let (tp, sl) = enforce_constraints(100.0, 90.0, 105.0, BracketSide::Short);
     assert_eq!(tp, 90.0);
     assert_eq!(sl, 105.0);
 }
 
 #[test]
-fn enforce_short_needs_swap() {
+fn enforce_short_wrong_side_is_pass_through() {
     let (tp, sl) = enforce_constraints(100.0, 105.0, 90.0, BracketSide::Short);
-    assert_eq!(tp, 90.0);
-    assert_eq!(sl, 105.0);
+    assert_eq!(tp, 105.0);
+    assert_eq!(sl, 90.0);
 }
 
 #[test]
-fn enforce_long_both_above() {
-    // Both above entry for Long: higher is TP, lower is SL.
+fn enforce_long_both_above_is_pass_through() {
     let (tp, sl) = enforce_constraints(100.0, 105.0, 108.0, BracketSide::Long);
-    assert_eq!(tp, 108.0);
-    assert_eq!(sl, 105.0);
-}
-
-#[test]
-fn enforce_long_both_below() {
-    // Both below entry for Long: higher is TP, lower is SL.
-    let (tp, sl) = enforce_constraints(100.0, 92.0, 95.0, BracketSide::Long);
-    assert_eq!(tp, 95.0);
-    assert_eq!(sl, 92.0);
-}
-
-#[test]
-fn enforce_short_both_above() {
-    // Both above entry for Short: lower is TP, higher is SL.
-    let (tp, sl) = enforce_constraints(100.0, 108.0, 105.0, BracketSide::Short);
     assert_eq!(tp, 105.0);
     assert_eq!(sl, 108.0);
 }
 
 #[test]
-fn enforce_short_both_below() {
-    // Both below entry for Short: lower is TP, higher is SL.
-    let (tp, sl) = enforce_constraints(100.0, 95.0, 92.0, BracketSide::Short);
+fn enforce_long_both_below_is_pass_through() {
+    let (tp, sl) = enforce_constraints(100.0, 92.0, 95.0, BracketSide::Long);
     assert_eq!(tp, 92.0);
     assert_eq!(sl, 95.0);
+}
+
+#[test]
+fn enforce_short_both_above_is_pass_through() {
+    let (tp, sl) = enforce_constraints(100.0, 108.0, 105.0, BracketSide::Short);
+    assert_eq!(tp, 108.0);
+    assert_eq!(sl, 105.0);
+}
+
+#[test]
+fn enforce_short_both_below_is_pass_through() {
+    let (tp, sl) = enforce_constraints(100.0, 95.0, 92.0, BracketSide::Short);
+    assert_eq!(tp, 95.0);
+    assert_eq!(sl, 92.0);
 }

@@ -24,9 +24,21 @@
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
+
+/// Standard three-shift xorshift64 RNG. Advances `state` in place and returns
+/// the new value. Never produces 0 unless seeded with 0 (caller guarantees a
+/// non-zero seed).
+fn xorshift64(state: &mut u64) -> u64 {
+    let mut x = *state;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    *state = x;
+    x
+}
 
 use crate::client::{BrokerCallback, BrokerClient, CancelOrderResult, PlaceOrderResult};
 use crate::testdata::TestDataProvider;
@@ -61,6 +73,10 @@ fn default_partial_fill_tranches() -> u32 {
 
 fn default_default_spread() -> f64 {
     0.01
+}
+
+fn default_tick_drift_bps() -> f64 {
+    10.0
 }
 
 /// Configuration for the test broker simulation engine.
@@ -108,6 +124,12 @@ pub struct TestBrokerConfig {
     #[serde(default = "default_default_spread")]
     pub default_spread: f64,
 
+    /// Peak per-tick drift in basis points of the previous price
+    /// (default 10.0 = ±0.10%). Applied uniformly in [-drift, +drift].
+    /// Set to 0.0 for frozen prices.
+    #[serde(default = "default_tick_drift_bps")]
+    pub tick_drift_bps: f64,
+
     // ── Phase 6: Error injection ────────────────────────────────────────
     /// Fraction of orders to reject deterministically (0.0 = none).
     /// Uses order count modulo: every Nth order is rejected where N = 1/rate.
@@ -128,6 +150,7 @@ impl Default for TestBrokerConfig {
             partial_fill_tranches: 1,
             tick_interval_ms: 0,
             default_spread: default_default_spread(),
+            tick_drift_bps: default_tick_drift_bps(),
             rejection_rate: 0.0,
         }
     }
@@ -234,6 +257,9 @@ struct TestBrokerInner {
     // ── Phase 6: Error injection ────────────────────────────────────────
     /// Running count of orders placed (used for deterministic rejection).
     order_count: u64,
+
+    /// Xorshift64 state for random price drift.
+    rng_state: u64,
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -258,6 +284,17 @@ impl TestBroker {
     pub fn new(config: TestBrokerConfig) -> Self {
         let auto_connect = config.auto_connect;
         let initial_cash = config.initial_cash;
+        // Seed the xorshift64 RNG from the wall clock. xorshift64 cannot
+        // advance from a 0 state, so fall back to a fixed non-zero constant.
+        let seed_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let rng_state = if seed_ns == 0 {
+            0x9E3779B97F4A7C15
+        } else {
+            seed_ns
+        };
         Self {
             config,
             inner: Mutex::new(TestBrokerInner {
@@ -272,6 +309,7 @@ impl TestBroker {
                 subscriptions: HashSet::new(),
                 last_tick_time: Instant::now(),
                 order_count: 0,
+                rng_state,
             }),
             next_id: AtomicI32::new(1000),
             connected: AtomicBool::new(auto_connect),
@@ -1106,19 +1144,41 @@ impl BrokerClient for TestBroker {
     fn poll_callbacks(&self) -> Vec<BrokerCallback> {
         let mut inner = self.inner.lock();
 
-        // Phase 4: auto-tick generation based on elapsed time
+        // Phase 4: auto-tick generation based on elapsed time.
+        // Each tick applies a uniform random drift in [-tick_drift_bps, +tick_drift_bps]
+        // basis points of the previous price, then re-runs limit/stop checks so
+        // pending orders actually trigger as the simulated market moves.
         if self.config.tick_interval_ms > 0 && !inner.subscriptions.is_empty() {
             let elapsed = inner.last_tick_time.elapsed();
             let interval = std::time::Duration::from_millis(self.config.tick_interval_ms);
             if elapsed >= interval {
                 inner.last_tick_time = Instant::now();
                 let symbols: Vec<String> = inner.subscriptions.iter().cloned().collect();
+                let spread = self.config.default_spread;
+                let drift_bps = self.config.tick_drift_bps;
                 for symbol in &symbols {
-                    let price = Self::get_or_seed_price_inner(&mut inner, symbol);
-                    let spread = self.config.default_spread;
+                    // Seed if absent, then draw a drifted price.
+                    let prev_price = Self::get_or_seed_price_inner(&mut inner, symbol);
+                    let new_price = if drift_bps > 0.0 {
+                        // xorshift64 → signed i64 → f64 in [-1.0, 1.0]
+                        let r = xorshift64(&mut inner.rng_state) as i64;
+                        let rand_unit = r as f64 / i64::MAX as f64;
+                        let drift = (drift_bps / 10_000.0) * rand_unit * prev_price;
+                        prev_price + drift
+                    } else {
+                        prev_price
+                    };
+                    inner.market_prices.insert(symbol.clone(), new_price);
+
+                    // Emit the tick using the new price.
                     inner.callbacks.push_back(Self::make_market_data_callback(
-                        0, symbol, price, spread, 100,
+                        0, symbol, new_price, spread, 100,
                     ));
+
+                    // Run the same fill/trigger checks set_market_price runs so
+                    // pending limit/stop orders react to simulated drift.
+                    self.check_limit_fills_inner(&mut inner, symbol, new_price);
+                    self.check_stop_triggers_inner(&mut inner, symbol, new_price);
                 }
             }
         }

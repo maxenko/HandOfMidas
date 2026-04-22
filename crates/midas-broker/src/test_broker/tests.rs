@@ -4,6 +4,15 @@ fn make_broker() -> TestBroker {
     TestBroker::new(TestBrokerConfig::default())
 }
 
+/// Build a broker with a custom tick interval and drift for the auto-tick tests.
+fn make_broker_with_ticks(interval_ms: u64, drift_bps: f64) -> TestBroker {
+    TestBroker::new(TestBrokerConfig {
+        tick_interval_ms: interval_ms,
+        tick_drift_bps: drift_bps,
+        ..TestBrokerConfig::default()
+    })
+}
+
 /// Helper: count callbacks of a specific status string.
 fn count_status(cbs: &[BrokerCallback], status_str: &str) -> usize {
     cbs.iter()
@@ -1751,5 +1760,108 @@ fn test_auto_tick_triggers_stop_loss_fill() {
     assert!(
         has_tick,
         "auto-tick should be generated for subscribed AAPL"
+    );
+}
+
+// ── Auto-tick random walk ────────────────────────────────────────────
+
+/// Extract `last` values from every `BrokerCallback::Tick` for `symbol`.
+fn tick_last_values(cbs: &[BrokerCallback], symbol: &str) -> Vec<f64> {
+    cbs.iter()
+        .filter_map(|cb| match cb {
+            BrokerCallback::Tick {
+                symbol: s,
+                last: Some(px),
+                ..
+            } if s == symbol => Some(*px),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Poll the broker repeatedly with short sleeps between calls, up to a total
+/// wall-clock duration. `poll_callbacks` emits at most one auto-tick per call
+/// (when the interval has elapsed), so callers must poll periodically to
+/// gather multiple ticks.
+fn poll_for(broker: &TestBroker, total_ms: u64, poll_every_ms: u64) -> Vec<BrokerCallback> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(total_ms);
+    let mut out = Vec::new();
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(poll_every_ms));
+        out.extend(broker.poll_callbacks());
+    }
+    out
+}
+
+#[test]
+fn auto_tick_with_drift_moves_price() {
+    // Large drift (100 bps = 1%) + 50ms interval polled every 25ms over
+    // ~250ms should produce at least two ticks with distinct `last` values
+    // with overwhelming probability. The xorshift64 seed is wall-clock
+    // based, so this is not bit-for-bit deterministic — but the probability
+    // of all draws producing the same f64 is astronomically small.
+    let broker = make_broker_with_ticks(50, 100.0);
+    broker.set_market_price("AAPL", 185.50);
+    broker.subscribe_market_data("AAPL", 265598);
+    // Drain the initial subscription tick + any set_market_price side-effects.
+    let _ = broker.poll_callbacks();
+
+    let cbs = poll_for(&broker, 250, 25);
+
+    let lasts = tick_last_values(&cbs, "AAPL");
+    assert!(
+        lasts.len() >= 2,
+        "expected at least 2 auto-tick Tick callbacks for AAPL, got {}",
+        lasts.len()
+    );
+
+    // Find any pair that differs — drift should have moved the price.
+    let any_differ = lasts
+        .iter()
+        .any(|&a| lasts.iter().any(|&b| (a - b).abs() > f64::EPSILON));
+    assert!(
+        any_differ,
+        "tick `last` values should differ when tick_drift_bps > 0, got {lasts:?}"
+    );
+}
+
+#[test]
+fn auto_tick_with_zero_drift_keeps_price_constant() {
+    let broker = make_broker_with_ticks(50, 0.0);
+    broker.set_market_price("AAPL", 185.50);
+    broker.subscribe_market_data("AAPL", 265598);
+    let _ = broker.poll_callbacks();
+
+    let cbs = poll_for(&broker, 250, 25);
+
+    let lasts = tick_last_values(&cbs, "AAPL");
+    assert!(
+        !lasts.is_empty(),
+        "expected at least one auto-tick Tick callback even with zero drift"
+    );
+    let first = lasts[0];
+    for (i, v) in lasts.iter().enumerate() {
+        assert!(
+            (*v - first).abs() < f64::EPSILON,
+            "tick {i} last={v} should equal first tick last={first} when drift is zero"
+        );
+    }
+}
+
+#[test]
+fn auto_tick_respects_tick_interval_zero() {
+    // tick_interval_ms: 0 => no auto-tick emission, even when subscribed.
+    let broker = make_broker_with_ticks(0, 10.0);
+    broker.set_market_price("AAPL", 185.50);
+    broker.subscribe_market_data("AAPL", 265598);
+    // Drain the initial subscription tick.
+    let _ = broker.poll_callbacks();
+
+    let cbs = poll_for(&broker, 100, 20);
+
+    let lasts = tick_last_values(&cbs, "AAPL");
+    assert!(
+        lasts.is_empty(),
+        "expected no Tick callbacks when tick_interval_ms == 0, got {lasts:?}"
     );
 }

@@ -677,6 +677,32 @@ fn update_market_data_triggers_auto_snap_when_stale() {
 }
 
 #[test]
+fn update_market_data_moves_last_price() {
+    // A plain state (no bracket, no stale anchor) should still have
+    // its cached `last_price` bumped by `UpdateMarketData`. This is
+    // the path the live-tick pipeline exercises — every broker tick
+    // dispatches `TickerMsg::UpdateMarketData`, and the UI reads back
+    // `last_price()` to drive decorator labels + badge text.
+    let mut state = TickerState::new(SymbolKey::new("AAPL"));
+    assert_eq!(state.last_price(), None);
+
+    let _ = state.apply(TickerMsg::UpdateMarketData {
+        last_price: 150.25,
+        gatr_abs: Some(2.5),
+    });
+    assert_eq!(state.last_price(), Some(150.25));
+    assert_eq!(state.gatr_abs(), Some(2.5));
+
+    // A second tick moves the cached value again.
+    let _ = state.apply(TickerMsg::UpdateMarketData {
+        last_price: 151.10,
+        gatr_abs: Some(2.5),
+    });
+    assert_eq!(state.last_price(), Some(151.10));
+    assert_eq!(state.gatr_abs(), Some(2.5));
+}
+
+#[test]
 fn update_market_data_skips_snap_while_editing() {
     let mut state = state_with_stale_anchor(100.0, 2.0);
     state.apply(TickerMsg::BeginEdit(EditingField::LimitPrice));
@@ -811,6 +837,57 @@ fn apply_drag_leg_updates_price_and_pnl() {
     assert!(effects
         .iter()
         .any(|e| matches!(e, TickerEffect::ProjectBracket(_))));
+}
+
+#[test]
+fn apply_drag_leg_accepts_price_across_entry() {
+    // Brackets are free-form: a Long TP dragged to 95 while entry is
+    // 100 must land at exactly 95 (no clamp, no mirror). Wrong-side
+    // placements are classified visually by the decorator layer — the
+    // stored price is whatever the user chose.
+    let mut state = TickerState::new_with_defaults(SymbolKey::new("AAPL"), 100.0, Some(2.0));
+    state.force_bracket_mode(Some(OrderSide::Buy));
+    state.apply(TickerMsg::EnsureDraftBracket {
+        side: OrderSide::Buy,
+        entry_type: EntryType::Market,
+    });
+    state.apply(TickerMsg::SetQuantity(100.0));
+
+    // Long bracket, entry = 100, drag TP below entry to 95.
+    state.apply(TickerMsg::DragLeg {
+        role: midas_chart::widget::order_bracket::LegRole::TakeProfit,
+        new_price: 95.0,
+    });
+    let tp_price = state
+        .live_bracket()
+        .unwrap()
+        .take_profit
+        .as_ref()
+        .expect("tp leg present")
+        .line
+        .price;
+    assert!(
+        (tp_price - 95.0).abs() < f64::EPSILON,
+        "Long TP must accept price below entry verbatim, got {tp_price}"
+    );
+
+    // Mirror case: drag SL above entry to 106.
+    state.apply(TickerMsg::DragLeg {
+        role: midas_chart::widget::order_bracket::LegRole::StopLoss,
+        new_price: 106.0,
+    });
+    let sl_price = state
+        .live_bracket()
+        .unwrap()
+        .stop_loss
+        .as_ref()
+        .expect("sl leg present")
+        .line
+        .price;
+    assert!(
+        (sl_price - 106.0).abs() < f64::EPSILON,
+        "Long SL must accept price above entry verbatim, got {sl_price}"
+    );
 }
 
 #[test]

@@ -1489,9 +1489,13 @@ fn test_drag_bracket_leg_action_stop_loss() {
     }
 }
 
-/// Camera with $30 range over 1080px — 36px/dollar.
-/// MIN_LEG_SEPARATION_PX (15) → ~$0.42 minimum offset.
-/// Test prices are 5-10 dollars apart, so the pixel minimum doesn't interfere.
+/// Camera used by the clamp pass-through tests below.
+///
+/// The clamp function is an identity shim (see
+/// `plan/live-sim-and-free-brackets.md`); brackets are free-form and
+/// the camera is no longer consulted. The tests still run the function
+/// to make sure the signature keeps compiling and the return value
+/// matches the input exactly.
 fn clamp_test_camera() -> Camera2D {
     Camera2D {
         viewport_width: 1920,
@@ -1505,87 +1509,82 @@ fn clamp_test_camera() -> Camera2D {
 }
 
 #[test]
-fn test_clamp_bracket_leg_long_tp_above_entry() {
+fn clamp_bracket_leg_is_identity_long_tp_above_entry() {
     let cam = clamp_test_camera();
-    let clamped =
-        clamp_bracket_leg_price(195.0, 185.0, LegRole::TakeProfit, BracketSide::Long, &cam);
-    assert!((clamped - 195.0).abs() < f64::EPSILON);
+    let out = clamp_bracket_leg_price(195.0, 185.0, LegRole::TakeProfit, BracketSide::Long, &cam);
+    assert!((out - 195.0).abs() < f64::EPSILON);
 }
 
 #[test]
-fn test_clamp_bracket_leg_long_tp_below_entry_clamped() {
+fn clamp_bracket_leg_is_identity_long_tp_below_entry() {
+    // Previously clamped Long TP up above entry; now passes through.
     let cam = clamp_test_camera();
-    let clamped =
-        clamp_bracket_leg_price(180.0, 185.0, LegRole::TakeProfit, BracketSide::Long, &cam);
+    let out = clamp_bracket_leg_price(180.0, 185.0, LegRole::TakeProfit, BracketSide::Long, &cam);
     assert!(
-        clamped > 185.0,
-        "Long TP must be above entry, got {}",
-        clamped
+        (out - 180.0).abs() < f64::EPSILON,
+        "Long TP below entry must pass through unchanged, got {out}"
     );
 }
 
 #[test]
-fn test_clamp_bracket_leg_long_sl_below_entry() {
+fn clamp_bracket_leg_is_identity_long_sl_below_entry() {
     let cam = clamp_test_camera();
-    let clamped = clamp_bracket_leg_price(175.0, 185.0, LegRole::StopLoss, BracketSide::Long, &cam);
-    assert!((clamped - 175.0).abs() < f64::EPSILON);
+    let out = clamp_bracket_leg_price(175.0, 185.0, LegRole::StopLoss, BracketSide::Long, &cam);
+    assert!((out - 175.0).abs() < f64::EPSILON);
 }
 
 #[test]
-fn test_clamp_bracket_leg_long_sl_above_entry_clamped() {
+fn clamp_bracket_leg_is_identity_long_sl_above_entry() {
+    // Previously clamped Long SL down below entry; now passes through.
     let cam = clamp_test_camera();
-    let clamped = clamp_bracket_leg_price(190.0, 185.0, LegRole::StopLoss, BracketSide::Long, &cam);
+    let out = clamp_bracket_leg_price(190.0, 185.0, LegRole::StopLoss, BracketSide::Long, &cam);
     assert!(
-        clamped < 185.0,
-        "Long SL must be below entry, got {}",
-        clamped
+        (out - 190.0).abs() < f64::EPSILON,
+        "Long SL above entry must pass through unchanged, got {out}"
     );
 }
 
 #[test]
-fn test_clamp_bracket_leg_short_tp_below_entry() {
+fn clamp_bracket_leg_is_identity_short_tp_below_entry() {
     let cam = clamp_test_camera();
-    let clamped =
-        clamp_bracket_leg_price(175.0, 185.0, LegRole::TakeProfit, BracketSide::Short, &cam);
-    assert!((clamped - 175.0).abs() < f64::EPSILON);
+    let out = clamp_bracket_leg_price(175.0, 185.0, LegRole::TakeProfit, BracketSide::Short, &cam);
+    assert!((out - 175.0).abs() < f64::EPSILON);
 }
 
 #[test]
-fn test_clamp_bracket_leg_short_tp_above_entry_clamped() {
+fn clamp_bracket_leg_is_identity_short_tp_above_entry() {
+    // Previously clamped Short TP down below entry; now passes through.
     let cam = clamp_test_camera();
-    let clamped =
-        clamp_bracket_leg_price(190.0, 185.0, LegRole::TakeProfit, BracketSide::Short, &cam);
+    let out = clamp_bracket_leg_price(190.0, 185.0, LegRole::TakeProfit, BracketSide::Short, &cam);
     assert!(
-        clamped < 185.0,
-        "Short TP must be below entry, got {}",
-        clamped
+        (out - 190.0).abs() < f64::EPSILON,
+        "Short TP above entry must pass through unchanged, got {out}"
     );
 }
 
 #[test]
-fn test_clamp_bracket_leg_short_sl_above_entry() {
+fn clamp_bracket_leg_is_identity_short_sl_above_entry() {
     let cam = clamp_test_camera();
-    let clamped =
-        clamp_bracket_leg_price(195.0, 185.0, LegRole::StopLoss, BracketSide::Short, &cam);
-    assert!((clamped - 195.0).abs() < f64::EPSILON);
+    let out = clamp_bracket_leg_price(195.0, 185.0, LegRole::StopLoss, BracketSide::Short, &cam);
+    assert!((out - 195.0).abs() < f64::EPSILON);
 }
 
 #[test]
-fn test_clamp_bracket_leg_short_sl_below_entry_clamped() {
+fn clamp_bracket_leg_is_identity_short_sl_below_entry() {
+    // Previously clamped Short SL up above entry; now passes through.
     let cam = clamp_test_camera();
-    let clamped =
-        clamp_bracket_leg_price(180.0, 185.0, LegRole::StopLoss, BracketSide::Short, &cam);
+    let out = clamp_bracket_leg_price(180.0, 185.0, LegRole::StopLoss, BracketSide::Short, &cam);
     assert!(
-        clamped > 185.0,
-        "Short SL must be above entry, got {}",
-        clamped
+        (out - 180.0).abs() < f64::EPSILON,
+        "Short SL below entry must pass through unchanged, got {out}"
     );
 }
 
 #[test]
-fn test_clamp_bracket_leg_pixel_minimum_enforced() {
-    // Zoomed-out camera: $200 range over 1080px → ~5.4 px/dollar.
-    // MIN_LEG_SEPARATION_PX (15) → ~$2.78 minimum offset.
+fn clamp_bracket_leg_is_identity_near_entry_zoomed_out() {
+    // At a heavily zoomed-out camera, legacy behaviour pushed legs to a
+    // minimum pixel separation. The pass-through shim keeps the raw
+    // price and leaves screen-space minimums to the renderer/decorator.
     let cam = Camera2D {
         viewport_width: 1920,
         viewport_height: 1080,
@@ -1595,13 +1594,10 @@ fn test_clamp_bracket_leg_pixel_minimum_enforced() {
         price_high: 300.0,
         dpi_scale: 1.0,
     };
-    // Try to place Long TP at entry + $0.50 — should be pushed out to ~entry + $2.78.
-    let clamped =
-        clamp_bracket_leg_price(185.50, 185.0, LegRole::TakeProfit, BracketSide::Long, &cam);
-    let offset = clamped - 185.0;
+    let out = clamp_bracket_leg_price(185.50, 185.0, LegRole::TakeProfit, BracketSide::Long, &cam);
     assert!(
-        offset > 2.0,
-        "Pixel minimum should push TP further from entry, offset = {offset}"
+        (out - 185.50).abs() < f64::EPSILON,
+        "near-entry leg must pass through regardless of zoom, got {out}"
     );
 }
 

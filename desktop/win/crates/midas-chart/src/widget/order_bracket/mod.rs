@@ -200,6 +200,12 @@ const BRACKET_TP_ZONE: [f32; 4] = [0.20, 0.78, 0.35, 0.06];
 /// Orange zone fill at 6% alpha (between entry and SL).
 const BRACKET_SL_ZONE: [f32; 4] = [1.0, 0.60, 0.0, 0.06];
 
+/// Amber fill used to warn when a bracket leg is on the "wrong" side
+/// of entry given the bracket's side. The leg is still rendered at its
+/// user-chosen price; the amber tint signals that it does not match
+/// the bracket's direction.
+pub const BRACKET_WARNING_COLOR: [f32; 4] = [0.95, 0.70, 0.18, 1.0];
+
 /// Minimum vertical gap (logical px) between the TP and SL decorator
 /// badges before they are considered visually overlapping.
 ///
@@ -215,6 +221,36 @@ const BRACKET_BADGE_HEIGHT_PX: f32 = 20.0;
 /// Screen-space threshold for the TP/SL overlap stacking heuristic.
 /// Pads the badge height by 2 px so stacked badges never touch.
 const BADGE_STACK_GAP_PX: f32 = BRACKET_BADGE_HEIGHT_PX + 2.0;
+
+// ── Wrong-side classification ────────────────────────────────────────
+
+/// Returns true when `leg_role` is on the directional side of
+/// `entry_price` that contradicts `bracket_side` — i.e., a Long TP
+/// priced at or below entry, a Long SL priced at or above entry, a
+/// Short TP priced at or above entry, or a Short SL priced at or below
+/// entry.
+///
+/// Entry and StopTrigger legs always return false — they are defined
+/// relative to the bracket's own mechanics, not TP/SL direction.
+///
+/// This is a pure render-time classifier: the underlying leg price is
+/// never modified. Callers (decorators, line-stroke helpers) tint the
+/// leg amber when this returns true; see
+/// [`BRACKET_WARNING_COLOR`].
+pub fn is_leg_on_wrong_side(
+    bracket_side: BracketSide,
+    leg_role: LegRole,
+    leg_price: f64,
+    entry_price: f64,
+) -> bool {
+    match (bracket_side, leg_role) {
+        (BracketSide::Long, LegRole::TakeProfit) => leg_price <= entry_price,
+        (BracketSide::Long, LegRole::StopLoss) => leg_price >= entry_price,
+        (BracketSide::Short, LegRole::TakeProfit) => leg_price >= entry_price,
+        (BracketSide::Short, LegRole::StopLoss) => leg_price <= entry_price,
+        (_, LegRole::Entry | LegRole::StopTrigger) => false,
+    }
+}
 
 // ── Phase 3: chart rendering helpers ─────────────────────────────────
 

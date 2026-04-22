@@ -1,12 +1,12 @@
 //! Bracket drawing tool: 3-click state machine for placing order brackets.
 //!
 //! Click 1: entry price, Click 2: take-profit, Click 3: stop-loss.
-//! The tool enforces directional constraints automatically:
-//! - Long brackets: TP > entry > SL
-//! - Short brackets: SL > entry > TP
 //!
-//! If the user clicks in the wrong order, the tool swaps TP/SL
-//! rather than rejecting the click. Escape cancels at any step.
+//! The tool does **not** enforce directional constraints. Legs are
+//! placed wherever the trader clicks; brackets whose TP/SL land on the
+//! "wrong" side of entry are classified visually by the decorator
+//! layer at render time (see
+//! `plan/live-sim-and-free-brackets.md`). Escape cancels at any step.
 
 use super::order_bracket::BracketSide;
 
@@ -161,13 +161,10 @@ impl BracketTool {
     /// `Complete` with all three prices when the final click lands.
     /// On `Complete`, the tool automatically returns to `Idle`.
     ///
-    /// # Constraint enforcement
-    ///
-    /// - **Long**: TP must be above entry, SL must be below entry.
-    /// - **Short**: TP must be below entry, SL must be above entry.
-    ///
-    /// If the user clicks on the wrong side, the tool swaps TP/SL
-    /// automatically rather than rejecting the input.
+    /// No directional enforcement: every click price flows through
+    /// verbatim into the resulting bracket. Wrong-side placements are
+    /// flagged visually at render time (see
+    /// [`crate::widget::order_bracket::is_leg_on_wrong_side`]).
     pub fn click(&mut self, price: f64) -> Option<BracketToolResult> {
         match self.mode.clone() {
             BracketToolMode::Idle => None,
@@ -223,62 +220,16 @@ impl BracketTool {
     }
 }
 
-/// Enforce directional constraints on TP and SL relative to entry.
+/// Identity pass-through for the three-click tool's TP/SL assignment.
 ///
-/// For Long: TP > entry > SL. For Short: SL > entry > TP.
-/// If both TP and SL are on the same side, they are swapped.
-fn enforce_constraints(entry: f64, tp: f64, sl: f64, side: BracketSide) -> (f64, f64) {
-    match side {
-        BracketSide::Long => {
-            // Long: TP should be above entry, SL below.
-            // If TP is below entry and SL is above, swap them.
-            if tp < entry && sl > entry {
-                (sl, tp)
-            } else if tp < entry && sl < entry {
-                // Both below entry: the higher one is TP, lower is SL.
-                if tp > sl {
-                    (tp, sl)
-                } else {
-                    (sl, tp)
-                }
-            } else if tp > entry && sl > entry {
-                // Both above entry: the lower one is SL (closer), higher is TP.
-                // Actually for Long, SL must be below entry. Swap so that
-                // the one closer to entry becomes SL and the farther becomes TP.
-                if tp > sl {
-                    (tp, sl)
-                } else {
-                    (sl, tp)
-                }
-            } else {
-                // Already correct: tp >= entry, sl <= entry.
-                (tp, sl)
-            }
-        }
-        BracketSide::Short => {
-            // Short: TP should be below entry, SL above.
-            if tp > entry && sl < entry {
-                (sl, tp)
-            } else if tp > entry && sl > entry {
-                // Both above entry: the lower one is TP, higher is SL.
-                if tp < sl {
-                    (tp, sl)
-                } else {
-                    (sl, tp)
-                }
-            } else if tp < entry && sl < entry {
-                // Both below entry: the higher one is SL (closer), lower is TP.
-                if tp < sl {
-                    (tp, sl)
-                } else {
-                    (sl, tp)
-                }
-            } else {
-                // Already correct: tp <= entry, sl >= entry.
-                (tp, sl)
-            }
-        }
-    }
+/// No longer enforces direction; placements that cross entry are
+/// classified visually by the decorator layer (see
+/// `plan/live-sim-and-free-brackets.md`). Kept as a function so the
+/// single call site in [`BracketTool::click`] stays explicit about
+/// "the second click becomes TP, the third becomes SL" and so the
+/// associated unit tests have a fixed target.
+fn enforce_constraints(_entry: f64, tp: f64, sl: f64, _side: BracketSide) -> (f64, f64) {
+    (tp, sl)
 }
 
 #[cfg(test)]

@@ -117,7 +117,9 @@ pub enum ChartAction {
         annotation_id: super::widget::AnnotationId,
         /// Which leg is being dragged.
         leg: super::widget::order_bracket::LegRole,
-        /// The new price for this leg (may be clamped by side constraints).
+        /// The new price for this leg. Free-form — legs on the "wrong"
+        /// side of entry are classified visually by the decorator layer
+        /// instead of being clamped or rejected.
         new_price: f64,
     },
     /// Create an order bracket from the drawing tool (3-click complete).
@@ -255,13 +257,17 @@ const SCROLL_PAN_FRACTION: f64 = 0.08;
 
 /// Bracket-specific context returned by [`hit_test_annotation()`].
 ///
-/// Carries the entry price and side needed for drag clamping.
+/// Historically carried the data needed to clamp a dragged leg to the
+/// correct side of entry. Drag clamping is now an identity pass-through
+/// (see `plan/live-sim-and-free-brackets.md`); the struct survives so
+/// the hit-test plumbing compiles unchanged and so future warning /
+/// classification logic can piggy-back on the same handoff.
 /// `None` for non-bracket annotations (levels).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BracketClampCtx {
-    /// Entry price of the bracket (for side-constraint clamping).
+    /// Entry price of the owning bracket.
     pub entry_price: f64,
-    /// Trade direction (for side-constraint clamping).
+    /// Trade direction of the owning bracket.
     pub side: crate::widget::order_bracket::BracketSide,
 }
 
@@ -920,7 +926,9 @@ fn handle_move_dragging_annotation(
                 entry_price: 0.0,
                 side: crate::widget::order_bracket::BracketSide::Long,
             });
-            // Clamp to correct side of entry based on trade direction.
+            // Pass-through: `clamp_bracket_leg_price` is an identity
+            // shim so the trader can drag any leg anywhere. Wrong-side
+            // legs are flagged visually by the decorator layer.
             let clamped =
                 clamp_bracket_leg_price(raw_price, ctx.entry_price, leg, ctx.side, &state.camera);
             // Snap to valid tick increment.
@@ -1595,43 +1603,24 @@ fn snap_to_tick(price: f64, tick_size: f64) -> f64 {
     (price / tick_size).round() * tick_size
 }
 
-/// Minimum screen-space separation (px) between a bracket leg and its
-/// entry line. Guarantees legs are always visually distinct and grabbable,
-/// regardless of zoom level or stock price.
-const MIN_LEG_SEPARATION_PX: f32 = 15.0;
-
-/// Clamp a bracket leg price so it stays on the correct side of entry,
-/// enforcing a minimum separation in **screen space** (pixels).
+/// Identity pass-through for bracket leg drag prices.
 ///
-/// - Long TP must be above entry; Long SL must be below entry.
-/// - Short TP must be below entry; Short SL must be above entry.
+/// Historically clamped TP/SL to the "correct" side of entry with a
+/// screen-space minimum separation; kept as an identity shim so the
+/// existing `BracketClampCtx` hit-test plumbing compiles unchanged.
 ///
-/// The minimum offset is derived from the camera's current zoom so that
-/// legs never collapse to sub-pixel distances on zoomed-out charts.
+/// Brackets are now free-form: the trader may drag any leg anywhere,
+/// and legs that cross entry are classified visually by the decorator
+/// layer via [`crate::widget::order_bracket::is_leg_on_wrong_side`]
+/// (see `plan/live-sim-and-free-brackets.md`).
 fn clamp_bracket_leg_price(
     raw_price: f64,
-    entry_price: f64,
-    leg: crate::widget::order_bracket::LegRole,
-    side: crate::widget::order_bracket::BracketSide,
-    camera: &crate::camera::Camera2D,
+    _entry_price: f64,
+    _leg: crate::widget::order_bracket::LegRole,
+    _side: crate::widget::order_bracket::BracketSide,
+    _camera: &crate::camera::Camera2D,
 ) -> f64 {
-    use crate::widget::order_bracket::{BracketSide, LegRole};
-
-    // Convert minimum pixel separation to a price offset at current zoom.
-    let price_range = camera.price_high - camera.price_low;
-    let min_offset = if camera.viewport_height > 0 && price_range > 0.0 {
-        (MIN_LEG_SEPARATION_PX as f64) * price_range / camera.viewport_height as f64
-    } else {
-        0.01
-    };
-
-    match (side, leg) {
-        (BracketSide::Long, LegRole::TakeProfit) => raw_price.max(entry_price + min_offset),
-        (BracketSide::Long, LegRole::StopLoss) => raw_price.min(entry_price - min_offset),
-        (BracketSide::Short, LegRole::TakeProfit) => raw_price.min(entry_price - min_offset),
-        (BracketSide::Short, LegRole::StopLoss) => raw_price.max(entry_price + min_offset),
-        (_, LegRole::Entry | LegRole::StopTrigger) => raw_price,
-    }
+    raw_price
 }
 
 /// Zero-candle `CandleData` stub for layout-only decorator hit-testing.
