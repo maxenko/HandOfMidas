@@ -96,6 +96,35 @@ pub struct WatchlistSubKey {
     pub symbols: Vec<SymbolKey>,
 }
 
+/// Prune `entries` and the parallel `last` vec to drop every
+/// `(sym, _)` whose sym is in `closed`. The two vecs stay
+/// index-aligned: `last[i]` corresponds to `entries[i]`.
+///
+/// Extracted so the "storm-prevention" invariant is unit-testable
+/// without having to stand up the full iced stream + router +
+/// SimMarketData trio.
+fn prune_closed(
+    entries: &mut Vec<(SymbolKey, Arc<QuoteEntry>)>,
+    last: &mut Vec<Option<Quote>>,
+    closed: &[SymbolKey],
+) {
+    if closed.is_empty() {
+        return;
+    }
+    let closed_set: std::collections::HashSet<&SymbolKey> = closed.iter().collect();
+    let mut new_entries: Vec<(SymbolKey, Arc<QuoteEntry>)> = Vec::with_capacity(entries.len());
+    let mut new_last: Vec<Option<Quote>> = Vec::with_capacity(last.len());
+    for (idx, (sym, entry)) in entries.drain(..).enumerate() {
+        if closed_set.contains(&sym) {
+            continue;
+        }
+        new_entries.push((sym, entry));
+        new_last.push(last[idx].clone());
+    }
+    *entries = new_entries;
+    *last = new_last;
+}
+
 pub fn watchlist_stream_builder(
     key: &WatchlistSubKey,
 ) -> impl iced::futures::Stream<Item = Message> {
@@ -162,21 +191,154 @@ pub fn watchlist_stream_builder(
             if !batch.is_empty() && output.send(Message::QuoteBatch(batch)).await.is_err() {
                 break;
             }
-            for sym in closed {
-                // Drop the stale registry entry so the next
-                // iced-diff pass doesn't keep handing out the closed
-                // receiver.
-                remove_quote_handle(&sym);
-                if output
-                    .send(Message::QuoteResync {
-                        symbol: sym.clone(),
-                    })
-                    .await
-                    .is_err()
-                {
+            if !closed.is_empty() {
+                // Prune the closed entries from BOTH `entries` and
+                // the parallel `last` vec so the next 50 ms tick
+                // doesn't re-detect them and emit another
+                // `QuoteResync`. Without this prune the loop storms
+                // the handler with resync messages at the poll
+                // cadence.
+                prune_closed(&mut entries, &mut last, &closed);
+
+                for sym in closed {
+                    // Drop the stale registry entry so the next
+                    // iced-diff pass doesn't keep handing out the
+                    // closed receiver.
+                    remove_quote_handle(&sym);
+                    if output
+                        .send(Message::QuoteResync {
+                            symbol: sym.clone(),
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+
+                // Nothing left to poll — exit the subscription task.
+                // An iced re-diff will rebuild us if the caller
+                // re-issues `last_quote` for the symbol.
+                if entries.is_empty() {
                     return;
                 }
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    //! Pruning-invariant coverage for Bug 2 (QuoteResync storm).
+    use super::*;
+    use midas_market_data::MarketDataRouter;
+    use tokio::runtime::Runtime;
+
+    fn build_router() -> Arc<MarketDataRouter> {
+        use midas_broker::sim::{SimMarketData, SimMarketDataConfig};
+        let sim = SimMarketData::new(SimMarketDataConfig {
+            farm_up_delay_ms: 1,
+            burst_enabled: false,
+            tick_drift_bps: 0.0,
+            tick_cadence_ms: 60_000,
+            ..SimMarketDataConfig::default()
+        });
+        let src: Arc<dyn midas_broker::MarketDataSource> = sim.clone();
+        MarketDataRouter::new(src)
+    }
+
+    async fn make_entry(router: &Arc<MarketDataRouter>, sym: &str) -> Arc<QuoteEntry> {
+        let key = SymbolKey {
+            contract_id: 0,
+            symbol: sym.to_string(),
+        };
+        let handle = router.last_quote(key).await.expect("last_quote");
+        Arc::new(QuoteEntry::new(handle))
+    }
+
+    #[test]
+    fn prune_closed_drops_matching_entries_and_keeps_others_index_aligned() {
+        let rt = Runtime::new().expect("tokio rt");
+        rt.block_on(async {
+            let router = build_router();
+            let aapl = SymbolKey {
+                contract_id: 0,
+                symbol: "AAPL_WL_T1".to_string(),
+            };
+            let msft = SymbolKey {
+                contract_id: 0,
+                symbol: "MSFT_WL_T1".to_string(),
+            };
+            let tsla = SymbolKey {
+                contract_id: 0,
+                symbol: "TSLA_WL_T1".to_string(),
+            };
+            let mut entries = vec![
+                (aapl.clone(), make_entry(&router, "AAPL_WL_T1").await),
+                (msft.clone(), make_entry(&router, "MSFT_WL_T1").await),
+                (tsla.clone(), make_entry(&router, "TSLA_WL_T1").await),
+            ];
+            // Populate `last` with a unique tag per slot so we can
+            // verify the parallel vec stays index-aligned with
+            // `entries` after prune.
+            let mut last: Vec<Option<Quote>> = vec![
+                Some(Quote {
+                    bid: Some(1.0),
+                    ..Quote::default()
+                }),
+                Some(Quote {
+                    bid: Some(2.0),
+                    ..Quote::default()
+                }),
+                Some(Quote {
+                    bid: Some(3.0),
+                    ..Quote::default()
+                }),
+            ];
+
+            prune_closed(&mut entries, &mut last, std::slice::from_ref(&msft));
+
+            assert_eq!(entries.len(), 2);
+            assert_eq!(entries[0].0, aapl);
+            assert_eq!(entries[1].0, tsla);
+            // Parallel vec must stay in lock-step with `entries`.
+            assert_eq!(last.len(), 2);
+            assert_eq!(last[0].as_ref().and_then(|q| q.bid), Some(1.0));
+            assert_eq!(last[1].as_ref().and_then(|q| q.bid), Some(3.0));
+        });
+    }
+
+    #[test]
+    fn prune_closed_is_noop_when_closed_list_is_empty() {
+        let rt = Runtime::new().expect("tokio rt");
+        rt.block_on(async {
+            let router = build_router();
+            let aapl = SymbolKey {
+                contract_id: 0,
+                symbol: "AAPL_WL_T2".to_string(),
+            };
+            let mut entries = vec![(aapl.clone(), make_entry(&router, "AAPL_WL_T2").await)];
+            let mut last: Vec<Option<Quote>> = vec![None];
+            prune_closed(&mut entries, &mut last, &[]);
+            assert_eq!(entries.len(), 1);
+            assert_eq!(last.len(), 1);
+        });
+    }
+
+    #[test]
+    fn prune_closed_can_empty_entries_for_all_match() {
+        let rt = Runtime::new().expect("tokio rt");
+        rt.block_on(async {
+            let router = build_router();
+            let aapl = SymbolKey {
+                contract_id: 0,
+                symbol: "AAPL_WL_T3".to_string(),
+            };
+            let mut entries = vec![(aapl.clone(), make_entry(&router, "AAPL_WL_T3").await)];
+            let mut last: Vec<Option<Quote>> = vec![None];
+            prune_closed(&mut entries, &mut last, std::slice::from_ref(&aapl));
+            assert!(entries.is_empty());
+            assert!(last.is_empty());
+        });
+    }
 }
