@@ -11,7 +11,7 @@
 //! publisher holds `Arc<SymbolHub>` directly. The DashMap is only
 //! consulted by the control actor on subscribe/unsubscribe.
 
-use std::sync::atomic::{AtomicI64, AtomicU32};
+use std::sync::atomic::{AtomicI64, AtomicU32, AtomicUsize};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use dashmap::DashMap;
@@ -65,6 +65,19 @@ pub(crate) struct RouterState {
     /// `Weak<MarketDataRouter>` so the router can still be dropped even
     /// while aggregator tasks are alive.
     pub(crate) aggregator_registry: Arc<BarAggregatorRegistry>,
+    /// Pending-message depth on the control mpsc. Incremented on every
+    /// successful send, decremented after the actor consumes a
+    /// message. Used purely for observability — crossing
+    /// [`super::actor::ROUTER_BACKLOG_WARN`] fires a one-shot
+    /// `warn!` log so operators can tell whether a hung upstream is
+    /// backing up the control plane before downstream tests start
+    /// reporting "subscribe took forever".
+    pub(crate) backlog: Arc<AtomicUsize>,
+    /// Sticky flag that flips `true` the first time
+    /// [`Self::backlog`] is observed crossing the warn threshold, so
+    /// we log at most once per lifetime of the router. Shared via
+    /// `Arc` so per-guard DecRef sends can use the same one-shot gate.
+    pub(crate) backlog_warned: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Per-symbol fan-out record.

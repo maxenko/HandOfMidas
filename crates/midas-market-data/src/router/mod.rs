@@ -15,6 +15,7 @@
 //! design and `plan/market-data-router/01-architecture.md` for the
 //! hot/cold-path contract.
 
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use futures::Stream;
@@ -64,6 +65,10 @@ pub use midas_broker::MarketDataSource as MarketDataSourceTrait;
 pub struct MarketDataRouter {
     state: Arc<RouterState>,
     control: mpsc::UnboundedSender<RouterMsg>,
+    /// Shared backlog counter (mirror of `state.backlog`). Hoisted to
+    /// the top-level so the `send_control` helper can bump it without
+    /// re-reaching into the `Arc<RouterState>`.
+    backlog: Arc<AtomicUsize>,
 }
 
 impl MarketDataRouter {
@@ -85,12 +90,16 @@ impl MarketDataRouter {
             // safe because `Arc::new_cyclic` guarantees `weak_self` is
             // already a valid `Weak<Self>` here.
             let registry = crate::aggregator::BarAggregatorRegistry::new(weak_self.clone());
+            let backlog = Arc::new(AtomicUsize::new(0));
+            let backlog_warned = Arc::new(AtomicBool::new(false));
             let state = Arc::new(RouterState {
                 source,
                 per_symbol: dashmap::DashMap::new(),
                 contract_cache: dashmap::DashMap::new(),
                 weak_self: weak_self.clone(),
                 aggregator_registry: registry,
+                backlog: Arc::clone(&backlog),
+                backlog_warned: Arc::clone(&backlog_warned),
             });
             let actor_state = state.clone();
             let actor_control = control_tx.clone();
@@ -98,10 +107,48 @@ impl MarketDataRouter {
             Self {
                 state,
                 control: control_tx,
+                backlog,
             }
         })
     }
 
+    /// Send a message onto the control mpsc and bump the backlog
+    /// counter. Returns the same `Result` shape as
+    /// [`mpsc::UnboundedSender::send`] — `Err(SendError<RouterMsg>)` if
+    /// the actor has already exited. Callers that need to distinguish
+    /// between a normal shutdown and a successful enqueue should keep
+    /// using this one helper.
+    fn send_control(&self, msg: RouterMsg) -> Result<(), mpsc::error::SendError<RouterMsg>> {
+        bump_backlog(&self.backlog, &self.state.backlog_warned);
+        match self.control.send(msg) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                // Undo the optimistic bump so a stale-Router drop
+                // doesn't leave the counter permanently skewed above
+                // the warn threshold on the next live router.
+                self.backlog.fetch_sub(1, Ordering::Relaxed);
+                Err(e)
+            }
+        }
+    }
+}
+
+/// Bump the shared `backlog` counter and log once if we cross
+/// [`actor::ROUTER_BACKLOG_WARN`]. Logged at `warn` level, sticky for
+/// the lifetime of the router (no flapping). Exposed at module scope
+/// so the per-guard Drop helpers can share the logic.
+pub(crate) fn bump_backlog(backlog: &Arc<AtomicUsize>, warned: &Arc<AtomicBool>) {
+    let depth = backlog.fetch_add(1, Ordering::Relaxed) + 1;
+    if depth >= actor::ROUTER_BACKLOG_WARN && !warned.swap(true, Ordering::Relaxed) {
+        tracing::warn!(
+            backlog = depth,
+            threshold = actor::ROUTER_BACKLOG_WARN,
+            "router control-plane backlog crossed warn threshold; upstream may be hung"
+        );
+    }
+}
+
+impl MarketDataRouter {
     /// Subscribe to the per-symbol tick fan-out.
     ///
     /// First subscriber per symbol triggers `source.subscribe_ticks`;
@@ -113,12 +160,11 @@ impl MarketDataRouter {
         symbol: SymbolKey,
     ) -> Result<SubscriptionHandle<Tick>, MarketDataError> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.control
-            .send(RouterMsg::SubscribeTicks {
-                symbol,
-                reply: reply_tx,
-            })
-            .map_err(|_| MarketDataError::ShuttingDown)?;
+        self.send_control(RouterMsg::SubscribeTicks {
+            symbol,
+            reply: reply_tx,
+        })
+        .map_err(|_| MarketDataError::ShuttingDown)?;
         reply_rx.await.map_err(|_| MarketDataError::ShuttingDown)?
     }
 
@@ -132,12 +178,11 @@ impl MarketDataRouter {
         symbol: SymbolKey,
     ) -> Result<SubscriptionHandle<Bar>, MarketDataError> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.control
-            .send(RouterMsg::SubscribeRtBars {
-                symbol,
-                reply: reply_tx,
-            })
-            .map_err(|_| MarketDataError::ShuttingDown)?;
+        self.send_control(RouterMsg::SubscribeRtBars {
+            symbol,
+            reply: reply_tx,
+        })
+        .map_err(|_| MarketDataError::ShuttingDown)?;
         reply_rx.await.map_err(|_| MarketDataError::ShuttingDown)?
     }
 
@@ -151,12 +196,11 @@ impl MarketDataRouter {
     /// [`WatchGuard`]: handle::WatchGuard
     pub async fn last_quote(&self, symbol: SymbolKey) -> Result<QuoteHandle, MarketDataError> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.control
-            .send(RouterMsg::OpenHubForWatch {
-                symbol,
-                reply: reply_tx,
-            })
-            .map_err(|_| MarketDataError::ShuttingDown)?;
+        self.send_control(RouterMsg::OpenHubForWatch {
+            symbol,
+            reply: reply_tx,
+        })
+        .map_err(|_| MarketDataError::ShuttingDown)?;
         reply_rx.await.map_err(|_| MarketDataError::ShuttingDown)?
     }
 
@@ -235,13 +279,22 @@ impl MarketDataRouter {
     pub async fn debug_dump(&self) -> Vec<SymbolDebugInfo> {
         let (reply_tx, reply_rx) = oneshot::channel();
         if self
-            .control
-            .send(RouterMsg::DebugDump { reply: reply_tx })
+            .send_control(RouterMsg::DebugDump { reply: reply_tx })
             .is_err()
         {
             return Vec::new();
         }
         reply_rx.await.unwrap_or_default()
+    }
+
+    /// Current pending-message depth on the control mpsc. Exposed
+    /// crate-wide so behaviour tests can assert the counter drains to
+    /// zero once all subscribes/unsubscribes have settled, and so
+    /// operators / `dev_harness` probes can surface the value without
+    /// reaching into the internals.
+    #[doc(hidden)]
+    pub fn control_backlog(&self) -> usize {
+        self.backlog.load(Ordering::Relaxed)
     }
 
     /// Accessor for the underlying provider. Pub-crate only — used by
@@ -280,7 +333,13 @@ impl MarketDataRouter {
 impl Drop for MarketDataRouter {
     fn drop(&mut self) {
         // Fire-and-forget shutdown. Actor may already be draining.
-        let _ = self.control.send(RouterMsg::Shutdown);
+        // Bump the backlog so the actor's post-recv decrement stays
+        // balanced — otherwise the counter could wrap on a borderline
+        // shutdown.
+        bump_backlog(&self.backlog, &self.state.backlog_warned);
+        if self.control.send(RouterMsg::Shutdown).is_err() {
+            self.backlog.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 }
 

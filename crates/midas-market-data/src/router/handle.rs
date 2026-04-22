@@ -20,6 +20,7 @@
 //! [`MarketDataRouter`]: crate::router::MarketDataRouter
 
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
@@ -29,6 +30,30 @@ use tokio::sync::{broadcast, mpsc, watch};
 use tokio_stream::wrappers::BroadcastStream;
 
 use super::actor::RouterMsg;
+use super::bump_backlog;
+
+/// Bundle of the bits a guard needs to DecRef on drop. Carries
+/// the control-plane sender plus the shared backlog accounting so
+/// the send-path stays balanced with the actor-side decrement.
+#[derive(Clone)]
+pub(crate) struct GuardCtrl {
+    pub(crate) control: mpsc::UnboundedSender<RouterMsg>,
+    pub(crate) backlog: Arc<AtomicUsize>,
+    pub(crate) backlog_warned: Arc<AtomicBool>,
+}
+
+impl GuardCtrl {
+    /// Fire-and-forget DecRef send. Keeps the counter balanced with
+    /// the actor's post-recv decrement; if the actor is already down
+    /// we roll the bump back.
+    fn send(&self, msg: RouterMsg) {
+        bump_backlog(&self.backlog, &self.backlog_warned);
+        if self.control.send(msg).is_err() {
+            self.backlog
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
 
 /// Shared marker for every RAII guard issued by the router.
 ///
@@ -39,7 +64,7 @@ pub trait Guard: Send + Sync {}
 /// Guard for a tick subscription — sends `DecTickRef` on drop.
 pub(crate) struct TickSubGuard {
     pub(crate) symbol: SymbolKey,
-    pub(crate) control: mpsc::UnboundedSender<RouterMsg>,
+    pub(crate) ctrl: GuardCtrl,
 }
 
 impl Drop for TickSubGuard {
@@ -47,7 +72,7 @@ impl Drop for TickSubGuard {
         // Send is fire-and-forget; if the control channel is already
         // closed the actor is being torn down and the upstream is
         // already being cancelled — nothing to do.
-        let _ = self.control.send(RouterMsg::DecTickRef {
+        self.ctrl.send(RouterMsg::DecTickRef {
             symbol: self.symbol.clone(),
         });
     }
@@ -57,12 +82,12 @@ impl Guard for TickSubGuard {}
 /// Guard for a realtime-bar subscription — sends `DecRtBarRef` on drop.
 pub(crate) struct RtBarSubGuard {
     pub(crate) symbol: SymbolKey,
-    pub(crate) control: mpsc::UnboundedSender<RouterMsg>,
+    pub(crate) ctrl: GuardCtrl,
 }
 
 impl Drop for RtBarSubGuard {
     fn drop(&mut self) {
-        let _ = self.control.send(RouterMsg::DecRtBarRef {
+        self.ctrl.send(RouterMsg::DecRtBarRef {
             symbol: self.symbol.clone(),
         });
     }
@@ -72,12 +97,12 @@ impl Guard for RtBarSubGuard {}
 /// Guard for a quote-watch subscription — sends `DecWatchRef` on drop.
 pub(crate) struct WatchGuard {
     pub(crate) symbol: SymbolKey,
-    pub(crate) control: mpsc::UnboundedSender<RouterMsg>,
+    pub(crate) ctrl: GuardCtrl,
 }
 
 impl Drop for WatchGuard {
     fn drop(&mut self) {
-        let _ = self.control.send(RouterMsg::DecWatchRef {
+        self.ctrl.send(RouterMsg::DecWatchRef {
             symbol: self.symbol.clone(),
         });
     }

@@ -186,6 +186,12 @@ pub(crate) struct SimTestCounters {
     /// use — the arm-then-fire pattern matches the NM-3 rollback
     /// test.
     pub(crate) next_subscribe_error: Mutex<Option<MarketDataError>>,
+    /// One-shot hang primitive: when armed, the next
+    /// `subscribe_ticks` call parks on the paired `Notify` until the
+    /// test flushes it. Used by the router wedge test to prove the
+    /// control actor's per-handler timeout returns `Err(..)` instead
+    /// of wedging the mpsc forever.
+    pub(crate) next_subscribe_hang: Mutex<Option<Arc<Notify>>>,
 }
 
 /// Minimal local mirror of the `MarketEvent::OrderingReady` variant so
@@ -530,6 +536,18 @@ impl SimMarketData {
         *self.test_counters.next_subscribe_error.lock() = Some(err);
     }
 
+    /// Arm the next `subscribe_ticks` call to hang until the returned
+    /// [`Notify`] is signalled. Consumed on use. Used by the router
+    /// wedge-guard test to prove `ROUTER_ACTOR_OP_TIMEOUT` closes
+    /// out the handler with `Err(..)` even when the upstream never
+    /// yields. Callers drive `notify.notify_one()` to unblock the
+    /// hung task after the observation they care about.
+    pub fn arm_next_subscribe_ticks_hang(&self) -> Arc<Notify> {
+        let notify = Arc::new(Notify::new());
+        *self.test_counters.next_subscribe_hang.lock() = Some(notify.clone());
+        notify
+    }
+
     /// M-20: simulate a farm-level connection event.
     ///
     /// * [`FarmCode::ConnectionRestoredDataLost`] (1101): emit
@@ -732,6 +750,15 @@ impl MarketDataSource for SimMarketData {
         // One-shot error injection (used by NM-3 rollback test).
         if let Some(err) = self.test_counters.next_subscribe_error.lock().take() {
             return Err(err);
+        }
+        // One-shot hang injection (used by the router wedge test).
+        // Park on the paired `Notify` before we allocate any state so
+        // the observation site is indistinguishable from a genuinely
+        // stuck upstream. Scope the lock tightly so the parking_lot
+        // guard isn't held across the await (it's !Send).
+        let hang_slot = self.test_counters.next_subscribe_hang.lock().take();
+        if let Some(hang) = hang_slot {
+            hang.notified().await;
         }
         let req_id = self.next_req_id();
         let (tx, rx) = broadcast::channel::<Arc<Tick>>(4096);

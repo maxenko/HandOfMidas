@@ -14,6 +14,7 @@
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
 use midas_broker_core::market_data::{
     Bar, MarketDataError, SecurityType, SymbolKey, Tick, WhatToShow,
@@ -21,10 +22,42 @@ use midas_broker_core::market_data::{
 use tokio::sync::{mpsc, oneshot};
 
 use super::handle::{
-    Guard, QuoteHandle, RtBarSubGuard, SubscriptionHandle, TickSubGuard, WatchGuard,
+    Guard, GuardCtrl, QuoteHandle, RtBarSubGuard, SubscriptionHandle, TickSubGuard, WatchGuard,
 };
 use super::publisher::{run_rt_bar_publisher, run_tick_publisher};
 use super::state::{RouterState, SymbolHub};
+
+/// Per-handler upstream-await budget. If a provider call
+/// (`resolve_contract`, `subscribe_ticks`, `subscribe_realtime_bars`)
+/// hangs past this deadline, the actor returns
+/// [`MarketDataError::Other`] instead of wedging indefinitely. A wedged
+/// actor would back up every subsequent control message (subscribe,
+/// dec-ref, shutdown) — P0 wedge guard.
+pub(crate) const ROUTER_ACTOR_OP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Backlog warn threshold on the control-plane mpsc. A healthy router
+/// keeps pending messages << 100; if we see the counter cross this
+/// line we log once at `warn` so the operator knows the actor is
+/// struggling before tests / users start to observe latency.
+pub(crate) const ROUTER_BACKLOG_WARN: usize = 1000;
+
+/// Run a fallible upstream call under the per-handler deadline.
+///
+/// On `Elapsed` we synthesise a `MarketDataError::Other` carrying the
+/// call label so logs distinguish `resolve_contract timeout` from
+/// `subscribe_ticks timeout`.
+async fn with_op_timeout<F, T>(label: &'static str, fut: F) -> Result<T, MarketDataError>
+where
+    F: std::future::Future<Output = Result<T, MarketDataError>>,
+{
+    match tokio::time::timeout(ROUTER_ACTOR_OP_TIMEOUT, fut).await {
+        Ok(inner) => inner,
+        Err(_) => Err(MarketDataError::Other(format!(
+            "router: upstream {label} timed out after {:?}",
+            ROUTER_ACTOR_OP_TIMEOUT
+        ))),
+    }
+}
 
 /// Single debug-dump snapshot entry (M-28).
 #[derive(Debug, Clone)]
@@ -91,18 +124,30 @@ pub(crate) async fn run_control_actor(
     state: Arc<RouterState>,
     control: mpsc::UnboundedSender<RouterMsg>,
 ) {
+    // Assemble the guard context once — it's what every
+    // `SubscriptionHandle` will carry so DecRef sends stay balanced
+    // with the actor's post-recv decrement.
+    let guard_ctrl = GuardCtrl {
+        control: control.clone(),
+        backlog: Arc::clone(&state.backlog),
+        backlog_warned: Arc::clone(&state.backlog_warned),
+    };
     while let Some(msg) = rx.recv().await {
+        // Keep the backlog counter balanced with the sender-side
+        // bumps. Every `send_control` / `bump_backlog` paired on the
+        // send path decrements here as the actor drains.
+        state.backlog.fetch_sub(1, Ordering::Relaxed);
         match msg {
             RouterMsg::SubscribeTicks { symbol, reply } => {
-                let result = handle_subscribe_ticks(&state, &control, &symbol).await;
+                let result = handle_subscribe_ticks(&state, &guard_ctrl, &symbol).await;
                 let _ = reply.send(result);
             }
             RouterMsg::SubscribeRtBars { symbol, reply } => {
-                let result = handle_subscribe_rt_bars(&state, &control, &symbol).await;
+                let result = handle_subscribe_rt_bars(&state, &guard_ctrl, &symbol).await;
                 let _ = reply.send(result);
             }
             RouterMsg::OpenHubForWatch { symbol, reply } => {
-                let result = handle_open_hub_for_watch(&state, &control, &symbol).await;
+                let result = handle_open_hub_for_watch(&state, &guard_ctrl, &symbol).await;
                 let _ = reply.send(result);
             }
             RouterMsg::DecTickRef { symbol } => {
@@ -136,10 +181,13 @@ async fn resolve_con_id(state: &RouterState, sym: &SymbolKey) -> Result<i32, Mar
     if let Some(c) = state.contract_cache.get(sym) {
         return Ok(c.contract_id);
     }
-    let details = state
-        .source
-        .resolve_contract(sym, SecurityType::Stock, "SMART")
-        .await?;
+    let details = with_op_timeout(
+        "resolve_contract",
+        state
+            .source
+            .resolve_contract(sym, SecurityType::Stock, "SMART"),
+    )
+    .await?;
     let con_id = details.contract_id;
     state.contract_cache.insert(sym.clone(), details);
     Ok(con_id)
@@ -147,7 +195,7 @@ async fn resolve_con_id(state: &RouterState, sym: &SymbolKey) -> Result<i32, Mar
 
 async fn handle_subscribe_ticks(
     state: &Arc<RouterState>,
-    control: &mpsc::UnboundedSender<RouterMsg>,
+    guard_ctrl: &GuardCtrl,
     symbol: &SymbolKey,
 ) -> Result<SubscriptionHandle<Tick>, MarketDataError> {
     let span = tracing::info_span!("router.subscribe_ticks", symbol = %symbol);
@@ -170,7 +218,7 @@ async fn handle_subscribe_ticks(
         let rx = hub.ticks_tx.subscribe();
         let guard: Box<dyn Guard> = Box::new(TickSubGuard {
             symbol: symbol.clone(),
-            control: control.clone(),
+            ctrl: guard_ctrl.clone(),
         });
         return Ok(SubscriptionHandle::new(rx, guard));
     }
@@ -185,10 +233,13 @@ async fn handle_subscribe_ticks(
         }
     };
 
-    let upstream = match state
-        .source
-        .subscribe_ticks(symbol, con_id, Default::default())
-        .await
+    let upstream = match with_op_timeout(
+        "subscribe_ticks",
+        state
+            .source
+            .subscribe_ticks(symbol, con_id, Default::default()),
+    )
+    .await
     {
         Ok(s) => s,
         Err(e) => {
@@ -207,7 +258,7 @@ async fn handle_subscribe_ticks(
     let rx = hub.ticks_tx.subscribe();
     let guard: Box<dyn Guard> = Box::new(TickSubGuard {
         symbol: symbol.clone(),
-        control: control.clone(),
+        ctrl: guard_ctrl.clone(),
     });
     Ok(SubscriptionHandle::new(rx, guard))
 }
@@ -231,10 +282,13 @@ async fn ensure_tick_publisher(
     }
     // Need to spawn. Resolve + subscribe + stash.
     let con_id = resolve_con_id(state, &hub.symbol).await?;
-    let upstream = state
-        .source
-        .subscribe_ticks(&hub.symbol, con_id, Default::default())
-        .await?;
+    let upstream = with_op_timeout(
+        "subscribe_ticks",
+        state
+            .source
+            .subscribe_ticks(&hub.symbol, con_id, Default::default()),
+    )
+    .await?;
     let hub_for_task = hub.clone();
     let handle = tokio::spawn(async move { run_tick_publisher(hub_for_task, upstream).await });
     *hub.tick_publisher_task.lock().unwrap() = Some(handle);
@@ -243,7 +297,7 @@ async fn ensure_tick_publisher(
 
 async fn handle_subscribe_rt_bars(
     state: &Arc<RouterState>,
-    control: &mpsc::UnboundedSender<RouterMsg>,
+    guard_ctrl: &GuardCtrl,
     symbol: &SymbolKey,
 ) -> Result<SubscriptionHandle<Bar>, MarketDataError> {
     let span = tracing::info_span!("router.subscribe_rt_bars", symbol = %symbol);
@@ -261,10 +315,13 @@ async fn handle_subscribe_rt_bars(
         };
         if need_spawn {
             let con_id = resolve_con_id(state, symbol).await?;
-            let upstream = state
-                .source
-                .subscribe_realtime_bars(symbol, con_id, WhatToShow::Trades)
-                .await?;
+            let upstream = with_op_timeout(
+                "subscribe_realtime_bars",
+                state
+                    .source
+                    .subscribe_realtime_bars(symbol, con_id, WhatToShow::Trades),
+            )
+            .await?;
             hub.ensure_rt_bars_tx();
             let hub_for_task = hub.clone();
             let handle =
@@ -276,17 +333,20 @@ async fn handle_subscribe_rt_bars(
         let rx = tx.subscribe();
         let guard: Box<dyn Guard> = Box::new(RtBarSubGuard {
             symbol: symbol.clone(),
-            control: control.clone(),
+            ctrl: guard_ctrl.clone(),
         });
         return Ok(SubscriptionHandle::new(rx, guard));
     }
 
     // First subscribe for this symbol. NM-3 rollback order.
     let con_id = resolve_con_id(state, symbol).await?;
-    let upstream = state
-        .source
-        .subscribe_realtime_bars(symbol, con_id, WhatToShow::Trades)
-        .await?;
+    let upstream = with_op_timeout(
+        "subscribe_realtime_bars",
+        state
+            .source
+            .subscribe_realtime_bars(symbol, con_id, WhatToShow::Trades),
+    )
+    .await?;
 
     let hub = SymbolHub::new(symbol.clone());
     hub.rt_bar_refcount.store(1, Ordering::Relaxed);
@@ -299,14 +359,14 @@ async fn handle_subscribe_rt_bars(
 
     let guard: Box<dyn Guard> = Box::new(RtBarSubGuard {
         symbol: symbol.clone(),
-        control: control.clone(),
+        ctrl: guard_ctrl.clone(),
     });
     Ok(SubscriptionHandle::new(rx, guard))
 }
 
 async fn handle_open_hub_for_watch(
     state: &Arc<RouterState>,
-    control: &mpsc::UnboundedSender<RouterMsg>,
+    guard_ctrl: &GuardCtrl,
     symbol: &SymbolKey,
 ) -> Result<QuoteHandle, MarketDataError> {
     // Reuse the existing hub if any.
@@ -325,17 +385,20 @@ async fn handle_open_hub_for_watch(
         let rx = hub.last_quote_tx.subscribe();
         let guard = WatchGuard {
             symbol: symbol.clone(),
-            control: control.clone(),
+            ctrl: guard_ctrl.clone(),
         };
         return Ok(QuoteHandle::new(rx, guard));
     }
 
     // First watcher on this symbol — lazy-open a tick publisher.
     let con_id = resolve_con_id(state, symbol).await?;
-    let upstream = state
-        .source
-        .subscribe_ticks(symbol, con_id, Default::default())
-        .await?;
+    let upstream = with_op_timeout(
+        "subscribe_ticks",
+        state
+            .source
+            .subscribe_ticks(symbol, con_id, Default::default()),
+    )
+    .await?;
 
     let hub = SymbolHub::new(symbol.clone());
     hub.watch_refcount.store(1, Ordering::Relaxed);
@@ -346,7 +409,7 @@ async fn handle_open_hub_for_watch(
     state.per_symbol.insert(symbol.clone(), hub);
     let guard = WatchGuard {
         symbol: symbol.clone(),
-        control: control.clone(),
+        ctrl: guard_ctrl.clone(),
     };
     Ok(QuoteHandle::new(rx, guard))
 }

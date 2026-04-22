@@ -803,3 +803,81 @@ async fn open_hub_for_watch_existing_hub_path_does_not_leak_refcount_on_upstream
         "rt-bar refcount must survive the failed watch open"
     );
 }
+
+// ---------------------------------------------------------------------------
+// P0 wedge guard: a hung upstream must not wedge the control actor.
+// ---------------------------------------------------------------------------
+
+/// Arm the sim so `subscribe_ticks` parks on a `Notify`. The router's
+/// per-handler `ROUTER_ACTOR_OP_TIMEOUT` (10s) must close the handler
+/// out with an `Err(..)` so the actor can drain the next control
+/// message. Without the timeout the actor would block on the mpsc
+/// forever and every subsequent call would pile up.
+///
+/// Uses `tokio::time::pause` + `advance` so the test doesn't actually
+/// wait ten wall-clock seconds. A multi-thread flavour is required so
+/// the parked sim task and the advancing driver task make forward
+/// progress independently.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn hung_upstream_subscribe_ticks_is_broken_by_actor_timeout() {
+    let (router, sim) = build_router();
+    let sym = aapl();
+
+    // Arm the hang — the first subscribe_ticks will park on the
+    // returned Notify.
+    let hang = sim.arm_next_subscribe_ticks_hang();
+
+    // Kick off the subscribe in a background task so we can advance
+    // the virtual clock past the deadline.
+    let router_cl = router.clone();
+    let sym_cl = sym.clone();
+    let subscribe = tokio::spawn(async move { router_cl.subscribe_ticks(sym_cl).await });
+
+    // Advance past the actor's 10s budget. The handler should close
+    // out with `Err(Other("... timed out ..."))`.
+    tokio::time::advance(Duration::from_secs(11)).await;
+
+    let result = subscribe
+        .await
+        .expect("subscribe task didn't finish after deadline");
+    let err = result.expect_err("should have timed out");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("timed out"),
+        "expected timeout error, got: {msg}"
+    );
+
+    // Release the stuck sim task so it doesn't leak into the runtime
+    // teardown.
+    hang.notify_one();
+
+    // Follow-up subscribe should work (the actor is still alive).
+    // Drain a quick tick so the previously-hung task finishes before
+    // the next subscribe overtakes it.
+    tokio::time::advance(Duration::from_millis(10)).await;
+    let _h = router
+        .subscribe_ticks(sym.clone())
+        .await
+        .expect("actor is not wedged; second subscribe should succeed");
+}
+
+// ---------------------------------------------------------------------------
+// Backlog counter — sanity: healthy traffic drains to zero.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn control_backlog_drains_under_healthy_traffic() {
+    let (router, _sim) = build_router();
+    let sym = aapl();
+    // Subscribe + drop a few times.
+    for _ in 0..10 {
+        let h = router.subscribe_ticks(sym.clone()).await.expect("sub");
+        drop(h);
+    }
+    drain().await;
+    assert_eq!(
+        router.control_backlog(),
+        0,
+        "backlog must drain to zero under healthy traffic"
+    );
+}
