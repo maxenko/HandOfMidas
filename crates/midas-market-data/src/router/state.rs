@@ -19,6 +19,7 @@ use midas_broker_core::market_data::{Bar, ContractDetails, Quote, SymbolKey, Tic
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
 
+use crate::aggregator::BarAggregatorRegistry;
 use crate::router::MarketDataRouter;
 
 use super::DynMarketDataSource;
@@ -54,10 +55,16 @@ pub(crate) struct RouterState {
     /// without re-resolving the contract.
     pub(crate) contract_cache: DashMap<SymbolKey, ContractDetails>,
     /// Self-weak, captured via `Arc::new_cyclic` (NM-4). S6's
-    /// aggregator registry will upgrade this to reach back into the
-    /// router without holding a strong ref.
+    /// aggregator registry upgrades this to reach back into the router
+    /// without holding a strong ref.
     #[allow(dead_code)]
     pub(crate) weak_self: Weak<MarketDataRouter>,
+    /// Lazy per-`(symbol, timeframe)` aggregator registry (S6).
+    ///
+    /// Delegate target for [`MarketDataRouter::subscribe_bars`]. Owns a
+    /// `Weak<MarketDataRouter>` so the router can still be dropped even
+    /// while aggregator tasks are alive.
+    pub(crate) aggregator_registry: Arc<BarAggregatorRegistry>,
 }
 
 /// Per-symbol fan-out record.

@@ -1045,6 +1045,17 @@ impl MarketDataSource for SimMarketData {
             MarketEvent::ConnectionState(cs) => {
                 let _ = self.conn_state_tx.send(cs);
             }
+            MarketEvent::Bar(b) => {
+                // Route bars by symbol to every matching rt-bar
+                // subscription. Used by aggregator tests to inject
+                // deterministic 5 s bars without waiting on the sim's
+                // interval-based emitter.
+                for entry in self.rt_bar_subs.iter() {
+                    if entry.symbol == b.symbol {
+                        let _ = entry.tx.send(Arc::new(b.clone()));
+                    }
+                }
+            }
             _ => {
                 // Silently drop; dev_harness owns richer replay.
             }

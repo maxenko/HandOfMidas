@@ -71,16 +71,26 @@ impl MarketDataRouter {
     /// actor eagerly so subscribe/unsubscribe work immediately.
     ///
     /// Construction uses [`Arc::new_cyclic`] (NM-4) so a `Weak<Self>`
-    /// can be stashed in [`RouterState::weak_self`] for S6's aggregator
-    /// registry.
+    /// can be stashed in [`RouterState::weak_self`] and handed to the
+    /// [`BarAggregatorRegistry`] for S6 without forming a reference
+    /// cycle.
+    ///
+    /// [`BarAggregatorRegistry`]: crate::aggregator::BarAggregatorRegistry
     pub fn new(source: DynMarketDataSource) -> Arc<Self> {
         Arc::new_cyclic(|weak_self| {
             let (control_tx, control_rx) = mpsc::unbounded_channel();
+            // The registry itself wraps a fresh Arc via its own
+            // Arc::new_cyclic so its weak_self is populated before any
+            // subscribe call runs; passing in the router's weak is
+            // safe because `Arc::new_cyclic` guarantees `weak_self` is
+            // already a valid `Weak<Self>` here.
+            let registry = crate::aggregator::BarAggregatorRegistry::new(weak_self.clone());
             let state = Arc::new(RouterState {
                 source,
                 per_symbol: dashmap::DashMap::new(),
                 contract_cache: dashmap::DashMap::new(),
                 weak_self: weak_self.clone(),
+                aggregator_registry: registry,
             });
             let actor_state = state.clone();
             let actor_control = control_tx.clone();
@@ -152,23 +162,41 @@ impl MarketDataRouter {
 
     /// Subscribe to aggregated bars at `tf` for `symbol`.
     ///
-    /// **OPEN(S6)**: the aggregator registry is not yet wired. In S5
-    /// this method returns `Err(MarketDataError::Other(...))` for
-    /// timeframes other than [`Timeframe::S5`]; `S5` passes through
-    /// to [`Self::subscribe_rt_bars`] since IB's RT bar cadence is
-    /// already 5 s. This keeps the public surface stable while S6
-    /// adds the aggregator.
+    /// Delegates to [`BarAggregatorRegistry::subscribe`] (S6). The
+    /// registry rejects unsupported timeframes (`S1`, `H4`, `D1`, `W1`,
+    /// `MN1`) with [`MarketDataError::UnsupportedTimeframe`]. Supported
+    /// set: `S5`, `S15`, `S30`, `M1`, `M5`, `M15`, `M30`, `H1`.
+    ///
+    /// All consumers on the same `(symbol, tf)` share ONE aggregator
+    /// task and ONE broadcast; two different `tf` values on the same
+    /// `symbol` share ONE upstream RT-bar subscription (NB-6 Model A).
+    ///
+    /// [`BarAggregatorRegistry::subscribe`]: crate::aggregator::BarAggregatorRegistry::subscribe
     pub async fn subscribe_bars(
         &self,
         symbol: SymbolKey,
         tf: Timeframe,
     ) -> Result<SubscriptionHandle<Bar>, MarketDataError> {
-        if matches!(tf, Timeframe::S5) {
-            return self.subscribe_rt_bars(symbol).await;
-        }
-        Err(MarketDataError::Other(
-            "aggregator not yet implemented; tracked as OPEN(S6)".to_string(),
-        ))
+        self.state.aggregator_registry.subscribe(symbol, tf).await
+    }
+
+    /// Snapshot accessor into the aggregator registry.
+    ///
+    /// Thin passthrough to
+    /// [`BarAggregatorRegistry::last_bar`](crate::aggregator::BarAggregatorRegistry::last_bar).
+    /// Used by `ChartResync` after a consumer observes `Lagged`.
+    pub async fn last_bar(&self, symbol: &SymbolKey, tf: Timeframe) -> Option<Bar> {
+        self.state.aggregator_registry.last_bar(symbol, tf).await
+    }
+
+    /// Accessor for the aggregator registry.
+    ///
+    /// Hidden from public docs; used by behaviour tests and future
+    /// dev-harness probes (S7) to inspect aggregator state without
+    /// racing the subscribe/drop plumbing.
+    #[doc(hidden)]
+    pub fn aggregator_registry(&self) -> &std::sync::Arc<crate::aggregator::BarAggregatorRegistry> {
+        &self.state.aggregator_registry
     }
 
     /// History + live seam (BR-7 rewrite, NB-2).

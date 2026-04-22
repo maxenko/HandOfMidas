@@ -27,9 +27,11 @@
 
 #![deny(missing_docs)]
 
+pub mod aggregator;
 pub mod error;
 pub mod router;
 
+pub use aggregator::BarAggregatorRegistry;
 pub use error::RouterError;
 pub use router::{
     DynMarketDataSource, Guard, GuardedStream, MarketDataRouter, QuoteHandle, SubscriptionHandle,
