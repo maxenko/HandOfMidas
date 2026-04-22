@@ -4102,6 +4102,33 @@ impl MidasApp {
                 tracing::warn!("chart resync failed: {e}");
                 Task::none()
             }
+            Message::QuoteResync { symbol } => {
+                // S8 §F: watch::Receiver reported Closed on the sub
+                // stream — typically because the router tore the
+                // publisher down when refcount hit zero. Re-open the
+                // watch via `last_quote` so the next batch-flush sees
+                // the fresh handle. The registry is re-installed by
+                // the async call; the stream's loop re-reads it on
+                // its next tick.
+                let Some(router) = self.router.clone() else {
+                    return Task::none();
+                };
+                let sym = symbol.clone();
+                tokio::spawn(async move {
+                    match router.last_quote(sym.clone()).await {
+                        Ok(handle) => {
+                            crate::app::watchlist_subscription::install_quote_handle(sym, handle);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                symbol = %sym.symbol,
+                                "QuoteResync last_quote failed: {e}"
+                            );
+                        }
+                    }
+                });
+                Task::none()
+            }
             Message::QuoteBatch(batch) => {
                 // Fold each (symbol, quote) into market_cache.
                 // Prefer `last` for the row's headline price; fall

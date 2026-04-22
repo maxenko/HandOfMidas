@@ -920,6 +920,17 @@ pub enum Message {
         )>,
     ),
 
+    /// Rare path: the watchlist subscription's `watch::Receiver`
+    /// reported `RecvError::Closed` — the router dropped the watch
+    /// sender, typically because the last consumer DecRef'd and
+    /// the publisher was torn down. Handler re-opens the watch via
+    /// `router.last_quote(sym)` and refreshes `market_cache` from
+    /// the snapshot. See S8 §F.
+    QuoteResync {
+        /// Symbol that needs to be re-opened.
+        symbol: midas_broker_core::SymbolKey,
+    },
+
     /// Latest price observation for a specific ticker. Drives
     /// `TickerMsg::UpdateMarketData` on the matching
     /// `TickerState`. Keyed by the router-era broker-core
@@ -3730,6 +3741,7 @@ impl MidasApp {
             | Message::ChartResync { .. }
             | Message::ChartResyncLoaded(..)
             | Message::QuoteBatch(..)
+            | Message::QuoteResync { .. }
             | Message::TickerLastPrice { .. }
             | Message::FarmStatusChanged(..)
             | Message::RouterReady(..) => self.handle_router_msg(message),

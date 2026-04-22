@@ -186,6 +186,14 @@ impl QuoteHandle {
         self.rx.changed().await
     }
 
+    /// Non-blocking probe — `Ok(true)` if a new value is pending,
+    /// `Ok(false)` if nothing changed since the last observation,
+    /// `Err(RecvError)` if the sender was dropped (S8 §F — watchlist
+    /// resync signal).
+    pub fn has_changed(&self) -> Result<bool, watch::error::RecvError> {
+        self.rx.has_changed()
+    }
+
     /// Borrow mutable access to the underlying `watch::Receiver`.
     ///
     /// Pre-existing callers that need to pass the receiver to

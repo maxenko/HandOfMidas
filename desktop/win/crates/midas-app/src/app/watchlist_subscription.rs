@@ -57,6 +57,17 @@ impl QuoteEntry {
         let mut guard = self.inner.lock().await;
         guard.changed().await
     }
+
+    /// Non-blocking probe — whether the watch has a pending new
+    /// value or, on `Err(Closed)`, whether the sender was dropped
+    /// (S8 §F). Distinguishes "nothing new" (`Ok(false)`) from
+    /// "watch is gone" (`Err(Closed)`) without consuming the
+    /// pending-change flag — we still read the value via
+    /// [`Self::snapshot`] afterwards.
+    pub async fn has_changed(&self) -> Result<bool, tokio::sync::watch::error::RecvError> {
+        let guard = self.inner.lock().await;
+        guard.has_changed()
+    }
 }
 
 /// Global watchlist quote registry. Keyed on broker-core
@@ -123,7 +134,21 @@ pub fn watchlist_stream_builder(
         loop {
             interval.tick().await;
             let mut batch: Vec<(SymbolKey, Quote)> = Vec::new();
+            let mut closed: Vec<SymbolKey> = Vec::new();
             for (idx, (sym, entry)) in entries.iter().enumerate() {
+                // S8 §F: probe `has_changed()` before reading the
+                // snapshot so we can detect the rare case where the
+                // router dropped the watch sender (e.g. every
+                // consumer DecRef'd and the publisher was torn
+                // down). On `Err(Closed)` emit `QuoteResync` so the
+                // handler can re-open via `last_quote`.
+                match entry.has_changed().await {
+                    Ok(_) => {}
+                    Err(_) => {
+                        closed.push(sym.clone());
+                        continue;
+                    }
+                }
                 let q = entry.snapshot().await;
                 let should_emit = match &last[idx] {
                     None => true,
@@ -136,6 +161,21 @@ pub fn watchlist_stream_builder(
             }
             if !batch.is_empty() && output.send(Message::QuoteBatch(batch)).await.is_err() {
                 break;
+            }
+            for sym in closed {
+                // Drop the stale registry entry so the next
+                // iced-diff pass doesn't keep handing out the closed
+                // receiver.
+                remove_quote_handle(&sym);
+                if output
+                    .send(Message::QuoteResync {
+                        symbol: sym.clone(),
+                    })
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
             }
         }
     })
