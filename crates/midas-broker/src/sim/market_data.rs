@@ -663,8 +663,11 @@ impl SimMarketData {
         let _ = self.conn_state_tx.send(ConnectionState::Ready);
     }
 
-    fn drop_all_subs_with_reason(&self, reason: EndReason) {
-        // Snapshot req_ids before mutating the map.
+    fn drop_all_subs_with_reason(&self, _reason: EndReason) {
+        // `_reason` is carried for dev_harness replay in a later slice.
+        //
+        // Snapshot req_ids before mutating the map so the iterator
+        // isn't invalidated by the remove calls.
         let ids: Vec<ReqId> = self.subscriptions.iter().map(|e| e.req_id).collect();
         for req_id in ids {
             if let Some((_, sub)) = self.subscriptions.remove(&req_id) {
@@ -676,7 +679,6 @@ impl SimMarketData {
                 // every consumer observes `RecvError::Closed` on the
                 // next `recv()`.
                 drop(sub.tx.lock().take());
-                let _ = reason; // carried for dev_harness replay later
             }
         }
         let rt_ids: Vec<ReqId> = self.rt_bar_subs.iter().map(|e| e.req_id).collect();
@@ -769,14 +771,9 @@ fn push_task_inner(tasks: &Arc<Mutex<Vec<JoinHandle<()>>>>, handle: JoinHandle<(
     ts.push(handle);
 }
 
-/// Wall-clock helper (unix-milliseconds). Used only for the cancel
-/// drain window; the tick emitter loop itself is pause-time-driven.
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
+// Wall-clock helper lives in `market_data_helpers::now_ms`; both this
+// module and `tick_emitter` reach for it there to avoid drift.
+use crate::sim::market_data_helpers::now_ms;
 
 #[async_trait]
 impl MarketDataSource for SimMarketData {
@@ -1088,19 +1085,19 @@ impl MarketDataSource for SimMarketData {
                 // Route by (symbol, req_id): if req_id matches an
                 // existing sub, fan to that one; else fan to every sub
                 // on that symbol (broadcast semantics).
-                let mut sent = false;
-                if let Some(sub) = self.subscriptions.get(&t.req_id) {
-                    if let Some(tx) = sub.tx.lock().as_ref() {
-                        let _ = tx.send(Arc::new(t.clone()));
-                        sent = true;
-                    }
-                }
-                if !sent {
+                let arc = Arc::new(t.clone());
+                let targeted = self
+                    .subscriptions
+                    .get(&t.req_id)
+                    .and_then(|sub| sub.tx.lock().as_ref().map(|tx| tx.send(arc.clone())))
+                    .is_some();
+                if !targeted {
                     for entry in self.subscriptions.iter() {
-                        if entry.symbol == t.symbol {
-                            if let Some(tx) = entry.tx.lock().as_ref() {
-                                let _ = tx.send(Arc::new(t.clone()));
-                            }
+                        if entry.symbol != t.symbol {
+                            continue;
+                        }
+                        if let Some(tx) = entry.tx.lock().as_ref() {
+                            let _ = tx.send(arc.clone());
                         }
                     }
                 }
