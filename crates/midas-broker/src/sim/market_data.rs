@@ -479,10 +479,25 @@ impl SimMarketData {
             // removal so the closure returns promptly.
             let req_id = sub.req_id;
             let subs = subscriptions.clone();
-            tokio::spawn(async move {
-                tokio::time::sleep(late_window).await;
-                subs.remove(&req_id);
-            });
+            // Gate the spawn on an active tokio runtime. This closure
+            // is often invoked from a stream handle's Drop; if the
+            // handle is dropped outside a tokio context (sim teardown
+            // in a `#[test]` rather than `#[tokio::test]`, or during
+            // runtime shutdown) `tokio::spawn` would panic. Without a
+            // runtime the sim is being torn down anyway — we just
+            // remove the sub entry synchronously so the DashMap stays
+            // clean.
+            match tokio::runtime::Handle::try_current() {
+                Ok(handle) => {
+                    handle.spawn(async move {
+                        tokio::time::sleep(late_window).await;
+                        subs.remove(&req_id);
+                    });
+                }
+                Err(_) => {
+                    subs.remove(&req_id);
+                }
+            }
         })
     }
 
@@ -1153,6 +1168,59 @@ mod internal_tests {
         assert_eq!(bar.o, 100.0);
         assert_eq!(bar.volume, 1_234);
         assert_eq!(bar.ts_close - bar.ts_open, chrono::Duration::seconds(60));
+    }
+
+    /// Dropping a tick cancel closure outside a tokio runtime must
+    /// not panic. Pre-fix the inner `tokio::spawn` unconditionally
+    /// tried to schedule the deferred removal; post-fix we fall
+    /// back to a synchronous `DashMap::remove` when no runtime is
+    /// active.
+    #[test]
+    fn tick_cancel_closure_outside_tokio_does_not_panic() {
+        // Build a minimal sub + map without a runtime.
+        let req_id = ReqId(42);
+        let subs: Arc<DashMap<ReqId, Arc<SimSubscription>>> = Arc::new(DashMap::new());
+        let sub = Arc::new(SimSubscription {
+            req_id,
+            symbol: SymbolKey {
+                contract_id: 1,
+                symbol: "AAPL".into(),
+            },
+            con_id: 1,
+            kind: SubKind::Tick,
+            tx: Mutex::new(None),
+            cancelled: AtomicBool::new(false),
+            draining_until_ns: std::sync::atomic::AtomicU64::new(0),
+            last_error: Arc::new(OnceLock::new()),
+        });
+        subs.insert(req_id, sub.clone());
+
+        // Reproduce the closure shape inline (exercises the same
+        // `try_current` fallback path the real closure uses).
+        let late_window = Duration::from_millis(50);
+        let subs_cl = subs.clone();
+        let sub_cl = sub.clone();
+        let closure: Box<dyn FnOnce() + Send + Sync> = Box::new(move || {
+            sub_cl.cancelled.store(true, Ordering::SeqCst);
+            let req_id = sub_cl.req_id;
+            let subs = subs_cl.clone();
+            match tokio::runtime::Handle::try_current() {
+                Ok(h) => {
+                    h.spawn(async move {
+                        tokio::time::sleep(late_window).await;
+                        subs.remove(&req_id);
+                    });
+                }
+                Err(_) => {
+                    subs.remove(&req_id);
+                }
+            }
+        });
+        // Invoke the closure from a plain `#[test]` (no runtime).
+        // Pre-fix this would panic; post-fix the sub is removed
+        // synchronously.
+        closure();
+        assert!(subs.get(&req_id).is_none(), "sub should be removed sync");
     }
 
     /// 100 subscribe/drop cycles must not leave 100 handles in

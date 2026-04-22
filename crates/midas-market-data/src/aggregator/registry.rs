@@ -218,7 +218,17 @@ impl Drop for AggGuard {
         // Fire-and-forget: guard drop is synchronous, but the removal
         // must take the async `Mutex`. Acceptable to delay — all that
         // happens is the aggregator lives a touch longer.
-        tokio::spawn(async move {
+        //
+        // Gate the spawn on an active tokio runtime: if we're being
+        // dropped outside tokio (sim shutdown, test teardown, router
+        // destruction after the runtime shut down) `tokio::spawn`
+        // would panic. No runtime means the whole router is being
+        // torn down anyway — the DecRef is moot because the
+        // aggregator will be destroyed along with the registry.
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        handle.spawn(async move {
             let Some(reg) = weak.upgrade() else {
                 return;
             };
@@ -294,5 +304,30 @@ mod tests {
         ] {
             assert!(is_unsupported_tf(tf), "{tf:?} should be rejected");
         }
+    }
+
+    /// Dropping an `AggGuard` outside a tokio runtime must not panic.
+    /// Pre-fix the Drop impl blindly called `tokio::spawn(..)` which
+    /// panics when no runtime is active (sim teardown in a plain
+    /// `#[test]`, runtime shutdown, etc.). Post-fix it uses
+    /// `Handle::try_current()` and silently no-ops.
+    #[test]
+    fn agg_guard_drop_outside_tokio_does_not_panic() {
+        // Construct a registry + guard directly without a runtime.
+        let router_weak = std::sync::Weak::<crate::router::MarketDataRouter>::new();
+        let reg = BarAggregatorRegistry::new(router_weak);
+        let key = (
+            midas_broker_core::SymbolKey {
+                contract_id: 1,
+                symbol: "AAPL".into(),
+            },
+            Timeframe::M1,
+        );
+        let guard = AggGuard {
+            key,
+            registry: Arc::downgrade(&reg),
+        };
+        // Dropping here (plain `#[test]`, no runtime) must not panic.
+        drop(guard);
     }
 }
