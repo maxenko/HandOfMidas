@@ -274,7 +274,7 @@ impl SimMarketData {
         let handle = tokio::spawn(async move {
             this_clone.run_connect_sequence().await;
         });
-        tasks.lock().push(handle);
+        push_task_inner(&tasks, handle);
 
         this
     }
@@ -441,7 +441,18 @@ impl SimMarketData {
             // Ensure the tick-loop does not re-emit the first burst.
             // (The symbol state already gates this per-symbol.)
         });
-        self.tasks.lock().push(handle);
+        self.push_task(handle);
+    }
+
+    /// Push a background task handle onto `self.tasks` while pruning
+    /// finished handles inline. Without this the vec grows unboundedly
+    /// for long-lived sims — every subscribe + drop cycle adds a
+    /// `JoinHandle<()>` but nothing trims completed ones. A single
+    /// `retain` per push keeps the cost O(live-tasks) per subscribe
+    /// call and bounds the vec size to roughly the number of
+    /// currently-running tasks.
+    fn push_task(&self, handle: JoinHandle<()>) {
+        push_task_inner(&self.tasks, handle);
     }
 
     /// Build a cancel closure for a tick subscription. Handle-drop
@@ -730,6 +741,19 @@ fn ohlcv_to_bar(b: &OhlcvBar, symbol: SymbolKey, tf: Timeframe) -> Bar {
     }
 }
 
+/// Shared retain-then-push helper for the background-task vec.
+///
+/// Called from every site that spawns a long-running sim task (ctor
+/// connect-sequence, initial-burst, rt-bar emitter, historical-stream
+/// update tail). Pruning `is_finished` handles on the way in keeps
+/// the vec bounded to the number of live tasks — the pre-fix path
+/// simply pushed, so the vec grew forever for any long-lived sim.
+fn push_task_inner(tasks: &Arc<Mutex<Vec<JoinHandle<()>>>>, handle: JoinHandle<()>) {
+    let mut ts = tasks.lock();
+    ts.retain(|h| !h.is_finished());
+    ts.push(handle);
+}
+
 /// Wall-clock helper (unix-milliseconds). Used only for the cancel
 /// drain window; the tick emitter loop itself is pause-time-driven.
 fn now_ms() -> u64 {
@@ -877,7 +901,7 @@ impl MarketDataSource for SimMarketData {
                 let _ = sub_for_task.tx.send(Arc::new(bar));
             }
         });
-        self.tasks.lock().push(handle);
+        self.push_task(handle);
 
         let rt_subs = self.rt_bar_subs.clone();
         let cancel = Box::new(move || {
@@ -991,7 +1015,7 @@ impl MarketDataSource for SimMarketData {
                 }
             }
         });
-        self.tasks.lock().push(handle);
+        self.push_task(handle);
 
         let hist_subs = self.hist_subs.clone();
         let cancel_closure = Box::new(move || {
@@ -1129,5 +1153,32 @@ mod internal_tests {
         assert_eq!(bar.o, 100.0);
         assert_eq!(bar.volume, 1_234);
         assert_eq!(bar.ts_close - bar.ts_open, chrono::Duration::seconds(60));
+    }
+
+    /// 100 subscribe/drop cycles must not leave 100 handles in
+    /// `self.tasks`. With the pre-fix `push` only path the vec grew
+    /// unboundedly; with `push_task_inner` the retain trims every
+    /// finished `JoinHandle` before the next push.
+    #[tokio::test]
+    async fn push_task_prunes_finished_handles() {
+        let tasks: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
+        // Spawn 100 tasks that finish immediately.
+        for _ in 0..100 {
+            let handle = tokio::spawn(async {
+                // Immediately returns — the JoinHandle is reaped on
+                // the next push_task_inner call.
+            });
+            push_task_inner(&tasks, handle);
+            // Yield so the task actually finishes before the next
+            // push_task_inner runs and has a chance to prune.
+            tokio::task::yield_now().await;
+        }
+        // After the loop the vec size is bounded — the exact count
+        // depends on scheduling but must be << 100.
+        let len = tasks.lock().len();
+        assert!(
+            len <= 20,
+            "tasks vec must not grow unboundedly; got {len} handles after 100 cycles"
+        );
     }
 }
