@@ -141,13 +141,23 @@ impl<T: Clone + Send + Sync + 'static> SubscriptionHandle<T> {
     /// the returned stream drops the guard, which `DecRef`s upstream —
     /// this is the preferred consumer API (NB-1 / NB-2).
     ///
-    /// `Lagged` items are silently skipped (consumer got behind and
-    /// the broadcast ring wrapped); `Closed` ends the stream.
+    /// **Lagged handling:** the stream closes on the first
+    /// `RecvError::Lagged` instead of silently skipping items. A
+    /// lagged consumer observed a ring wrap, which means one or more
+    /// items have been lost — silently continuing leaks a gap the
+    /// caller can neither detect nor repair (this was the bug in
+    /// `history_then_live`: a long history fetch could pile up RT-bars
+    /// in the 256-slot ring, trigger Lagged, and stitch a gap at the
+    /// seam). Closing the stream forces the consumer to re-subscribe
+    /// (and, for seamed consumers, re-fetch history) so the invariant
+    /// is explicit, not implicit. `Closed` also ends the stream, same
+    /// as before.
     pub fn into_stream(self) -> GuardedStream<T> {
         let (rx, guard) = self.into_parts();
         GuardedStream {
             inner: BroadcastStream::new(rx),
             _guard: guard,
+            closed: false,
         }
     }
 }
@@ -213,26 +223,49 @@ impl std::fmt::Debug for QuoteHandle {
 /// Stream wrapper that owns both the broadcast receiver and the RAII
 /// guard of a [`SubscriptionHandle`].
 ///
-/// Returned by [`SubscriptionHandle::into_stream`]. Skips
-/// `RecvError::Lagged` items silently and terminates on
-/// `RecvError::Closed` — dropping the stream drops the guard and
+/// Returned by [`SubscriptionHandle::into_stream`]. Terminates on
+/// either `RecvError::Lagged` or `RecvError::Closed` — in both cases
+/// the stream yields `None`. Dropping the stream drops the guard and
 /// `DecRef`s upstream.
+///
+/// Closing on `Lagged` is intentional (Bug 5): silently skipping
+/// Lagged items hides a gap the caller can neither detect nor repair.
+/// Seamed consumers like `history_then_live` are particularly
+/// vulnerable — a long history fetch can pile RT-bars up in the ring,
+/// trigger Lagged, and stitch a hole in between history and live.
+/// Surfacing the close forces the consumer to re-open the
+/// subscription (and re-fetch history) so the invariant is explicit.
 pub struct GuardedStream<T> {
     inner: BroadcastStream<Arc<T>>,
     _guard: Box<dyn Guard>,
+    /// Sticky: once we've surfaced a close we never resurrect.
+    /// Protects against a `BroadcastStream` that might yield further
+    /// items after the Lagged we already surfaced as terminal.
+    closed: bool,
 }
 
 impl<T: Clone + Send + Sync + 'static> Stream for GuardedStream<T> {
     type Item = Arc<T>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        loop {
-            match Pin::new(&mut self.inner).poll_next(cx) {
-                Poll::Ready(Some(Ok(v))) => return Poll::Ready(Some(v)),
-                Poll::Ready(Some(Err(_lagged))) => continue, // skip Lagged
-                Poll::Ready(None) => return Poll::Ready(None),
-                Poll::Pending => return Poll::Pending,
+        if self.closed {
+            return Poll::Ready(None);
+        }
+        match Pin::new(&mut self.inner).poll_next(cx) {
+            Poll::Ready(Some(Ok(v))) => Poll::Ready(Some(v)),
+            Poll::Ready(Some(Err(_lagged))) => {
+                tracing::warn!(
+                    "GuardedStream observed Lagged; closing stream so the consumer \
+                     resubscribes instead of silently skipping items"
+                );
+                self.closed = true;
+                Poll::Ready(None)
             }
+            Poll::Ready(None) => {
+                self.closed = true;
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
         }
     }
 }

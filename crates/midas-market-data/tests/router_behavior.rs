@@ -621,6 +621,71 @@ async fn subscribe_ticks_existing_hub_path_does_not_leak_refcount_on_upstream_er
     );
 }
 
+// ---------------------------------------------------------------------------
+// Bug 5: GuardedStream closes on Lagged instead of silently skipping
+// ---------------------------------------------------------------------------
+
+/// `SubscriptionHandle::into_stream` used to `continue` on
+/// `RecvError::Lagged`, which silently skipped dropped items and hid
+/// a gap from consumers (history_then_live in particular stitched a
+/// hole at the seam on a long history fetch). The fix closes the
+/// stream on Lagged so the caller has to re-open — an explicit
+/// signal instead of an invisible one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn guarded_stream_closes_on_lagged_instead_of_skipping() {
+    use futures::StreamExt;
+    use midas_broker_core::market_data::{Bar as CoreBar, BarCompleteness, MarketEvent};
+
+    let (router, sim) = build_router();
+    let sym = aapl();
+
+    let handle = router
+        .subscribe_rt_bars(sym.clone())
+        .await
+        .expect("subscribe_rt_bars");
+    let mut stream = handle.into_stream();
+
+    // Flood more bars than the RT-bar broadcast ring holds (cap 256)
+    // WITHOUT polling the stream. Next poll observes Lagged.
+    let base = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    for i in 0i64..400 {
+        let ts_open = base + chrono::Duration::seconds(i * 5);
+        sim.inject_for_test(MarketEvent::Bar(CoreBar {
+            symbol: sym.clone(),
+            timeframe: Timeframe::S5,
+            ts_open,
+            ts_close: ts_open + chrono::Duration::seconds(5),
+            o: 100.0,
+            h: 101.0,
+            l: 99.0,
+            c: 100.5,
+            volume: 1000,
+            trade_count: 42,
+            wap: Some(100.25),
+            completeness: BarCompleteness::Completed,
+        }));
+    }
+    // Let the publisher pump the ring full.
+    sleep(Duration::from_millis(100)).await;
+
+    // First poll: the BroadcastStream surfaces Lagged as the
+    // first error item. Our GuardedStream turns that into a
+    // clean `None`.
+    let first = tokio::time::timeout(Duration::from_millis(500), stream.next())
+        .await
+        .expect("stream.next() didn't respond");
+    assert!(
+        first.is_none(),
+        "GuardedStream must close on Lagged, not silently skip (got: {first:?})"
+    );
+
+    // Sticky-close: subsequent polls keep yielding None.
+    let second = tokio::time::timeout(Duration::from_millis(50), stream.next())
+        .await
+        .expect("stream.next() didn't respond");
+    assert!(second.is_none(), "GuardedStream stays closed after Lagged");
+}
+
 /// Same shape for `handle_open_hub_for_watch`: prime an rt-bar-only
 /// hub, arm a subscribe_ticks error, open a watch, expect Err with
 /// `watch_refcount` staying at 0.
