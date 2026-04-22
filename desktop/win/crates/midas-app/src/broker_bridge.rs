@@ -59,24 +59,6 @@ impl BrokerBridge {
         self.send_command(BrokerCommand::Connect)
     }
 
-    /// Send `BrokerCommand::CreateBracket`.
-    pub fn create_bracket(&self, params: midas_broker::BracketParams) -> Result<(), String> {
-        self.send_command(BrokerCommand::CreateBracket(params))
-    }
-
-    /// Send `BrokerCommand::CancelBracket`.
-    pub fn cancel_bracket(&self, parent_id: uuid::Uuid) -> Result<(), String> {
-        self.send_command(BrokerCommand::CancelBracket { parent_id })
-    }
-
-    /// Send `BrokerCommand::ModifyBracketLeg`.
-    pub fn modify_bracket_leg(&self, order_id: uuid::Uuid, new_price: f64) -> Result<(), String> {
-        self.send_command(BrokerCommand::ModifyBracketLeg {
-            order_id,
-            new_price,
-        })
-    }
-
     /// Whether the broker engine reports a connected state.
     pub fn is_engine_connected(&self) -> bool {
         self.connection_state.borrow().is_connected()

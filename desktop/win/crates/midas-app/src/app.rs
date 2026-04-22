@@ -799,6 +799,12 @@ pub enum Message {
     /// Broker connection state changed.
     BrokerConnectionChanged(String),
 
+    /// Async result of a [`BracketSubmitter::place_bracket`] call
+    /// (router refactor slice 10b). The UI logs and surfaces errors to
+    /// the user; success is driven by the subsequent `OrderEvent`
+    /// stream which reconciles to the provisional annotation.
+    BracketPlaceResult(BracketPlaceOutcome),
+
     // -- Toast notifications --
     /// All toast traffic routes through one wrapper variant.
     /// [`crate::toast::ToastMsg`] is the controller-local enum.
@@ -980,6 +986,20 @@ impl std::fmt::Debug for RouterReadyPayload {
             .field("order_client", &self.order_client.name())
             .finish()
     }
+}
+
+/// Outcome of a [`BracketSubmitter::place_bracket`] call, carried on
+/// [`Message::BracketPlaceResult`] (router refactor slice 10b).
+///
+/// `symbol` is cloned in so the UI handler can surface errors without
+/// cross-referencing the drag-origin chart.
+#[derive(Debug, Clone)]
+pub struct BracketPlaceOutcome {
+    /// Symbol the submission was for.
+    pub symbol: String,
+    /// Result of the submission. `Ok(handle)` carries the IB order ids
+    /// assigned to each leg; `Err(msg)` is a human-readable reason.
+    pub result: Result<crate::bracket_submit::BracketHandle, String>,
 }
 
 /// Classify messages the `wait_for_idle` tracker should NOT treat as
@@ -3574,6 +3594,17 @@ impl MidasApp {
             action: None,
         });
     }
+
+    /// Build a [`BracketSubmitter`] from the current
+    /// `router_order_client`, or `None` if the router isn't ready yet.
+    ///
+    /// Returned by value (cheap `Arc` clone) so callers can move it
+    /// into `Task::perform` futures without borrowing `self`.
+    pub(crate) fn bracket_submitter(&self) -> Option<crate::bracket_submit::BracketSubmitter> {
+        self.router_order_client
+            .clone()
+            .map(crate::bracket_submit::BracketSubmitter::new)
+    }
 }
 
 // Ticker-state wiring (bind_chart_to_symbol, bind_panel_to_symbol,
@@ -3734,6 +3765,7 @@ impl MidasApp {
             | Message::BrokerBracketStatusChanged { .. }
             | Message::BrokerEventReceived(..)
             | Message::BrokerConnectionChanged(..)
+            | Message::BracketPlaceResult(..)
             | Message::BrokerSimSpawned(..) => self.handle_broker_msg(message),
 
             // -- Router refactor (S7) --

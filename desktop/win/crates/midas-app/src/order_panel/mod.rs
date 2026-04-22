@@ -751,6 +751,14 @@ pub struct OrderAnnotationLink {
     pub tp_order_id: Option<uuid::Uuid>,
     /// Broker order UUID of the SL child (if any).
     pub sl_order_id: Option<uuid::Uuid>,
+    /// IB order id of the entry leg (router-era — S10b). `None`
+    /// until [`Message::BracketPlaceResult`] lands the real id from
+    /// the sim / IB adapter.
+    pub entry_ib_id: Option<i32>,
+    /// IB order id of the TP leg (router-era — S10b).
+    pub tp_ib_id: Option<i32>,
+    /// IB order id of the SL leg (router-era — S10b).
+    pub sl_ib_id: Option<i32>,
     /// Symbol (for quick lookup without loading orders).
     pub symbol: String,
     /// Side of the bracket (Long/Short), cached at creation time for reconciliation.

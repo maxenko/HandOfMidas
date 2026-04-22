@@ -1232,8 +1232,12 @@ impl MidasApp {
                         sl_price.is_some(),
                     );
 
-                    // Send to broker engine.
-                    if let Some(ref bridge) = self.broker_bridge {
+                    // Dispatch to the router's OrderClient via the
+                    // BracketSubmitter (slice 10b). No bridge fallback —
+                    // when the router isn't ready yet, the order is
+                    // dropped with a toast; iced will re-diff the
+                    // submission the next time the user hits Confirm.
+                    let place_task = if let Some(submitter) = self.bracket_submitter() {
                         let broker_params = midas_broker::BracketParams {
                             symbol: symbol.clone(),
                             con_id: None,
@@ -1262,21 +1266,25 @@ impl MidasApp {
                             entry_price: None,
                             entry_stop_price: None,
                         };
-                        match bridge.create_bracket(broker_params) {
-                            Ok(()) => {
-                                tracing::info!(
-                                    "CreateBracket sent to broker engine for {}",
-                                    symbol
-                                );
-                            }
-                            Err(e) => {
-                                tracing::error!("Failed to send bracket to broker: {e}");
-                                self.show_toast(format!("Broker error: {e}"));
-                            }
-                        }
+                        let sym_for_task = symbol.clone();
+                        Task::perform(
+                            async move {
+                                let result = submitter
+                                    .place_bracket(broker_params)
+                                    .await
+                                    .map_err(|e| e.to_string());
+                                crate::app::BracketPlaceOutcome {
+                                    symbol: sym_for_task,
+                                    result,
+                                }
+                            },
+                            Message::BracketPlaceResult,
+                        )
                     } else {
-                        tracing::warn!("No broker bridge: CreateBracket for {} not sent", symbol,);
-                    }
+                        tracing::warn!("No router: CreateBracket for {} not sent", symbol);
+                        self.show_toast("Broker not ready — try again");
+                        Task::none()
+                    };
 
                     self.status_message = format!(
                         "Order submitted: {} {} {}",
@@ -1293,9 +1301,14 @@ impl MidasApp {
                         p.state.showing_confirmation = false;
                     }
 
-                    // Create chart annotation via self-message so the bracket is
-                    // visible on all charts displaying this symbol.
-                    return self.update(Message::BrokerBracketCreated {
+                    // Create provisional chart annotation via self-
+                    // message so the bracket is visible on all charts
+                    // displaying this symbol. The engine-path UUID is
+                    // provisional — the real IB ids arrive on the
+                    // BracketPlaceResult message, at which point the
+                    // reconciliation in `handle_broker_msg` updates the
+                    // `order_annotation_links` map.
+                    let ann = self.update(Message::BrokerBracketCreated {
                         parent_id: uuid::Uuid::now_v7(),
                         take_profit_id: tp_price.map(|_| uuid::Uuid::now_v7()),
                         stop_loss_id: sl_price.map(|_| uuid::Uuid::now_v7()),
@@ -1306,6 +1319,7 @@ impl MidasApp {
                         tp_price,
                         sl_price,
                     });
+                    return Task::batch([ann, place_task]);
                 }
 
                 // Capture data for panel→chart annotation sync (applied
@@ -2959,22 +2973,46 @@ impl MidasApp {
                     ));
                     tracing::info!("Bracket {parent_id} cancel requested from context menu");
 
-                    // Send cancellation to broker engine.
-                    if let Some(ref bridge) = self.broker_bridge {
-                        match bridge.cancel_bracket(parent_id) {
-                            Ok(()) => {
-                                tracing::info!(
-                                    "CancelBracket sent to broker engine for {parent_id}"
-                                );
-                            }
-                            Err(e) => {
-                                tracing::error!("Failed to send CancelBracket to broker: {e}");
-                            }
+                    // Slice 10b: cancel via OrderClient. Look up the IB
+                    // order ids recorded in `order_annotation_links`.
+                    let link = self.order_annotation_links.get(&parent_id).cloned();
+                    if let (Some(submitter), Some(link)) = (self.bracket_submitter(), link.clone())
+                    {
+                        let mut legs = Vec::with_capacity(3);
+                        if let Some(id) = link.entry_ib_id {
+                            legs.push(id);
                         }
-                    } else {
-                        // No engine — remove link now since there will be no confirmation.
-                        self.order_annotation_links.remove(&parent_id);
+                        if let Some(id) = link.tp_ib_id {
+                            legs.push(id);
+                        }
+                        if let Some(id) = link.sl_ib_id {
+                            legs.push(id);
+                        }
+                        if !legs.is_empty() {
+                            return Task::perform(
+                                async move {
+                                    if let Err(e) = submitter.cancel_bracket(&legs).await {
+                                        tracing::error!(
+                                            "Failed to cancel bracket {parent_id}: {e}"
+                                        );
+                                    }
+                                    crate::app::BracketPlaceOutcome {
+                                        symbol: link.symbol.clone(),
+                                        // Reuse the outcome slot as a
+                                        // throwaway — the real cancel
+                                        // confirmation arrives via
+                                        // OrderEvent::Cancelled.
+                                        result: Err(String::from("cancel-dispatched")),
+                                    }
+                                },
+                                |_| Message::BracketContextDismiss,
+                            );
+                        }
                     }
+                    // Fall-through: no submitter, no IB ids, or empty
+                    // leg list. Drop the link so the UI doesn't
+                    // wait forever for a confirmation.
+                    self.order_annotation_links.remove(&parent_id);
                 }
                 Task::none()
             }
@@ -3066,21 +3104,38 @@ impl MidasApp {
                     new_price,
                 },
             ));
-            if let Some(ref bridge) = self.broker_bridge {
-                let order_id = self
-                    .order_annotation_links
-                    .values()
-                    .find(|link| link.annotation_id == annotation_id.0)
-                    .and_then(|link| match leg {
-                        midas_chart::widget::order_bracket::LegRole::TakeProfit => link.tp_order_id,
-                        midas_chart::widget::order_bracket::LegRole::StopLoss => link.sl_order_id,
-                        _ => None,
-                    });
-                if let Some(order_id) = order_id {
-                    if let Err(e) = bridge.modify_bracket_leg(order_id, new_price) {
-                        tracing::error!("Failed to send ModifyBracketLeg to broker: {e}");
+            // Slice 10b: modify via OrderClient. Look up the IB order
+            // id from `order_annotation_links`; it lands when
+            // `Message::BracketPlaceResult` fires.
+            let ib_id_and_is_stop = self
+                .order_annotation_links
+                .values()
+                .find(|link| link.annotation_id == annotation_id.0)
+                .and_then(|link| match leg {
+                    midas_chart::widget::order_bracket::LegRole::TakeProfit => {
+                        link.tp_ib_id.map(|id| (id, false))
                     }
-                }
+                    midas_chart::widget::order_bracket::LegRole::StopLoss => {
+                        link.sl_ib_id.map(|id| (id, true))
+                    }
+                    _ => None,
+                });
+            if let (Some(submitter), Some((ib_id, is_stop))) =
+                (self.bracket_submitter(), ib_id_and_is_stop)
+            {
+                let task = Task::perform(
+                    async move {
+                        if let Err(e) = submitter
+                            .modify_bracket_leg(ib_id, new_price, is_stop)
+                            .await
+                        {
+                            tracing::error!("Failed to modify leg {ib_id}: {e}");
+                        }
+                    },
+                    |_| Message::BracketContextDismiss,
+                );
+                self.sync_drag_to_intent(ticker.clone(), annotation_id);
+                return task;
             }
         }
         if let Some(symbol_at_drag_start) = ticker {
@@ -3278,7 +3333,7 @@ impl MidasApp {
             ));
         }
 
-        if let Some(ref bridge) = self.broker_bridge {
+        let place_task = if let Some(submitter) = self.bracket_submitter() {
             let broker_params = midas_broker::BracketParams {
                 symbol: symbol.clone(),
                 con_id: None,
@@ -3309,39 +3364,31 @@ impl MidasApp {
                 entry_price,
                 entry_stop_price,
             };
-            match bridge.create_bracket(broker_params) {
-                Ok(()) => {
-                    tracing::info!(
-                        "CreateBracket sent: chart={chart_id:?} ann={ann_id} \
-                         symbol={symbol} qty={quantity} type={entry_kind:?}"
-                    );
-                }
-                Err(e) => {
-                    tracing::error!("Failed to send bracket to broker: {e}");
-                    {
-                        let sym_key = crate::annotation_store::SymbolKey::new(&symbol);
-                        let _ = self.update(Message::Ticker(
-                            sym_key,
-                            crate::ticker_state::TickerMsg::OrderRejected {
-                                reason: e.to_string(),
-                            },
-                        ));
+            tracing::info!(
+                "CreateBracket via submitter: chart={chart_id:?} ann={ann_id} \
+                 symbol={symbol} qty={quantity} type={entry_kind:?}"
+            );
+            let sym_for_task = symbol.clone();
+            Task::perform(
+                async move {
+                    let result = submitter
+                        .place_bracket(broker_params)
+                        .await
+                        .map_err(|e| e.to_string());
+                    crate::app::BracketPlaceOutcome {
+                        symbol: sym_for_task,
+                        result,
                     }
-                    if let Some(pid) = panel_id {
-                        if let Some(p) = self.order_panels.get_mut(&pid) {
-                            p.state.errors = vec![("broker".into(), format!("Broker error: {e}"))];
-                        }
-                    }
-                    self.mark_levels_dirty_for_ticker(&symbol);
-                    return Task::none();
-                }
-            }
+                },
+                Message::BracketPlaceResult,
+            )
         } else {
             tracing::info!(
-                "Bracket submitted (no broker bridge): \
+                "Bracket submitted (no router): \
                  chart={chart_id:?} ann={ann_id} symbol={symbol} qty={quantity}"
             );
-        }
+            Task::none()
+        };
 
         {
             let sym_key = crate::annotation_store::SymbolKey::new(&symbol);
@@ -3356,7 +3403,7 @@ impl MidasApp {
             }
         }
         self.mark_levels_dirty_for_ticker(&symbol);
-        Task::none()
+        place_task
     }
 
     pub(crate) fn handle_chart_bracket_cancel(
@@ -3447,11 +3494,16 @@ impl MidasApp {
                     .unwrap_or(0);
 
                 // Store the mapping from annotation to broker order IDs.
+                // IB ids are filled in later when
+                // `Message::BracketPlaceResult` lands (slice 10b).
                 let link = crate::order_panel::OrderAnnotationLink {
                     annotation_id,
                     parent_order_id: parent_id,
                     tp_order_id: take_profit_id,
                     sl_order_id: stop_loss_id,
+                    entry_ib_id: None,
+                    tp_ib_id: None,
+                    sl_ib_id: None,
                     symbol: symbol.clone(),
                     side: action,
                     quantity,
@@ -3706,6 +3758,68 @@ impl MidasApp {
                     }
                 }
                 thumbnail_batch
+            }
+
+            Message::BracketPlaceResult(outcome) => {
+                // Slice 10b: the router's OrderClient returned — either
+                // with the IB order ids for each leg, or an error we
+                // need to surface to the user. On success we reconcile
+                // with the provisional annotation link the UI created
+                // during the click, stamping in the real IB ids so
+                // subsequent cancel / modify calls can address specific
+                // legs.
+                match outcome.result {
+                    Ok(handle) => {
+                        // Find the most recent provisional link for
+                        // this symbol and stamp the IB ids into it.
+                        // We can't filter further (the UI doesn't
+                        // remember the parent UUID it minted) but the
+                        // "most recent" match is correct for sequential
+                        // submissions.
+                        let key = self
+                            .order_annotation_links
+                            .iter()
+                            .filter(|(_, link)| {
+                                link.symbol == outcome.symbol && link.entry_ib_id.is_none()
+                            })
+                            .max_by_key(|(_, link)| link.created_at)
+                            .map(|(k, _)| *k);
+                        if let Some(key) = key {
+                            if let Some(link) = self.order_annotation_links.get_mut(&key) {
+                                link.entry_ib_id = Some(handle.entry_id);
+                                link.tp_ib_id = handle.tp_id;
+                                link.sl_ib_id = handle.sl_id;
+                                tracing::info!(
+                                    "Bracket submission confirmed: symbol={} \
+                                     entry={} tp={:?} sl={:?}",
+                                    outcome.symbol,
+                                    handle.entry_id,
+                                    handle.tp_id,
+                                    handle.sl_id,
+                                );
+                            }
+                        } else {
+                            tracing::warn!(
+                                "BracketPlaceResult: no provisional link for {}",
+                                outcome.symbol
+                            );
+                        }
+                    }
+                    Err(msg) => {
+                        tracing::error!(
+                            "Bracket submission failed for {}: {}",
+                            outcome.symbol,
+                            msg
+                        );
+                        self.show_toast(format!("Broker error: {msg}"));
+                        let sym_key = crate::annotation_store::SymbolKey::new(&outcome.symbol);
+                        let _ = self.update(Message::Ticker(
+                            sym_key,
+                            crate::ticker_state::TickerMsg::OrderRejected { reason: msg },
+                        ));
+                    }
+                }
+                Task::none()
             }
 
             Message::BrokerBracketStatusChanged {

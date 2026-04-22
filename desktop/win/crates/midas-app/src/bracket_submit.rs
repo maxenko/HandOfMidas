@@ -84,10 +84,7 @@ impl BracketSubmitter {
     /// Submit a bracket in IB-correct order (entry → TP → SL,
     /// transmit-last) and return the [`BracketHandle`] identifying
     /// every leg.
-    pub async fn place_bracket(
-        &self,
-        params: BracketParams,
-    ) -> Result<BracketHandle, OrderError> {
+    pub async fn place_bracket(&self, params: BracketParams) -> Result<BracketHandle, OrderError> {
         let parent_id = Uuid::now_v7();
         let has_tp = params.take_profit.is_some();
         let has_sl = params.stop_loss.is_some();

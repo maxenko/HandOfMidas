@@ -548,8 +548,12 @@ impl MidasApp {
                     }
                 }
                 crate::ticker_state::TickerEffect::SubmitToBroker { ref bracket } => {
-                    // Convert bracket to broker params and send.
-                    if let Some(ref bridge) = self.broker_bridge {
+                    // Slice 10b: submit via OrderClient instead of the
+                    // legacy bridge. The effect-handler loop runs
+                    // synchronously; spawn the async submission on the
+                    // tokio runtime so we don't need to plumb a Task
+                    // back through the effect handler return type.
+                    if let Some(submitter) = self.bracket_submitter() {
                         let action = match bracket.side {
                             midas_chart::widget::order_bracket::BracketSide::Long => {
                                 midas_broker::OrderAction::Buy
@@ -608,9 +612,11 @@ impl MidasApp {
                             entry_price,
                             entry_stop_price,
                         };
-                        if let Err(e) = bridge.create_bracket(broker_params) {
-                            tracing::error!("Failed to submit bracket to broker: {e}");
-                        }
+                        tokio::spawn(async move {
+                            if let Err(e) = submitter.place_bracket(broker_params).await {
+                                tracing::error!("Failed to submit bracket to broker: {e}");
+                            }
+                        });
                     }
                 }
                 crate::ticker_state::TickerEffect::ProjectLevel { .. } => {
