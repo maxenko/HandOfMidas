@@ -48,18 +48,15 @@ pub fn order_events_stream(
 ) -> impl iced::futures::Stream<Item = crate::app::Message> {
     use iced::futures::StreamExt;
     use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
-    let rx = source.order_client.order_events();
-    let raw = tokio_stream::StreamExt::filter_map(
-        BroadcastStream::new(rx),
-        |r: Result<OrderEvent, BroadcastStreamRecvError>| match r {
-            Ok(ev) => Some(ev),
-            Err(BroadcastStreamRecvError::Lagged(n)) => {
-                tracing::warn!(skipped = n, "order_events_stream: broadcast lagged");
-                None
-            }
-        },
-    );
-    StreamExt::map(raw, |ev| {
-        crate::app::Message::RouterOrderEvent(Box::new(ev))
-    })
+    BroadcastStream::new(source.order_client.order_events())
+        .filter_map(|r| {
+            std::future::ready(match r {
+                Ok(ev) => Some(ev),
+                Err(BroadcastStreamRecvError::Lagged(n)) => {
+                    tracing::warn!(skipped = n, "order_events_stream: broadcast lagged");
+                    None
+                }
+            })
+        })
+        .map(|ev: OrderEvent| crate::app::Message::RouterOrderEvent(Box::new(ev)))
 }

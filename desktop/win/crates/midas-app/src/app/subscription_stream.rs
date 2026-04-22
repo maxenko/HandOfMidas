@@ -99,12 +99,10 @@ pub async fn drive_subscription<Item, Acc, Msg, OnPush, OnFlush, OnLag>(
                     // (large per-symbol lookback on reconnect) would
                     // otherwise sit in the buffer for a full window
                     // before emitting.
-                    if coalescer.should_flush_early() {
-                        if let BatchEmit::One(msg) = on_flush(&mut coalescer) {
-                            if output.send(msg).await.is_err() {
-                                break;
-                            }
-                        }
+                    if coalescer.should_flush_early()
+                        && !send_batch(&mut output, on_flush(&mut coalescer)).await
+                    {
+                        break;
                     }
                 }
                 Err(RecvError::Lagged(n)) => {
@@ -117,14 +115,25 @@ pub async fn drive_subscription<Item, Acc, Msg, OnPush, OnFlush, OnLag>(
                 Err(RecvError::Closed) => break,
             },
             _ = interval.tick() => {
-                if coalescer.has_pending() {
-                    if let BatchEmit::One(msg) = on_flush(&mut coalescer) {
-                        if output.send(msg).await.is_err() {
-                            break;
-                        }
-                    }
+                if coalescer.has_pending()
+                    && !send_batch(&mut output, on_flush(&mut coalescer)).await
+                {
+                    break;
                 }
             }
         }
+    }
+}
+
+/// Ship a [`BatchEmit`] through `output`. Returns `true` when the
+/// send succeeded (or was skipped); `false` when the iced channel is
+/// closed and the caller should exit the select-loop.
+async fn send_batch<Msg>(output: &mut Sender<Msg>, emit: BatchEmit<Msg>) -> bool
+where
+    Msg: Send + 'static,
+{
+    match emit {
+        BatchEmit::One(msg) => output.send(msg).await.is_ok(),
+        BatchEmit::Skip => true,
     }
 }
