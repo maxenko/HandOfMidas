@@ -296,6 +296,42 @@ pub struct OrderSpec {
     pub sweep_to_fill: bool,
 }
 
+impl Default for OrderSpec {
+    /// Sentinel defaults for the required-but-overridden fields
+    /// (`ib_order_id`, `symbol`, `action`, `order_type`, `quantity`);
+    /// real defaults for everything else. The bracket-submitter's leg
+    /// builders lean on this so adding a new `OrderSpec` field only
+    /// needs one touch site instead of three.
+    fn default() -> Self {
+        Self {
+            ib_order_id: 0,
+            symbol: SymbolKey::default(),
+            con_id: 0,
+            action: OrderAction::Buy,
+            order_type: OrderType::Market,
+            quantity: 0.0,
+            limit_price: None,
+            stop_price: None,
+            parent_id: None,
+            transmit: true,
+            tif: Tif::Day,
+            outside_rth: false,
+            oca_group: None,
+            oca_type: None,
+            conditions: Vec::new(),
+            algo_strategy: None,
+            algo_params: Vec::new(),
+            good_after_time: None,
+            good_till_date: None,
+            display_size: None,
+            hidden: false,
+            trigger_method: TriggerMethod::Default,
+            discretionary_amt: None,
+            sweep_to_fill: false,
+        }
+    }
+}
+
 /// Parameters accepted by
 /// [`OrderClient::modify_order`](OrderClient::modify_order) (M-18).
 #[derive(Debug, Clone, Default)]

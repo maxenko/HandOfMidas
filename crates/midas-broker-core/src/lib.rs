@@ -117,7 +117,7 @@ impl fmt::Display for OptionRight {
 /// keyed on `SymbolKey` iterates in a stable, deterministic order — the
 /// IB sim (and anyone else doing cross-symbol aggregation) relies on this
 /// for reproducible output.
-#[derive(Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct SymbolKey {
     pub contract_id: i32,
     pub symbol: String,

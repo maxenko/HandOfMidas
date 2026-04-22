@@ -29,7 +29,7 @@ use uuid::Uuid;
 
 use crate::orders::bracket::{BracketParams, StopLossParams, TakeProfitParams};
 use crate::orders::types::{OrderAction, OrderKind, TimeInForce};
-use crate::{OrderClient, OrderError, OrderModify, OrderSpec, OrderType, Tif, TriggerMethod};
+use crate::{OrderClient, OrderError, OrderModify, OrderSpec, OrderType, Tif};
 
 /// Helper that packages [`OrderClient::place_order`] calls into a
 /// three-leg bracket submission with IB-correct transmit semantics.
@@ -200,6 +200,13 @@ impl BracketSubmitter {
 }
 
 // ── OrderSpec builders ────────────────────────────────────────────────
+//
+// Audit P1 refactor 5: `OrderSpec::default` collapses the shared
+// "every other field stays at its default" tail into
+// `..OrderSpec::default()` so each builder only names the fields it
+// cares about. Note that `OrderSpec::default` uses `Tif::Day`; the
+// bracket legs all want explicit GTC semantics
+// (`tif: tif_from(...)`), so the `tif` field stays named.
 
 fn entry_spec(
     ib_order_id: i32,
@@ -207,32 +214,19 @@ fn entry_spec(
     params: &BracketParams,
     transmit: bool,
 ) -> OrderSpec {
-    let order_type = kind_to_order_type(params.entry_kind);
     OrderSpec {
         ib_order_id,
         symbol: symbol_key.clone(),
         con_id: params.con_id.unwrap_or(0),
         action: params.action,
-        order_type,
+        order_type: kind_to_order_type(params.entry_kind),
         quantity: params.quantity,
         limit_price: params.entry_price,
         stop_price: params.entry_stop_price,
-        parent_id: None,
         transmit,
         tif: tif_from(None),
         outside_rth: params.outside_rth,
-        oca_group: None,
-        oca_type: None,
-        conditions: Vec::new(),
-        algo_strategy: None,
-        algo_params: Vec::new(),
-        good_after_time: None,
-        good_till_date: None,
-        display_size: None,
-        hidden: false,
-        trigger_method: TriggerMethod::Default,
-        discretionary_amt: None,
-        sweep_to_fill: false,
+        ..OrderSpec::default()
     }
 }
 
@@ -252,23 +246,11 @@ fn tp_spec(
         order_type: OrderType::Limit,
         quantity: params.quantity,
         limit_price: Some(tp.price),
-        stop_price: None,
         parent_id: Some(parent_ib_id),
         transmit,
         tif: tif_from(tp.tif),
         outside_rth: params.outside_rth,
-        oca_group: None,
-        oca_type: None,
-        conditions: Vec::new(),
-        algo_strategy: None,
-        algo_params: Vec::new(),
-        good_after_time: None,
-        good_till_date: None,
-        display_size: None,
-        hidden: false,
-        trigger_method: TriggerMethod::Default,
-        discretionary_amt: None,
-        sweep_to_fill: false,
+        ..OrderSpec::default()
     }
 }
 
@@ -298,18 +280,7 @@ fn sl_spec(
         transmit,
         tif: tif_from(sl.tif),
         outside_rth: params.outside_rth,
-        oca_group: None,
-        oca_type: None,
-        conditions: Vec::new(),
-        algo_strategy: None,
-        algo_params: Vec::new(),
-        good_after_time: None,
-        good_till_date: None,
-        display_size: None,
-        hidden: false,
-        trigger_method: TriggerMethod::Default,
-        discretionary_amt: None,
-        sweep_to_fill: false,
+        ..OrderSpec::default()
     }
 }
 
