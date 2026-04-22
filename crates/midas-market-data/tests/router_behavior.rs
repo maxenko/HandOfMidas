@@ -473,3 +473,84 @@ async fn subscribe_returns_err_if_source_fails() {
     let _h = router.subscribe_ticks(sym.clone()).await.expect("retry");
     assert_eq!(sim.live_subscription_count_for(&sym), 1);
 }
+
+// ---------------------------------------------------------------------------
+// S8 §E: iced subscription teardown propagates the DecRef chain.
+// ---------------------------------------------------------------------------
+
+/// Simulates the iced-side teardown flow end-to-end in an in-process
+/// harness:
+///
+/// 1. A spawned task subscribes via the router (like the chart
+///    subscription stream builder does).
+/// 2. The outer task is dropped (like iced dropping the `Subscription`
+///    on a re-diff when the chart is gone).
+/// 3. The `SubscriptionHandle` drops, the guard runs, the router sees
+///    `DecRef`, and upstream gets cancelled.
+///
+/// Asserts that within 250 ms of the outer-task drop, the router's
+/// `debug_dump()` reports zero consumers for the symbol — proving the
+/// RAII chain works when the stream closure is dropped mid-recv.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn iced_subscription_teardown_propagates_dec_ref() {
+    let (router, sim) = build_router();
+    let sym = aapl();
+
+    // Spawn the "iced-side" task: holds the handle, recvs forever.
+    // When the JoinHandle is dropped the future is aborted and the
+    // handle's Drop runs, sending `DecRef` to the router.
+    let router_cl = router.clone();
+    let sym_cl = sym.clone();
+    let task = tokio::spawn(async move {
+        let handle = router_cl
+            .subscribe_ticks(sym_cl)
+            .await
+            .expect("subscribe in iced-like task");
+        let mut rx = handle.resubscribe();
+        // Park forever — the only way out is an abort from the
+        // outer test scope, which is what iced teardown does.
+        loop {
+            let _ = rx.recv().await;
+        }
+    });
+
+    // Let the subscribe land.
+    sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        sim.live_subscription_count_for(&sym),
+        1,
+        "upstream should be subscribed while the task holds the handle"
+    );
+    let dump = router.debug_dump().await;
+    let pre = dump.iter().find(|d| d.symbol == sym).expect("hub present");
+    assert_eq!(pre.tick_refcount, 1, "one tick consumer via iced-like task");
+
+    // Simulate iced dropping the subscription: abort the task.
+    task.abort();
+    let _ = task.await;
+
+    // Poll debug_dump until the refcount is gone (or timeout).
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(250);
+    loop {
+        let dump = router.debug_dump().await;
+        let still_live = dump.iter().any(|d| d.symbol == sym && d.tick_refcount > 0);
+        if !still_live {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("teardown did not propagate DecRef within 250 ms: {dump:?}");
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+    // Upstream should also be cancelled.
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(250);
+    while sim.live_subscription_count_for(&sym) != 0 {
+        if tokio::time::Instant::now() >= deadline {
+            panic!(
+                "upstream sub count != 0 after teardown: {}",
+                sim.live_subscription_count_for(&sym)
+            );
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+}

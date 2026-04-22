@@ -234,6 +234,16 @@ pub struct ChartPanel {
     /// Generation counter incremented on every load request.
     /// Used to discard stale `DataLoaded` messages from previously-requested tickers.
     pub load_generation: u64,
+    /// Whether the chart is currently driving live-data subscriptions
+    /// (S8 §D). When `false`, `chart_subscriptions()` drops this chart
+    /// from the iced diff, which cascades through the RAII chain
+    /// `SubscriptionHandle → DecRef` to cancel the upstream.
+    ///
+    /// Defaults to `true`. Future UI plumbing (pane minimisation,
+    /// off-screen floating windows, mobile workspace switch) will
+    /// flip this field; the current code path only exercises the
+    /// default-true behaviour end-to-end.
+    pub visible: bool,
 }
 
 impl ChartPanel {
@@ -248,6 +258,17 @@ impl ChartPanel {
                 Some(buf.timestamps[buf.len() - 1] as f64)
             }
         })
+    }
+
+    /// Whether this chart should currently be driving live-data
+    /// subscriptions (S8 §D).
+    ///
+    /// Reads the [`Self::visible`] field — defaults to `true`. The
+    /// `chart_subscriptions()` iced builder filters on this so the
+    /// RAII drop chain `SubscriptionHandle → DecRef` fires the
+    /// moment a chart flips invisible.
+    pub fn is_visible(&self) -> bool {
+        self.visible
     }
 }
 
@@ -2624,6 +2645,7 @@ impl MidasApp {
             gatr_hover: false,
             camera_restored_pending: false,
             load_generation: 0,
+            visible: true,
         }
     }
 

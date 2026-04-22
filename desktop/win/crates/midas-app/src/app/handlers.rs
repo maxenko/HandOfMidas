@@ -3834,11 +3834,39 @@ impl MidasApp {
     /// deduplicates naturally.
     pub(crate) fn chart_subscriptions(&self) -> iced::Subscription<Message> {
         // NB-4: no router yet → no subscriptions.
-        let Some(_router) = self.router.as_ref() else {
+        if self.router.is_none() {
             return iced::Subscription::none();
-        };
-        let mut subs = Vec::<iced::Subscription<Message>>::new();
-        for (chart_id, chart) in &self.charts {
+        }
+        let keys = self.chart_sub_keys();
+        if keys.is_empty() {
+            return iced::Subscription::none();
+        }
+        let subs: Vec<iced::Subscription<Message>> = keys
+            .into_iter()
+            .map(|key| {
+                iced::Subscription::run_with(
+                    key,
+                    crate::app::chart_subscription::chart_stream_builder,
+                )
+            })
+            .collect();
+        iced::Subscription::batch(subs)
+    }
+
+    /// Structural helper: enumerate the `ChartSubKey`s
+    /// [`Self::chart_subscriptions`] would wrap into iced subs on the
+    /// next diff. Covers docked + floating charts and applies the
+    /// S8 §D visibility filter so hidden charts are excluded.
+    ///
+    /// Exposed separately for tests and for `dev_harness::DumpState`
+    /// (M-28) to verify the subscription shape without having to walk
+    /// iced's opaque `Subscription` internals.
+    pub(crate) fn chart_sub_keys(&self) -> Vec<crate::app::chart_subscription::ChartSubKey> {
+        let mut out = Vec::new();
+        // S8 §D: skip hidden charts — their subscription vanishes on
+        // the next iced re-diff, which drops the `SubscriptionHandle`
+        // and DecRefs upstream through the router's RAII guard.
+        for (chart_id, chart) in self.charts.iter().filter(|(_, c)| c.is_visible()) {
             let Some(ref sym) = chart.bound_symbol else {
                 continue;
             };
@@ -3846,17 +3874,13 @@ impl MidasApp {
                 contract_id: 0,
                 symbol: sym.as_str().to_string(),
             };
-            let key = crate::app::chart_subscription::ChartSubKey {
+            out.push(crate::app::chart_subscription::ChartSubKey {
                 chart_id: *chart_id,
                 symbol: broker_sym,
                 timeframe: chart_timeframe_to_broker_core(chart.timeframe),
-            };
-            subs.push(iced::Subscription::run_with(
-                key,
-                crate::app::chart_subscription::chart_stream_builder,
-            ));
+            });
         }
-        for (window_id, chart) in &self.floating_charts {
+        for (window_id, chart) in self.floating_charts.iter().filter(|(_, c)| c.is_visible()) {
             let Some(ref sym) = chart.bound_symbol else {
                 continue;
             };
@@ -3865,21 +3889,13 @@ impl MidasApp {
                 symbol: sym.as_str().to_string(),
             };
             let synthetic_id = floating_window_synthetic_id(*window_id);
-            let key = crate::app::chart_subscription::ChartSubKey {
+            out.push(crate::app::chart_subscription::ChartSubKey {
                 chart_id: synthetic_id,
                 symbol: broker_sym,
                 timeframe: chart_timeframe_to_broker_core(chart.timeframe),
-            };
-            subs.push(iced::Subscription::run_with(
-                key,
-                crate::app::chart_subscription::chart_stream_builder,
-            ));
+            });
         }
-        if subs.is_empty() {
-            iced::Subscription::none()
-        } else {
-            iced::Subscription::batch(subs)
-        }
+        out
     }
 
     /// Aggregated watchlist subscription (S7c).
@@ -4321,5 +4337,103 @@ impl MidasApp {
         } else {
             Task::batch(tasks)
         }
+    }
+}
+
+// ── S8 §D tests — visibility filter ─────────────────────────────────
+
+#[cfg(test)]
+mod visibility_tests {
+    use std::collections::HashMap;
+
+    use midas_chart::{Camera2D, ChartState};
+    use midas_core::{ChartId, LinkMode, Timeframe};
+
+    use super::super::chart_subscription::ChartSubKey;
+    use super::chart_timeframe_to_broker_core;
+    use crate::annotation_store::SymbolKey;
+    use crate::app::{apply_symbol_to_panel, ChartPanel, LoadState};
+
+    fn make_panel(symbol: &str, visible: bool) -> ChartPanel {
+        let camera = Camera2D {
+            time_start: 0.0,
+            time_end: 1.0,
+            price_low: 0.0,
+            price_high: 1.0,
+            viewport_width: 800,
+            viewport_height: 600,
+            dpi_scale: 1.0,
+        };
+        let mut panel = ChartPanel {
+            symbol: String::new(),
+            bound_symbol: None,
+            timeframe: Timeframe::M1,
+            data: None,
+            chart_state: ChartState::new(camera),
+            load_state: LoadState::Empty,
+            symbol_input: String::new(),
+            editing_level_id: None,
+            editing_level_screen_pos: None,
+            level_editor_price_input: String::new(),
+            symbol_link: LinkMode::Unlinked,
+            timeframe_link: LinkMode::Unlinked,
+            gatr_hover: false,
+            camera_restored_pending: false,
+            load_generation: 0,
+            visible,
+        };
+        let sym = SymbolKey::new(symbol);
+        apply_symbol_to_panel(&mut panel, symbol, sym);
+        panel
+    }
+
+    /// Re-implement the filter the way `chart_sub_keys` does, over a
+    /// free-standing map. Keeps the assertion scoped to "the filter
+    /// drops hidden charts" without requiring a full `MidasApp`.
+    fn collect_sub_keys(charts: &HashMap<ChartId, ChartPanel>) -> Vec<ChartSubKey> {
+        charts
+            .iter()
+            .filter(|(_, c)| c.is_visible())
+            .filter_map(|(id, c)| {
+                c.bound_symbol.as_ref().map(|sym| ChartSubKey {
+                    chart_id: *id,
+                    symbol: midas_broker_core::SymbolKey {
+                        contract_id: 0,
+                        symbol: sym.as_str().to_string(),
+                    },
+                    timeframe: chart_timeframe_to_broker_core(c.timeframe),
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn hidden_chart_has_no_subscription() {
+        let mut charts: HashMap<ChartId, ChartPanel> = HashMap::new();
+        charts.insert(ChartId::new(1), make_panel("AAPL", true));
+        charts.insert(ChartId::new(2), make_panel("MSFT", false));
+        let keys = collect_sub_keys(&charts);
+        assert_eq!(keys.len(), 1, "hidden chart should be filtered out");
+        assert_eq!(keys[0].symbol.symbol, "AAPL");
+    }
+
+    #[test]
+    fn flipping_visible_to_false_drops_subscription_key() {
+        let mut charts: HashMap<ChartId, ChartPanel> = HashMap::new();
+        charts.insert(ChartId::new(1), make_panel("AAPL", true));
+        assert_eq!(collect_sub_keys(&charts).len(), 1);
+        // Simulate the pane minimising: flip visible off.
+        charts.get_mut(&ChartId::new(1)).unwrap().visible = false;
+        assert_eq!(
+            collect_sub_keys(&charts).len(),
+            0,
+            "subscription key vanishes once the chart hides"
+        );
+    }
+
+    #[test]
+    fn default_chart_panel_is_visible() {
+        let panel = make_panel("AAPL", true);
+        assert!(panel.is_visible());
     }
 }

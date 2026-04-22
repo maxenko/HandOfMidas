@@ -22,7 +22,7 @@ use midas_broker_core::{SymbolKey, Timeframe};
 use midas_core::ChartId;
 use tokio::sync::broadcast::error::RecvError;
 
-use super::subscription_helpers::FRAME_COALESCE_MS;
+use super::subscription_helpers::{FrameCoalescer, FRAME_COALESCE_MS};
 use super::subscription_registry;
 use crate::app::Message;
 
@@ -86,34 +86,42 @@ pub fn chart_stream_builder(key: &ChartSubKey) -> impl iced::futures::Stream<Ite
             }
         };
         let mut rx = entry.resubscribe().await;
-        let mut pending: Vec<Bar> = Vec::with_capacity(8);
+        let mut coalescer: FrameCoalescer<Bar> = FrameCoalescer::with_capacity(8);
         let mut interval = tokio::time::interval(FRAME_COALESCE_MS);
         // First tick is immediate; we want the first coalesce to fire
         // ~16 ms after the first bar arrives.
         interval.tick().await;
+        let chart_id = key.chart_id;
         loop {
             tokio::select! {
                 r = rx.recv() => match r {
-                    Ok(arc_bar) => pending.push((*arc_bar).clone()),
+                    Ok(arc_bar) => {
+                        coalescer.push((*arc_bar).clone());
+                        // M-30: size-based early flush so bursty
+                        // backfills (large per-symbol lookback on
+                        // reconnect) don't sit in the buffer for a
+                        // full 16 ms window.
+                        if coalescer.should_flush_early() {
+                            let bars = coalescer.drain();
+                            if output.send(Message::ChartBarBatch { chart_id, bars }).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
                     Err(RecvError::Lagged(n)) => {
                         tracing::warn!(
-                            chart_id = ?key.chart_id,
+                            chart_id = ?chart_id,
                             skipped = n,
                             "chart bar stream lagged; requesting resync"
                         );
-                        let _ = output.send(Message::ChartResync {
-                            chart_id: key.chart_id,
-                        }).await;
+                        let _ = output.send(Message::ChartResync { chart_id }).await;
                     }
                     Err(RecvError::Closed) => break,
                 },
                 _ = interval.tick() => {
-                    if !pending.is_empty() {
-                        let bars = std::mem::take(&mut pending);
-                        if output.send(Message::ChartBarBatch {
-                            chart_id: key.chart_id,
-                            bars,
-                        }).await.is_err() {
+                    if coalescer.has_pending() {
+                        let bars = coalescer.drain();
+                        if output.send(Message::ChartBarBatch { chart_id, bars }).await.is_err() {
                             break;
                         }
                     }

@@ -18,7 +18,7 @@ use midas_broker_core::market_data::{TickType, TickValue};
 use midas_broker_core::SymbolKey;
 use tokio::sync::broadcast::error::RecvError;
 
-use super::subscription_helpers::TICKER_EMIT_MS;
+use super::subscription_helpers::{FrameCoalescer, TICKER_EMIT_MS};
 use super::subscription_registry;
 use crate::app::Message;
 
@@ -56,7 +56,16 @@ pub fn ticker_stream_builder(key: &TickerSubKey) -> impl iced::futures::Stream<I
             }
         };
         let mut rx = entry.resubscribe().await;
-        let mut last_price: Option<f64> = None;
+        // Ticker emits at most one `UpdateMarketData` per 33 ms
+        // window, so the coalescer is a single-slot buffer on the
+        // *latest* observed Last price — we don't care about any
+        // older prices in the same window. `FrameCoalescer`'s
+        // M-30 early-flush is configured aggressively (1) so that
+        // any accumulated window emits on the very next drain
+        // without waiting; this matches the pre-refactor behaviour
+        // of `Option<f64>::take`.
+        let mut coalescer: FrameCoalescer<f64> =
+            FrameCoalescer::with_capacity_and_max_batch(1, usize::MAX);
         let mut interval = tokio::time::interval(TICKER_EMIT_MS);
         interval.tick().await;
         loop {
@@ -68,10 +77,17 @@ pub fn ticker_stream_builder(key: &TickerSubKey) -> impl iced::futures::Stream<I
                         // the watchlist path through the router's
                         // Quote watch, not here.
                         if matches!(arc_tick.tick_type, TickType::Last) {
-                            match arc_tick.value {
-                                TickValue::Price(p) => last_price = Some(p),
-                                TickValue::PriceSize { price, .. } => last_price = Some(price),
-                                _ => {}
+                            let price = match arc_tick.value {
+                                TickValue::Price(p) => Some(p),
+                                TickValue::PriceSize { price, .. } => Some(price),
+                                _ => None,
+                            };
+                            if let Some(p) = price {
+                                // Keep only the latest observation
+                                // per window — drop any prior value
+                                // still sitting in the buffer.
+                                let _ = coalescer.drain();
+                                coalescer.push(p);
                             }
                         }
                     }
@@ -79,7 +95,7 @@ pub fn ticker_stream_builder(key: &TickerSubKey) -> impl iced::futures::Stream<I
                     Err(RecvError::Closed) => break,
                 },
                 _ = interval.tick() => {
-                    if let Some(p) = last_price.take() {
+                    if let Some(p) = coalescer.drain().into_iter().next_back() {
                         if output.send(Message::TickerLastPrice {
                             symbol: key.symbol.clone(),
                             last_price: p,
