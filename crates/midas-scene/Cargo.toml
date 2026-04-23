@@ -1,0 +1,14 @@
+[package]
+name = "midas-scene"
+version = "0.1.0"
+edition = "2021"
+description = "Sans-IO composable scene layers for the session-aware chart stack"
+
+[dependencies]
+chrono = "0.4"
+midas-axis = { path = "../midas-axis" }
+midas-bars = { path = "../midas-bars" }
+midas-calendar = { path = "../midas-calendar" }
+parking_lot = "0.12"
+smallvec = "1"
+thiserror = "2"

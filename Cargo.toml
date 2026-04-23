@@ -1,11 +1,18 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/midas-axis",
+    "crates/midas-bars",
+    "crates/midas-bars-adapter",
     "crates/midas-broker-core",
     "crates/midas-broker",
+    "crates/midas-calendar",
+    "crates/midas-clock",
     "crates/midas-ib-sim",
     "crates/mailbox_processor",
     "crates/midas-market-data",
+    "crates/midas-scene",
+    "crates/midas-stream",
 ]
 exclude = [
     "desktop/win/duckdb-spike",

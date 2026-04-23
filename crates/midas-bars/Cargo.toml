@@ -1,0 +1,15 @@
+[package]
+name = "midas-bars"
+version = "0.1.0"
+edition = "2021"
+description = "Session-aware candle types and SoA storage (Candle wire-type + CandleSeries)"
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+midas-calendar = { path = "../midas-calendar" }
+serde = { version = "1", features = ["derive"] }
+smallvec = "1"
+thiserror = "2"
+
+[dev-dependencies]
+serde_json = "1"

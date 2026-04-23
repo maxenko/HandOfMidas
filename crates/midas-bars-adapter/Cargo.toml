@@ -1,0 +1,22 @@
+[package]
+name = "midas-bars-adapter"
+version = "0.1.0"
+edition = "2021"
+description = "Adapter bridging legacy MarketDataSource Bar output into the session-aware BarStream<Candle> world (Phase B of session-aware-charts)"
+
+[dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+midas-bars = { path = "../midas-bars" }
+midas-broker-core = { path = "../midas-broker-core" }
+midas-calendar = { path = "../midas-calendar" }
+midas-clock = { path = "../midas-clock" }
+midas-stream = { path = "../midas-stream" }
+smallvec = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+tracing = "0.1"
+
+[dev-dependencies]
+midas-clock = { path = "../midas-clock", features = ["mock_clock"] }
+tokio = { version = "1", features = ["sync", "time", "macros", "rt", "rt-multi-thread", "test-util"] }

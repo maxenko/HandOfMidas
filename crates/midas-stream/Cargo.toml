@@ -1,0 +1,18 @@
+[package]
+name = "midas-stream"
+version = "0.1.0"
+edition = "2021"
+description = "BarStream abstraction + history/live chaining for session-aware market data"
+
+[dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+midas-bars = { path = "../midas-bars" }
+midas-calendar = { path = "../midas-calendar" }
+midas-clock = { path = "../midas-clock" }
+smallvec = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["sync", "time"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["sync", "time", "macros", "rt", "rt-multi-thread"] }

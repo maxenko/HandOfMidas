@@ -1,0 +1,18 @@
+[package]
+name = "midas-clock"
+version = "0.1.0"
+edition = "2021"
+description = "First-class Clock abstraction (wall + monotonic) for session-aware market data"
+
+[features]
+# Gates the test-only `MockClock`. Downstream test binaries opt in via
+# `midas-clock = { workspace = true, features = ["mock_clock"] }`. Pulls in
+# `tokio/test-util` so `MockClock::advance_by` can call `tokio::time::advance`.
+mock_clock = ["tokio/test-util"]
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+tokio = { version = "1", features = ["time", "sync"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time", "sync", "test-util"] }

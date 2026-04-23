@@ -1,0 +1,18 @@
+[package]
+name = "midas-calendar"
+version = "0.1.0"
+edition = "2021"
+description = "Exchange calendars for the session-aware chart stack (XNYS, CryptoSpot)"
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+serde = { version = "1", features = ["derive"] }
+smallvec = "1"
+thiserror = "2"
+
+[dev-dependencies]
+# Cross-checks the rule-based XNYS holiday table against a third-party
+# reference. Library coverage is 2020..=2028; our crate coverage extends
+# to 2031 but the golden-fixture test narrows to the library's range.
+nyse-holiday-cal = "0.2"

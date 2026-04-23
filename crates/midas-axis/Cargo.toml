@@ -1,0 +1,15 @@
+[package]
+name = "midas-axis"
+version = "0.1.0"
+edition = "2021"
+description = "Time-axis projection for the session-aware chart stack (continuous / compressed / session-index)"
+
+[dependencies]
+chrono = "0.4"
+midas-bars = { path = "../midas-bars" }
+midas-calendar = { path = "../midas-calendar" }
+smallvec = "1"
+thiserror = "2"
+
+[dev-dependencies]
+chrono-tz = "0.10"
