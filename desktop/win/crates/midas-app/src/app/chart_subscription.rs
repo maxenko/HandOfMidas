@@ -51,13 +51,30 @@ pub fn chart_stream_builder(key: &ChartSubKey) -> impl iced::futures::Stream<Ite
             timeframe: key.timeframe,
             chart_id: key.chart_id,
         };
-        // Look up or lazy-subscribe: iced's `fn`-pointer builders
-        // can't capture the router, so we resolve it out of the
-        // process-scoped `subscription_registry::router()` slot
-        // and call `subscribe_bars` on first run. Subsequent
-        // re-diffs for the same key reuse the installed handle.
-        let entry = if let Some(e) = subscription_registry::get_chart_handle(&reg_key) {
-            e
+        // Look up or lazy-subscribe. First preference is the
+        // aggregator path (`subscribe_bars`) — it hands us bars at
+        // exactly `tf` cadence. If the aggregator rejects the
+        // timeframe (S1/H4/D1/W1/MN1 — no trading-calendar dep in
+        // the legacy aggregator) we fall back to the raw 5-second
+        // realtime-bar fan-out and let the chart merge sub-bucket
+        // bars into the D1/W1/etc window on the consumer side via
+        // `CandleBuffer::merge_bar`. Without this fallback the chart
+        // simply never extends live for session/calendar timeframes.
+        let (entry, is_sub_bucket) = if let Some(e) =
+            subscription_registry::get_chart_handle(&reg_key)
+        {
+            // Registry entry doesn't track sub-bucket status.
+            // Re-derive from the timeframe: the legacy aggregator
+            // rejects exactly this set.
+            let is_sub = matches!(
+                key.timeframe,
+                midas_broker_core::Timeframe::S1
+                    | midas_broker_core::Timeframe::H4
+                    | midas_broker_core::Timeframe::D1
+                    | midas_broker_core::Timeframe::W1
+                    | midas_broker_core::Timeframe::MN1
+            );
+            (e, is_sub)
         } else {
             let Some(router) = subscription_registry::router() else {
                 return;
@@ -71,7 +88,29 @@ pub fn chart_stream_builder(key: &ChartSubKey) -> impl iced::futures::Stream<Ite
                     let Some(e) = subscription_registry::get_chart_handle(&reg_key) else {
                         return;
                     };
-                    e
+                    (e, false)
+                }
+                Err(midas_broker_core::market_data::MarketDataError::UnsupportedTimeframe(_)) => {
+                    // Fallback: subscribe to raw RT bars (sim emits
+                    // every `realtime_bar_size_ms`). Consumer will
+                    // bucket-merge into the chart's declared TF.
+                    match router.subscribe_rt_bars(key.symbol.clone()).await {
+                        Ok(handle) => {
+                            subscription_registry::install_chart_handle(reg_key.clone(), handle);
+                            let Some(e) = subscription_registry::get_chart_handle(&reg_key) else {
+                                return;
+                            };
+                            (e, true)
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                chart_id = ?key.chart_id,
+                                symbol = %key.symbol.symbol,
+                                "subscribe_rt_bars fallback failed: {e}"
+                            );
+                            return;
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -85,15 +124,24 @@ pub fn chart_stream_builder(key: &ChartSubKey) -> impl iced::futures::Stream<Ite
         };
         let rx = entry.resubscribe().await;
         let chart_id = key.chart_id;
+        let bucket_secs = key.timeframe.as_secs();
         drive_subscription(
             output,
             rx,
             FrameCoalescer::<Bar>::with_capacity(8),
             FRAME_COALESCE_MS,
             |buf, arc_bar| buf.push((*arc_bar).clone()),
-            |buf| {
+            move |buf| {
                 let bars = buf.drain();
-                BatchEmit::One(Message::ChartBarBatch { chart_id, bars })
+                if is_sub_bucket {
+                    BatchEmit::One(Message::ChartSubBarBatch {
+                        chart_id,
+                        bars,
+                        bucket_secs,
+                    })
+                } else {
+                    BatchEmit::One(Message::ChartBarBatch { chart_id, bars })
+                }
             },
             move |_n| Some(Message::ChartResync { chart_id }),
         )

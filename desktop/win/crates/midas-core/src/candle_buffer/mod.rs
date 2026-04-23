@@ -277,6 +277,52 @@ impl CandleBuffer {
             }
         }
     }
+
+    /// Incrementally merge a sub-bucket bar into the current bucket.
+    ///
+    /// Where `apply_bar` is an authoritative overwrite (the aggregator
+    /// re-emits the same window with refreshed OHLCV), `merge_bar` is
+    /// the accumulator: callers feeding 5-second RT bars into a D1
+    /// chart floor the incoming timestamp to the chart's bucket and
+    /// call here. If the last candle's ts matches, OHLC folds as
+    /// "open stays, high = max, low = min, close = incoming close,
+    /// volume += incoming". If not, the bucket is new and the bar is
+    /// pushed with the incoming values as-is.
+    ///
+    /// Used by the chart-subscription fallback for timeframes the
+    /// aggregator rejects (D1/W1/MN1/H4/S1) — the legacy aggregator
+    /// can't synthesise those from 5 s bars without a trading
+    /// calendar, so the chart does the merge itself until it migrates
+    /// to the session-aware aggregator path.
+    pub fn merge_bar(&mut self, bucket_ts_open_ms: i64, o: f32, h: f32, l: f32, c: f32, v: u32) {
+        match self.timestamps.last().copied() {
+            Some(ts) if ts == bucket_ts_open_ms => {
+                // Same bucket — accumulate OHLCV.
+                let h_last = self.highs.last_mut().expect("highs out of sync");
+                if h > *h_last {
+                    *h_last = h;
+                }
+                let l_last = self.lows.last_mut().expect("lows out of sync");
+                if l < *l_last {
+                    *l_last = l;
+                }
+                *self.closes.last_mut().expect("closes out of sync") = c;
+                let v_last = self.volumes.last_mut().expect("volumes out of sync");
+                *v_last = v_last.saturating_add(v);
+                self.version.fetch_add(1, Ordering::Relaxed);
+            }
+            Some(ts) if ts > bucket_ts_open_ms => {
+                tracing::warn!(
+                    last_ts = ts,
+                    incoming = bucket_ts_open_ms,
+                    "merge_bar: dropping out-of-order sub-bar"
+                );
+            }
+            _ => {
+                self.push(bucket_ts_open_ms, o, h, l, c, v);
+            }
+        }
+    }
 }
 
 impl CandleData for CandleBuffer {

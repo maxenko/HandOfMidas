@@ -425,3 +425,69 @@ fn clone_independent_version() {
     // Original counter must not be affected.
     assert_eq!(buf.version(), 2);
 }
+
+// ─── merge_bar — sub-bucket accumulation (D1/W1 live-extend fallback) ──
+
+#[test]
+fn merge_bar_push_new_bucket_on_empty() {
+    let mut buf = CandleBuffer::new();
+    buf.merge_bar(86_400_000, 100.0, 100.0, 100.0, 100.0, 10);
+    assert_eq!(buf.len(), 1);
+    assert_eq!(buf.opens[0], 100.0);
+    assert_eq!(buf.closes[0], 100.0);
+    assert_eq!(buf.volumes[0], 10);
+}
+
+#[test]
+fn merge_bar_accumulates_same_bucket() {
+    let mut buf = CandleBuffer::new();
+    // First sub-bar opens the D1 bucket (midnight UTC of day 2).
+    buf.merge_bar(86_400_000, 100.0, 100.0, 100.0, 100.0, 10);
+    // Second sub-bar — higher high, same bucket.
+    buf.merge_bar(86_400_000, 102.0, 105.0, 101.0, 103.0, 20);
+    // Third sub-bar — lower low, new close.
+    buf.merge_bar(86_400_000, 103.0, 104.0, 99.0, 100.5, 15);
+    assert_eq!(buf.len(), 1);
+    assert_eq!(buf.opens[0], 100.0); // open stays at first sub-bar
+    assert_eq!(buf.highs[0], 105.0); // max over all sub-bars
+    assert_eq!(buf.lows[0], 99.0); // min over all sub-bars
+    assert_eq!(buf.closes[0], 100.5); // latest close wins
+    assert_eq!(buf.volumes[0], 45); // 10 + 20 + 15
+}
+
+#[test]
+fn merge_bar_pushes_new_candle_on_new_bucket() {
+    let mut buf = CandleBuffer::new();
+    buf.merge_bar(86_400_000, 100.0, 101.0, 99.0, 100.5, 10);
+    buf.merge_bar(172_800_000, 102.0, 103.0, 101.0, 102.5, 20);
+    assert_eq!(buf.len(), 2);
+    assert_eq!(buf.timestamps, &[86_400_000, 172_800_000]);
+}
+
+#[test]
+fn merge_bar_drops_out_of_order() {
+    let mut buf = CandleBuffer::new();
+    buf.merge_bar(172_800_000, 100.0, 101.0, 99.0, 100.0, 10);
+    // Second bar claims an EARLIER bucket — stale, should drop.
+    buf.merge_bar(86_400_000, 90.0, 91.0, 89.0, 90.0, 5);
+    assert_eq!(buf.len(), 1);
+    assert_eq!(buf.timestamps[0], 172_800_000);
+}
+
+#[test]
+fn merge_bar_volume_saturates() {
+    let mut buf = CandleBuffer::new();
+    buf.merge_bar(86_400_000, 1.0, 1.0, 1.0, 1.0, u32::MAX - 5);
+    buf.merge_bar(86_400_000, 1.0, 1.0, 1.0, 1.0, 100);
+    assert_eq!(buf.volumes[0], u32::MAX);
+}
+
+#[test]
+fn merge_bar_bumps_version() {
+    let mut buf = CandleBuffer::new();
+    assert_eq!(buf.version(), 0);
+    buf.merge_bar(86_400_000, 1.0, 1.0, 1.0, 1.0, 10);
+    assert_eq!(buf.version(), 1);
+    buf.merge_bar(86_400_000, 2.0, 2.0, 1.0, 1.5, 5);
+    assert_eq!(buf.version(), 2);
+}

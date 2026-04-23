@@ -257,6 +257,38 @@ impl MarketDataRouter {
         history_seam::history_then_live_impl(self, symbol, tf, duration).await
     }
 
+    /// One-shot historical fetch through the router's own provider.
+    ///
+    /// Resolves `con_id` via the router's contract cache, then calls
+    /// [`MarketDataSource::historical_bars`] with `end = Utc::now()`
+    /// and `WhatToShow::Trades`. Use this when callers need just the
+    /// historical tail (no live chain) — e.g. the desktop chart's
+    /// initial data load that unifies with the watchlist's sim
+    /// source instead of a disjoint synthetic generator.
+    ///
+    /// Callers that need history + live should prefer
+    /// [`Self::history_then_live`].
+    pub async fn historical_bars(
+        &self,
+        symbol: SymbolKey,
+        tf: Timeframe,
+        duration: IbDuration,
+    ) -> Result<midas_broker_core::provider::HistoricalBarsResult, MarketDataError> {
+        let con_id = self.resolve_or_cached(&symbol).await?.contract_id;
+        let end = chrono::Utc::now();
+        self.source()
+            .historical_bars(
+                &symbol,
+                con_id,
+                end,
+                duration,
+                tf,
+                midas_broker_core::market_data::WhatToShow::Trades,
+                true,
+            )
+            .await
+    }
+
     /// Clone of the upstream farm-status broadcast.
     pub fn farm_status(&self) -> broadcast::Receiver<FarmStatus> {
         self.state.source.farm_status()

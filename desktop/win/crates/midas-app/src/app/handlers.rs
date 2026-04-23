@@ -4336,6 +4336,62 @@ impl MidasApp {
                 }
                 Task::none()
             }
+            Message::ChartSubBarBatch {
+                chart_id,
+                bars,
+                bucket_secs,
+            } => {
+                // Live-extend path for timeframes the legacy aggregator
+                // refuses (S1/H4/D1/W1/MN1). Each incoming raw bar's
+                // `ts_open` is floored to the chart's bucket and merged
+                // into the current candle via `merge_bar`. The
+                // historical prefix was loaded at the chart's own
+                // timeframe; the first sub-bucket bar whose floored ts
+                // lands past the historical tail simply pushes a new
+                // candle (today's D1, say), and subsequent sub-bar
+                // batches within the same bucket accumulate.
+                let bucket_ms = (bucket_secs as i64) * 1_000;
+                if bucket_ms <= 0 {
+                    return Task::none();
+                }
+                let fold = |buf: &mut midas_core::CandleBuffer,
+                            bar: &midas_broker_core::market_data::Bar| {
+                    let ms = bar.ts_open.timestamp_millis();
+                    let bucket_open_ms = (ms / bucket_ms) * bucket_ms;
+                    let vol = bar.volume.min(u32::MAX as u64) as u32;
+                    buf.merge_bar(
+                        bucket_open_ms,
+                        bar.o as f32,
+                        bar.h as f32,
+                        bar.l as f32,
+                        bar.c as f32,
+                        vol,
+                    );
+                };
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    if let Some(arc) = chart.data.as_mut() {
+                        let buf = std::sync::Arc::make_mut(arc);
+                        for bar in &bars {
+                            fold(buf, bar);
+                        }
+                        chart.chart_state.dirty.mark_data();
+                    }
+                } else {
+                    for (wid, chart) in self.floating_charts.iter_mut() {
+                        if floating_window_synthetic_id(*wid) == chart_id {
+                            if let Some(arc) = chart.data.as_mut() {
+                                let buf = std::sync::Arc::make_mut(arc);
+                                for bar in &bars {
+                                    fold(buf, bar);
+                                }
+                                chart.chart_state.dirty.mark_data();
+                            }
+                            break;
+                        }
+                    }
+                }
+                Task::none()
+            }
             Message::ChartResync { chart_id } => {
                 // M-29 throttle — at most one resync per chart per 5 s.
                 let now = Instant::now();

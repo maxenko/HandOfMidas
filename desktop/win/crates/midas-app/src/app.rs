@@ -110,6 +110,28 @@ fn push_recent_symbol_inner(
     true
 }
 
+/// Convert the router's `Vec<Bar>` into a legacy `CandleBuffer`.
+///
+/// The router speaks `midas_broker_core::market_data::Bar` (f64 OHLC,
+/// u64 volume, UTC `DateTime`); the chart's storage is SoA f32 columns
+/// keyed by epoch-millis. Volumes saturate at `u32::MAX` — individual
+/// equity bars never approach 4 B shares so this is lossless in
+/// practice. Pre-sizes both `Vec`s to avoid mid-fill reallocation.
+fn bars_to_candle_buffer(bars: &[midas_broker_core::market_data::Bar]) -> CandleBuffer {
+    let mut buf = CandleBuffer::with_capacity(bars.len());
+    for bar in bars {
+        buf.push(
+            bar.ts_open.timestamp_millis(),
+            bar.o as f32,
+            bar.h as f32,
+            bar.l as f32,
+            bar.c as f32,
+            bar.volume.min(u32::MAX as u64) as u32,
+        );
+    }
+    buf
+}
+
 #[cfg(test)]
 mod recent_symbols_tests {
     use super::{push_recent_symbol_inner, RecentEntry, MAX_RECENTS};
@@ -942,6 +964,18 @@ pub enum Message {
         bars: Vec<midas_broker_core::market_data::Bar>,
     },
 
+    /// Sub-bucket bars from the raw-RT fallback path (timeframes the
+    /// aggregator can't synthesise: S1/H4/D1/W1/MN1). Handler floors
+    /// each bar's `ts_open` to the chart's bucket and merges
+    /// (high=max, low=min, close=latest, volume+=) via
+    /// `CandleBuffer::merge_bar`.
+    ChartSubBarBatch {
+        chart_id: ChartId,
+        bars: Vec<midas_broker_core::market_data::Bar>,
+        /// Bucket width in seconds (matches the chart's `Timeframe::as_secs`).
+        bucket_secs: u64,
+    },
+
     /// The chart's bar stream observed a `Lagged` error; rebuild
     /// the historical prefix. M-29 throttled to at most one resync
     /// per chart per 5 s in the handler.
@@ -1130,6 +1164,7 @@ fn is_tick_rate_message(msg: &Message) -> bool {
                 // from the wait_for_idle tracker for the same
                 // reason the legacy Tick path is excluded.
                 | Message::ChartBarBatch { .. }
+                | Message::ChartSubBarBatch { .. }
                 | Message::QuoteBatch(..)
                 | Message::TickerLastPrice { .. }
                 | Message::FarmStatusChanged(..)
@@ -3286,8 +3321,13 @@ impl MidasApp {
         }
     }
 
-    /// Core async data loader. Calls the active provider and wraps the
-    /// result in the message variant produced by `make_msg`.
+    /// Core async data loader. Prefers the router's own provider so
+    /// the chart shares the exact historical source the watchlist and
+    /// ticker state stream from — a disjoint `TestProvider` would
+    /// desynchronise prices across widgets (the core bug the
+    /// router-refactor rewrite was meant to eliminate). Falls back to
+    /// the legacy `HistoricalDataRegistry` only when no router is
+    /// attached (early boot, fixture replay).
     fn load_chart_with<F>(
         &self,
         chart_id: ChartId,
@@ -3300,10 +3340,6 @@ impl MidasApp {
             + Send
             + 'static,
     {
-        let provider = match self.providers.active_data_provider() {
-            Some(p) => p,
-            None => return Task::none(),
-        };
         let gen = self
             .charts
             .get(&chart_id)
@@ -3311,18 +3347,51 @@ impl MidasApp {
             .unwrap_or(0);
         let symbol = symbol.to_uppercase();
         let requested_symbol = symbol.clone();
+
+        if let Some(router) = self.router.clone() {
+            let days = Self::days_for_timeframe(tf);
+            return Task::perform(
+                Self::load_chart_via_router(router, symbol, tf, days),
+                move |result| make_msg(chart_id, requested_symbol, gen, result.map(Arc::new)),
+            );
+        }
+
+        let Some(provider) = self.providers.active_data_provider() else {
+            return Task::none();
+        };
         let days = Self::days_for_timeframe(tf);
         Task::perform(
-            async move { provider.get_candles(&symbol, tf, days).await },
-            move |result| {
-                make_msg(
-                    chart_id,
-                    requested_symbol,
-                    gen,
-                    result.map(Arc::new).map_err(|e| e.to_string()),
-                )
+            async move {
+                provider
+                    .get_candles(&symbol, tf, days)
+                    .await
+                    .map_err(|e| e.to_string())
             },
+            move |result| make_msg(chart_id, requested_symbol, gen, result.map(Arc::new)),
         )
+    }
+
+    /// Async helper: fetch historical bars via the router, convert
+    /// them into a `CandleBuffer` matching the legacy chart's storage
+    /// shape. The router resolves `con_id` internally; the caller
+    /// only supplies the symbol string.
+    async fn load_chart_via_router(
+        router: Arc<midas_market_data::MarketDataRouter>,
+        symbol: String,
+        tf: Timeframe,
+        days: u32,
+    ) -> Result<CandleBuffer, String> {
+        let tf_bc = crate::app::handlers::chart_timeframe_to_broker_core(tf);
+        let duration = midas_broker_core::market_data::IbDuration::Days(days.max(1));
+        let key = midas_broker_core::SymbolKey {
+            contract_id: 0,
+            symbol: symbol.clone(),
+        };
+        let result = router
+            .historical_bars(key, tf_bc, duration)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(bars_to_candle_buffer(&result.bars))
     }
 
     /// Async-load chart data. On completion, sends `Message::DataLoaded`
@@ -3342,23 +3411,31 @@ impl MidasApp {
         self.load_chart_with(chart_id, symbol, tf, Message::DataRestoredFromStartup)
     }
 
-    /// Load a market data snapshot for a symbol from the active data provider.
+    /// Load a market data snapshot for a symbol, preferring the
+    /// router's provider so the watchlist "last close" matches
+    /// whatever the chart loads on the same ticker.
     fn load_market_snapshot(&self, symbol: &str) -> Task<Message> {
-        let provider = match self.providers.active_data_provider() {
-            Some(p) => p,
-            None => return Task::none(),
-        };
         let sym = symbol.to_uppercase();
         let sym_clone = sym.clone();
+
+        if let Some(router) = self.router.clone() {
+            return Task::perform(
+                Self::load_chart_via_router(router, sym, midas_core::Timeframe::D1, 30),
+                move |result| Message::MarketSnapshotLoaded(sym_clone, result),
+            );
+        }
+
+        let Some(provider) = self.providers.active_data_provider() else {
+            return Task::none();
+        };
         Task::perform(
             async move {
                 provider
                     .get_candles(&sym, midas_core::Timeframe::D1, 30)
                     .await
+                    .map_err(|e| e.to_string())
             },
-            move |result| {
-                Message::MarketSnapshotLoaded(sym_clone, result.map_err(|e| e.to_string()))
-            },
+            move |result| Message::MarketSnapshotLoaded(sym_clone, result),
         )
     }
 
@@ -3801,6 +3878,7 @@ impl MidasApp {
 
             // -- Router refactor (S7) --
             Message::ChartBarBatch { .. }
+            | Message::ChartSubBarBatch { .. }
             | Message::ChartResync { .. }
             | Message::ChartResyncLoaded(..)
             | Message::QuoteBatch(..)
