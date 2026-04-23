@@ -519,6 +519,19 @@ pub struct MidasApp {
     /// order status / fill / rejection messages the existing UI
     /// handlers consume. (Router refactor slice 10c.)
     pub(crate) ib_to_uuid: std::collections::HashMap<i32, uuid::Uuid>,
+
+    /// Session-aware-charts Phase C: floating windows hosting a
+    /// [`crate::session_chart::widget::SessionChart`]. Keyed by the
+    /// OS window id returned from `window::open()`. The value owns
+    /// the widget, the driver Arc (kept alive so the pump task lives
+    /// as long as the window), and a fresh `watch` receiver used by
+    /// the window's subscription to wake on version ticks.
+    ///
+    /// Feature-gated on `session_chart`. None of the legacy chart /
+    /// watchlist / ticker-state code reads this map.
+    #[cfg(feature = "session_chart")]
+    pub(crate) floating_session_charts:
+        std::collections::HashMap<window::Id, crate::session_chart_window::SessionChartWindow>,
 }
 
 /// Pending drag: press started but hold threshold not yet reached.
@@ -989,6 +1002,70 @@ pub enum Message {
     /// Wrapped in [`RouterReadyPayload`] because `dyn OrderClient`
     /// is `!Debug` while `Message` derives `Debug`.
     RouterReady(Result<RouterReadyPayload, String>),
+
+    /// Session-aware-charts (Phase B S8 + Phase C S10–S14).
+    /// Feature-gated on `session_chart`.
+    ///
+    /// Carries the full request (ticker + period + calendar) so the
+    /// handler can route to any of the three canonical presets
+    /// (BTC-M1, AAPL-M5, SPY-D1-RTH) without a hard-coded chain.
+    ///
+    /// The handler:
+    /// 1. Resolves the ticker through `StaticSymbolResolver` and
+    ///    asserts the calendar matches `request.calendar_id`.
+    /// 2. Spins up a `SessionedBarStream` via
+    ///    `midas_bars_adapter::subscribe_aggregated_bars`, optionally
+    ///    wrapping it in [`midas_stream::Filtered<_, EhFilter>`] per
+    ///    the current [`crate::session_chart::widget::EhPolicy`].
+    /// 3. Wraps the stream in a [`crate::session_chart::SessionChartDriver`].
+    /// 4. Opens a standalone iced window (via `window::open`) and
+    ///    stores the widget + driver in `floating_session_charts`
+    ///    keyed by the returned `window::Id` once iced hands it back
+    ///    on [`Message::SessionChartWindowOpened`].
+    #[cfg(feature = "session_chart")]
+    OpenSessionChart(crate::session_chart::SessionChartRequest),
+
+    /// The iced runtime created a session-chart window and handed us
+    /// its `window::Id`. Completes the lifecycle started in
+    /// `handle_open_session_chart`. Feature-gated.
+    #[cfg(feature = "session_chart")]
+    SessionChartWindowOpened(window::Id, SessionChartWindowPayload),
+
+    /// Async pipeline construction failed (timeout, resolver error,
+    /// etc.). Close the already-opened but empty window so the user
+    /// isn't left with a blank frame. Feature-gated. App-harden M1.
+    #[cfg(feature = "session_chart")]
+    SessionChartOpenFailed(window::Id),
+
+    /// User pressed the EH-policy toggle chip in a session-chart
+    /// window. Cycles the widget's policy; a full subscribe-rebuild
+    /// is a later slice (the filter wraps the stream at subscribe
+    /// time, so toggling mid-stream requires the host to spawn a
+    /// fresh driver). For now the chip cycles the rendering policy
+    /// only — a TODO tracked in `session_chart/mod.rs`.
+    #[cfg(feature = "session_chart")]
+    SessionChartCyclePolicy(window::Id),
+}
+
+/// Payload for [`Message::SessionChartWindowOpened`]. Carries the
+/// freshly-spawned driver + request so the update handler can build
+/// the widget once it knows the window `Id`. Feature-gated.
+#[cfg(feature = "session_chart")]
+#[derive(Clone)]
+pub struct SessionChartWindowPayload {
+    /// The driver pumping the stream into the shared series.
+    pub driver: std::sync::Arc<crate::session_chart::SessionChartDriver>,
+    /// The request that spawned this chart.
+    pub request: crate::session_chart::SessionChartRequest,
+}
+
+#[cfg(feature = "session_chart")]
+impl std::fmt::Debug for SessionChartWindowPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionChartWindowPayload")
+            .field("request", &self.request)
+            .finish()
+    }
 }
 
 /// Payload for [`Message::RouterReady`]. The inner `Arc<dyn
@@ -2171,6 +2248,8 @@ impl MidasApp {
             router_order_client,
             resync_throttle: std::collections::HashMap::new(),
             ib_to_uuid: std::collections::HashMap::new(),
+            #[cfg(feature = "session_chart")]
+            floating_session_charts: std::collections::HashMap::new(),
         };
 
         // Restore bracket annotations from persistence.
@@ -3755,6 +3834,32 @@ impl MidasApp {
                 self.drain_thumbnail_queue()
             }
 
+            // -- Session chart (S8 + Phase C, feature-gated) --
+            //
+            // Boots the new-stack pipeline for the requested
+            // (ticker, period, calendar) triple AND opens a standalone
+            // iced window hosting the widget. See the doc-comment on
+            // `Message::OpenSessionChart` and `session_chart/mod.rs`
+            // for the lifecycle.
+            #[cfg(feature = "session_chart")]
+            Message::OpenSessionChart(request) => self.handle_open_session_chart(request),
+            #[cfg(feature = "session_chart")]
+            Message::SessionChartWindowOpened(window_id, payload) => {
+                self.handle_session_chart_window_opened(window_id, payload)
+            }
+            #[cfg(feature = "session_chart")]
+            Message::SessionChartOpenFailed(window_id) => {
+                tracing::warn!(
+                    ?window_id,
+                    "session_chart: async pipeline construction failed; closing window"
+                );
+                window::close(window_id)
+            }
+            #[cfg(feature = "session_chart")]
+            Message::SessionChartCyclePolicy(window_id) => {
+                self.handle_session_chart_cycle_policy(window_id)
+            }
+
             // -- Dev harness (feature-gated) --
             #[cfg(feature = "dev_harness")]
             Message::DevHarness { command, responder } => {
@@ -3859,6 +3964,238 @@ impl MidasApp {
             tasks.push(self.propagate_timeframe_change(id, tf));
             self.mark_config_dirty();
             return Task::batch(tasks);
+        }
+        Task::none()
+    }
+
+    /// Phase C handler: boot the new-stack pipeline for the requested
+    /// (ticker, period, calendar) triple AND open a standalone iced
+    /// window hosting the widget.
+    ///
+    /// Feature-gated on `session_chart`. The pipeline construction
+    /// happens inside a `Task::perform` so the pump task is tied to
+    /// the iced runtime; on success the handler sends a
+    /// [`Message::SessionChartWindowOpened`] that carries the driver
+    /// Arc + original request back onto the main thread, where the
+    /// widget + window state can be installed in
+    /// `floating_session_charts`.
+    ///
+    /// The standalone window is opened via `window::open` BEFORE the
+    /// async driver construction completes — iced hands us the
+    /// `window::Id` synchronously. The window's view starts empty
+    /// (no chart for this id yet), and the
+    /// `SessionChartWindowOpened` handler installs the widget +
+    /// driver state keyed by that id. This matches how the
+    /// pop-out floating-chart path works.
+    #[cfg(feature = "session_chart")]
+    fn handle_open_session_chart(
+        &mut self,
+        request: crate::session_chart::SessionChartRequest,
+    ) -> Task<Message> {
+        use midas_bars_adapter::{subscribe_aggregated_bars, StaticSymbolResolver, SymbolResolver};
+        use midas_broker::sim::{SimConfig, SimMarketData};
+        use midas_clock::SystemClock;
+        use std::sync::Arc;
+
+        // Fresh sim source — independent of `self.router` to keep the
+        // blast radius zero on the legacy subscription surface.
+        let sim_cfg = SimConfig::default();
+        let source: Arc<dyn midas_broker::MarketDataSource> =
+            SimMarketData::new(sim_cfg.market_data.clone());
+        let clock: Arc<dyn midas_clock::Clock> = Arc::new(SystemClock);
+
+        tracing::info!(
+            "session_chart: booting pipeline ticker={} period={:?} calendar={}",
+            request.ticker,
+            request.period,
+            request.calendar_id.0,
+        );
+
+        // Synchronously open the window so iced hands us the id to
+        // wire into the `SessionChartWindowOpened` handler.
+        let (win_id, open_task) = window::open(window::Settings {
+            size: iced::Size::new(720.0, 520.0),
+            ..window::Settings::default()
+        });
+
+        // Spawn the async construction. On success, the returned
+        // Task resolves to a `Message::SessionChartWindowOpened` that
+        // the main update loop handles synchronously (installing the
+        // widget / driver into `floating_session_charts`).
+        let request_for_task = request.clone();
+        let win_id_for_task = win_id;
+        let construct_task = Task::perform(
+            async move {
+                use midas_stream::BarStream;
+
+                let resolver = StaticSymbolResolver::new();
+                let resolved = match resolver.resolve(&request_for_task.ticker) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::error!(
+                            "session_chart: resolve failed for {}: {e}",
+                            request_for_task.ticker
+                        );
+                        return None;
+                    }
+                };
+                if resolved.calendar.id() != request_for_task.calendar_id {
+                    tracing::error!(
+                        "session_chart: calendar mismatch — resolver says {} but request asks for {}",
+                        resolved.calendar.id().0,
+                        request_for_task.calendar_id.0,
+                    );
+                    return None;
+                }
+
+                let stream = match subscribe_aggregated_bars(
+                    source,
+                    &resolver,
+                    &request_for_task.ticker,
+                    request_for_task.period,
+                    clock,
+                )
+                .await
+                {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::error!("session_chart: subscribe failed: {e}");
+                        return None;
+                    }
+                };
+                let meta = stream.meta().clone();
+                let series = Arc::new(parking_lot::RwLock::new(midas_bars::CandleSeries::new(
+                    meta.calendar.id(),
+                    meta.period,
+                    meta.symbol,
+                )));
+                let driver = Arc::new(crate::session_chart::SessionChartDriver::spawn(
+                    series, stream,
+                ));
+
+                tracing::info!(
+                    "session_chart: pipeline up for {} ({:?}); initial version={}",
+                    request_for_task.ticker,
+                    request_for_task.period,
+                    driver.current_version(),
+                );
+
+                Some(crate::app::SessionChartWindowPayload {
+                    driver,
+                    request: request_for_task,
+                })
+            },
+            move |maybe_payload| match maybe_payload {
+                Some(p) => Message::SessionChartWindowOpened(win_id_for_task, p),
+                // App-harden M1: the async pipeline failed (timeout,
+                // resolver error, etc.). Close the already-opened
+                // window instead of leaving an empty frame.
+                None => Message::SessionChartOpenFailed(win_id_for_task),
+            },
+        );
+
+        // Chain: open window first (iced needs this to assign the
+        // id), then fire the async pipeline construction.
+        Task::batch([open_task.map(|_id| Message::Tick), construct_task])
+    }
+
+    /// Phase C handler: iced handed us the window id, and our async
+    /// pipeline construction succeeded. Install the widget + driver
+    /// in `floating_session_charts`.
+    #[cfg(feature = "session_chart")]
+    fn handle_session_chart_window_opened(
+        &mut self,
+        window_id: window::Id,
+        payload: crate::app::SessionChartWindowPayload,
+    ) -> Task<Message> {
+        use midas_axis::{PriceRange, Viewport};
+        use midas_scene::ThemePalette;
+
+        let calendar: &'static dyn midas_calendar::ExchangeCalendar =
+            if payload.request.calendar_id == midas_calendar::CRYPTO_SPOT_ID {
+                midas_calendar::crypto_spot()
+            } else if payload.request.calendar_id == midas_calendar::XNYS_ID {
+                midas_calendar::xnys()
+            } else {
+                tracing::error!(
+                    "session_chart: unsupported calendar id {}",
+                    payload.request.calendar_id.0
+                );
+                return Task::none();
+            };
+
+        // Pick a sensible default time window for the chart's axis.
+        // For crypto: 24h centred on now. For XNYS: ~2 trading days
+        // centred on now. Both are just initial hints — the user can
+        // pan/zoom through the widget's `set_time_window`.
+        let now = chrono::Utc::now();
+        let (ts_start, ts_end) = if payload.request.calendar_id == midas_calendar::CRYPTO_SPOT_ID {
+            (
+                now - chrono::Duration::hours(12),
+                now + chrono::Duration::hours(12),
+            )
+        } else {
+            (
+                now - chrono::Duration::days(2),
+                now + chrono::Duration::hours(6),
+            )
+        };
+
+        let price_range =
+            PriceRange::new(1.0, 100_000.0).expect("price range for initial chart must be valid");
+        let viewport = Viewport::new(700.0, 400.0);
+
+        let widget = match crate::session_chart::SessionChart::new(
+            std::sync::Arc::clone(&payload.driver),
+            calendar,
+            payload.request.period,
+            price_range,
+            viewport,
+            ThemePalette::dark_default(),
+            (ts_start, ts_end),
+        ) {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::warn!(
+                    ?window_id,
+                    error = %e,
+                    "session_chart: widget construction rejected; closing window"
+                );
+                return window::close(window_id);
+            }
+        };
+
+        let state = crate::session_chart_window::SessionChartWindow::new(
+            widget,
+            payload.driver,
+            payload.request,
+        );
+        self.floating_session_charts.insert(window_id, state);
+        Task::none()
+    }
+
+    /// Phase C handler: user pressed the "EH" chip in a session-chart
+    /// window. Cycles the widget's [`EhPolicy`]. Re-subscription
+    /// through `Filtered<_, EhFilter>` is scheduled for a follow-up
+    /// slice; for now the scene chrome reflects the new policy via
+    /// [`SceneLayers::from_eh_policy`], which matches the
+    /// ideal-design contract that `ShowAll` / `HideExtended` emit the
+    /// same chrome.
+    #[cfg(feature = "session_chart")]
+    fn handle_session_chart_cycle_policy(&mut self, window_id: window::Id) -> Task<Message> {
+        if let Some(state) = self.floating_session_charts.get_mut(&window_id) {
+            // Take a write guard for the single mutation. Scope
+            // deliberately kept to one statement so paint passes
+            // taking `try_write()` never contend for long.
+            let new_policy = {
+                let mut g = state.widget.write();
+                g.cycle_eh_policy()
+            };
+            tracing::info!(
+                "session_chart: window {:?} -> eh_policy={:?}",
+                window_id,
+                new_policy
+            );
         }
         Task::none()
     }

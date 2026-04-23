@@ -33,6 +33,33 @@ pub struct StateProjection<'a> {
     /// fields devloop assertions need (name + symbol list + the
     /// cached `last_price` the watchlist row renders).
     pub watchlists: Vec<WatchlistProjection<'a>>,
+    /// Feature-gated session-chart projection. Present when
+    /// `session_chart` is enabled; omitted from the dump otherwise.
+    /// App-harden M6.
+    #[cfg(feature = "session_chart")]
+    pub session_charts: Vec<SessionChartProjection>,
+}
+
+/// Projection of a single floating session-chart window (app-harden M6).
+/// Carries the minimum a devloop test needs to assert a chart is
+/// live and healthy — ticker, period, calendar, EH policy, series
+/// length, and driver version.
+///
+/// `window_id` is rendered via `Debug` because `iced::window::Id` is
+/// opaque — we don't know its wire representation, but the `Debug`
+/// form is stable for any given iced version and that's all the
+/// devloop needs for disambiguation.
+#[cfg(feature = "session_chart")]
+#[derive(Serialize)]
+pub struct SessionChartProjection {
+    pub window_id: String,
+    pub ticker: String,
+    pub period: String,
+    pub calendar_id: String,
+    pub eh_policy: String,
+    pub series_len: usize,
+    pub version: u64,
+    pub axis_kind: String,
 }
 
 /// Router state projection for the devloop dump (S7e / BR-15).
@@ -188,6 +215,37 @@ pub fn build(app: &MidasApp) -> serde_json::Value {
         })
         .collect();
 
+    #[cfg(feature = "session_chart")]
+    let session_charts: Vec<SessionChartProjection> = app
+        .floating_session_charts
+        .iter()
+        .map(|(win_id, state)| {
+            // `state.widget` is now an `Arc<RwLock<SessionChart>>`
+            // (Phase D shader rewire); take a short-lived read-guard
+            // to pull scalar fields. `series()` returns a fresh Arc
+            // clone — we drop the outer guard before reading the
+            // inner series so we never hold two guards concurrently.
+            let (eh_policy, axis_kind, series_arc) = {
+                let g = state.widget.read();
+                (g.eh_policy(), g.axis_kind(), g.series())
+            };
+            let (series_len, version) = {
+                let g = series_arc.read();
+                (g.len(), g.version())
+            };
+            SessionChartProjection {
+                window_id: format!("{win_id:?}"),
+                ticker: state.request.ticker.clone(),
+                period: format!("{:?}", state.request.period),
+                calendar_id: state.request.calendar_id.0.to_string(),
+                eh_policy: eh_policy.short_label().to_string(),
+                series_len,
+                version,
+                axis_kind: axis_kind_label(axis_kind).to_string(),
+            }
+        })
+        .collect();
+
     let projection = StateProjection {
         tickers,
         active_chart_id: app.workspace.focused_chart_id().map(|id| id.0),
@@ -200,9 +258,20 @@ pub fn build(app: &MidasApp) -> serde_json::Value {
         broker,
         router_state,
         watchlists,
+        #[cfg(feature = "session_chart")]
+        session_charts,
     };
 
     serde_json::to_value(&projection).unwrap_or(serde_json::Value::Null)
+}
+
+#[cfg(feature = "session_chart")]
+fn axis_kind_label(kind: crate::session_chart::AxisKind) -> &'static str {
+    match kind {
+        crate::session_chart::AxisKind::Continuous => "Continuous",
+        crate::session_chart::AxisKind::Compressed => "Compressed",
+        crate::session_chart::AxisKind::SessionIndex => "SessionIndex",
+    }
 }
 
 fn snapshot_camera(chart: &ChartPanel) -> CameraSnapshot {
@@ -266,5 +335,33 @@ mod tests {
     fn walk_path_empty_returns_root() {
         let v = json!({"a": 1});
         assert_eq!(walk_path(&v, ""), Some(&v));
+    }
+
+    /// Regression: app-harden M6. The dev-harness dump MUST include a
+    /// `session_charts` array when the feature is on so devloop tests
+    /// can inspect floating session-chart windows. We assert the
+    /// projection struct serialises cleanly with `serde_json` — the
+    /// full `build(app)` path is covered by existing dev-harness
+    /// integration tests.
+    #[cfg(feature = "session_chart")]
+    #[test]
+    fn session_chart_projection_serialises() {
+        let p = SessionChartProjection {
+            window_id: "Id(1)".into(),
+            ticker: "AAPL".into(),
+            period: "Clock(Minutes(1))".into(),
+            calendar_id: "XNYS".into(),
+            eh_policy: "EH".into(),
+            series_len: 42,
+            version: 100,
+            axis_kind: "Compressed".into(),
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["ticker"], json!("AAPL"));
+        assert_eq!(v["period"], json!("Clock(Minutes(1))"));
+        assert_eq!(v["calendar_id"], json!("XNYS"));
+        assert_eq!(v["series_len"], json!(42));
+        assert_eq!(v["version"], json!(100));
+        assert_eq!(v["axis_kind"], json!("Compressed"));
     }
 }

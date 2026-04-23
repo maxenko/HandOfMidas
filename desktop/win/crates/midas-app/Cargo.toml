@@ -21,6 +21,28 @@ dev_harness = [
     "midas-market-data/test_inject",
 ]
 
+# S8: Session-aware chart widget (vertical-slice proof). Opt-in. When
+# disabled, the `session_chart` module is empty and the "New session
+# chart" menu entry + `Message::OpenSessionChart` variant compile out.
+# When enabled, the app gains a background command that boots the new
+# midas-scene / midas-stream / midas-bars-adapter pipeline for a crypto
+# M1 chart.
+#
+# See plan/session-aware-charts/00b-integration-strategy.md (Phase B,
+# S8). Module-level docs on `src/session_chart/mod.rs` explain the MVP
+# scope — the driver + scene pipeline is fully wired end-to-end, but
+# rendering into a new iced window is deferred to S9 to keep the S8
+# blast radius at zero on the existing chart surface.
+session_chart = [
+    "dep:midas-scene",
+    "dep:midas-bars",
+    "dep:midas-bars-adapter",
+    "dep:midas-calendar",
+    "dep:midas-clock",
+    "dep:midas-stream",
+    "dep:midas-axis",
+]
+
 [dependencies]
 midas-core   = { path = "../midas-core" }
 midas-data   = { path = "../midas-data" }
@@ -37,6 +59,7 @@ image-compare = { workspace = true, optional = true }
 
 iced       = { workspace = true }
 wgpu       = { workspace = true }
+glam       = { workspace = true }
 # `process` + `io-util` are opt-in features, needed by the dev-harness
 # sim-child lifecycle (tokio::process::Command + AsyncReadExt) and
 # released crates elsewhere in the workspace don't need them.
@@ -59,6 +82,17 @@ midas-broker = { workspace = true }
 # central match arm.
 midas-market-data = { workspace = true }
 midas-broker-core = { workspace = true }
+
+# S8 (session_chart feature): Phase-A crates from the root workspace.
+# All `optional = true`; the `session_chart` feature above opts them in.
+midas-scene        = { workspace = true, optional = true }
+midas-bars         = { workspace = true, optional = true }
+midas-bars-adapter = { workspace = true, optional = true }
+midas-calendar     = { workspace = true, optional = true }
+midas-clock        = { workspace = true, optional = true }
+midas-stream       = { workspace = true, optional = true }
+midas-axis         = { workspace = true, optional = true }
+
 async-trait  = { workspace = true }
 futures      = { workspace = true }
 # Concurrent map for the chart-subscription registry. The registry

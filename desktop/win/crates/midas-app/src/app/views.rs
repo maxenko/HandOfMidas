@@ -33,6 +33,12 @@ impl MidasApp {
             return self.view_floating_chart(window_id, chart);
         }
 
+        // Session-chart window (Phase C).
+        #[cfg(feature = "session_chart")]
+        if let Some(state) = self.floating_session_charts.get(&window_id) {
+            return state.view(window_id);
+        }
+
         // Main window (or fallback for unknown windows).
         let toolbar = self.view_toolbar();
         let content = self.view_content();
@@ -357,6 +363,45 @@ impl MidasApp {
             .padding([4, 10])
             .style(hover_text_button_style);
 
+        // Session-aware charts (Phase B S8 + Phase C S10–S14).
+        // Feature-gated. Three presets exercise every code path:
+        //   BTC M1  — crypto / ContinuousAxis / Clock(M1).
+        //   AAPL M5 — XNYS  / CompressedAxis / Clock(M5).
+        //   SPY D1·RTH — XNYS / CompressedAxis / Session(Regular).
+        #[cfg(feature = "session_chart")]
+        let session_chart_btn: iced::Element<'_, Message> = {
+            let btn_btc = button(text("BTC M1").size(11))
+                .on_press(Message::OpenSessionChart(
+                    crate::session_chart::SessionChartRequest::btc_m1(),
+                ))
+                .padding([4, 8])
+                .style(hover_text_button_style);
+            let btn_aapl = button(text("AAPL M5").size(11))
+                .on_press(Message::OpenSessionChart(
+                    crate::session_chart::SessionChartRequest::aapl_m5(),
+                ))
+                .padding([4, 8])
+                .style(hover_text_button_style);
+            let btn_spy = button(text("SPY D1·RTH").size(11))
+                .on_press(Message::OpenSessionChart(
+                    crate::session_chart::SessionChartRequest::spy_d1_rth(),
+                ))
+                .padding([4, 8])
+                .style(hover_text_button_style);
+            row![
+                text("Session:").size(11).color(theme::TEXT_SECONDARY),
+                btn_btc,
+                btn_aapl,
+                btn_spy
+            ]
+            .spacing(4)
+            .align_y(iced::Alignment::Center)
+            .into()
+        };
+        #[cfg(not(feature = "session_chart"))]
+        let session_chart_btn: iced::Element<'_, Message> =
+            iced::widget::Space::new().width(0).height(0).into();
+
         // Provider dropdowns (pushed to the right). Both lists +
         // active selections come from the toolbar VM.
         let toolbar_vm = self.toolbar_vm();
@@ -385,6 +430,7 @@ impl MidasApp {
             wl_btn,
             order_btn,
             orders_btn,
+            session_chart_btn,
             Space::new().width(Fill),
             text("Data:").size(11).color(theme::TEXT_SECONDARY),
             data_picker,

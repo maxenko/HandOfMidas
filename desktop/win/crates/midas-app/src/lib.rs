@@ -17,3 +17,13 @@
 /// See the module docs for the pipeline-ownership story and the
 /// empty-data handling rules.
 pub mod thumbnail_widget;
+
+/// Session-aware chart pipeline (S8 + Phase C). Exposed via the
+/// library target so integration tests
+/// (`desktop/win/tests/session_chart_e2e.rs`) can reach
+/// [`session_chart::SessionChartDriver`] /
+/// [`session_chart::build_scene`] / [`session_chart::translate`] and
+/// exercise the full end-to-end pipeline without spinning up the
+/// whole `midas-app` binary. Feature-gated on `session_chart`.
+#[cfg(feature = "session_chart")]
+pub mod session_chart;

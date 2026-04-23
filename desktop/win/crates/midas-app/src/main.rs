@@ -18,6 +18,16 @@ mod market_cache;
 mod order_blotter;
 mod order_panel;
 mod registry;
+// S8 (session-aware-charts Phase B). Opt-in module behind the
+// `session_chart` Cargo feature. Also declared `pub mod` in `lib.rs`
+// so integration tests can reach it; in Cargo's binary + library
+// dual-target model these are two separate compilations of the same
+// source, which is fine — the module is sans-IO and duplicating it
+// has no runtime cost.
+#[cfg(feature = "session_chart")]
+mod session_chart;
+#[cfg(feature = "session_chart")]
+mod session_chart_window;
 mod sim_child;
 mod theme;
 mod thumbnail_data;

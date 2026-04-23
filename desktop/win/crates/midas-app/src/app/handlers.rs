@@ -2889,11 +2889,32 @@ impl MidasApp {
                     let synthetic = floating_window_synthetic_id(id);
                     crate::app::subscription_registry::remove_chart_handles_for_chart(synthetic);
                 }
+                // Session-chart windows (Phase C). Dropping the state
+                // drops the driver Arc; the pump task aborts via the
+                // driver's `Drop`.
+                #[cfg(feature = "session_chart")]
+                if let Some(state) = self.floating_session_charts.remove(&id) {
+                    tracing::info!(
+                        "Floating session chart window closed for {}",
+                        state.request.ticker
+                    );
+                    // Explicit drop for clarity — pump task goes away.
+                    drop(state);
+                }
+                // Also fire an explicit close so the OS tears down
+                // the window if it's still around (iced ignores the
+                // request if the window is already gone, which is
+                // fine).
+                #[cfg(feature = "session_chart")]
+                let close_task = iced::window::close(id);
+                #[cfg(not(feature = "session_chart"))]
+                let close_task: Task<Message> = Task::none();
+
                 // If the main window was closed, exit the application.
                 if self.window.main_window() == Some(id) {
                     return self.flush_config().chain(iced::exit());
                 }
-                Task::none()
+                close_task
             }
 
             _ => unreachable!(),

@@ -39,6 +39,32 @@ tempfile = "3"
 midas-devloop-proto = { path = "crates/midas-devloop-proto" }
 serde_json = { workspace = true }
 
+# S8 (session-aware-charts Phase B). Dev-deps for
+# `tests/session_chart_e2e.rs`. The test body is gated on
+# `#[cfg(feature = "session_chart_tests")]`; these deps get pulled in
+# whenever dev-deps are resolved (integration tests), but the test
+# surface is empty unless the feature is on, so the runtime cost of
+# an off-feature `cargo test` is a minor compile-time increase only.
+midas-app          = { path = "crates/midas-app", features = ["session_chart"] }
+midas-bars         = { workspace = true }
+midas-bars-adapter = { workspace = true }
+midas-calendar     = { workspace = true }
+midas-clock        = { workspace = true }
+midas-scene        = { workspace = true }
+midas-stream       = { workspace = true }
+midas-axis         = { workspace = true }
+midas-broker-core  = { workspace = true }
+async-trait        = { workspace = true }
+chrono             = { workspace = true }
+tokio              = { workspace = true }
+parking_lot        = { workspace = true }
+
+[features]
+default = []
+# Enable the session-chart e2e integration test in `tests/`. Run with:
+#   cargo test -p midas-workspace --features session_chart_tests --test session_chart_e2e
+session_chart_tests = []
+
 # ─── Workspace-wide dependency versions ───────────────────────────────
 # Crates reference these via: dep = { workspace = true }
 [workspace.dependencies]
@@ -104,6 +130,18 @@ midas-broker = { path = "../../crates/midas-broker" }
 # of the legacy `BrokerEvent::Tick` central match arm (S7+).
 midas-market-data = { path = "../../crates/midas-market-data" }
 midas-broker-core = { path = "../../crates/midas-broker-core" }
+
+# Session-aware-charts Phase-A crates (S0..S7). The desktop workspace
+# references these through `workspace.dependencies` so the Cargo feature
+# `session_chart` on `midas-app` can opt them in without every other
+# crate paying for the build. See plan/session-aware-charts/.
+midas-bars         = { path = "../../crates/midas-bars" }
+midas-bars-adapter = { path = "../../crates/midas-bars-adapter" }
+midas-calendar     = { path = "../../crates/midas-calendar" }
+midas-clock        = { path = "../../crates/midas-clock" }
+midas-scene        = { path = "../../crates/midas-scene" }
+midas-stream       = { path = "../../crates/midas-stream" }
+midas-axis         = { path = "../../crates/midas-axis" }
 
 # futures helpers (iced::futures re-exports are fine for most sites,
 # but the subscription-helper streams use the crate-level `Stream` /
