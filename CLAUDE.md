@@ -31,7 +31,7 @@ Use the harness (not manual `cargo run` + eyeballing) to verify UI-visible chang
 
 ## Project Status
 
-1000+ tests passing across two workspaces. Order entry with interactive bracket placement, GPU chart rendering, per-ticker state machine, and decorator-based annotation system are implemented. Phase 1 (IB paper trading connection) is next.
+2 600+ tests passing across two workspaces. Order entry with interactive bracket placement, GPU chart rendering, per-ticker state machine, decorator-based annotation system, market-data router with sim + IB backends, and a new session-aware charting stack (feature-gated on `session_chart`) are implemented. Phase 1 (IB paper trading connection) is next.
 
 ## Workspace Structure
 
@@ -39,13 +39,22 @@ Two independent Cargo workspaces share a single git repo:
 
 ```
 HandOfMidas/
-├── Cargo.toml                     # Root workspace: broker engine + market-data router
+├── Cargo.toml                     # Root workspace: broker engine + market-data router + session-aware stack
 ├── crates/
 │   ├── midas-broker-core/         # Shared domain types (OrderId, SecurityType, market-data events)
 │   ├── midas-broker/              # Trading engine — sim + IB backends behind MarketDataSource / OrderClient traits
 │   ├── midas-market-data/         # Per-symbol router + bar aggregator registry + RAII subscription handles
 │   ├── midas-ib-sim/              # In-process IB-gateway simulator for integration tests
-│   └── mailbox_processor/         # Async actor pattern (request-reply channels)
+│   ├── mailbox_processor/         # Async actor pattern (request-reply channels)
+│   │
+│   │  ── session-aware charts (new stack; additive, no legacy edits) ──
+│   ├── midas-clock/               # Clock trait (wall + monotonic), SystemClock, MockClock + tokio::time::advance
+│   ├── midas-calendar/            # ExchangeCalendar trait, XnysCalendar (NYSE holidays 2000-2031), CryptoSpotCalendar
+│   ├── midas-bars/                # Candle (wire), CandleSeries (SoA storage), Symbol, BarPeriod
+│   ├── midas-stream/              # BarStream + SeekableBarStream traits, Fixture/Channel/HistoryThenLive, Filtered
+│   ├── midas-axis/                # TimeAxis trait, Continuous/Compressed/SessionIndex axes
+│   ├── midas-scene/               # ChartScene + layer stack (candle, band, separator, holiday, crosshair, annotation)
+│   └── midas-bars-adapter/        # Bridge: MarketDataSource → BarStream<Candle>, SymbolResolver, SessionedBarAggregator
 ├── desktop/win/                   # Desktop workspace (11 crates)
 │   ├── Cargo.toml                 # Workspace root with shared dependency versions
 │   └── crates/
@@ -100,6 +109,9 @@ Session-scoped per-(symbol, timeframe) camera state (`midas-app/src/chart_view.r
 ### Sans-IO chart core
 `midas-chart` has zero GPU or framework dependencies. All chart logic (state, interactions, zoom/pan, hit-testing, dirty flags) lives here. `midas-render` reads `ChartScene` to build GPU primitives.
 
+### Session-aware charts (new, feature-gated on `session_chart`)
+Clean-slate session/calendar-aware charting stack landed as 7 additive root-workspace crates (see `plan/session-aware-charts/README.md`). `midas-calendar` defines `ExchangeCalendar` with `XnysCalendar` + `CryptoSpotCalendar` singletons (`&'static dyn`); `midas-bars` holds the session-tagged `Candle` wire type and SoA `CandleSeries`; `midas-stream` unifies history + live via `BarStream` + `SeekableBarStream` + `HistoryThenLive` + `Filtered<_, EhFilter>`; `midas-axis` offers Continuous/Compressed/SessionIndex axes; `midas-scene` is a composable layer stack (candle/band/separator/holiday/crosshair/annotation) with sans-IO `ScenePrimitives`; `midas-bars-adapter` is the bridge from `MarketDataSource` → `BarStream<Candle>` with `SymbolResolver` + `SessionedBarAggregator` (calendar-aware bar windowing). Feature-gated `midas-app::session_chart` widget + standalone window render this via `iced::widget::shader` + existing `midas-render` pipelines. Legacy chart path untouched; Phase D retirement requires porting brackets/annotations/indicators first.
+
 ## Architecture Rules
 
 1. **No ibapi types in public API.** UI crate never imports ibapi; the `midas-market-data` router never imports `midas-broker` concrete types — it holds `Arc<dyn MarketDataSource>`.
@@ -146,3 +158,4 @@ cargo build --workspace --release
 | Grid component | `desktop/win/plan/grid-component/README.md` |
 | Desktop UI architecture | `desktop/win/plan/archive/initial/00-index.md` |
 | IB API reference | `research/provider-ib.md` |
+| Session-aware charts | `plan/session-aware-charts/README.md` (status), `00a-ideal-design.md` (spec), `00b-integration-strategy.md` (migration) |
