@@ -77,7 +77,10 @@ use midas_axis::{AxisError, CompressedAxis, ContinuousAxis, PriceRange, Viewport
 use midas_bars::{BarPeriod, CandleSeries};
 use midas_calendar::{ExchangeCalendar, Timestamp};
 use midas_scene::layers::{LevelDragState, LevelView, SharedLevelDrag};
-use midas_scene::tools::{ContextMenuAction, LevelTool, ToolEffect};
+use midas_scene::tools::{
+    BracketTool, ContextMenuAction, LegRole as SceneLegRole, LevelTool, Side as SceneBracketSide,
+    ToolEffect,
+};
 use midas_scene::{InteractionState, ScenePrimitives, SharedCandleSeries, ThemePalette};
 use parking_lot::{Mutex, RwLock};
 
@@ -154,14 +157,65 @@ impl LevelToolHost {
     }
 }
 
+/// Slice 5b chart-transition: persistent holder for the bracket-tool
+/// FSM. Lives on [`SessionChart`] so the FSM survives per-frame scene
+/// rebuilds.
+#[derive(Debug, Default)]
+pub struct BracketToolHost {
+    /// Active bracket-placement tool, if the user activated
+    /// "Buy Bracket" / "Sell Bracket". `None` while off.
+    pub tool: Option<BracketTool>,
+    /// The side the user chose when activating the tool. Kept separate
+    /// from the tool's own `side()` observer because the FSM drops the
+    /// side in `Complete` — this field powers the "reset to
+    /// AwaitingEntry { side }" multi-bracket workflow.
+    last_activated_side: Option<SceneBracketSide>,
+}
+
+impl BracketToolHost {
+    pub fn new() -> Self {
+        Self {
+            tool: None,
+            last_activated_side: None,
+        }
+    }
+
+    /// True iff the bracket tool is active + placing (non-Idle, non-
+    /// Complete).
+    pub fn is_active(&self) -> bool {
+        self.tool.as_ref().is_some_and(|t| t.is_placing())
+    }
+
+    /// Activate the tool for a Long (Buy) bracket.
+    pub fn activate_buy(&mut self) {
+        self.tool = Some(BracketTool::awaiting_entry(SceneBracketSide::Long));
+        self.last_activated_side = Some(SceneBracketSide::Long);
+    }
+
+    /// Activate the tool for a Short (Sell) bracket.
+    pub fn activate_sell(&mut self) {
+        self.tool = Some(BracketTool::awaiting_entry(SceneBracketSide::Short));
+        self.last_activated_side = Some(SceneBracketSide::Short);
+    }
+
+    /// Deactivate the tool. Called on Escape / window close / tool swap.
+    /// R11: mid-placement deactivation must also translate to a
+    /// `CancelBracket` on `TickerState` — the widget handles that via
+    /// [`SessionChart::deactivate_bracket_tool`].
+    pub fn deactivate(&mut self) {
+        self.tool = None;
+        self.last_activated_side = None;
+    }
+}
+
 /// A single translated effect ready for the app's `update()` to route.
 ///
 /// Widget-level helper returned by [`SessionChart::drain_level_effects`]
 /// so the caller (dev-harness scripts, unit tests, the app binary's
 /// message translator) never has to match on the raw [`ToolEffect`]
-/// variant — the host maps unknown variants (brackets — slice 5b) into
-/// [`ProjectedEffect::BracketDeferred`] so slice 4 code compiles with
-/// forward-compatible bracket plumbing.
+/// variant. Slice 5b (chart-transition plan) adds bracket variants
+/// that translate to the existing draft-then-save `TickerMsg` sequence
+/// (plan C1 / architecture rule 8 — no new `TickerMsg` variant).
 #[derive(Clone, Debug, PartialEq)]
 pub enum ProjectedEffect {
     /// Commit a new level at `price`. Host translates to
@@ -179,12 +233,60 @@ pub enum ProjectedEffect {
         annotation_id: u64,
         action: ContextMenuAction,
     },
-    /// A bracket-shape effect arrived. Slice 5b handles these; slice 4
-    /// just tracks that one fired so tests can assert the shape is
-    /// forward-compatible.
-    BracketDeferred,
+    /// Start a draft bracket. Translates to
+    /// `TickerMsg::EnsureDraftBracket { side, entry_type: Limit }`
+    /// + `TickerMsg::SetLegPrice { role: Entry, price: entry }`.
+    ///
+    /// The host maps `BracketSide` to `crate::order_panel::OrderSide`
+    /// at the `app.rs` dispatch layer (keeps the library target free
+    /// of bin-only types).
+    BeginDraftBracket {
+        side: midas_chart::widget::order_bracket::BracketSide,
+        entry: f64,
+    },
+    /// Set a TP / SL leg on the draft bracket. Translates to
+    /// `TickerMsg::SetLegPrice { role, price }` plus
+    /// `SetTpEnabled(true)` / `SetSlEnabled(true)` as appropriate.
+    SetDraftLeg {
+        role: midas_chart::widget::order_bracket::LegRole,
+        price: f64,
+    },
+    /// Finalise the draft bracket. Translates to
+    /// `TickerMsg::SaveBracket`.
+    CommitDraftBracket,
+    /// Discard the draft bracket. Translates to
+    /// `TickerMsg::CancelBracket`.
+    CancelDraftBracket,
+    /// Drag-move on a live bracket's TP / SL leg. Translates to
+    /// `TickerMsg::SetLegPrice { role, price }` (the live bracket's
+    /// leg id is implicit — the app's ticker state owns the live
+    /// bracket for the symbol).
+    UpdateLiveBracketLeg {
+        bracket_id: u64,
+        role: midas_chart::widget::order_bracket::LegRole,
+        price: f64,
+    },
     /// Tool-layer error (panic fallback, persistence fault, etc.).
     Error(String),
+}
+
+fn scene_side_to_bracket_side(
+    side: SceneBracketSide,
+) -> midas_chart::widget::order_bracket::BracketSide {
+    use midas_chart::widget::order_bracket::BracketSide;
+    match side {
+        SceneBracketSide::Long => BracketSide::Long,
+        SceneBracketSide::Short => BracketSide::Short,
+    }
+}
+
+fn scene_role_to_chart_role(role: SceneLegRole) -> midas_chart::widget::order_bracket::LegRole {
+    use midas_chart::widget::order_bracket::LegRole as ChartLegRole;
+    match role {
+        SceneLegRole::Entry => ChartLegRole::Entry,
+        SceneLegRole::Tp => ChartLegRole::TakeProfit,
+        SceneLegRole::Sl => ChartLegRole::StopLoss,
+    }
 }
 
 impl ProjectedEffect {
@@ -217,13 +319,25 @@ impl ProjectedEffect {
                 })
                 .collect(),
             ToolEffect::ReportError(err) => vec![ProjectedEffect::Error(err.to_string())],
-            // Slice 5b variants — shape-reserved; slice 4 just flags
-            // them so a future commit surface doesn't churn this file.
-            ToolEffect::BeginDraftBracket { .. }
-            | ToolEffect::SetDraftLeg { .. }
-            | ToolEffect::CommitDraftBracket
-            | ToolEffect::CancelDraftBracket
-            | ToolEffect::UpdateBracketLeg { .. } => vec![ProjectedEffect::BracketDeferred],
+            ToolEffect::BeginDraftBracket { side, entry } => {
+                vec![ProjectedEffect::BeginDraftBracket {
+                    side: scene_side_to_bracket_side(side),
+                    entry,
+                }]
+            }
+            ToolEffect::SetDraftLeg { role, price } => vec![ProjectedEffect::SetDraftLeg {
+                role: scene_role_to_chart_role(role),
+                price,
+            }],
+            ToolEffect::CommitDraftBracket => vec![ProjectedEffect::CommitDraftBracket],
+            ToolEffect::CancelDraftBracket => vec![ProjectedEffect::CancelDraftBracket],
+            ToolEffect::UpdateBracketLeg { id, role, price } => {
+                vec![ProjectedEffect::UpdateLiveBracketLeg {
+                    bracket_id: id,
+                    role: scene_role_to_chart_role(role),
+                    price,
+                }]
+            }
         }
     }
 }
@@ -273,6 +387,9 @@ pub struct SessionChart {
     /// Slice 4 of chart-transition: persistent level-tool + drag state
     /// + cached level views. Survives the per-frame scene rebuild.
     level_host: LevelToolHost,
+    /// Slice 5b of chart-transition: persistent bracket-tool FSM.
+    /// Survives per-frame scene rebuilds alongside the level host.
+    bracket_host: BracketToolHost,
     /// Slice 4: queue of projected tool effects. The widget drives the
     /// scene through `handle_input` (slice 1), then drains the effect
     /// queue into this vec. Host code calls
@@ -320,6 +437,7 @@ impl SessionChart {
             // full band/separator compute path.
             version_at_paint: u64::MAX,
             level_host: LevelToolHost::new(),
+            bracket_host: BracketToolHost::new(),
             pending_effects: Vec::new(),
         })
     }
@@ -837,6 +955,120 @@ impl SessionChart {
     /// Borrow the shared drag state so tests can inspect it.
     pub fn level_drag_state(&self) -> SharedLevelDrag {
         Arc::clone(&self.level_host.drag)
+    }
+
+    // ── Slice 5b chart-transition: bracket-tool plumbing ────────────
+
+    /// Activate the bracket tool for a Buy (Long) bracket. Toolbar
+    /// "Buy Bracket" button dispatches here.
+    pub fn activate_buy_bracket_tool(&mut self) {
+        tracing::debug!(
+            target: "midas_app::session_chart::widget",
+            "activate buy bracket tool",
+        );
+        self.bracket_host.activate_buy();
+    }
+
+    /// Activate the bracket tool for a Sell (Short) bracket.
+    pub fn activate_sell_bracket_tool(&mut self) {
+        tracing::debug!(
+            target: "midas_app::session_chart::widget",
+            "activate sell bracket tool",
+        );
+        self.bracket_host.activate_sell();
+    }
+
+    /// Deactivate the bracket tool. Called on Escape / window close /
+    /// tool swap. If the tool is mid-placement, also emits a
+    /// `CancelDraftBracket` projected effect so the host can translate
+    /// to `TickerMsg::CancelBracket` — R11: zero orphan drafts.
+    pub fn deactivate_bracket_tool(&mut self) {
+        if let Some(tool) = self.bracket_host.tool.as_mut() {
+            // Translate mid-placement cancel into a projected effect
+            // on the drain queue so the host emits TickerMsg::CancelBracket.
+            let mut effs = Vec::new();
+            tool.cancel_with_effect(&mut effs);
+            for raw in effs {
+                for projected in ProjectedEffect::from_tool_effect(raw) {
+                    self.pending_effects.push(projected);
+                }
+            }
+        }
+        self.bracket_host.deactivate();
+    }
+
+    /// True iff the bracket tool is currently active + placing.
+    pub fn is_bracket_tool_active(&self) -> bool {
+        self.bracket_host.is_active()
+    }
+
+    /// Observer — current bracket-tool mode (dev-harness `DumpState`).
+    pub fn bracket_tool_mode(&self) -> Option<midas_scene::tools::BracketToolMode> {
+        self.bracket_host.tool.as_ref().map(|t| t.mode())
+    }
+
+    /// Feed a preview price / cursor-y before dispatching a `MouseMove`
+    /// that should update the bracket preview line.
+    pub fn update_bracket_preview(&mut self, price: f64, cursor_y_px: f32) {
+        if let Some(tool) = self.bracket_host.tool.as_mut() {
+            tool.update_preview(price, cursor_y_px);
+        }
+    }
+
+    /// Dispatch an [`InputEvent`] through the active bracket tool.
+    /// Mirrors [`handle_level_input`](Self::handle_level_input);
+    /// effects land on `pending_effects` via the same projection path.
+    ///
+    /// Unlike the level path — which constructs a transient scene so
+    /// it can install a `LevelLayer` — the bracket tool is a pure FSM
+    /// with no additional layers to run against; we dispatch the event
+    /// straight into `BracketTool::update` and project the resulting
+    /// effects.
+    pub fn handle_bracket_input(
+        &mut self,
+        ev: midas_scene::InputEvent,
+    ) -> midas_scene::EventStatus {
+        let Some(tool) = self.bracket_host.tool.as_mut() else {
+            return midas_scene::EventStatus::Ignored;
+        };
+
+        let mut effs: Vec<ToolEffect> = Vec::new();
+        let mut last_err: Option<midas_scene::SceneError> = None;
+        let status = {
+            let mut cx = midas_scene::ToolContext {
+                price_range: &self.price_range,
+                last_error: &mut last_err,
+                effects: &mut effs,
+            };
+            midas_scene::InteractiveLayer::update(tool, ev, &mut cx)
+        };
+
+        // Drain + project.
+        for raw in effs {
+            for projected in ProjectedEffect::from_tool_effect(raw) {
+                self.pending_effects.push(projected);
+            }
+        }
+        if let Some(err) = last_err {
+            self.pending_effects
+                .push(ProjectedEffect::Error(err.to_string()));
+        }
+
+        // If the tool moved to Complete, reset to AwaitingEntry with
+        // the same side so the user can place another bracket in one
+        // activation. FSM's `side()` returns `None` in `Complete`, so
+        // consult `last_activated_side`.
+        if tool.is_complete() {
+            let side = self
+                .bracket_host
+                .last_activated_side
+                .unwrap_or(SceneBracketSide::Long);
+            if let Some(tool) = self.bracket_host.tool.as_mut() {
+                tool.continue_placing_with(side);
+            }
+        }
+
+        status
     }
 }
 

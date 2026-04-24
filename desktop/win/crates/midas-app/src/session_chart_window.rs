@@ -172,14 +172,73 @@ impl SessionChartWindow {
                 .on_press(crate::app::Message::SessionChartToggleLevelTool(window_id))
                 .padding([2, 8]);
 
+        // Slice 5b chart-transition: "Buy Bracket" / "Sell Bracket"
+        // toolbar chips activate the `BracketTool` on the widget for
+        // Long / Short placement respectively. The app-side message
+        // handler flips the tool state + translates the resulting
+        // effects to `TickerMsg`s via the draft-then-save sequence.
+        let bracket_mode = {
+            let g = self.widget.read();
+            if g.is_bracket_tool_active() {
+                g.bracket_tool_mode()
+            } else {
+                None
+            }
+        };
+        let buy_btn_label = match bracket_mode {
+            Some(midas_scene::tools::BracketToolMode::AwaitingEntry {
+                side: midas_scene::tools::Side::Long,
+            })
+            | Some(midas_scene::tools::BracketToolMode::AwaitingTarget {
+                side: midas_scene::tools::Side::Long,
+                ..
+            })
+            | Some(midas_scene::tools::BracketToolMode::AwaitingStop {
+                side: midas_scene::tools::Side::Long,
+                ..
+            }) => "Buy *",
+            _ => "Buy Bracket",
+        };
+        let sell_btn_label = match bracket_mode {
+            Some(midas_scene::tools::BracketToolMode::AwaitingEntry {
+                side: midas_scene::tools::Side::Short,
+            })
+            | Some(midas_scene::tools::BracketToolMode::AwaitingTarget {
+                side: midas_scene::tools::Side::Short,
+                ..
+            })
+            | Some(midas_scene::tools::BracketToolMode::AwaitingStop {
+                side: midas_scene::tools::Side::Short,
+                ..
+            }) => "Sell *",
+            _ => "Sell Bracket",
+        };
+        let buy_bracket_btn = button(text(buy_btn_label).size(11))
+            .on_press(crate::app::Message::SessionChartActivateBuyBracketTool(
+                window_id,
+            ))
+            .padding([2, 8]);
+        let sell_bracket_btn = button(text(sell_btn_label).size(11))
+            .on_press(crate::app::Message::SessionChartActivateSellBracketTool(
+                window_id,
+            ))
+            .padding([2, 8]);
+
         let close_btn = button(text("Close").size(11))
             .on_press(crate::app::Message::FloatingWindowClosed(window_id))
             .padding([2, 8]);
 
         let overlay = container(
-            row![header, eh_btn, add_level_btn, close_btn]
-                .spacing(8)
-                .align_y(Alignment::Center),
+            row![
+                header,
+                eh_btn,
+                add_level_btn,
+                buy_bracket_btn,
+                sell_bracket_btn,
+                close_btn,
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
         )
         .padding(6)
         .width(Length::Fill);

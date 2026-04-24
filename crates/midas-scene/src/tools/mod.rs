@@ -26,9 +26,15 @@
 use crate::error::SceneError;
 use crate::input::Point;
 
+pub mod bracket;
+pub mod bracket_effects;
+pub mod bracket_status;
 pub mod level;
 pub mod snap;
 
+pub use bracket::{BracketTool, BracketToolMode};
+pub use bracket_effects::{project_effect_to_ticker_msg, TickerMsgProjection};
+pub use bracket_status::{is_leg_on_wrong_side, LegKind};
 pub use level::{LevelTool, LevelToolMode};
 pub use snap::{snap_to_ohlc, CandleRef, SNAP_THRESHOLD_MAX_PX, SNAP_THRESHOLD_MIN_PX};
 

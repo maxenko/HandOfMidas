@@ -140,7 +140,7 @@ jobs:
         run: cargo test -p midas-ib-sim
 
   sim_fuzz_nightly:
-    name: IB sim fuzz (nightly, decode_incoming)
+    name: IB sim fuzz (nightly, decode_incoming + bracket_tool_fsm)
     runs-on: ubuntu-latest
     # Runs only on the 03:00 UTC cron schedule — never on PR or push.
     if: github.event_name == 'schedule' && github.event.schedule == '0 3 * * *'
@@ -160,11 +160,19 @@ jobs:
       - name: Run decode_incoming for one hour
         working-directory: crates/midas-ib-sim
         run: cargo +nightly fuzz run decode_incoming -- -max_total_time=3600
+      # chart-transition slice 5b / plan R19: BracketTool FSM fuzz.
+      # Runs for 30 minutes alongside decode_incoming (total job ≤1.5h
+      # under existing GitHub Actions limits). Per R19, not per-PR —
+      # cold-install cost of cargo-fuzz is ~2 minutes and fuzz is a
+      # regression net, not a gate.
+      - name: Run bracket_tool_fsm for 30 minutes
+        working-directory: crates/midas-ib-sim
+        run: cargo +nightly fuzz run bracket_tool_fsm -- -max_total_time=1800
       - name: Upload crashes (if any)
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: fuzz-artifacts-decode_incoming
+          name: fuzz-artifacts
           path: |
             crates/midas-ib-sim/fuzz/artifacts/**
             crates/midas-ib-sim/fuzz/corpus/**

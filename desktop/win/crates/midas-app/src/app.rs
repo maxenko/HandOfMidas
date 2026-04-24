@@ -1094,6 +1094,18 @@ pub enum Message {
     /// on the chart surface commit level annotations.
     #[cfg(feature = "session_chart")]
     SessionChartToggleLevelTool(window::Id),
+
+    /// Slice 5b of chart-transition plan: "Buy Bracket" toolbar button
+    /// on the session-chart window activates the bracket-placement
+    /// tool for a Long (Buy) bracket. Subsequent clicks on the chart
+    /// surface commit a bracket via the existing draft-then-save
+    /// `TickerMsg` sequence.
+    #[cfg(feature = "session_chart")]
+    SessionChartActivateBuyBracketTool(window::Id),
+
+    /// Slice 5b: "Sell Bracket" toolbar button — Short-side bracket.
+    #[cfg(feature = "session_chart")]
+    SessionChartActivateSellBracketTool(window::Id),
 }
 
 /// Payload for [`Message::SessionChartWindowOpened`]. Carries the
@@ -4033,6 +4045,14 @@ impl MidasApp {
             Message::SessionChartToggleLevelTool(window_id) => {
                 self.handle_session_chart_toggle_level_tool(window_id)
             }
+            #[cfg(feature = "session_chart")]
+            Message::SessionChartActivateBuyBracketTool(window_id) => {
+                self.handle_session_chart_activate_bracket_tool(window_id, true)
+            }
+            #[cfg(feature = "session_chart")]
+            Message::SessionChartActivateSellBracketTool(window_id) => {
+                self.handle_session_chart_activate_bracket_tool(window_id, false)
+            }
 
             // -- Dev harness (feature-gated) --
             #[cfg(feature = "dev_harness")]
@@ -4387,6 +4407,51 @@ impl MidasApp {
                 g.deactivate_level_tool();
             } else {
                 g.activate_level_tool();
+            }
+        }
+        Task::none()
+    }
+
+    /// Slice 5b chart-transition: activate the bracket-placement tool
+    /// on the session-chart widget. `is_buy = true` → Long bracket,
+    /// false → Short. Clicking the same-side button again while the
+    /// tool is active deactivates (toggle behaviour matches the Add
+    /// Level chip). Clicking the OPPOSITE-side button swaps the side
+    /// without deactivating.
+    ///
+    /// Bracket effects that the widget drains from its projection
+    /// queue translate here into the existing `TickerMsg` draft-then-
+    /// save sequence (architecture rule 8 / plan C1). Orphan drafts on
+    /// window close are prevented by
+    /// [`SessionChart::deactivate_bracket_tool`], which emits
+    /// `CancelDraftBracket` mid-placement (R11).
+    #[cfg(feature = "session_chart")]
+    fn handle_session_chart_activate_bracket_tool(
+        &mut self,
+        window_id: window::Id,
+        is_buy: bool,
+    ) -> Task<Message> {
+        if let Some(state) = self.floating_session_charts.get_mut(&window_id) {
+            let mut g = state.widget.write();
+            // Toggle: if active + same side, deactivate. Otherwise
+            // install the requested side.
+            let same_side_active = match g.bracket_tool_mode() {
+                Some(midas_scene::tools::BracketToolMode::AwaitingEntry { side })
+                | Some(midas_scene::tools::BracketToolMode::AwaitingTarget { side, .. })
+                | Some(midas_scene::tools::BracketToolMode::AwaitingStop { side, .. }) => {
+                    match side {
+                        midas_scene::tools::Side::Long => is_buy,
+                        midas_scene::tools::Side::Short => !is_buy,
+                    }
+                }
+                _ => false,
+            };
+            if same_side_active {
+                g.deactivate_bracket_tool();
+            } else if is_buy {
+                g.activate_buy_bracket_tool();
+            } else {
+                g.activate_sell_bracket_tool();
             }
         }
         Task::none()

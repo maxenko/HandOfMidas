@@ -93,6 +93,9 @@ fn full_xnys_scene_with_all_layers_emits_expected_primitives() {
         sl_price: Some(100.0),
         side: Side::Long,
         label: Cow::Borrowed("E"),
+        entry_ts: None,
+        filled_qty: None,
+        total_qty: 0,
     }]);
 
     let price_lines = PriceLineLayer::new(vec![PriceLineView {

@@ -58,12 +58,13 @@ pub use crate::interaction::{
 };
 pub use crate::layer::{InteractiveLayer, LayerId, LayerZ, SceneLayer, ToolContext};
 pub use crate::layers::{
-    bin_count_for_viewport, AtrLayer, AtrStyle, BrightIndices, CandleLayer, CandleStyle,
-    CrosshairLayer, DecoratorLayer, GerchikAtrLayer, GerchikStyle, GridLayer, GridStyle,
-    HolidayMarkerLayer, LevelDragState, LevelHit, LevelHitTarget, LevelLayer, LevelView,
-    OrderBracketLayer, OrderBracketView, PriceLineLayer, PriceLineView, SeparatorStyle,
-    SessionBandLayer, SessionBoundary, SessionPalette, SessionSeparatorLayer, SharedCandleSeries,
-    SharedLevelDrag, Side, VolumeLayer, VolumeProfileLayer, VolumeProfileStyle, VolumeStyle,
+    bin_count_for_viewport, AtrLayer, AtrStyle, BracketDragState, BracketHit, BracketHitTarget,
+    BrightIndices, CandleLayer, CandleStyle, CrosshairLayer, DecoratorLayer, GerchikAtrLayer,
+    GerchikStyle, GridLayer, GridStyle, HolidayMarkerLayer, LevelDragState, LevelHit,
+    LevelHitTarget, LevelLayer, LevelView, OrderBracketLayer, OrderBracketView, PriceLineLayer,
+    PriceLineView, SeparatorStyle, SessionBandLayer, SessionBoundary, SessionPalette,
+    SessionSeparatorLayer, SharedBracketDrag, SharedCandleSeries, SharedLevelDrag, Side,
+    VolumeLayer, VolumeProfileLayer, VolumeProfileStyle, VolumeStyle,
 };
 pub use crate::paint::PaintContext;
 pub use crate::primitives::{
@@ -72,9 +73,11 @@ pub use crate::primitives::{
 };
 pub use crate::scene::{ChartScene, ChartSceneBuilder, LayerConfig, SceneBuildError};
 pub use crate::tools::{
-    snap_to_ohlc, AnnotationId as ToolAnnotationId, CandleRef as SnapCandleRef, ContextMenuAction,
-    ContextMenuItem, LegRole, LevelTool, LevelToolMode, Side as ToolSide, ToolEffect,
-    SNAP_THRESHOLD_MAX_PX, SNAP_THRESHOLD_MIN_PX,
+    is_leg_on_wrong_side, project_effect_to_ticker_msg, snap_to_ohlc,
+    AnnotationId as ToolAnnotationId, BracketTool, BracketToolMode, CandleRef as SnapCandleRef,
+    ContextMenuAction, ContextMenuItem, LegKind, LegRole, LevelTool, LevelToolMode,
+    Side as ToolSide, TickerMsgProjection, ToolEffect, SNAP_THRESHOLD_MAX_PX,
+    SNAP_THRESHOLD_MIN_PX,
 };
 
 // Convenience re-exports — downstream crates pull the full scene surface

@@ -13,9 +13,19 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 bytes = "1"
 tokio-util = { version = "0.7", features = ["codec"] }
+chrono = "0.4"
 
 [dependencies.midas-ib-sim]
 path = ".."
+
+[dependencies.midas-scene]
+path = "../../midas-scene"
+
+[dependencies.midas-axis]
+path = "../../midas-axis"
+
+[dependencies.midas-calendar]
+path = "../../midas-calendar"
 
 # Prevent `cargo build` in the parent workspace from recursing into this crate.
 [workspace]
@@ -24,6 +34,13 @@ members = ["."]
 [[bin]]
 name = "decode_incoming"
 path = "fuzz_targets/decode_incoming.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bracket_tool_fsm"
+path = "fuzz_targets/bracket_tool_fsm.rs"
 test = false
 doc = false
 bench = false
