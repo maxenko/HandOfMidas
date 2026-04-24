@@ -623,4 +623,126 @@ mod tests {
         let b = translate(&p);
         assert!(buckets_equal(&a, &b));
     }
+
+    // ── Slice 3 — text → WidgetLabel projection ──────────────────────
+
+    #[test]
+    fn text_meta_carries_anchor_from_scene_primitive() {
+        let mut p = empty();
+        p.text.push(SceneText {
+            x: 10.0,
+            y: 20.0,
+            color: [0xff; 4],
+            text: "50000.00".into(),
+            size_px: 11.0,
+            anchor: TextAnchor::MiddleRight,
+        });
+        let out = translate(&p);
+        assert_eq!(out.text[0].anchor, TextAnchor::MiddleRight);
+    }
+
+    #[test]
+    fn scene_anchor_projection_covers_every_variant() {
+        // Slice 3 asserts no scene anchor panics the projection.
+        for a in [
+            TextAnchor::TopLeft,
+            TextAnchor::TopCenter,
+            TextAnchor::TopRight,
+            TextAnchor::MiddleLeft,
+            TextAnchor::MiddleCenter,
+            TextAnchor::MiddleRight,
+            TextAnchor::BottomLeft,
+            TextAnchor::BottomCenter,
+            TextAnchor::BottomRight,
+        ] {
+            let _la = scene_anchor_to_label_anchor(a);
+        }
+    }
+
+    #[test]
+    fn right_anchors_collapse_to_label_right() {
+        assert!(matches!(
+            scene_anchor_to_label_anchor(TextAnchor::MiddleRight),
+            LabelAnchor::Right
+        ));
+        assert!(matches!(
+            scene_anchor_to_label_anchor(TextAnchor::TopRight),
+            LabelAnchor::Right
+        ));
+    }
+
+    #[test]
+    fn middle_left_collapses_to_label_left() {
+        assert!(matches!(
+            scene_anchor_to_label_anchor(TextAnchor::MiddleLeft),
+            LabelAnchor::Left
+        ));
+    }
+
+    #[test]
+    fn bottom_center_collapses_to_label_center() {
+        assert!(matches!(
+            scene_anchor_to_label_anchor(TextAnchor::BottomCenter),
+            LabelAnchor::Center
+        ));
+    }
+
+    #[test]
+    fn text_meta_to_widget_label_round_trips_core_fields() {
+        let meta = TextMetaInstance {
+            x: 42.0,
+            y: 19.0,
+            size_px: 11.0,
+            color: [1.0, 0.5, 0.25, 1.0],
+            text: "AAPL 150.25".into(),
+            anchor: TextAnchor::TopLeft,
+        };
+        let wl = text_meta_to_widget_label(&meta);
+        assert_eq!(wl.text, "AAPL 150.25");
+        assert!((wl.screen_x - 42.0).abs() < 1e-6);
+        assert!((wl.screen_y - 19.0).abs() < 1e-6);
+        assert!((wl.font_size - 11.0).abs() < 1e-6);
+        assert_eq!(wl.text_color, [1.0, 0.5, 0.25, 1.0]);
+        // Crosshair labels paint with a transparent background.
+        assert_eq!(wl.bg_color, [0.0, 0.0, 0.0, 0.0]);
+        assert!(matches!(wl.anchor, LabelAnchor::TopLeft));
+    }
+
+    #[test]
+    fn bulk_text_to_widget_labels_preserves_order_and_count() {
+        let metas = vec![
+            TextMetaInstance {
+                x: 1.0,
+                y: 1.0,
+                size_px: 11.0,
+                color: [0.0; 4],
+                text: "A".into(),
+                anchor: TextAnchor::TopLeft,
+            },
+            TextMetaInstance {
+                x: 2.0,
+                y: 2.0,
+                size_px: 11.0,
+                color: [0.0; 4],
+                text: "B".into(),
+                anchor: TextAnchor::MiddleRight,
+            },
+            TextMetaInstance {
+                x: 3.0,
+                y: 3.0,
+                size_px: 11.0,
+                color: [0.0; 4],
+                text: "C".into(),
+                anchor: TextAnchor::BottomCenter,
+            },
+        ];
+        let labels = text_buckets_to_widget_labels(&metas);
+        assert_eq!(labels.len(), 3);
+        assert_eq!(labels[0].text, "A");
+        assert_eq!(labels[1].text, "B");
+        assert_eq!(labels[2].text, "C");
+        assert!(matches!(labels[0].anchor, LabelAnchor::TopLeft));
+        assert!(matches!(labels[1].anchor, LabelAnchor::Right));
+        assert!(matches!(labels[2].anchor, LabelAnchor::Center));
+    }
 }

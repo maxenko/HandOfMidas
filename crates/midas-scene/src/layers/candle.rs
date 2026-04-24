@@ -137,8 +137,7 @@ fn tint(color: [u8; 4], kind: SessionKind, style: &CandleStyle, is_bright: bool)
     } else {
         1.0
     };
-    let a =
-        (color[3] as f32 * session_factor * bright_factor).clamp(0.0, 255.0);
+    let a = (color[3] as f32 * session_factor * bright_factor).clamp(0.0, 255.0);
     let a = a.round() as u8;
     [color[0], color[1], color[2], a]
 }
@@ -173,9 +172,7 @@ impl SceneLayer for CandleLayer {
         let bright_guard = self.bright_indices.as_ref().map(|arc| arc.read());
 
         for (idx, row) in guard.iter().enumerate() {
-            let is_bright = bright_guard
-                .as_deref()
-                .is_some_and(|bs| bs.contains(&idx));
+            let is_bright = bright_guard.as_deref().is_some_and(|bs| bs.contains(&idx));
 
             let x_center = axis.to_x(row.ts_open());
             let high_px = ctx.price_to_y(row.high());
@@ -190,7 +187,12 @@ impl SceneLayer for CandleLayer {
                 palette.candle_down
             };
             let body_color = tint(base, row.session_kind(), &self.style, is_bright);
-            let wick_color = tint(palette.candle_wick, row.session_kind(), &self.style, is_bright);
+            let wick_color = tint(
+                palette.candle_wick,
+                row.session_kind(),
+                &self.style,
+                is_bright,
+            );
 
             ctx.out.candles.push(CandleInstance {
                 x_center,

@@ -266,15 +266,10 @@ fn crosshair_empty_series_fixture() {
     assert_eq!(ctx.out.lines.len(), 2, "arms emit even with empty series");
     // Two axis labels (price + time). No OHLC rows.
     assert_eq!(ctx.out.text.len(), 2);
-    assert!(
-        ctx.out
-            .text
-            .iter()
-            .all(|t| !t.text.starts_with("O: ")
-                && !t.text.starts_with("H: ")
-                && !t.text.starts_with("L: ")
-                && !t.text.starts_with("C: ")),
-    );
+    assert!(ctx.out.text.iter().all(|t| !t.text.starts_with("O: ")
+        && !t.text.starts_with("H: ")
+        && !t.text.starts_with("L: ")
+        && !t.text.starts_with("C: ")),);
 }
 
 /// Collect the four OHLC rows from a `TextInstance` slice into a

@@ -15,5 +15,16 @@ tempfile = { workspace = true }
 async-trait = { workspace = true }
 uuid     = { workspace = true }
 
+# Cross-workspace path dep (D7 of the chart-transition plan). The
+# orphan rule forbids implementing `CandleData` (defined here) for
+# `CandleSeries` (defined in the root-workspace `midas-bars`) in the
+# adapter crate — so the impl lives here, against the owned trait,
+# with a cross-workspace path dep on `midas-bars`. This single impl
+# unblocks the `midas-indicators` compute path against either backing
+# store (legacy `CandleBuffer` or new-stack `CandleSeries`) without a
+# rewrite.
+midas-bars = { path = "../../../../crates/midas-bars" }
+
 [dev-dependencies]
 serde_json = { workspace = true }
+midas-calendar = { path = "../../../../crates/midas-calendar" }

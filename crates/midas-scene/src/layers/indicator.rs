@@ -263,11 +263,7 @@ impl AtrLayer {
     }
 
     /// Build with an explicit style.
-    pub fn with_style(
-        series: Arc<RwLock<CandleSeries>>,
-        period: usize,
-        style: AtrStyle,
-    ) -> Self {
+    pub fn with_style(series: Arc<RwLock<CandleSeries>>, period: usize, style: AtrStyle) -> Self {
         assert!(period > 0, "ATR period must be > 0");
         Self {
             series,
@@ -676,13 +672,7 @@ mod tests {
         chrono::Utc.with_ymd_and_hms(y, mo, d, h, mi, 0).unwrap()
     }
 
-    fn mk_candle(
-        ts: Timestamp,
-        o: f64,
-        h: f64,
-        l: f64,
-        c: f64,
-    ) -> Candle {
+    fn mk_candle(ts: Timestamp, o: f64, h: f64, l: f64, c: f64) -> Candle {
         let cal = xnys();
         let sym = Symbol::new("SPY", cal.id());
         let session = cal.classify(ts);
@@ -702,8 +692,7 @@ mod tests {
 
     fn seed_series(n: usize) -> Arc<RwLock<CandleSeries>> {
         let cal = xnys();
-        let mut s =
-            CandleSeries::new(cal.id(), BarPeriod::m1(), Symbol::new("SPY", cal.id()));
+        let mut s = CandleSeries::new(cal.id(), BarPeriod::m1(), Symbol::new("SPY", cal.id()));
         let start = utc(2024, 1, 17, 14, 30); // 09:30 ET
         for i in 0..n {
             let ts = start + chrono::Duration::minutes(i as i64);
@@ -713,7 +702,7 @@ mod tests {
         Arc::new(RwLock::new(s))
     }
 
-    fn harness<'a>(
+    fn harness(
         vp: Viewport,
         pr: PriceRange,
     ) -> (
@@ -739,8 +728,7 @@ mod tests {
     #[test]
     fn atr_layer_empty_series_is_noop() {
         let cal = xnys();
-        let empty =
-            CandleSeries::new(cal.id(), BarPeriod::m1(), Symbol::new("SPY", cal.id()));
+        let empty = CandleSeries::new(cal.id(), BarPeriod::m1(), Symbol::new("SPY", cal.id()));
         let series = Arc::new(RwLock::new(empty));
         let layer = AtrLayer::new(series, 14);
         let vp = Viewport::new(800.0, 400.0);
@@ -923,8 +911,7 @@ mod tests {
     #[test]
     fn gerchik_atr_layer_empty_series_is_noop() {
         let cal = xnys();
-        let empty =
-            CandleSeries::new(cal.id(), BarPeriod::m1(), Symbol::new("SPY", cal.id()));
+        let empty = CandleSeries::new(cal.id(), BarPeriod::m1(), Symbol::new("SPY", cal.id()));
         let series = Arc::new(RwLock::new(empty));
         let layer = GerchikAtrLayer::new(series);
         let vp = Viewport::new(800.0, 400.0);
@@ -1102,10 +1089,11 @@ mod tests {
         let gatr = GerchikAtrLayer::new(series.clone());
         let bright = gatr.bright_indices();
 
-        let mut style = CandleStyle::default();
-        style.bright_multiplier = 0.5;
-        let candle_layer =
-            CandleLayer::with_bright_indices(series.clone(), style, bright.clone());
+        let style = CandleStyle {
+            bright_multiplier: 0.5,
+            ..CandleStyle::default()
+        };
+        let candle_layer = CandleLayer::with_bright_indices(series.clone(), style, bright.clone());
 
         // Force every candle bright.
         *bright.write() = (0..10).collect();

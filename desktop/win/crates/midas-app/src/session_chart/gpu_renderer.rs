@@ -54,10 +54,11 @@
 
 use midas_chart::compute::{LayerEnd, ANNOTATION_LAYER_COUNT};
 use midas_chart::instances::{GridLineInstance, VolumeInstance};
+use midas_chart::widget::compute::WidgetLabel;
 use midas_chart::{BadgeInstance, DirtyFlags, DirtyTracker};
 use midas_render::renderer::{ChartRenderer, ChartScene};
 
-use super::primitives_bridge::RenderBuckets;
+use super::primitives_bridge::{text_buckets_to_widget_labels, RenderBuckets};
 
 /// Thin adapter around [`midas_render::ChartRenderer`] that consumes
 /// [`RenderBuckets`]. See module docs for the deferred gaps.
@@ -86,6 +87,19 @@ pub struct SessionChartRenderer {
     grid_lines: Vec<GridLineInstance>,
     /// Cached volume buffer — S8 translator leaves it empty.
     volumes: Vec<VolumeInstance>,
+    /// Cached `WidgetLabel` buffer populated each frame from the
+    /// translator's `TextMetaInstance` bucket. Routed through the
+    /// inner renderer's `axis_labels` slot — cryoglyph's dedicated
+    /// axis `TextRenderer` draws these behind every annotation-layer
+    /// text batch.
+    ///
+    /// Slice 3 of the chart-transition plan closes the G-2
+    /// text-rendering gap: the crosshair (and any future layer that
+    /// emits `TextInstance`) now feeds the cryoglyph pipeline that
+    /// already sits inside `ChartRenderer` — no extra `TextContext`
+    /// plumbing needed, `ChartRenderer` owns one atlas per window and
+    /// one renderer per layer internally.
+    text_labels: Vec<WidgetLabel>,
     /// Last projection matrix we uploaded; compared on every prepare.
     last_projection: glam::Mat4,
     /// Last `(viewport_width, viewport_height)` seen.
@@ -104,6 +118,7 @@ impl SessionChartRenderer {
             badges: Vec::new(),
             grid_lines: Vec::new(),
             volumes: Vec::new(),
+            text_labels: Vec::new(),
             last_projection: glam::Mat4::IDENTITY,
             last_viewport: (0, 0),
         }
@@ -157,6 +172,14 @@ impl SessionChartRenderer {
             });
         }
 
+        // Slice 3: project scene `TextInstance` → `WidgetLabel` and
+        // route through the inner renderer's cryoglyph axis-label
+        // pipeline. One atlas per window; shared across every
+        // crosshair / price-line / level / axis layer that emits
+        // text. The conversion is O(n) in label count — bounded by
+        // ~10 labels per frame today (6 crosshair + few axis ticks).
+        self.text_labels = text_buckets_to_widget_labels(&buckets.text);
+
         // Camera-dirty detection: bump only when viewport or
         // projection actually changed so the inner renderer can skip
         // the uniform upload on still frames.
@@ -197,9 +220,13 @@ impl SessionChartRenderer {
             crosshair_lines: &[],
             volume_profile: &[],
             badges: &self.badges,
-            // TODO(session_chart): text rendering. See module docs.
+            // Slice 3: text rendering now flows through the
+            // axis_labels slot so cryoglyph's dedicated
+            // axis-TextRenderer draws them. The per-annotation-layer
+            // `labels` slot stays empty — annotations lands in
+            // slice 4+.
             labels: &[],
-            axis_labels: &[],
+            axis_labels: &self.text_labels,
             // No annotations → zero layer boundaries. The inner
             // renderer's per-layer interleave loop therefore draws the
             // whole badge buffer in one range and issues zero text

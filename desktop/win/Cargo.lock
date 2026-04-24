@@ -2980,6 +2980,8 @@ dependencies = [
  "async-trait",
  "chrono",
  "glam 0.29.3",
+ "midas-bars",
+ "midas-calendar",
  "serde",
  "serde_json",
  "tempfile",

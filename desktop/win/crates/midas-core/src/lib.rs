@@ -8,6 +8,11 @@ use serde::{Deserialize, Serialize};
 pub mod atr;
 pub mod candle_buffer;
 pub mod candle_data;
+/// D7 of the chart-transition plan: `impl CandleData for
+/// midas_bars::CandleSeries`. Thin cross-workspace adapter module;
+/// the implementation is the single `impl` block, so the module
+/// itself stays tiny.
+pub mod candle_data_for_series;
 pub mod config;
 pub mod id;
 pub mod link;

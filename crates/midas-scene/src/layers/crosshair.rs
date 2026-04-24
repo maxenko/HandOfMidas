@@ -252,9 +252,7 @@ impl SceneLayer for CrosshairLayer {
         // the vertical arm. `axis.from_x` returns `None` when the
         // cursor sits in a compressed gap — skip emission there.
         if let Some(ts) = ctx.axis.from_x(x) {
-            let text = ctx
-                .formatter
-                .time(ts, self.timezone, TickDensity::Dense);
+            let text = ctx.formatter.time(ts, self.timezone, TickDensity::Dense);
             ctx.out.text.push(TextInstance {
                 x,
                 y: vp.height_px - AXIS_LABEL_MARGIN_PX,
@@ -298,12 +296,9 @@ impl CrosshairLayer {
         // hit per probe. At 5K bars that is ~13 probes — negligible
         // inside the render hot path.
         let len = guard.len();
-        let idx_after = (0..len).collect::<Vec<_>>().partition_point(|&i| {
-            guard
-                .at(i)
-                .map(|c| c.ts_open() <= ts)
-                .unwrap_or(false)
-        });
+        let idx_after = (0..len)
+            .collect::<Vec<_>>()
+            .partition_point(|&i| guard.at(i).map(|c| c.ts_open() <= ts).unwrap_or(false));
         if idx_after == 0 {
             // Cursor before the first bar.
             return;
@@ -417,16 +412,7 @@ mod tests {
         let ts = start + chrono::Duration::minutes(minute_offset);
         let session = cal.classify(ts);
         let window = cal.bar_window(ts, BarPeriod::m1()).unwrap();
-        let ohlcv = Ohlcv::new(
-            open,
-            open + 5.0,
-            open - 3.0,
-            open + 2.5,
-            100,
-            1,
-            None,
-        )
-        .unwrap();
+        let ohlcv = Ohlcv::new(open, open + 5.0, open - 3.0, open + 2.5, 100, 1, None).unwrap();
         Candle::new(
             sym,
             cal,
@@ -508,8 +494,8 @@ mod tests {
             formatter: &fmt,
             out: &mut out,
         };
-        let layer = CrosshairLayer::with_position((500.0, 200.0))
-            .with_series(empty_crypto_series());
+        let layer =
+            CrosshairLayer::with_position((500.0, 200.0)).with_series(empty_crypto_series());
         layer.paint(&mut ctx);
         assert_eq!(out.lines.len(), 2, "arms must always emit");
         // With an empty series no OHLC rows land — only the two
@@ -657,8 +643,7 @@ mod tests {
         // x=500 → midnight + 12 h → bar index 720. Build a series
         // spanning 721 bars so the cursor lands on the last bar.
         let series = fill_crypto_series(721, 100.0);
-        let layer = CrosshairLayer::with_position((500.0, 200.0))
-            .with_series(series);
+        let layer = CrosshairLayer::with_position((500.0, 200.0)).with_series(series);
         layer.paint(&mut ctx);
 
         let ohlc_count = out
@@ -697,8 +682,7 @@ mod tests {
             out: &mut out,
         };
         let series = fill_crypto_series(721, 100.0);
-        let layer = CrosshairLayer::with_position((500.0, 50.0))
-            .with_series(series);
+        let layer = CrosshairLayer::with_position((500.0, 50.0)).with_series(series);
         layer.paint(&mut ctx);
 
         // Collect only the OHLC rows, sorted by their y coordinate.
@@ -742,8 +726,7 @@ mod tests {
             out: &mut out,
         };
         let series = fill_crypto_series(721, 100.0);
-        let layer = CrosshairLayer::with_position((500.0, 200.0))
-            .with_series(series);
+        let layer = CrosshairLayer::with_position((500.0, 200.0)).with_series(series);
         layer.paint(&mut ctx);
 
         let rows: std::collections::HashMap<&str, &str> = out
@@ -789,8 +772,7 @@ mod tests {
         };
         // 1000 px wide. Box width ≈ 110. 200 + 8 + 110 = 318 < 1000.
         let series = fill_crypto_series(721, 100.0);
-        let layer = CrosshairLayer::with_position((200.0, 100.0))
-            .with_series(series);
+        let layer = CrosshairLayer::with_position((200.0, 100.0)).with_series(series);
         layer.paint(&mut ctx);
         for t in out.text.iter() {
             if t.text.starts_with("O: ") {
@@ -820,8 +802,7 @@ mod tests {
         };
         // 950 + 8 + 110 = 1068 > 1000 → spill check fires.
         let series = fill_crypto_series(1440, 100.0);
-        let layer = CrosshairLayer::with_position((950.0, 100.0))
-            .with_series(series);
+        let layer = CrosshairLayer::with_position((950.0, 100.0)).with_series(series);
         layer.paint(&mut ctx);
         for t in out.text.iter() {
             if t.text.starts_with("O: ") {
@@ -922,8 +903,7 @@ mod tests {
             s.push(mk_crypto_candle(start, i, 100.0 + i as f64));
         }
         let series: SharedCandleSeries = Arc::new(RwLock::new(s));
-        let layer =
-            CrosshairLayer::with_position((0.5, 200.0)).with_series(series);
+        let layer = CrosshairLayer::with_position((0.5, 200.0)).with_series(series);
         layer.paint(&mut ctx);
 
         let ohlc_count = out
