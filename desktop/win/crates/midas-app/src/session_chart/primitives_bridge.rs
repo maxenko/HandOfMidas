@@ -44,9 +44,11 @@
 use std::borrow::Cow;
 
 use midas_chart::instances::{CandleInstance, GridLineInstance, VolumeInstance};
+use midas_chart::widget::compute::{LabelAnchor, WidgetLabel};
 use midas_scene::{
     BadgeInstance as SceneBadge, CandleInstance as SceneCandle, LineInstance as SceneLine,
-    QuadInstance as SceneQuad, ScenePrimitives, TextInstance as SceneText,
+    QuadInstance as SceneQuad, ScenePrimitives, TextAnchor as SceneTextAnchor,
+    TextInstance as SceneText,
 };
 
 /// Result of [`translate`]. Each `Vec` maps 1:1 to a legacy
@@ -103,7 +105,9 @@ pub struct BadgeMetaInstance {
 }
 
 /// Anchor + size + color + payload for the text pipeline. Not `Pod`
-/// — same reason as above.
+/// — same reason as above. Slice 3 widened this with `anchor` so the
+/// crosshair's right-margin / bottom-margin / top-left OHLC rows
+/// project onto the correct [`LabelAnchor`] for cryoglyph.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextMetaInstance {
     pub x: f32,
@@ -111,6 +115,55 @@ pub struct TextMetaInstance {
     pub size_px: f32,
     pub color: [f32; 4],
     pub text: Cow<'static, str>,
+    pub anchor: SceneTextAnchor,
+}
+
+/// Project the scene's nine-way [`TextAnchor`][midas_scene::TextAnchor]
+/// onto the legacy text-pipeline's four-way [`LabelAnchor`]. The
+/// legacy pipeline has no Top/Bottom-only anchors, so the scene's
+/// `TopCenter`/`BottomCenter` collapse to `Center` (the cursor's x
+/// still sits at the requested x, but the y shifts by half the
+/// glyph height). For the crosshair this is acceptable — the
+/// bottom-margin time label is an axis chip that tolerates a 6 px
+/// y-drift.
+pub fn scene_anchor_to_label_anchor(a: SceneTextAnchor) -> LabelAnchor {
+    match a {
+        SceneTextAnchor::TopLeft | SceneTextAnchor::BottomLeft => LabelAnchor::TopLeft,
+        SceneTextAnchor::TopRight | SceneTextAnchor::BottomRight => LabelAnchor::Right,
+        SceneTextAnchor::MiddleLeft => LabelAnchor::Left,
+        SceneTextAnchor::MiddleRight => LabelAnchor::Right,
+        SceneTextAnchor::MiddleCenter
+        | SceneTextAnchor::TopCenter
+        | SceneTextAnchor::BottomCenter => LabelAnchor::Center,
+    }
+}
+
+/// Map a [`TextMetaInstance`] into a [`WidgetLabel`] the
+/// [`midas_render::pipelines::text::TextPipeline`] consumes directly.
+/// Slice 3 of the chart-transition plan closes the G-2 gap — the
+/// translator now produces legacy-compatible text records instead of
+/// dropping scene text on the floor.
+///
+/// `bg_color` is `[0, 0, 0, 0]` (transparent) — crosshair labels paint
+/// pure text on top of the chart; no backing badge. If a future layer
+/// needs a background it should emit a [`BadgeInstance`] of its own
+/// and route the text through there.
+pub fn text_meta_to_widget_label(t: &TextMetaInstance) -> WidgetLabel {
+    WidgetLabel {
+        text: t.text.to_string(),
+        screen_x: t.x,
+        screen_y: t.y,
+        bg_color: [0.0, 0.0, 0.0, 0.0],
+        text_color: t.color,
+        font_size: t.size_px,
+        anchor: scene_anchor_to_label_anchor(t.anchor),
+    }
+}
+
+/// Bulk variant of [`text_meta_to_widget_label`]. Allocates a `Vec`
+/// the text pipeline can drain directly via its axis-labels slot.
+pub fn text_buckets_to_widget_labels(bucket: &[TextMetaInstance]) -> Vec<WidgetLabel> {
+    bucket.iter().map(text_meta_to_widget_label).collect()
 }
 
 /// Pure data transform. Zero GPU work. Runs on the main thread between
@@ -230,15 +283,16 @@ fn translate_badge(b: &SceneBadge) -> BadgeMetaInstance {
 }
 
 fn translate_text(t: &SceneText) -> TextMetaInstance {
-    // TextAnchor is retained in the scene primitive; for the S8 bridge
-    // we surface (x, y) verbatim and rely on the future glyph pipeline
-    // to honour the anchor. This is documented in the struct.
+    // Slice 3: propagate the scene's anchor so the downstream text
+    // pipeline (cryoglyph) places the glyph box correctly. The legacy
+    // [`LabelAnchor`] mapping lives in [`scene_anchor_to_label_anchor`].
     TextMetaInstance {
         x: t.x,
         y: t.y,
         size_px: t.size_px,
         color: rgba8_to_f32(t.color),
         text: t.text.clone(),
+        anchor: t.anchor,
     }
 }
 

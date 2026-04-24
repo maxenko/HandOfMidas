@@ -28,6 +28,8 @@
 //!   - R2-NM-7 Camera deletion: `InteractionState` captures pan/zoom/
 //!     drag/hover.
 
+pub mod error;
+pub mod input;
 pub mod interaction;
 pub mod layer;
 pub mod layers;
@@ -35,20 +37,29 @@ pub mod paint;
 pub mod primitives;
 pub mod scene;
 
-pub use crate::interaction::{BracketLeg, DragSession, HoverTarget, InteractionState};
-pub use crate::layer::{LayerId, LayerZ, SceneLayer};
+pub use crate::error::SceneError;
+pub use crate::input::{
+    CursorShape, EventStatus, Hit, InputEvent, Key, Modifiers, MouseButton, Point,
+};
+pub use crate::interaction::{
+    auto_scale_price, pan_time_window, zoom_price_range_at, zoom_time_window_at, BracketLeg,
+    DragSession, HoverTarget, InteractionState, MAX_ZOOM_OUT_YEARS, MIN_VISIBLE_CANDLES,
+};
+pub use crate::layer::{InteractiveLayer, LayerId, LayerZ, SceneLayer, ToolContext};
 pub use crate::layers::{
-    CandleLayer, CandleStyle, CrosshairLayer, DecoratorLayer, GridLayer, GridStyle,
+    bin_count_for_viewport, AtrLayer, AtrStyle, BrightIndices, CandleLayer, CandleStyle,
+    CrosshairLayer, DecoratorLayer, GerchikAtrLayer, GerchikStyle, GridLayer, GridStyle,
     HolidayMarkerLayer, LevelLayer, LevelView, OrderBracketLayer, OrderBracketView, PriceLineLayer,
     PriceLineView, SeparatorStyle, SessionBandLayer, SessionBoundary, SessionPalette,
-    SessionSeparatorLayer, SharedCandleSeries, Side, VolumeLayer, VolumeStyle,
+    SessionSeparatorLayer, SharedCandleSeries, Side, VolumeLayer, VolumeProfileLayer,
+    VolumeProfileStyle, VolumeStyle,
 };
 pub use crate::paint::PaintContext;
 pub use crate::primitives::{
     BadgeInstance, CandleInstance, LineInstance, QuadInstance, ScenePrimitives, TextAnchor,
     TextInstance,
 };
-pub use crate::scene::{ChartScene, ChartSceneBuilder, LayerConfig, SceneError};
+pub use crate::scene::{ChartScene, ChartSceneBuilder, LayerConfig, SceneBuildError};
 
 // Convenience re-exports — downstream crates pull the full scene surface
 // from `midas-scene` without a second `midas-axis` / `midas-calendar`

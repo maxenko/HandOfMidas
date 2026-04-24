@@ -27,3 +27,11 @@ pub mod thumbnail_widget;
 /// whole `midas-app` binary. Feature-gated on `session_chart`.
 #[cfg(feature = "session_chart")]
 pub mod session_chart;
+
+/// Chart-transition parity harness (`plan/chart-transition` Slice 0).
+/// Exposed at lib-root so the chart-parity-fixture integration test
+/// can consume [`chart_parity::compare_images`] without pulling in
+/// the bin-private `dev_harness` module. The bin's dev-harness
+/// command dispatch re-exports from here.
+#[cfg(feature = "dev_harness")]
+pub mod chart_parity;

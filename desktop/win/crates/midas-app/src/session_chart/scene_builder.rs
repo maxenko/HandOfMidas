@@ -51,7 +51,7 @@ use midas_axis::{PriceRange, TimeAxis, Viewport};
 use midas_calendar::ExchangeCalendar;
 use midas_scene::{
     CandleLayer, CandleStyle, ChartScene, CrosshairLayer, GridLayer, GridStyle, HolidayMarkerLayer,
-    InteractionState, SceneError, SessionBandLayer, SessionSeparatorLayer, SharedCandleSeries,
+    InteractionState, SceneBuildError, SessionBandLayer, SessionSeparatorLayer, SharedCandleSeries,
     ThemePalette, VolumeLayer, VolumeStyle,
 };
 
@@ -180,7 +180,7 @@ pub struct SceneConfig<'a, A: TimeAxis + 'static> {
 
 /// Build a [`ChartScene`] for the given frame.
 ///
-/// Returns [`SceneError`] if the underlying builder rejects the config
+/// Returns [`SceneBuildError`] if the underlying builder rejects the config
 /// (e.g. mixed-up viewport). Each layer is optional — disabled ones
 /// simply aren't added, so zero-cost when the user doesn't want them.
 ///
@@ -190,7 +190,7 @@ pub struct SceneConfig<'a, A: TimeAxis + 'static> {
 /// holiday layer walks a year range derived from the time window.
 pub fn build_scene<A: TimeAxis + 'static>(
     cfg: SceneConfig<'_, A>,
-) -> Result<ChartScene, SceneError> {
+) -> Result<ChartScene, SceneBuildError> {
     let SceneConfig {
         series,
         axis,

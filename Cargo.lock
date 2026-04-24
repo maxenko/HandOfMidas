@@ -1147,6 +1147,7 @@ dependencies = [
  "midas-calendar",
  "smallvec",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -1159,6 +1160,7 @@ dependencies = [
  "serde_json",
  "smallvec",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -1301,12 +1303,15 @@ name = "midas-scene"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "chrono-tz",
  "midas-axis",
  "midas-bars",
  "midas-calendar",
  "parking_lot",
  "smallvec",
  "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

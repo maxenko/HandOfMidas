@@ -507,6 +507,34 @@ pub fn handle_command(
                 },
             )
         }
+
+        Command::CompareImages {
+            path_a,
+            path_b,
+            diff_out,
+        } => {
+            match crate::chart_parity::compare_images(&path_a, &path_b, diff_out.as_deref()) {
+                Ok(result) => {
+                    let body = serde_json::to_value(&result).unwrap_or_else(|_| {
+                        serde_json::json!({
+                            "ssim": result.ssim,
+                            "diff_fraction": result.diff_fraction,
+                            "width": result.width,
+                            "height": result.height,
+                        })
+                    });
+                    responder.ok(body, cursor_now());
+                }
+                Err(e) => {
+                    responder.err(
+                        ErrorKind::Internal,
+                        format!("compare_images: {e}"),
+                        cursor_now(),
+                    );
+                }
+            }
+            iced::Task::none()
+        }
     }
 }
 

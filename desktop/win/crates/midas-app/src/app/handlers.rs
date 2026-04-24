@@ -4303,6 +4303,46 @@ fn apply_quote_to_matching_charts(
     }
 }
 
+/// Slice 2c of chart-transition: fan a quote-cadence tick out to
+/// every session-chart panel bound to `sym` by folding the price
+/// into the shared `Arc<RwLock<CandleSeries>>` under a SINGLE write
+/// guard. Also flips the paint-pending flag on every matching
+/// floating-session-chart widget so iced's draw loop knows a repaint
+/// is due.
+///
+/// Constraint (plan R15): per symbol, only ONE write-guard take per
+/// `QuoteBatch` entry covers every session-chart panel for that
+/// symbol — they share the same `Arc`. No per-panel lock. Per-panel
+/// scan is needed only for the paint-pending flag (a lock-free
+/// atomic), which does not serialize.
+#[cfg(feature = "session_chart")]
+fn apply_quote_to_session_chart_series(
+    registry: &crate::session_chart::SymbolSeriesRegistry,
+    sym: &midas_broker_core::SymbolKey,
+    price: f64,
+    floating_session_charts: &std::collections::HashMap<
+        iced::window::Id,
+        crate::session_chart_window::SessionChartWindow,
+    >,
+) {
+    let Some(series_arc) = registry.get(sym) else {
+        return;
+    };
+    // One write-guard take per (symbol, batch) — not per panel.
+    {
+        let mut guard = series_arc.write();
+        guard.update_last_price(price);
+    }
+    // Flag every session-chart window for repaint. This walk is
+    // lock-free on the widget side (the `paint_pending` atomic) but
+    // does take brief read-locks on each widget to reach its
+    // interaction state; the guards never cross an `.await`.
+    for win in floating_session_charts.values() {
+        let w = win.widget.read();
+        w.interaction().mark_paint_pending();
+    }
+}
+
 /// Fold a single `Bar` (router-era) into a `CandleBuffer` via
 /// `apply_bar`. Narrows the `u64` volume to `u32` with saturation.
 fn apply_bar_to_buffer(
@@ -4524,6 +4564,29 @@ impl MidasApp {
                             &sym.symbol,
                             price_f32,
                         );
+
+                        // Slice 2c of chart-transition: fan the same
+                        // tick out to every session-chart panel
+                        // bound to `sym`. The registry returns the
+                        // SHARED `Arc<RwLock<CandleSeries>>` — one
+                        // write-guard take per (symbol, batch)
+                        // covers N panels. Paint coalescing (plan
+                        // R15): `take_paint_pending()` flips true
+                        // on every widget that reads the shared
+                        // series; iced's draw loop observes + clears
+                        // it per frame. The legacy
+                        // `apply_quote_to_matching_charts` path
+                        // above stays until slice 9c retires the
+                        // legacy chart.
+                        #[cfg(feature = "session_chart")]
+                        {
+                            apply_quote_to_session_chart_series(
+                                &self.session_chart_registry,
+                                sym,
+                                price,
+                                &self.floating_session_charts,
+                            );
+                        }
                     }
                 }
                 Task::none()

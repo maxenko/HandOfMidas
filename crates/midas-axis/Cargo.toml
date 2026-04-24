@@ -6,10 +6,11 @@ description = "Time-axis projection for the session-aware chart stack (continuou
 
 [dependencies]
 chrono = "0.4"
+chrono-tz = "0.10"
 midas-bars = { path = "../midas-bars" }
 midas-calendar = { path = "../midas-calendar" }
 smallvec = "1"
 thiserror = "2"
+tracing = "0.1"
 
 [dev-dependencies]
-chrono-tz = "0.10"

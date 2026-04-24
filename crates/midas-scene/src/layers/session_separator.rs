@@ -99,7 +99,7 @@ impl SceneLayer for SessionSeparatorLayer {
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
-    use midas_axis::{ContinuousAxis, PriceRange, Viewport};
+    use midas_axis::{ContinuousAxis, DefaultFormatter, LinearPriceAxis, PriceRange, Viewport};
     use midas_calendar::{xnys, Timestamp};
 
     use super::*;
@@ -136,11 +136,15 @@ mod tests {
         let vp = Viewport::new(1000.0, 400.0);
         let pal = ThemePalette::dark_default();
         let mut out = ScenePrimitives::default();
+        let paxis = LinearPriceAxis::new(pr, vp.height_px);
+        let fmt = DefaultFormatter::new();
         let mut ctx = PaintContext {
             axis: &axis,
             viewport: vp,
             price_range: pr,
             palette: &pal,
+            price_axis: &paxis,
+            formatter: &fmt,
             out: &mut out,
         };
         layer.paint(&mut ctx);
@@ -159,11 +163,15 @@ mod tests {
         let vp = Viewport::new(1000.0, 400.0);
         let pal = ThemePalette::dark_default();
         let mut out = ScenePrimitives::default();
+        let paxis = LinearPriceAxis::new(pr, vp.height_px);
+        let fmt = DefaultFormatter::new();
         let mut ctx = PaintContext {
             axis: &axis,
             viewport: vp,
             price_range: pr,
             palette: &pal,
+            price_axis: &paxis,
+            formatter: &fmt,
             out: &mut out,
         };
         layer.paint(&mut ctx);

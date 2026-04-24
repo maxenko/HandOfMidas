@@ -176,6 +176,22 @@ pub enum Command {
     /// token read at [`SpawnSim`] time. Body is serialised to the same
     /// `{"type": "...", ...}` shape the sim accepts.
     InjectSimFault { fault: SimFault },
+
+    // -- Chart-transition parity harness (Slice 0) --
+    /// Compare two PNGs on disk. Mirrors the same
+    /// `image_compare::rgba_hybrid_compare` + pixel-diff path the
+    /// screenshot handler uses, without requiring a
+    /// `.devloop/refs/<stem>.png` convention. The response body is a
+    /// [`CompareResult`]. Written to drive chart-parity-harness
+    /// scripts that need to diff two arbitrary paths (e.g.
+    /// legacy-backend.png vs new-backend.png of the same fixture).
+    CompareImages {
+        path_a: PathBuf,
+        path_b: PathBuf,
+        /// Optional: write the similarity map to this path. Skipped if
+        /// `None` so CI scripts can keep the harness read-only.
+        diff_out: Option<PathBuf>,
+    },
 }
 
 /// Fault-injection payloads forwarded to the sim control plane. Wire
@@ -218,6 +234,23 @@ pub enum SimFault {
         multiplier: f64,
         duration_ms: u64,
     },
+}
+
+/// Body payload for a successful [`Command::CompareImages`]. Serialises
+/// into the `Response::Ok { body }` envelope.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CompareResult {
+    /// SSIM ∈ `[0.0, 1.0]`; `1.0` = identical. Mirrors
+    /// `image_compare::rgba_hybrid_compare(..).score`.
+    pub ssim: f64,
+    /// Fraction of pixels that differ by more than the perceptual
+    /// threshold used in the screenshot diff path.
+    pub diff_fraction: f64,
+    pub width: u32,
+    pub height: u32,
+    /// Set iff the command supplied `diff_out` AND the similarity map
+    /// was written successfully.
+    pub diff_path: Option<PathBuf>,
 }
 
 // ── Responses ─────────────────────────────────────────────────────────

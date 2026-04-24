@@ -127,7 +127,9 @@ fn nice_step(raw: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
-    use midas_axis::{ContinuousAxis, PriceRange, TimeAxis, Viewport};
+    use midas_axis::{
+        ContinuousAxis, DefaultFormatter, LinearPriceAxis, PriceRange, TimeAxis, Viewport,
+    };
     use midas_calendar::Timestamp;
 
     use super::*;
@@ -146,11 +148,15 @@ mod tests {
         let vp = Viewport::new(1000.0, 400.0);
         let pal = ThemePalette::dark_default();
         let mut out = ScenePrimitives::default();
+        let paxis = LinearPriceAxis::new(pr, vp.height_px);
+        let fmt = DefaultFormatter::new();
         let mut ctx = PaintContext {
             axis: &axis,
             viewport: vp,
             price_range: pr,
             palette: &pal,
+            price_axis: &paxis,
+            formatter: &fmt,
             out: &mut out,
         };
         GridLayer::with_defaults().paint(&mut ctx);
@@ -172,11 +178,15 @@ mod tests {
         let vp = Viewport::new(1000.0, 400.0);
         let pal = ThemePalette::dark_default();
         let mut out = ScenePrimitives::default();
+        let paxis = LinearPriceAxis::new(pr, vp.height_px);
+        let fmt = DefaultFormatter::new();
         let mut ctx = PaintContext {
             axis: &axis,
             viewport: vp,
             price_range: pr,
             palette: &pal,
+            price_axis: &paxis,
+            formatter: &fmt,
             out: &mut out,
         };
         GridLayer::with_defaults().paint(&mut ctx);
@@ -196,11 +206,15 @@ mod tests {
         let vp = Viewport::new(1000.0, 400.0);
         let pal = ThemePalette::dark_default();
         let mut out = ScenePrimitives::default();
+        let paxis = LinearPriceAxis::new(pr, vp.height_px);
+        let fmt = DefaultFormatter::new();
         let mut ctx = PaintContext {
             axis: &axis,
             viewport: vp,
             price_range: pr,
             palette: &pal,
+            price_axis: &paxis,
+            formatter: &fmt,
             out: &mut out,
         };
         let expected_ticks = axis.ticks(TickDensity::Normal).len();

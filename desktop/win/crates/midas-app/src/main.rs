@@ -7,6 +7,8 @@ mod account_panel;
 mod annotation_persistence;
 mod annotation_store;
 mod app;
+#[cfg(feature = "dev_harness")]
+mod chart_parity;
 mod chart_view;
 mod chart_widget;
 mod column_resize;

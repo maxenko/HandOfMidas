@@ -5,11 +5,15 @@
 //! builder so projection pieces are validated (all three of
 //! axis / price_range / viewport are required).
 
-use midas_axis::{PriceRange, TimeAxis, Viewport};
+use std::panic::AssertUnwindSafe;
 
-use crate::layer::{LayerZ, SceneLayer};
+use midas_axis::{DefaultFormatter, LinearPriceAxis, PriceRange, TimeAxis, Viewport};
+
+use crate::error::SceneError;
+use crate::input::{EventStatus, Hit, InputEvent, Point};
+use crate::layer::{InteractiveLayer, LayerId, LayerZ, SceneLayer, ToolContext};
 use crate::paint::PaintContext;
-use crate::primitives::ScenePrimitives;
+use crate::primitives::{QuadInstance, ScenePrimitives};
 use crate::ThemePalette;
 
 /// Declarative layer-toggle set for a scene. Callers build a scene
@@ -79,12 +83,27 @@ impl Default for LayerConfig {
 
 /// Finished scene: sorted layer stack + projection state. Produced by
 /// [`ChartSceneBuilder`].
+///
+/// Slice 1 added three interactive-layer fields per plan:
+/// - [`active_tool`](ChartScene::set_active_tool) — the mutually-
+///   exclusive slot for a tool (bracket placement, level draw). Per
+///   D2 this lives on the scene so tool state survives widget
+///   rebuilds.
+/// - [`drag_focus`](ChartScene::drag_focus) — once a layer returns
+///   `Captured` from `update`, events bypass hit-testing and route
+///   directly to it until `MouseUp`.
+/// - `last_error` — slot for runtime errors emitted by tools /
+///   layers (see [`SceneError`]). Widget drains this per-frame to
+///   surface toasts.
 pub struct ChartScene {
     axis: Box<dyn TimeAxis>,
     price_range: PriceRange,
     viewport: Viewport,
     palette: ThemePalette,
     layers: Vec<Box<dyn SceneLayer>>,
+    active_tool: Option<Box<dyn InteractiveLayer>>,
+    drag_focus: Option<LayerId>,
+    last_error: Option<SceneError>,
 }
 
 impl std::fmt::Debug for ChartScene {
@@ -116,18 +135,274 @@ impl ChartScene {
 
     /// Paint every layer in z-order into `out`. Clears `out` first so
     /// the caller can reuse the same buffer across frames.
+    ///
+    /// Panic isolation (slice 1): each layer's `paint` call is
+    /// wrapped in `catch_unwind`. A panicking layer emits a debug-red
+    /// fallback quad at the viewport bounds + `tracing::error!`; other
+    /// layers continue painting. The scene records a
+    /// [`SceneError::PanicFallback`] on `last_error` so downstream
+    /// tests and the dev-harness `DumpState` projection can observe
+    /// the recovery.
+    ///
+    /// Because `paint` is `&self`, the last-error write goes through
+    /// an interior-mutability pattern: callers who want to inspect
+    /// `last_error` after a panic should use [`paint_mut`].
     pub fn paint(&self, out: &mut ScenePrimitives) {
-        out.clear();
-        let mut ctx = PaintContext {
-            axis: self.axis.as_ref(),
-            viewport: self.viewport,
-            price_range: self.price_range,
-            palette: &self.palette,
-            out,
-        };
-        for layer in &self.layers {
-            layer.paint(&mut ctx);
+        self.paint_impl(out, &mut None);
+    }
+
+    /// Mutable variant of [`paint`] that writes recovered panics to
+    /// the scene's `last_error` slot. Use this when the caller cares
+    /// whether a fallback quad was emitted.
+    pub fn paint_mut(&mut self, out: &mut ScenePrimitives) {
+        // Take a temporary slot; move back into self after paint.
+        let mut err_slot: Option<SceneError> = None;
+        self.paint_impl(out, &mut err_slot);
+        if let Some(e) = err_slot {
+            self.last_error = Some(e);
         }
+    }
+
+    fn paint_impl(&self, out: &mut ScenePrimitives, err_sink: &mut Option<SceneError>) {
+        out.clear();
+        // Slice 2a: synthesise a per-frame `LinearPriceAxis` from the
+        // scene's `price_range` + viewport height so every layer sees
+        // the same `&dyn PriceAxis`. The formatter is stateless and
+        // fixed to [`DefaultFormatter`] for now; a future slice will
+        // let callers inject a custom one.
+        let price_axis = LinearPriceAxis::new(self.price_range, self.viewport.height_px);
+        let formatter = DefaultFormatter::new();
+        for layer in &self.layers {
+            let layer_id = layer.id();
+            // `AssertUnwindSafe` because `PaintContext` borrows `out`
+            // mutably; under panic we may leave `out` in an
+            // arbitrary-but-valid Vec state, which is fine — we then
+            // emit a fallback quad into the same `out` and move on.
+            let ctx_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                let mut ctx = PaintContext {
+                    axis: self.axis.as_ref(),
+                    viewport: self.viewport,
+                    price_range: self.price_range,
+                    palette: &self.palette,
+                    price_axis: &price_axis,
+                    formatter: &formatter,
+                    out,
+                };
+                layer.paint(&mut ctx);
+            }));
+            if let Err(_panic) = ctx_result {
+                tracing::error!(
+                    target: "midas_scene::scene",
+                    layer = %layer_id,
+                    "layer paint panicked; emitting fallback quad"
+                );
+                out.quads.push(QuadInstance {
+                    x: 0.0,
+                    y: 0.0,
+                    w: self.viewport.width_px,
+                    h: self.viewport.height_px,
+                    color: [0xff, 0x00, 0x00, 0x55],
+                });
+                if err_sink.is_none() {
+                    *err_sink = Some(SceneError::PanicFallback { layer: layer_id });
+                }
+            }
+        }
+    }
+
+    // ── Interactive layer plumbing (slice 1) ─────────────────────────
+
+    /// Install an active tool. Replaces any existing tool — at most
+    /// one is live at a time. The scene dispatches `InputEvent`s to
+    /// the tool first, then falls through to layer hit-testing.
+    pub fn set_active_tool(&mut self, tool: Box<dyn InteractiveLayer>) {
+        if self.active_tool.is_some() {
+            tracing::debug!(
+                target: "midas_scene::scene",
+                "replacing active_tool"
+            );
+            self.clear_active_tool();
+        }
+        tracing::debug!(
+            target: "midas_scene::scene",
+            id = %tool.id(),
+            "install active_tool"
+        );
+        self.active_tool = Some(tool);
+    }
+
+    /// Cancel + drop the active tool. Idempotent.
+    pub fn clear_active_tool(&mut self) {
+        if let Some(mut tool) = self.active_tool.take() {
+            tracing::debug!(
+                target: "midas_scene::scene",
+                id = %tool.id(),
+                "clear active_tool"
+            );
+            tool.cancel();
+        }
+    }
+
+    /// True iff an active tool is installed.
+    #[inline]
+    pub fn has_active_tool(&self) -> bool {
+        self.active_tool.is_some()
+    }
+
+    /// Current drag-focus, if any layer is capturing events.
+    #[inline]
+    pub fn drag_focus(&self) -> Option<LayerId> {
+        self.drag_focus
+    }
+
+    /// Drain and return the scene's last reported error. Returning
+    /// it clears the slot so the widget only surfaces each error
+    /// once.
+    pub fn take_last_error(&mut self) -> Option<SceneError> {
+        self.last_error.take()
+    }
+
+    /// Dispatch an input event.
+    ///
+    /// Routing order (per plan D4):
+    ///
+    /// 1. If `drag_focus` is set, route directly to that layer /
+    ///    tool — bypass hit-testing. Release drag-focus on `MouseUp`.
+    /// 2. Escape key → always `cancel()` the active tool + clear
+    ///    drag-focus.
+    /// 3. Active tool gets first shot; if it returns `Captured`,
+    ///    scene records drag-focus on `MouseDown`.
+    /// 4. Layers top-down (highest z first); first `Captured` wins.
+    /// 5. Fallthrough: `Ignored` — caller (widget) handles chart-
+    ///    scene-level pan/zoom.
+    pub fn handle_input(&mut self, ev: InputEvent) -> EventStatus {
+        // Escape: always clears tool + drag-focus.
+        if let InputEvent::KeyDown {
+            key: crate::input::Key::Escape,
+            ..
+        } = ev
+        {
+            let had_tool = self.active_tool.is_some();
+            let had_drag = self.drag_focus.is_some();
+            self.clear_active_tool();
+            self.drag_focus = None;
+            if had_tool || had_drag {
+                return EventStatus::Captured;
+            }
+            return EventStatus::Ignored;
+        }
+
+        // MouseUp always clears drag-focus (even if the dragged
+        // layer returns Ignored on the up event).
+        let is_mouse_up = matches!(ev, InputEvent::MouseUp { .. });
+
+        // 1. Drag-focus routing.
+        if let Some(focus_id) = self.drag_focus {
+            let status = self.route_to_id(focus_id, ev);
+            if is_mouse_up {
+                self.drag_focus = None;
+            }
+            return status;
+        }
+
+        // 2. Active-tool first shot.
+        let (status_from_tool, should_set_drag) = {
+            let mut tool_ctx = ToolContext {
+                price_range: &self.price_range,
+                last_error: &mut self.last_error,
+            };
+            if let Some(tool) = self.active_tool.as_mut() {
+                let s = tool.update(ev, &mut tool_ctx);
+                let drag = matches!(s, EventStatus::Captured)
+                    && matches!(ev, InputEvent::MouseDown { .. });
+                (Some((s, tool.id())), drag)
+            } else {
+                (None, false)
+            }
+        };
+        if let Some((s, id)) = status_from_tool {
+            if matches!(s, EventStatus::Captured) {
+                if should_set_drag {
+                    self.drag_focus = Some(id);
+                }
+                return EventStatus::Captured;
+            }
+        }
+
+        // 3. Layers top-down. We reverse-iterate because builder
+        // sorts ascending by z; the visually-topmost is the last
+        // entry.
+        let mut winner: Option<(usize, LayerId)> = None;
+        for (idx, layer) in self.layers.iter_mut().enumerate().rev() {
+            if let Some(il) = layer.as_interactive() {
+                let mut tool_ctx = ToolContext {
+                    price_range: &self.price_range,
+                    last_error: &mut self.last_error,
+                };
+                let s = il.update(ev, &mut tool_ctx);
+                if matches!(s, EventStatus::Captured) {
+                    let id = layer.id();
+                    winner = Some((idx, id));
+                    break;
+                }
+            }
+        }
+        if let Some((_idx, id)) = winner {
+            if matches!(ev, InputEvent::MouseDown { .. }) {
+                self.drag_focus = Some(id);
+            }
+            return EventStatus::Captured;
+        }
+
+        EventStatus::Ignored
+    }
+
+    /// Route an event to a specific drag-captured target (either the
+    /// active tool, if its id matches, or a layer by id). Used when
+    /// `drag_focus` is set.
+    fn route_to_id(&mut self, target: LayerId, ev: InputEvent) -> EventStatus {
+        if let Some(tool) = self.active_tool.as_mut() {
+            if tool.id() == target {
+                let mut ctx = ToolContext {
+                    price_range: &self.price_range,
+                    last_error: &mut self.last_error,
+                };
+                return tool.update(ev, &mut ctx);
+            }
+        }
+        for layer in self.layers.iter_mut() {
+            if layer.id() == target {
+                if let Some(il) = layer.as_interactive() {
+                    let mut ctx = ToolContext {
+                        price_range: &self.price_range,
+                        last_error: &mut self.last_error,
+                    };
+                    return il.update(ev, &mut ctx);
+                }
+            }
+        }
+        EventStatus::Ignored
+    }
+
+    /// Hit-test helper. Slice 1 returns `None` unconditionally; slice
+    /// 2b wires the real top-down cascade once `InteractionState`
+    /// needs it for cursor-shape resolution. The current
+    /// `InteractiveLayer::hit_test` takes `&self`, but `SceneLayer::
+    /// as_interactive` takes `&mut self`, so a pure `&self` cascade
+    /// requires a separate `hit_test` accessor on the trait — that
+    /// lands when cursor-shape wiring needs it. Keeping the signature
+    /// now so downstream slices don't change the public surface.
+    pub fn hit_test(&self, _pt: Point) -> Option<Hit> {
+        None
+    }
+
+    /// Called when the chart's host window is about to close. Cancels
+    /// any active tool + releases drag-focus so no partial state
+    /// leaks (R11: mid-placement bracket must not persist across
+    /// window-close).
+    pub fn on_destroy(&mut self) {
+        self.clear_active_tool();
+        self.drag_focus = None;
     }
 
     #[inline]
@@ -174,6 +449,7 @@ pub struct ChartSceneBuilder {
     palette: Option<ThemePalette>,
     layers: Vec<(LayerZ, usize, Box<dyn SceneLayer>)>,
     next_insertion_idx: usize,
+    active_tool: Option<Box<dyn InteractiveLayer>>,
 }
 
 impl ChartSceneBuilder {
@@ -210,15 +486,22 @@ impl ChartSceneBuilder {
         self
     }
 
-    pub fn build(self) -> Result<ChartScene, SceneError> {
+    /// Install an active tool at build time. Equivalent to calling
+    /// [`ChartScene::set_active_tool`] immediately after build.
+    pub fn active_tool<T: InteractiveLayer + 'static>(mut self, tool: T) -> Self {
+        self.active_tool = Some(Box::new(tool));
+        self
+    }
+
+    pub fn build(self) -> Result<ChartScene, SceneBuildError> {
         let Some(axis) = self.axis else {
-            return Err(SceneError::MissingAxis);
+            return Err(SceneBuildError::MissingAxis);
         };
         let Some(price_range) = self.price_range else {
-            return Err(SceneError::MissingPriceRange);
+            return Err(SceneBuildError::MissingPriceRange);
         };
         let Some(viewport) = self.viewport else {
-            return Err(SceneError::MissingViewport);
+            return Err(SceneBuildError::MissingViewport);
         };
         let palette = self.palette.unwrap_or_else(ThemePalette::dark_default);
         let mut layers = self.layers;
@@ -230,13 +513,20 @@ impl ChartSceneBuilder {
             viewport,
             palette,
             layers,
+            active_tool: self.active_tool,
+            drag_focus: None,
+            last_error: None,
         })
     }
 }
 
-/// Errors surfaced by [`ChartSceneBuilder::build`].
+/// Build-time errors surfaced by [`ChartSceneBuilder::build`].
+///
+/// Renamed from `SceneBuildError` in slice 1 to disambiguate from
+/// [`crate::error::SceneBuildError`] which reports *runtime* tool /
+/// annotation / panic-recovery faults.
 #[derive(Debug, thiserror::Error)]
-pub enum SceneError {
+pub enum SceneBuildError {
     #[error("builder missing axis")]
     MissingAxis,
     #[error("builder missing price_range")]
@@ -329,7 +619,7 @@ mod tests {
             .viewport(vp())
             .build()
             .unwrap_err();
-        assert!(matches!(err, SceneError::MissingAxis));
+        assert!(matches!(err, SceneBuildError::MissingAxis));
     }
 
     #[test]
@@ -339,7 +629,7 @@ mod tests {
             .viewport(vp())
             .build()
             .unwrap_err();
-        assert!(matches!(err, SceneError::MissingPriceRange));
+        assert!(matches!(err, SceneBuildError::MissingPriceRange));
     }
 
     #[test]
@@ -349,7 +639,7 @@ mod tests {
             .price_range(pr())
             .build()
             .unwrap_err();
-        assert!(matches!(err, SceneError::MissingViewport));
+        assert!(matches!(err, SceneBuildError::MissingViewport));
     }
 
     #[test]

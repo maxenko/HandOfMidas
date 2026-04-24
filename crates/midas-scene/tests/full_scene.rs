@@ -156,8 +156,11 @@ fn full_xnys_scene_with_all_layers_emits_expected_primitives() {
     //     So: 1 badge.
     assert_eq!(out.badges.len(), 1);
 
-    // --- Text: 1 price-line label + 1 level label.
-    assert_eq!(out.text.len(), 2);
+    // --- Text: 1 price-line label + 1 level label + 2 crosshair
+    //     axis labels (price at right margin, time at bottom margin).
+    //     The crosshair has no series attached in this fixture, so no
+    //     OHLC box emits — see slice 3 of the chart-transition plan.
+    assert_eq!(out.text.len(), 4);
 
     // Sanity: every primitive fits inside a finite range.
     for c in &out.candles {

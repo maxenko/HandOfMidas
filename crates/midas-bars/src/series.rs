@@ -215,6 +215,54 @@ impl CandleSeries {
         self.debug_check_invariant();
     }
 
+    /// Tick-cadence update: fold a last-trade price into the current
+    /// (last) candle without creating a new row.
+    ///
+    /// Semantics (mirrors the legacy `midas_core::CandleBuffer::
+    /// update_last_price` that shipped in `fad1878`):
+    ///
+    /// - If the series is empty, the call is a no-op.
+    /// - If `price` is NaN or infinite, the call is a no-op — neither
+    ///   columns nor version advance.
+    /// - Otherwise: `close = price`, `high = max(high, price)`,
+    ///   `low = min(low, price)`. Open, timestamp, volume, trade_count
+    ///   and WAP are untouched.
+    ///
+    /// The method bumps `version` so observers see the mutation.
+    ///
+    /// Slice 2c of the chart-transition plan. Drives the
+    /// watchlist ↔ chart synchronization at quote cadence — every
+    /// chart panel bound to a symbol shares the same
+    /// `Arc<RwLock<CandleSeries>>` and one `update_last_price` call
+    /// refreshes all of them under a single write guard.
+    pub fn update_last_price(&mut self, price: f64) {
+        if !price.is_finite() {
+            return;
+        }
+        if self.closes.is_empty() {
+            return;
+        }
+        let price_f32 = price as f32;
+        let last = self.closes.len() - 1;
+        // Extend high if the tick prints a new high.
+        if price_f32 > self.highs[last] {
+            self.highs[last] = price_f32;
+        }
+        // Extend low if the tick prints a new low.
+        if price_f32 < self.lows[last] {
+            self.lows[last] = price_f32;
+        }
+        self.closes[last] = price_f32;
+        self.bump_version();
+        tracing::debug!(
+            target: "midas_bars::series::update_last_price",
+            symbol = ?self.symbol,
+            price,
+            "tick fold",
+        );
+        self.debug_check_invariant();
+    }
+
     /// Optional rolling-cap configured at construction.
     #[inline]
     pub fn max_rows(&self) -> Option<usize> {

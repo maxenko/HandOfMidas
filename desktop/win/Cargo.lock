@@ -2011,7 +2011,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.58.0",
 ]
 
 [[package]]
@@ -2863,10 +2863,12 @@ name = "midas-axis"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "chrono-tz",
  "midas-bars",
  "midas-calendar",
  "smallvec",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -2878,6 +2880,7 @@ dependencies = [
  "serde",
  "smallvec",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -3084,12 +3087,14 @@ name = "midas-scene"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "chrono-tz",
  "midas-axis",
  "midas-bars",
  "midas-calendar",
  "parking_lot",
  "smallvec",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -3135,6 +3140,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "glam 0.29.3",
+ "image",
  "midas-app",
  "midas-axis",
  "midas-bars",

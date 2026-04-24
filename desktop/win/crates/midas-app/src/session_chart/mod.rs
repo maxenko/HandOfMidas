@@ -120,6 +120,7 @@ pub mod driver;
 pub mod gpu_renderer;
 pub mod policy;
 pub mod primitives_bridge;
+pub mod registry;
 pub mod scene_builder;
 pub mod shader;
 pub mod widget;
@@ -129,6 +130,7 @@ pub use driver::{DriverError, SessionChartDriver, VersionReceiver};
 pub use gpu_renderer::SessionChartRenderer;
 pub use policy::EhPolicy;
 pub use primitives_bridge::{translate, BadgeMetaInstance, RenderBuckets, TextMetaInstance};
+pub use registry::SymbolSeriesRegistry;
 pub use scene_builder::{build_scene, SceneConfig, SceneLayers};
 pub use shader::{
     session_chart_shader, SessionChartPipeline, SessionChartPrimitive, SessionChartProgram,

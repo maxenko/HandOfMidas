@@ -42,11 +42,15 @@ use midas_calendar::{ExchangeCalendar, SessionBuf, TimeAxisPolicy, Timestamp};
 
 mod compressed;
 mod continuous;
+mod format;
+mod price;
 mod session_index;
 mod ticks;
 
 pub use crate::compressed::CompressedAxis;
 pub use crate::continuous::ContinuousAxis;
+pub use crate::format::{DefaultFormatter, LabelFormatter};
+pub use crate::price::{LinearPriceAxis, PriceAxis};
 pub use crate::session_index::SessionIndexAxis;
 
 // Re-export the bar-period for convenience; downstream crates should be

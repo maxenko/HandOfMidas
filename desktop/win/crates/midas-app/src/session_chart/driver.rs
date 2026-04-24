@@ -35,10 +35,13 @@
 use std::sync::Arc;
 
 use midas_bars::{Candle, CandleSeries, Completeness};
+use midas_broker_core::SymbolKey;
 use midas_stream::BarStream;
 use parking_lot::RwLock;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+
+use super::registry::SymbolSeriesRegistry;
 
 /// Handle to the pump task. On `drop`, the task is aborted so
 /// shutdown cascades cleanly to the upstream `BarStream`.
@@ -61,6 +64,11 @@ pub struct SessionChartDriver {
     _pump: JoinHandle<()>,
     series: Arc<RwLock<CandleSeries>>,
     version_rx: watch::Receiver<u64>,
+    /// Slice 2c: registry + the key we registered under so the Drop
+    /// impl can call `deregister`. Optional — legacy callers
+    /// (`spawn`) still work; slice 2c call sites use
+    /// [`SessionChartDriver::spawn_with_registry`].
+    registry: Option<(SymbolSeriesRegistry, SymbolKey)>,
 }
 
 /// Receiver side of the driver's version counter. Each bump on
@@ -88,7 +96,35 @@ impl SessionChartDriver {
     /// task is the ONLY writer. Readers on other threads should take
     /// their own clone of the Arc and `try_lock` or `blocking_lock`
     /// during paint.
-    pub fn spawn<S>(series: Arc<RwLock<CandleSeries>>, mut stream: S) -> Self
+    pub fn spawn<S>(series: Arc<RwLock<CandleSeries>>, stream: S) -> Self
+    where
+        S: BarStream + Send + 'static,
+    {
+        Self::spawn_inner(series, stream, None)
+    }
+
+    /// Slice 2c: spawn + register the shared series in a
+    /// [`SymbolSeriesRegistry`] so the app's `QuoteBatch` handler can
+    /// find it from a `SymbolKey`. The driver's `Drop` deregisters
+    /// automatically.
+    pub fn spawn_with_registry<S>(
+        series: Arc<RwLock<CandleSeries>>,
+        stream: S,
+        registry: SymbolSeriesRegistry,
+        key: SymbolKey,
+    ) -> Self
+    where
+        S: BarStream + Send + 'static,
+    {
+        registry.register(key.clone(), &series);
+        Self::spawn_inner(series, stream, Some((registry, key)))
+    }
+
+    fn spawn_inner<S>(
+        series: Arc<RwLock<CandleSeries>>,
+        mut stream: S,
+        registry: Option<(SymbolSeriesRegistry, SymbolKey)>,
+    ) -> Self
     where
         S: BarStream + Send + 'static,
     {
@@ -126,6 +162,7 @@ impl SessionChartDriver {
             _pump: pump,
             series,
             version_rx,
+            registry,
         }
     }
 
@@ -146,6 +183,16 @@ impl SessionChartDriver {
     /// tests that want a synchronous snapshot.
     pub fn current_version(&self) -> u64 {
         *self.version_rx.borrow()
+    }
+}
+
+impl Drop for SessionChartDriver {
+    fn drop(&mut self) {
+        if let Some((reg, key)) = self.registry.take() {
+            reg.deregister(&key);
+        }
+        // Pump task is aborted by `JoinHandle::Drop` (field-order
+        // comment above).
     }
 }
 
@@ -370,5 +417,92 @@ mod tests {
         let mut rx = driver.version_receiver();
         rx.changed().await.unwrap();
         assert!(driver.current_version() >= 1);
+    }
+
+    // ── Slice 2c: registry integration ──────────────────────────────
+
+    fn key(s: &str) -> SymbolKey {
+        SymbolKey {
+            symbol: s.to_string(),
+            contract_id: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_with_registry_registers_shared_arc() {
+        let series = fresh_series();
+        let (tx, stream) = MockStream::new();
+        let registry = SymbolSeriesRegistry::new();
+        let k = key("BTC-USD");
+        let driver = SessionChartDriver::spawn_with_registry(
+            Arc::clone(&series),
+            stream,
+            registry.clone(),
+            k.clone(),
+        );
+        // Registry now holds the same Arc via a weak ref.
+        let got = registry.get(&k).expect("registered");
+        assert!(Arc::ptr_eq(&got, &series));
+        drop(tx);
+        drop(driver);
+    }
+
+    #[tokio::test]
+    async fn dropping_driver_deregisters_registry_entry() {
+        let series = fresh_series();
+        let (tx, stream) = MockStream::new();
+        let registry = SymbolSeriesRegistry::new();
+        let k = key("BTC-USD");
+        let driver = SessionChartDriver::spawn_with_registry(
+            Arc::clone(&series),
+            stream,
+            registry.clone(),
+            k.clone(),
+        );
+        assert!(registry.get(&k).is_some());
+        drop(tx);
+        drop(driver);
+        // With the driver gone, the registry explicit-deregister path
+        // has also fired.
+        assert!(
+            registry.get(&k).is_none(),
+            "driver drop must deregister registry entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn quote_fold_through_registry_reaches_shared_series() {
+        // End-to-end: register the series → fold a tick via the
+        // registry's Arc → observe the close on the shared series.
+        let series = fresh_series();
+        let (tx, stream) = MockStream::new();
+        let registry = SymbolSeriesRegistry::new();
+        let k = key("BTC-USD");
+        let driver = SessionChartDriver::spawn_with_registry(
+            Arc::clone(&series),
+            stream,
+            registry.clone(),
+            k.clone(),
+        );
+
+        // Seed one candle so update_last_price has a target row.
+        tx.send(mk_crypto_candle(
+            utc(2024, 3, 1, 0, 0),
+            50_000.0,
+            Completeness::Completed,
+        ))
+        .await
+        .unwrap();
+        let mut rx = driver.version_receiver();
+        rx.changed().await.unwrap();
+
+        // Fold a tick through the registry's shared Arc.
+        let handle = registry.get(&k).unwrap();
+        {
+            let mut g = handle.write();
+            g.update_last_price(50_100.0);
+        }
+        let row = series.read().at(0).map(|r| r.close()).unwrap();
+        assert!((row - 50_100.0).abs() < 1e-3);
     }
 }

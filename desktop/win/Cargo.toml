@@ -58,12 +58,18 @@ async-trait        = { workspace = true }
 chrono             = { workspace = true }
 tokio              = { workspace = true }
 parking_lot        = { workspace = true }
+image              = { workspace = true }
 
 [features]
 default = []
 # Enable the session-chart e2e integration test in `tests/`. Run with:
 #   cargo test -p midas-workspace --features session_chart_tests --test session_chart_e2e
 session_chart_tests = []
+# Chart-transition parity-harness self-validation test (slice 0). Run with:
+#   cargo test -p midas-workspace --features chart_parity_tests --test chart_parity_fixture
+# The test builds a 10-pair corpus (5 good + 5 bad) and asserts the
+# slice-0 SSIM thresholds correctly classify each pair.
+chart_parity_tests = ["midas-app/dev_harness"]
 
 # ─── Workspace-wide dependency versions ───────────────────────────────
 # Crates reference these via: dep = { workspace = true }

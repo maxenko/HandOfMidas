@@ -97,7 +97,7 @@ mod tests {
     use std::sync::Arc;
 
     use chrono::TimeZone;
-    use midas_axis::{ContinuousAxis, PriceRange, Viewport};
+    use midas_axis::{ContinuousAxis, DefaultFormatter, LinearPriceAxis, PriceRange, Viewport};
     use midas_bars::{Candle, CandleSeries, Completeness, Ohlcv, Symbol};
     use midas_calendar::{xnys, BarPeriod, Timestamp};
     use parking_lot::RwLock;
@@ -147,11 +147,15 @@ mod tests {
         let vp = Viewport::new(1000.0, 400.0);
         let pal = ThemePalette::dark_default();
         let mut out = ScenePrimitives::default();
+        let paxis = LinearPriceAxis::new(pr, vp.height_px);
+        let fmt = DefaultFormatter::new();
         let mut ctx = PaintContext {
             axis: &axis,
             viewport: vp,
             price_range: pr,
             palette: &pal,
+            price_axis: &paxis,
+            formatter: &fmt,
             out: &mut out,
         };
         VolumeLayer::with_defaults(s).paint(&mut ctx);
@@ -171,11 +175,15 @@ mod tests {
         let vp = Viewport::new(1000.0, 400.0);
         let pal = ThemePalette::dark_default();
         let mut out = ScenePrimitives::default();
+        let paxis = LinearPriceAxis::new(pr, vp.height_px);
+        let fmt = DefaultFormatter::new();
         let mut ctx = PaintContext {
             axis: &axis,
             viewport: vp,
             price_range: pr,
             palette: &pal,
+            price_axis: &paxis,
+            formatter: &fmt,
             out: &mut out,
         };
         VolumeLayer::with_defaults(s).paint(&mut ctx);
@@ -198,11 +206,15 @@ mod tests {
         let vp = Viewport::new(1000.0, 400.0);
         let pal = ThemePalette::dark_default();
         let mut out = ScenePrimitives::default();
+        let paxis = LinearPriceAxis::new(pr, vp.height_px);
+        let fmt = DefaultFormatter::new();
         let mut ctx = PaintContext {
             axis: &axis,
             viewport: vp,
             price_range: pr,
             palette: &pal,
+            price_axis: &paxis,
+            formatter: &fmt,
             out: &mut out,
         };
         VolumeLayer::with_defaults(s).paint(&mut ctx);

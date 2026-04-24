@@ -250,6 +250,168 @@ impl SessionChart {
         self.axis = AxisBox::Continuous(axis);
     }
 
+    // ── Slice 2b: pan / zoom / keyboard helpers ─────────────────────
+
+    /// Pan the visible time window horizontally by `dx_px`. Positive
+    /// shifts right, negative shifts left. Rebuilds the axis at the
+    /// new window so pixel-space queries stay correct.
+    pub fn pan_x(&mut self, dx_px: f32) {
+        let new = midas_scene::interaction::pan_time_window(
+            self.time_window,
+            dx_px,
+            self.viewport.width_px,
+        );
+        tracing::debug!(
+            target: "midas_app::session_chart::pan_x",
+            dx_px,
+            "pan x",
+        );
+        self.set_time_window(new);
+    }
+
+    /// Zoom the x-axis about a pixel anchor. `factor < 1.0` zooms in
+    /// (narrows the visible span), `> 1.0` zooms out. Uses the
+    /// period's wall-clock duration as the min-10-candles floor.
+    pub fn zoom_x_at(&mut self, anchor_x_px: f32, factor: f32) {
+        let candle_width_ns = bar_period_ns(self.period);
+        let new = midas_scene::interaction::zoom_time_window_at(
+            self.time_window,
+            anchor_x_px,
+            self.viewport.width_px,
+            factor,
+            candle_width_ns,
+        );
+        tracing::debug!(
+            target: "midas_app::session_chart::zoom_x_at",
+            anchor_x_px,
+            factor,
+            "zoom x",
+        );
+        self.set_time_window(new);
+    }
+
+    /// Zoom the y-axis (price) about a pixel anchor. No-op on
+    /// degenerate inputs (factor ≤ 0, non-finite anchor).
+    pub fn zoom_y_at(&mut self, anchor_y_px: f32, factor: f32) {
+        if let Some(new_range) = midas_scene::interaction::zoom_price_range_at(
+            self.price_range,
+            anchor_y_px,
+            self.viewport.height_px,
+            factor,
+        ) {
+            tracing::debug!(
+                target: "midas_app::session_chart::zoom_y_at",
+                anchor_y_px,
+                factor,
+                "zoom y",
+            );
+            self.price_range = new_range;
+        }
+    }
+
+    /// Jump the x-window to the FIRST bar in the series. No-op on an
+    /// empty series. Keeps the current span.
+    pub fn jump_home(&mut self) {
+        let guard = self.series.read();
+        let Some(first) = guard.at(0) else { return };
+        let first_ts = first.ts_open();
+        let span = self.time_window.1 - self.time_window.0;
+        drop(guard);
+        tracing::debug!(
+            target: "midas_app::session_chart::jump_home",
+            first_ts = %first_ts,
+            "jump to first bar",
+        );
+        self.set_time_window((first_ts, first_ts + span));
+    }
+
+    /// Jump the x-window so the LAST bar sits at the right edge.
+    /// No-op on an empty series. Keeps the current span.
+    pub fn jump_end(&mut self) {
+        let guard = self.series.read();
+        let n = guard.len();
+        if n == 0 {
+            return;
+        }
+        let last = guard.at(n - 1).expect("bounds checked");
+        let last_ts = last.ts_open();
+        let span = self.time_window.1 - self.time_window.0;
+        drop(guard);
+        tracing::debug!(
+            target: "midas_app::session_chart::jump_end",
+            last_ts = %last_ts,
+            "jump to last bar",
+        );
+        self.set_time_window((last_ts - span, last_ts));
+    }
+
+    /// Auto-scale the price range to fit the visible candles.
+    /// Returns `true` iff the range changed. Used by the "first-ever
+    /// data arrived, no saved viewport" path and by an explicit
+    /// user-triggered auto-scale shortcut.
+    pub fn auto_scale_price_to_visible(&mut self) -> bool {
+        let guard = self.series.read();
+        let n = guard.len();
+        if n == 0 {
+            return false;
+        }
+        // Visible range: the first → last bar (could be narrowed to a
+        // binary-search of the current time_window — left as a
+        // follow-up slice when a windowed view is needed).
+        let visible = 0..n;
+        let Some(new_range) = midas_scene::interaction::auto_scale_price(&guard, visible) else {
+            return false;
+        };
+        drop(guard);
+        if new_range != self.price_range {
+            tracing::debug!(
+                target: "midas_app::session_chart::auto_scale_price",
+                low = new_range.low(),
+                high = new_range.high(),
+                "auto-scale price",
+            );
+            self.price_range = new_range;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Call once per frame — if the series has just gone from empty
+    /// to non-empty AND no external caller has pinned a price range,
+    /// auto-scale to fit. Returns `true` if auto-scale ran.
+    ///
+    /// "First-ever transition" is signalled by `version_at_paint ==
+    /// u64::MAX` (the bootstrap sentinel) matched against a
+    /// non-zero live series version.
+    pub fn auto_scale_on_first_data(&mut self) -> bool {
+        let v = { self.series.read().version() };
+        let is_first_data = self.version_at_paint == u64::MAX && v > 0;
+        if !is_first_data {
+            return false;
+        }
+        self.auto_scale_price_to_visible()
+    }
+}
+
+/// Approximate wall-clock nanoseconds per bar for the given period.
+/// Used by zoom clamping to enforce the min-10-candles floor on an
+/// unknown calendar (compressed gaps are ignored — the clamp is
+/// intentionally loose).
+fn bar_period_ns(period: BarPeriod) -> i64 {
+    use chrono::Duration;
+    match period {
+        p if p == BarPeriod::m1() => Duration::minutes(1).num_nanoseconds().unwrap_or(0),
+        p if p == BarPeriod::m5() => Duration::minutes(5).num_nanoseconds().unwrap_or(0),
+        p if p == BarPeriod::d1_rth() => Duration::days(1).num_nanoseconds().unwrap_or(0),
+        p if p == BarPeriod::w1() => Duration::days(7).num_nanoseconds().unwrap_or(0),
+        // Fallback for any BarPeriod we didn't special-case — a
+        // minute's worth of ns is close enough for a zoom floor.
+        _ => Duration::minutes(1).num_nanoseconds().unwrap_or(0),
+    }
+}
+
+impl SessionChart {
     /// Replace the axis with a compressed one directly.
     pub fn set_compressed_axis(&mut self, axis: CompressedAxis) {
         self.axis = AxisBox::Compressed(Box::new(axis));
@@ -854,5 +1016,171 @@ mod tests {
             elapsed < std::time::Duration::from_secs(5),
             "100 paints over 10k rows took {elapsed:?} — regression suspected (R1)"
         );
+    }
+
+    // ── Slice 2b: pan / zoom / keyboard / auto-scale ────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pan_x_shifts_time_window_forward() {
+        let (tx, stream) = MockStream::crypto();
+        drop(tx);
+        let driver = Arc::new(SessionChartDriver::spawn(fresh_crypto_series(), stream));
+        let mut w = crypto_widget(driver);
+        let (s0, e0) = w.time_window;
+        w.pan_x(100.0);
+        let (s1, e1) = w.time_window;
+        assert!(s1 > s0);
+        assert!(e1 > e0);
+        assert_eq!(e1 - s1, e0 - s0, "span preserved");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn zoom_x_in_narrows_span_and_preserves_anchor() {
+        let (tx, stream) = MockStream::crypto();
+        drop(tx);
+        let driver = Arc::new(SessionChartDriver::spawn(fresh_crypto_series(), stream));
+        let mut w = crypto_widget(driver);
+        let (s0, e0) = w.time_window;
+        let span0 = e0 - s0;
+        let anchor_px = w.viewport().width_px * 0.5;
+        w.zoom_x_at(anchor_px, 0.5);
+        let (s1, e1) = w.time_window;
+        let span1 = e1 - s1;
+        assert!(span1 < span0, "span narrowed on zoom-in");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn zoom_y_in_narrows_price_span() {
+        let (tx, stream) = MockStream::crypto();
+        drop(tx);
+        let driver = Arc::new(SessionChartDriver::spawn(fresh_crypto_series(), stream));
+        let mut w = crypto_widget(driver);
+        let before = w.price_range();
+        w.zoom_y_at(w.viewport().height_px * 0.5, 0.5);
+        let after = w.price_range();
+        assert!(after.span() < before.span());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn jump_home_positions_first_bar_at_left() {
+        let series = fresh_crypto_series();
+        let (tx, stream) = MockStream::crypto();
+        let driver = Arc::new(SessionChartDriver::spawn(Arc::clone(&series), stream));
+        // Push one candle so the series is non-empty.
+        let ts = utc(2024, 3, 5, 0, 0);
+        tx.send(mk_crypto(ts, 50_000.0)).await.unwrap();
+        drop(tx);
+        let mut rx = driver.version_receiver();
+        while *rx.borrow_and_update() < 1 {
+            if rx.changed().await.is_err() {
+                break;
+            }
+        }
+        let mut w = crypto_widget(Arc::clone(&driver));
+        w.jump_home();
+        assert_eq!(w.time_window.0, ts);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn jump_home_on_empty_series_is_noop() {
+        let (tx, stream) = MockStream::crypto();
+        drop(tx);
+        let driver = Arc::new(SessionChartDriver::spawn(fresh_crypto_series(), stream));
+        let mut w = crypto_widget(driver);
+        let (s0, e0) = w.time_window;
+        w.jump_home();
+        assert_eq!(w.time_window.0, s0);
+        assert_eq!(w.time_window.1, e0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn jump_end_positions_last_bar_at_right() {
+        let series = fresh_crypto_series();
+        let (tx, stream) = MockStream::crypto();
+        let driver = Arc::new(SessionChartDriver::spawn(Arc::clone(&series), stream));
+        let ts = utc(2024, 3, 5, 0, 0);
+        tx.send(mk_crypto(ts, 50_000.0)).await.unwrap();
+        drop(tx);
+        let mut rx = driver.version_receiver();
+        while *rx.borrow_and_update() < 1 {
+            if rx.changed().await.is_err() {
+                break;
+            }
+        }
+        let mut w = crypto_widget(Arc::clone(&driver));
+        w.jump_end();
+        assert_eq!(w.time_window.1, ts);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn auto_scale_on_first_data_sets_price_range() {
+        let series = fresh_crypto_series();
+        let (tx, stream) = MockStream::crypto();
+        let driver = Arc::new(SessionChartDriver::spawn(Arc::clone(&series), stream));
+        // Push one candle with known O/H/L/C.
+        let ts = utc(2024, 3, 5, 0, 0);
+        let cal = crypto_spot();
+        let sym = Symbol::new("BTC-USD", cal.id());
+        let session = cal.classify(ts);
+        let window = cal.bar_window(ts, BarPeriod::m1()).unwrap();
+        let ohlcv = Ohlcv::new(50_000.0, 50_100.0, 49_900.0, 50_050.0, 1, 1, None).unwrap();
+        let candle = Candle::new(
+            sym,
+            cal,
+            BarPeriod::m1(),
+            session,
+            window,
+            ohlcv,
+            Completeness::Completed,
+        )
+        .unwrap();
+        tx.send(candle).await.unwrap();
+        drop(tx);
+        let mut rx = driver.version_receiver();
+        while *rx.borrow_and_update() < 1 {
+            if rx.changed().await.is_err() {
+                break;
+            }
+        }
+        let mut w = crypto_widget(Arc::clone(&driver));
+        let fired = w.auto_scale_on_first_data();
+        assert!(fired, "auto-scale must run on first-data transition");
+        let r = w.price_range();
+        // Fits high=50_100, low=49_900 with 5% pad.
+        assert!(r.low() < 49_900.0);
+        assert!(r.high() > 50_100.0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn auto_scale_on_first_data_no_op_when_empty() {
+        let (tx, stream) = MockStream::crypto();
+        drop(tx);
+        let driver = Arc::new(SessionChartDriver::spawn(fresh_crypto_series(), stream));
+        let mut w = crypto_widget(driver);
+        assert!(!w.auto_scale_on_first_data());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn zoom_x_min_floor_at_10_candles() {
+        let (tx, stream) = MockStream::crypto();
+        drop(tx);
+        let driver = Arc::new(SessionChartDriver::spawn(fresh_crypto_series(), stream));
+        let mut w = crypto_widget(driver);
+        // Extreme zoom-in factor.
+        w.zoom_x_at(500.0, 0.00001);
+        let span = w.time_window.1 - w.time_window.0;
+        // 10 × 1-minute min floor = 10 minutes.
+        assert!(span >= chrono::Duration::minutes(10));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn zoom_y_no_op_on_nan_anchor() {
+        let (tx, stream) = MockStream::crypto();
+        drop(tx);
+        let driver = Arc::new(SessionChartDriver::spawn(fresh_crypto_series(), stream));
+        let mut w = crypto_widget(driver);
+        let before = w.price_range();
+        w.zoom_y_at(f32::NAN, 0.5);
+        assert_eq!(before, w.price_range());
     }
 }

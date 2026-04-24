@@ -283,7 +283,7 @@ impl SceneLayer for DecoratorLayer {
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
-    use midas_axis::{ContinuousAxis, PriceRange, Viewport};
+    use midas_axis::{ContinuousAxis, DefaultFormatter, LinearPriceAxis, PriceRange, Viewport};
     use midas_calendar::Timestamp;
 
     use super::*;
@@ -294,23 +294,40 @@ mod tests {
         chrono::Utc.with_ymd_and_hms(y, mo, d, h, mi, s).unwrap()
     }
 
-    fn harness() -> (ContinuousAxis, PriceRange, Viewport, ThemePalette) {
+    fn harness() -> (
+        ContinuousAxis,
+        LinearPriceAxis,
+        PriceRange,
+        Viewport,
+        ThemePalette,
+        DefaultFormatter,
+    ) {
         let axis =
             ContinuousAxis::new(ts(2024, 1, 1, 0, 0, 0), ts(2024, 1, 2, 0, 0, 0), 1000.0).unwrap();
         let pr = PriceRange::new(90.0, 110.0).unwrap();
         let vp = Viewport::new(1000.0, 400.0);
-        (axis, pr, vp, ThemePalette::dark_default())
+        let paxis = LinearPriceAxis::new(pr, vp.height_px);
+        (
+            axis,
+            paxis,
+            pr,
+            vp,
+            ThemePalette::dark_default(),
+            DefaultFormatter::new(),
+        )
     }
 
     #[test]
     fn order_bracket_with_all_legs_emits_three_lines() {
-        let (axis, pr, vp, pal) = harness();
+        let (axis, paxis, pr, vp, pal, fmt) = harness();
         let mut out = ScenePrimitives::default();
         let mut ctx = PaintContext {
             axis: &axis,
             viewport: vp,
             price_range: pr,
             palette: &pal,
+            price_axis: &paxis,
+            formatter: &fmt,
             out: &mut out,
         };
         let layer = OrderBracketLayer::new(vec![OrderBracketView {
@@ -328,13 +345,15 @@ mod tests {
 
     #[test]
     fn order_bracket_entry_only_emits_one_line() {
-        let (axis, pr, vp, pal) = harness();
+        let (axis, paxis, pr, vp, pal, fmt) = harness();
         let mut out = ScenePrimitives::default();
         let mut ctx = PaintContext {
             axis: &axis,
             viewport: vp,
             price_range: pr,
             palette: &pal,
+            price_axis: &paxis,
+            formatter: &fmt,
             out: &mut out,
         };
         let layer = OrderBracketLayer::new(vec![OrderBracketView {
@@ -351,13 +370,15 @@ mod tests {
 
     #[test]
     fn price_line_emits_one_line_per_entry() {
-        let (axis, pr, vp, pal) = harness();
+        let (axis, paxis, pr, vp, pal, fmt) = harness();
         let mut out = ScenePrimitives::default();
         let mut ctx = PaintContext {
             axis: &axis,
             viewport: vp,
             price_range: pr,
             palette: &pal,
+            price_axis: &paxis,
+            formatter: &fmt,
             out: &mut out,
         };
         let layer = PriceLineLayer::new(vec![
@@ -381,13 +402,15 @@ mod tests {
 
     #[test]
     fn level_layer_applies_alpha_scale() {
-        let (axis, pr, vp, pal) = harness();
+        let (axis, paxis, pr, vp, pal, fmt) = harness();
         let mut out = ScenePrimitives::default();
         let mut ctx = PaintContext {
             axis: &axis,
             viewport: vp,
             price_range: pr,
             palette: &pal,
+            price_axis: &paxis,
+            formatter: &fmt,
             out: &mut out,
         };
         let layer = LevelLayer::new(vec![LevelView {
@@ -404,13 +427,15 @@ mod tests {
 
     #[test]
     fn decorator_layer_emits_one_badge_per_marker() {
-        let (axis, pr, vp, pal) = harness();
+        let (axis, paxis, pr, vp, pal, fmt) = harness();
         let mut out = ScenePrimitives::default();
         let mut ctx = PaintContext {
             axis: &axis,
             viewport: vp,
             price_range: pr,
             palette: &pal,
+            price_axis: &paxis,
+            formatter: &fmt,
             out: &mut out,
         };
         DecoratorLayer::new(vec![100.0, 200.0, 300.0]).paint(&mut ctx);

@@ -554,6 +554,14 @@ pub struct MidasApp {
     #[cfg(feature = "session_chart")]
     pub(crate) floating_session_charts:
         std::collections::HashMap<window::Id, crate::session_chart_window::SessionChartWindow>,
+
+    /// Slice 2c of chart-transition: per-symbol shared-Arc lookup for
+    /// `CandleSeries` handles. Drivers register on spawn + deregister
+    /// on drop. `QuoteBatch` handler reads this map to fold
+    /// quote-cadence ticks into every session-chart panel for a
+    /// symbol with ONE write-guard take per batch.
+    #[cfg(feature = "session_chart")]
+    pub(crate) session_chart_registry: crate::session_chart::SymbolSeriesRegistry,
 }
 
 /// Pending drag: press started but hold threshold not yet reached.
@@ -2285,6 +2293,8 @@ impl MidasApp {
             ib_to_uuid: std::collections::HashMap::new(),
             #[cfg(feature = "session_chart")]
             floating_session_charts: std::collections::HashMap::new(),
+            #[cfg(feature = "session_chart")]
+            session_chart_registry: crate::session_chart::SymbolSeriesRegistry::new(),
         };
 
         // Restore bracket annotations from persistence.

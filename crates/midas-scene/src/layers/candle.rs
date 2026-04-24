@@ -26,6 +26,16 @@ pub struct CandleStyle {
     pub pre_market_tint: f32,
     /// Multiplier applied to `color` alpha for `PostMarket` candles.
     pub post_market_tint: f32,
+    /// Alpha multiplier applied to candles whose index is present in
+    /// the optional `bright_indices` set (see
+    /// [`CandleLayer::with_bright_indices`]). Values above `1.0` clamp
+    /// to the u8 ceiling at emit time. Default `1.0` — i.e.
+    /// unchanged — so a layer that doesn't opt into the bright
+    /// channel behaves identically to one that does but whose set is
+    /// empty. Slice 6 of the chart-transition plan: G.ATR selects
+    /// non-paranormal bars; those bars render at full alpha, the rest
+    /// (dimmed via `pre_market_tint` / `post_market_tint`) fade back.
+    pub bright_multiplier: f32,
 }
 
 impl Default for CandleStyle {
@@ -34,9 +44,17 @@ impl Default for CandleStyle {
             body_width_px: 8.0,
             pre_market_tint: 0.6,
             post_market_tint: 0.8,
+            bright_multiplier: 1.0,
         }
     }
 }
+
+/// Shared index set of "bright" candles. Populated by the G.ATR
+/// indicator layer to highlight the non-paranormal days it averaged;
+/// read by [`CandleLayer`] at paint time. `Arc<RwLock<...>>` so the
+/// producer and consumer share the same allocation without cloning
+/// per frame.
+pub type BrightIndices = std::sync::Arc<parking_lot::RwLock<Vec<usize>>>;
 
 /// Candle body + wick layer. Reads an `Arc<RwLock<CandleSeries>>`
 /// shared with the driver (single writer, many readers). `paint` takes
@@ -46,12 +64,45 @@ impl Default for CandleStyle {
 pub struct CandleLayer {
     candles: SharedCandleSeries,
     style: CandleStyle,
+    /// Optional bright-index channel. When `Some(idx_set)`, candles
+    /// whose zero-based index appears in the set render at
+    /// `CandleStyle.bright_multiplier` alpha. Typically populated by
+    /// [`super::super::layers::indicator::GerchikAtrLayer`].
+    bright_indices: Option<BrightIndices>,
 }
 
 impl CandleLayer {
-    /// Build a layer over `candles` with `style`.
+    /// Build a layer over `candles` with `style`. No bright-index
+    /// channel — backward-compatible with every pre-slice-6 caller.
     pub fn new(candles: SharedCandleSeries, style: CandleStyle) -> Self {
-        Self { candles, style }
+        Self {
+            candles,
+            style,
+            bright_indices: None,
+        }
+    }
+
+    /// Build a layer that consults `bright_indices` at paint time.
+    ///
+    /// The Arc is shared with the producer (G.ATR indicator layer).
+    /// Writes on the producer side land on the next paint — no
+    /// synchronisation dance; `parking_lot::RwLock` is the cheap
+    /// read path.
+    ///
+    /// Slice 6 addition. Existing `new` / `with_defaults` stay
+    /// untouched to preserve backward compatibility — downstream
+    /// callers that don't care about the bright channel don't pay
+    /// for it.
+    pub fn with_bright_indices(
+        candles: SharedCandleSeries,
+        style: CandleStyle,
+        bright_indices: BrightIndices,
+    ) -> Self {
+        Self {
+            candles,
+            style,
+            bright_indices: Some(bright_indices),
+        }
     }
 
     /// Convenience: build with [`CandleStyle::default`].
@@ -63,16 +114,32 @@ impl CandleLayer {
     pub fn style(&self) -> CandleStyle {
         self.style
     }
+
+    /// Borrow the bright-index channel, if one was attached via
+    /// [`Self::with_bright_indices`]. Primarily for tests and
+    /// diagnostics.
+    #[inline]
+    pub fn bright_indices(&self) -> Option<&BrightIndices> {
+        self.bright_indices.as_ref()
+    }
 }
 
-/// Apply a session-based alpha tint.
-fn tint(color: [u8; 4], kind: SessionKind, style: &CandleStyle) -> [u8; 4] {
-    let factor = match kind {
+/// Apply a session-based alpha tint plus an optional "bright"
+/// boost when the candle's index appears in the shared set.
+fn tint(color: [u8; 4], kind: SessionKind, style: &CandleStyle, is_bright: bool) -> [u8; 4] {
+    let session_factor = match kind {
         SessionKind::PreMarket => style.pre_market_tint,
         SessionKind::PostMarket => style.post_market_tint,
         _ => 1.0,
     };
-    let a = (color[3] as f32 * factor).round().clamp(0.0, 255.0) as u8;
+    let bright_factor = if is_bright {
+        style.bright_multiplier
+    } else {
+        1.0
+    };
+    let a =
+        (color[3] as f32 * session_factor * bright_factor).clamp(0.0, 255.0);
+    let a = a.round() as u8;
     [color[0], color[1], color[2], a]
 }
 
@@ -98,7 +165,18 @@ impl SceneLayer for CandleLayer {
         let palette = ctx.palette;
         let width = self.style.body_width_px;
 
-        for row in guard.iter() {
+        // Snapshot the bright-index set once — we iterate candles with
+        // `enumerate` and membership-test each idx. The snapshot (a
+        // read-guard held inside the `Option`) is dropped at end-of-
+        // scope with `paint`. Cheap even for long series: linear scan
+        // against a `Vec<usize>`, typically of size `GATR_LOOKBACK = 7`.
+        let bright_guard = self.bright_indices.as_ref().map(|arc| arc.read());
+
+        for (idx, row) in guard.iter().enumerate() {
+            let is_bright = bright_guard
+                .as_deref()
+                .is_some_and(|bs| bs.contains(&idx));
+
             let x_center = axis.to_x(row.ts_open());
             let high_px = ctx.price_to_y(row.high());
             let low_px = ctx.price_to_y(row.low());
@@ -111,8 +189,8 @@ impl SceneLayer for CandleLayer {
             } else {
                 palette.candle_down
             };
-            let body_color = tint(base, row.session_kind(), &self.style);
-            let wick_color = tint(palette.candle_wick, row.session_kind(), &self.style);
+            let body_color = tint(base, row.session_kind(), &self.style, is_bright);
+            let wick_color = tint(palette.candle_wick, row.session_kind(), &self.style, is_bright);
 
             ctx.out.candles.push(CandleInstance {
                 x_center,
@@ -131,7 +209,9 @@ impl SceneLayer for CandleLayer {
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
-    use midas_axis::{ContinuousAxis, PriceRange, TimeAxis, Viewport};
+    use midas_axis::{
+        ContinuousAxis, DefaultFormatter, LinearPriceAxis, PriceRange, TimeAxis, Viewport,
+    };
     use midas_bars::{Candle, CandleSeries, Completeness, Ohlcv, Symbol};
     use midas_calendar::{xnys, BarPeriod, Timestamp};
 
@@ -190,11 +270,15 @@ mod tests {
         let vp = Viewport::new(1000.0, 400.0);
         let pal = ThemePalette::dark_default();
         let mut out = ScenePrimitives::default();
+        let paxis = LinearPriceAxis::new(pr, vp.height_px);
+        let fmt = DefaultFormatter::new();
         let mut ctx = PaintContext {
             axis: &axis,
             viewport: vp,
             price_range: pr,
             palette: &pal,
+            price_axis: &paxis,
+            formatter: &fmt,
             out: &mut out,
         };
         let layer = CandleLayer::with_defaults(s);
@@ -208,11 +292,15 @@ mod tests {
         let expected_x = axis.to_x(s.read().at(0).unwrap().ts_open());
         let pal = ThemePalette::dark_default();
         let mut out = ScenePrimitives::default();
+        let paxis = LinearPriceAxis::new(pr, vp.height_px);
+        let fmt = DefaultFormatter::new();
         let mut ctx = PaintContext {
             axis: &axis,
             viewport: vp,
             price_range: pr,
             palette: &pal,
+            price_axis: &paxis,
+            formatter: &fmt,
             out: &mut out,
         };
         let layer = CandleLayer::with_defaults(s);
@@ -234,11 +322,15 @@ mod tests {
         let vp = Viewport::new(1000.0, 400.0);
         let pal = ThemePalette::dark_default();
         let mut out = ScenePrimitives::default();
+        let paxis = LinearPriceAxis::new(pr, vp.height_px);
+        let fmt = DefaultFormatter::new();
         let mut ctx = PaintContext {
             axis: &axis,
             viewport: vp,
             price_range: pr,
             palette: &pal,
+            price_axis: &paxis,
+            formatter: &fmt,
             out: &mut out,
         };
         let layer = CandleLayer::with_defaults(s);
@@ -259,11 +351,15 @@ mod tests {
         let vp = Viewport::new(1000.0, 400.0);
         let pal = ThemePalette::dark_default();
         let mut out = ScenePrimitives::default();
+        let paxis = LinearPriceAxis::new(pr, vp.height_px);
+        let fmt = DefaultFormatter::new();
         let mut ctx = PaintContext {
             axis: &axis,
             viewport: vp,
             price_range: pr,
             palette: &pal,
+            price_axis: &paxis,
+            formatter: &fmt,
             out: &mut out,
         };
         let layer = CandleLayer::with_defaults(s);
@@ -284,11 +380,15 @@ mod tests {
         let vp = Viewport::new(1000.0, 400.0);
         let pal = ThemePalette::dark_default();
         let mut out = ScenePrimitives::default();
+        let paxis = LinearPriceAxis::new(pr, vp.height_px);
+        let fmt = DefaultFormatter::new();
         let mut ctx = PaintContext {
             axis: &axis,
             viewport: vp,
             price_range: pr,
             palette: &pal,
+            price_axis: &paxis,
+            formatter: &fmt,
             out: &mut out,
         };
         let layer = CandleLayer::with_defaults(s);
@@ -301,11 +401,15 @@ mod tests {
         let (s, axis, pr, vp) = harness(10);
         let pal = ThemePalette::dark_default();
         let mut out = ScenePrimitives::default();
+        let paxis = LinearPriceAxis::new(pr, vp.height_px);
+        let fmt = DefaultFormatter::new();
         let mut ctx = PaintContext {
             axis: &axis,
             viewport: vp,
             price_range: pr,
             palette: &pal,
+            price_axis: &paxis,
+            formatter: &fmt,
             out: &mut out,
         };
         let layer = CandleLayer::with_defaults(s);
