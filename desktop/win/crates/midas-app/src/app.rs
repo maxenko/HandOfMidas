@@ -3392,6 +3392,12 @@ impl MidasApp {
 
     /// Build the provider registry, registering all available providers
     /// and restoring the active selection from config.
+    ///
+    /// Chart-transition slice 8.5: the registry is the pre-router
+    /// fallback for `load_chart_with` / `load_market_snapshot` / the
+    /// thumbnail helpers. Every session-chart (`backend: New`) path
+    /// uses `self.router` exclusively and never calls through here.
+    /// Deleted in slice 9c's atomic deletion PR.
     fn build_provider_registry(config: &AppConfig) -> HistoricalDataRegistry {
         let mut registry = HistoricalDataRegistry::new();
         let test_provider: Arc<dyn DataProvider> = Arc::new(midas_feed::TestProvider::new());

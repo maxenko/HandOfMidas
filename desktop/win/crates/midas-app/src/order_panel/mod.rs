@@ -3,6 +3,18 @@
 //! A floating/dockable widget that lets the user create market order
 //! brackets with optional Take Profit and Stop Loss legs.
 //! Follows TradingView's bracket order model (1 TP + 1 SL per bracket).
+//!
+//! ## Chart-transition slice 8.5 status
+//!
+//! The `midas_chart::widget::order_bracket::*` + `AnnotationId` imports
+//! below are the shared **OrderBracket persistent shape** (plan D9 —
+//! format unchanged). Both the legacy chart and the session-chart path
+//! (via `ticker_state::TickerState.live_bracket`) round-trip this same
+//! model. Session-chart tool emission uses scene-native
+//! [`midas_scene::tools::Side`] / [`midas_scene::tools::LegRole`] and
+//! translates only at the `TickerMsg` boundary — so `order_panel` is
+//! legacy-side wiring, not a session-chart consumer. The types migrate
+//! in slice 9c's atomic deletion PR.
 
 use midas_chart::widget::order_bracket::EntryType;
 use midas_chart::widget::AnnotationId;

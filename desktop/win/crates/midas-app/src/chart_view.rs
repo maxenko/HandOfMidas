@@ -29,6 +29,14 @@
 //! This is **session-scoped state, not persisted** — the schema key is
 //! persisted for rollback coordination, but the views themselves reset
 //! across restarts.
+//!
+//! ## Chart-transition slice 8.5 status
+//!
+//! The `Camera2D` + `CandleBuffer` imports below are used ONLY by the
+//! legacy chart path (`chart_widget.rs` + `app.rs::apply_candle_data`).
+//! The session-chart path has its own [`midas_axis::Viewport`] +
+//! [`midas_bars::CandleSeries`] equivalents inside
+//! [`crate::session_chart`](crate::session_chart). Deleted in slice 9c.
 
 use midas_chart::camera::Camera2D;
 use midas_core::{CandleBuffer, Timeframe};

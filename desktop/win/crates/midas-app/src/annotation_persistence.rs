@@ -3,6 +3,14 @@
 //! Each symbol's annotations are saved as a separate JSON file in
 //! `data/annotations/<SYMBOL>.json`. Writes are atomic (write to .tmp,
 //! then rename) and debounced (500ms after last mutation).
+//!
+//! ## Chart-transition slice 8.5 status
+//!
+//! The `midas_chart::widget::Annotation` import is the shared persistent
+//! annotation shape (plan D9 — `AnnotationStore` format unchanged).
+//! Session-chart paths never call this module directly; all persistence
+//! lookups route through `AnnotationStore`. The type migrates to its
+//! new home in slice 9c's atomic deletion PR.
 
 use crate::annotation_store::AnnotationStore;
 use midas_chart::widget::Annotation;

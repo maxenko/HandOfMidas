@@ -20,9 +20,8 @@ use midas_app::session_chart::{ProjectedEffect, SessionChart, SessionChartDriver
 use midas_axis::{PriceRange, Viewport};
 use midas_bars::{BarPeriod, CandleSeries, Symbol};
 use midas_calendar::{crypto_spot, Timestamp};
-use midas_chart::widget::order_bracket::{BracketSide, LegRole};
 use midas_scene::input::{InputEvent, Modifiers, MouseButton, Point};
-use midas_scene::tools::BracketToolMode;
+use midas_scene::tools::{BracketToolMode, LegRole, Side as BracketSide};
 use midas_scene::ThemePalette;
 use midas_stream::{BarStream, BarStreamMeta, StreamError, TimeRange};
 use parking_lot::RwLock;
@@ -147,14 +146,14 @@ async fn three_click_long_places_bracket_via_projected_effects() {
     assert_eq!(
         effects[2],
         ProjectedEffect::SetDraftLeg {
-            role: LegRole::TakeProfit,
+            role: LegRole::Tp,
             price: 50_100.0,
         }
     );
     assert_eq!(
         effects[3],
         ProjectedEffect::SetDraftLeg {
-            role: LegRole::StopLoss,
+            role: LegRole::Sl,
             price: 49_950.0,
         }
     );
@@ -263,7 +262,7 @@ async fn amber_fires_on_wrong_side_placement() {
     assert!(matches!(
         effects[3],
         ProjectedEffect::SetDraftLeg {
-            role: LegRole::StopLoss,
+            role: LegRole::Sl,
             price,
         } if (price - 50_050.0).abs() < 1e-6
     ));

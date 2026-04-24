@@ -12,6 +12,20 @@
 //! `Vec<Bar>` to `CandleBuffer`; the signatures don't align 1:1, so
 //! the migration was deferred out of this slice's scope.
 //!
+//! **Chart-transition slice 8.5 status:** `HistoricalDataRegistry` is
+//! reached only from legacy code paths inside `midas-app` —
+//!
+//! 1. `build_provider_registry` seeds the fallback at startup.
+//! 2. `load_chart_with` / `load_market_snapshot` / thumbnail helpers
+//!    use it only when `self.router.is_none()` (pre-connect fallback
+//!    for LivePaper / Live backends).
+//! 3. `persistence.rs` serialises the active provider name for TOML
+//!    round-trip.
+//!
+//! None of these paths are reachable from the session-chart
+//! (`backend: New`) widget. Entire file is deleted in slice 9c's
+//! atomic deletion PR.
+//!
 //! Owned by `MidasApp` (single iced update thread). Providers are
 //! `Arc`'d so they can be cloned into `Task::perform` closures for
 //! async operations.

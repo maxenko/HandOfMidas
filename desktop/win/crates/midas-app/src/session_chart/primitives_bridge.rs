@@ -43,6 +43,14 @@
 
 use std::borrow::Cow;
 
+// Chart-transition slice 8.5 grep-gate exception — documented GPU-pipeline
+// bridge. These `midas_chart::*` types are the legacy renderer's instance
+// / text-label vocabulary that `midas-render` (which survives slice 9c)
+// still consumes. They are NOT chart-widget types. Slice 9c either
+// migrates them into `midas-render` or introduces a neutral
+// GPU-primitive crate; the move lands as part of 9c's atomic deletion
+// PR, not here. Tracked under `plan/chart-transition/00-index.md`
+// slice 9c pre-deletion checklist.
 use midas_chart::instances::{CandleInstance, GridLineInstance, VolumeInstance};
 use midas_chart::widget::compute::{LabelAnchor, WidgetLabel};
 use midas_scene::{

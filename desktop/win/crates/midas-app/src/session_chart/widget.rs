@@ -237,20 +237,16 @@ pub enum ProjectedEffect {
     /// `TickerMsg::EnsureDraftBracket { side, entry_type: Limit }`
     /// + `TickerMsg::SetLegPrice { role: Entry, price: entry }`.
     ///
-    /// The host maps `BracketSide` to `crate::order_panel::OrderSide`
-    /// at the `app.rs` dispatch layer (keeps the library target free
-    /// of bin-only types).
-    BeginDraftBracket {
-        side: midas_chart::widget::order_bracket::BracketSide,
-        entry: f64,
-    },
+    /// The host maps the scene-native [`Side`][midas_scene::tools::Side]
+    /// onto its own domain-side type at the dispatch layer. Carrying
+    /// the scene-native shape here keeps the session-chart path free
+    /// of the legacy `midas-chart` widget vocabulary (chart-transition
+    /// slice 8.5 grep gate).
+    BeginDraftBracket { side: SceneBracketSide, entry: f64 },
     /// Set a TP / SL leg on the draft bracket. Translates to
     /// `TickerMsg::SetLegPrice { role, price }` plus
     /// `SetTpEnabled(true)` / `SetSlEnabled(true)` as appropriate.
-    SetDraftLeg {
-        role: midas_chart::widget::order_bracket::LegRole,
-        price: f64,
-    },
+    SetDraftLeg { role: SceneLegRole, price: f64 },
     /// Finalise the draft bracket. Translates to
     /// `TickerMsg::SaveBracket`.
     CommitDraftBracket,
@@ -263,30 +259,11 @@ pub enum ProjectedEffect {
     /// bracket for the symbol).
     UpdateLiveBracketLeg {
         bracket_id: u64,
-        role: midas_chart::widget::order_bracket::LegRole,
+        role: SceneLegRole,
         price: f64,
     },
     /// Tool-layer error (panic fallback, persistence fault, etc.).
     Error(String),
-}
-
-fn scene_side_to_bracket_side(
-    side: SceneBracketSide,
-) -> midas_chart::widget::order_bracket::BracketSide {
-    use midas_chart::widget::order_bracket::BracketSide;
-    match side {
-        SceneBracketSide::Long => BracketSide::Long,
-        SceneBracketSide::Short => BracketSide::Short,
-    }
-}
-
-fn scene_role_to_chart_role(role: SceneLegRole) -> midas_chart::widget::order_bracket::LegRole {
-    use midas_chart::widget::order_bracket::LegRole as ChartLegRole;
-    match role {
-        SceneLegRole::Entry => ChartLegRole::Entry,
-        SceneLegRole::Tp => ChartLegRole::TakeProfit,
-        SceneLegRole::Sl => ChartLegRole::StopLoss,
-    }
 }
 
 impl ProjectedEffect {
@@ -320,21 +297,17 @@ impl ProjectedEffect {
                 .collect(),
             ToolEffect::ReportError(err) => vec![ProjectedEffect::Error(err.to_string())],
             ToolEffect::BeginDraftBracket { side, entry } => {
-                vec![ProjectedEffect::BeginDraftBracket {
-                    side: scene_side_to_bracket_side(side),
-                    entry,
-                }]
+                vec![ProjectedEffect::BeginDraftBracket { side, entry }]
             }
-            ToolEffect::SetDraftLeg { role, price } => vec![ProjectedEffect::SetDraftLeg {
-                role: scene_role_to_chart_role(role),
-                price,
-            }],
+            ToolEffect::SetDraftLeg { role, price } => {
+                vec![ProjectedEffect::SetDraftLeg { role, price }]
+            }
             ToolEffect::CommitDraftBracket => vec![ProjectedEffect::CommitDraftBracket],
             ToolEffect::CancelDraftBracket => vec![ProjectedEffect::CancelDraftBracket],
             ToolEffect::UpdateBracketLeg { id, role, price } => {
                 vec![ProjectedEffect::UpdateLiveBracketLeg {
                     bracket_id: id,
-                    role: scene_role_to_chart_role(role),
+                    role,
                     price,
                 }]
             }

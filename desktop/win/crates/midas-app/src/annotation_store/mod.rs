@@ -6,6 +6,19 @@
 //! (`AnnotationKind::OrderBracket`). Owned by `MidasApp`, passed by
 //! reference during scene computation.
 //!
+//! ## Chart-transition slice 8.5 status
+//!
+//! The `midas_chart::widget::*` imports below (`Annotation`,
+//! `AnnotationId`, `AnnotationKind`, `PriceLine`, `HorizontalLevel`,
+//! `LineStyle`, `Presence`, `LineExtent`, `LineStroke`) are the shared
+//! **persistent annotation data model** — per plan D9, the
+//! `AnnotationStore` format is unchanged across the migration. Session-
+//! chart consumers read from this store via scene-native projections
+//! (`Vec<midas_scene::layers::LevelView>`); they never handle these
+//! types directly. These imports migrate in slice 9c's atomic
+//! deletion PR when the `midas-chart` crate is retired and the types
+//! move to their new home.
+//!
 //! All mutations bump a generation counter for dirty tracking.
 //!
 //! ## Level helpers

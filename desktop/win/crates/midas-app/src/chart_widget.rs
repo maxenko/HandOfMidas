@@ -3,6 +3,17 @@
 //! This module implements iced 0.14's `shader::Program` and `shader::Primitive`
 //! traits to render wgpu-based charts inside the iced widget tree.
 //!
+//! ## Chart-transition slice 8.5 status
+//!
+//! This file is the LEGACY chart widget. Every `midas_chart::*` /
+//! `Camera2D` / `CandleBuffer` import below is intentional — the whole
+//! file renders the legacy stack's chart surface. The sister
+//! session-chart path lives in
+//! [`crate::session_chart`](crate::session_chart) and uses
+//! [`midas_scene`] / [`midas_axis`] / [`midas_bars`] instead.
+//!
+//! Deleted wholesale in slice 9c's atomic deletion PR.
+//!
 //! ## Data flow
 //!
 //! 1. `view()` constructs a `ChartProgram` with a `ChartRenderSnapshot`

@@ -52,6 +52,15 @@
 
 #![cfg(feature = "session_chart")]
 
+// Chart-transition slice 8.5 grep-gate exception — documented GPU-pipeline
+// bridge. These `midas_chart::*` types are the legacy renderer's
+// instance / dirty-tracking vocabulary that `midas-render::ChartRenderer`
+// (which survives slice 9c) still consumes as its input. They are NOT
+// chart-widget types (`Camera2D`, `ChartState`, `ChartScene-widget-level`
+// are all absent here). Slice 9c either (a) migrates these structs into
+// `midas-render` or (b) introduces a neutral GPU-primitive crate; either
+// move lands as part of the atomic deletion PR, not here. Tracked under
+// `plan/chart-transition/00-index.md` slice 9c pre-deletion checklist.
 use midas_chart::compute::{LayerEnd, ANNOTATION_LAYER_COUNT};
 use midas_chart::instances::{GridLineInstance, VolumeInstance};
 use midas_chart::widget::compute::WidgetLabel;
