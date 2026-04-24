@@ -28,6 +28,7 @@
 //!   - R2-NM-7 Camera deletion: `InteractionState` captures pan/zoom/
 //!     drag/hover.
 
+pub mod decorator;
 pub mod error;
 pub mod input;
 pub mod interaction;
@@ -38,6 +39,15 @@ pub mod primitives;
 pub mod scene;
 pub mod tools;
 
+pub use crate::decorator::{
+    emissions_for_group as decorator_emissions_for_group,
+    layout::{
+        apply_drag_ghost_alpha, promote_by_proximity, visibility_for, DecoratorEmission,
+        PromotedItem, SubZ, DRAG_GHOST_ALPHA, PROXIMITY_THRESHOLD_PX,
+    },
+    ButtonAction, DecoratorGroup, DecoratorItem, GroupId, HoverState, Rect as DecoratorRect,
+    Visibility as DecoratorVisibility,
+};
 pub use crate::error::SceneError;
 pub use crate::input::{
     CursorShape, EventStatus, Hit, InputEvent, Key, Modifiers, MouseButton, Point,

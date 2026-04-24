@@ -7,9 +7,9 @@
 //! - [`PriceLineLayer`] — labelled horizontal lines.
 //! - [`LevelLayer`] — named price levels (dashed / alpha-reduced visual
 //!   differentiator for MVP).
-//! - [`DecoratorLayer`] — stub placeholder for the decorator-tree
-//!   integration arriving in Phase C (currently emits small badges at
-//!   a list of `marker_xs`).
+//! - [`DecoratorLayer`] — full port of the legacy decorator subsystem
+//!   (hover / proximity / drag sub-z, button dispatch) landed in
+//!   slice 5a of the chart-transition plan.
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -17,6 +17,8 @@ use std::sync::Arc;
 use midas_axis::PriceRange;
 use parking_lot::Mutex;
 
+use crate::decorator::layout::{emissions_for_group, DecoratorEmission, SubZ};
+use crate::decorator::{ButtonAction, DecoratorGroup, DecoratorItem, HoverState};
 use crate::input::{CursorShape, EventStatus, Hit, InputEvent, Key, MouseButton, Point};
 use crate::layer::{InteractiveLayer, LayerId, LayerZ, SceneLayer, ToolContext};
 use crate::paint::PaintContext;
@@ -551,18 +553,112 @@ impl InteractiveLayer for LevelLayer {
     }
 }
 
-/// Placeholder for the Phase C decorator-tree integration. Renders a
-/// small badge at each supplied pixel-x at the top of the viewport.
-/// The final integration will consume a full `DecoratorTree` from
-/// `midas-ui` — that's intentionally kept out of `midas-scene` so
-/// this crate stays dep-light.
+/// Full decorator-subsystem port (slice 5a of the chart-transition
+/// plan). Consumes a flat `Vec<DecoratorGroup>` supplied by the host
+/// widget — typically one group per bracket leg, one per level badge,
+/// one per indicator chip — and paints the emissions according to the
+/// four sub-z bands (background < proximity-promoted < hovered <
+/// dragged).
+///
+/// ## Paint cycle
+///
+/// For every group:
+/// 1. Run [`visibility_for`](crate::decorator::layout::visibility_for).
+///    Hidden groups skip entirely.
+/// 2. Run [`promote_by_proximity`](crate::decorator::layout::promote_by_proximity)
+///    to tag each item with its sub-z band. Drag ghost applies
+///    layer-wide alpha at emit time.
+/// 3. Collect `(sub_z, group_insertion_idx, item_idx, emission)`
+///    tuples.
+///
+/// After walking every group, the collected tuples are stable-sorted
+/// by `(sub_z, group_insertion_idx, item_idx)` and pushed into
+/// `ScenePrimitives`. Within one sub-z, groups stay in their insertion
+/// order; within a group, items stay in theirs.
+///
+/// ## Interactive role
+///
+/// The layer implements [`InteractiveLayer`] so it can dispatch left-
+/// clicks on `Button` items. Hit-testing walks visible groups only;
+/// a click on a button inside an on-hover group that is currently
+/// hidden is ignored. Any matched click emits the button's
+/// [`ButtonAction`] as a [`ToolEffect`] and returns
+/// `EventStatus::Captured`.
 pub struct DecoratorLayer {
-    pub marker_xs: Vec<f32>,
+    /// The current flat decorator set. The host rebuilds this per
+    /// frame from its annotation store (levels, bracket legs,
+    /// indicator chips).
+    pub groups: Vec<DecoratorGroup>,
+    /// Per-frame hover / drag / expansion snapshot. Host rebuilds
+    /// before each paint.
+    pub hover: HoverState,
 }
 
 impl DecoratorLayer {
-    pub fn new(marker_xs: Vec<f32>) -> Self {
-        Self { marker_xs }
+    /// Construct a decorator layer with its initial group set +
+    /// hover snapshot.
+    pub fn new(groups: Vec<DecoratorGroup>, hover: HoverState) -> Self {
+        Self { groups, hover }
+    }
+
+    /// Replace the stored group set. Host calls this at frame boundary
+    /// after rebuilding the annotation projection.
+    pub fn set_groups(&mut self, groups: Vec<DecoratorGroup>) {
+        self.groups = groups;
+    }
+
+    /// Replace the stored hover state.
+    pub fn set_hover(&mut self, hover: HoverState) {
+        self.hover = hover;
+    }
+
+    /// Return the button at `pt`, walking visible groups top-to-bottom
+    /// (later groups win — matches paint-over semantics). Returns the
+    /// group insertion idx + item idx so the caller can route the
+    /// click.
+    pub fn button_at(&self, pt: Point) -> Option<(usize, usize)> {
+        // Iterate in reverse so later-inserted groups win (they paint on top).
+        for (g_idx, group) in self.groups.iter().enumerate().rev() {
+            if !crate::decorator::layout::visibility_for(group, &self.hover) {
+                continue;
+            }
+            for (i_idx, item) in group.items.iter().enumerate().rev() {
+                if let DecoratorItem::Button { bounds, .. } = item {
+                    if bounds.contains(pt.x, pt.y) {
+                        return Some((g_idx, i_idx));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Translate a `ButtonAction` into a `ToolEffect`. Private helper.
+    fn action_to_effect(action: &ButtonAction, pt: Point) -> ToolEffect {
+        match action {
+            ButtonAction::OpenContextMenu { items } => ToolEffect::OpenContextMenu {
+                pt,
+                items: items.clone(),
+            },
+            ButtonAction::Menu(menu_action) => match *menu_action {
+                ContextMenuAction::Edit { id } => ToolEffect::OpenContextMenu {
+                    pt,
+                    items: vec![ContextMenuItem {
+                        label: "Edit".to_string(),
+                        action: ContextMenuAction::Edit { id },
+                    }],
+                },
+                ContextMenuAction::ToggleLock { id } => ToolEffect::OpenContextMenu {
+                    pt,
+                    items: vec![ContextMenuItem {
+                        label: "Toggle Lock".to_string(),
+                        action: ContextMenuAction::ToggleLock { id },
+                    }],
+                },
+                ContextMenuAction::Delete { id } => ToolEffect::DeleteLevel { id },
+            },
+            ButtonAction::Effect(effect) => effect.clone(),
+        }
     }
 }
 
@@ -576,16 +672,69 @@ impl SceneLayer for DecoratorLayer {
     }
 
     fn paint(&self, ctx: &mut PaintContext<'_>) {
-        for &x in &self.marker_xs {
-            ctx.out.badges.push(BadgeInstance {
-                x: x - 4.0,
-                y: 4.0,
-                w: 8.0,
-                h: 8.0,
-                color: ctx.palette.text,
-                text: "".into(),
-            });
+        // Collect `(sub_z, group_idx, item_idx, emission)` across all
+        // groups. Stable-sort lets us paint bands in ascending order
+        // while preserving insertion order within a band.
+        let mut collected: Vec<(SubZ, usize, usize, DecoratorEmission)> = Vec::new();
+        for (g_idx, group) in self.groups.iter().enumerate() {
+            let emissions = emissions_for_group(group, &self.hover);
+            for (sub_z, i_idx, emission) in emissions {
+                collected.push((sub_z, g_idx, i_idx, emission));
+            }
         }
+        collected.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| a.2.cmp(&b.2))
+        });
+        for (_sub_z, _g_idx, _i_idx, emission) in collected {
+            match emission {
+                DecoratorEmission::Line(l) => ctx.out.lines.push(l),
+                DecoratorEmission::Badge(b) => ctx.out.badges.push(b),
+            }
+        }
+    }
+
+    fn as_interactive(&mut self) -> Option<&mut dyn InteractiveLayer> {
+        Some(self)
+    }
+}
+
+impl InteractiveLayer for DecoratorLayer {
+    fn update(&mut self, ev: InputEvent, ctx: &mut ToolContext<'_>) -> EventStatus {
+        let InputEvent::MouseDown {
+            button: MouseButton::Left,
+            pt,
+            ..
+        } = ev
+        else {
+            return EventStatus::Ignored;
+        };
+        let Some((g_idx, i_idx)) = self.button_at(pt) else {
+            return EventStatus::Ignored;
+        };
+        let DecoratorItem::Button { action, .. } = &self.groups[g_idx].items[i_idx] else {
+            return EventStatus::Ignored;
+        };
+        let effect = Self::action_to_effect(action, pt);
+        ctx.emit_effect(effect);
+        EventStatus::Captured
+    }
+
+    fn hit_test(&self, pt: Point, _price_range: &PriceRange) -> Option<Hit> {
+        if self.button_at(pt).is_some() {
+            Some(Hit {
+                layer_id: LayerId("decorators"),
+                sub_z: 0,
+                cursor: CursorShape::Pointer,
+            })
+        } else {
+            None
+        }
+    }
+
+    fn cancel(&mut self) {
+        // Decorator layer is stateless — nothing to reset.
     }
 }
 
@@ -736,7 +885,11 @@ mod tests {
     }
 
     #[test]
-    fn decorator_layer_emits_one_badge_per_marker() {
+    fn decorator_layer_emits_one_badge_per_always_group() {
+        // Thin smoke test — the deep decorator-layout coverage lives in
+        // `crate::decorator::tests`. This just confirms the layer's
+        // SceneLayer integration pushes into the primitives buffer.
+        use crate::decorator::{DecoratorGroup, DecoratorItem, GroupId, HoverState, Rect};
         let (axis, paxis, pr, vp, pal, fmt) = harness();
         let mut out = ScenePrimitives::default();
         let mut ctx = PaintContext {
@@ -748,7 +901,35 @@ mod tests {
             formatter: &fmt,
             out: &mut out,
         };
-        DecoratorLayer::new(vec![100.0, 200.0, 300.0]).paint(&mut ctx);
-        assert_eq!(out.badges.len(), 3);
+        let groups = vec![
+            DecoratorGroup::always(
+                GroupId(1),
+                1,
+                Rect::new(0.0, 0.0, 100.0, 50.0),
+                vec![DecoratorItem::Badge(BadgeInstance {
+                    x: 100.0,
+                    y: 4.0,
+                    w: 8.0,
+                    h: 8.0,
+                    color: [0xff, 0xff, 0xff, 0xff],
+                    text: "".into(),
+                })],
+            ),
+            DecoratorGroup::always(
+                GroupId(2),
+                2,
+                Rect::new(100.0, 0.0, 200.0, 50.0),
+                vec![DecoratorItem::Badge(BadgeInstance {
+                    x: 200.0,
+                    y: 4.0,
+                    w: 8.0,
+                    h: 8.0,
+                    color: [0xff, 0xff, 0xff, 0xff],
+                    text: "".into(),
+                })],
+            ),
+        ];
+        DecoratorLayer::new(groups, HoverState::default()).paint(&mut ctx);
+        assert_eq!(out.badges.len(), 2);
     }
 }
