@@ -491,3 +491,80 @@ fn merge_bar_bumps_version() {
     buf.merge_bar(86_400_000, 2.0, 2.0, 1.0, 1.5, 5);
     assert_eq!(buf.version(), 2);
 }
+
+// ─── update_last_price — tick-rate chart refresh ────────────────────
+
+#[test]
+fn update_last_price_on_empty_is_noop() {
+    let mut buf = CandleBuffer::new();
+    buf.update_last_price(100.0);
+    assert!(buf.is_empty());
+    assert_eq!(buf.version(), 0);
+}
+
+#[test]
+fn update_last_price_moves_close_and_extends_high() {
+    let mut buf = CandleBuffer::new();
+    buf.push(1000, 100.0, 101.0, 99.0, 100.5, 1_000);
+    buf.update_last_price(102.0);
+    assert_eq!(buf.closes[0], 102.0);
+    assert_eq!(buf.highs[0], 102.0); // extended from 101 → 102
+    assert_eq!(buf.lows[0], 99.0); // unchanged
+    assert_eq!(buf.opens[0], 100.0); // unchanged
+    assert_eq!(buf.volumes[0], 1_000); // unchanged
+}
+
+#[test]
+fn update_last_price_extends_low() {
+    let mut buf = CandleBuffer::new();
+    buf.push(1000, 100.0, 101.0, 99.0, 100.5, 1_000);
+    buf.update_last_price(98.0);
+    assert_eq!(buf.closes[0], 98.0);
+    assert_eq!(buf.lows[0], 98.0);
+    assert_eq!(buf.highs[0], 101.0); // unchanged
+}
+
+#[test]
+fn update_last_price_inside_range_only_moves_close() {
+    let mut buf = CandleBuffer::new();
+    buf.push(1000, 100.0, 101.0, 99.0, 100.5, 1_000);
+    buf.update_last_price(100.2);
+    assert_eq!(buf.closes[0], 100.2);
+    assert_eq!(buf.highs[0], 101.0); // unchanged
+    assert_eq!(buf.lows[0], 99.0); // unchanged
+}
+
+#[test]
+fn update_last_price_bumps_version() {
+    let mut buf = CandleBuffer::new();
+    buf.push(1000, 100.0, 101.0, 99.0, 100.5, 1_000);
+    let v0 = buf.version();
+    buf.update_last_price(100.2);
+    assert_eq!(buf.version(), v0 + 1);
+}
+
+#[test]
+fn update_last_price_rejects_non_finite() {
+    let mut buf = CandleBuffer::new();
+    buf.push(1000, 100.0, 101.0, 99.0, 100.5, 1_000);
+    let v0 = buf.version();
+    buf.update_last_price(f32::NAN);
+    buf.update_last_price(f32::INFINITY);
+    buf.update_last_price(f32::NEG_INFINITY);
+    assert_eq!(buf.closes[0], 100.5); // unchanged
+    assert_eq!(buf.version(), v0); // no version bump
+}
+
+#[test]
+fn update_last_price_only_touches_last_candle() {
+    let mut buf = CandleBuffer::new();
+    buf.push(1000, 100.0, 101.0, 99.0, 100.5, 1_000);
+    buf.push(2000, 100.5, 102.0, 100.0, 101.5, 2_000);
+    buf.update_last_price(105.0);
+    // First candle untouched.
+    assert_eq!(buf.closes[0], 100.5);
+    assert_eq!(buf.highs[0], 101.0);
+    // Second candle gets the update.
+    assert_eq!(buf.closes[1], 105.0);
+    assert_eq!(buf.highs[1], 105.0);
+}

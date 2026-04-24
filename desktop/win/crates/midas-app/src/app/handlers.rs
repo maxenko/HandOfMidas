@@ -4267,6 +4267,42 @@ fn floating_window_synthetic_id(wid: iced::window::Id) -> midas_core::ChartId {
     midas_core::ChartId::new(raw)
 }
 
+/// Apply a quote-cadence price update to every chart bound to
+/// `symbol_str`. Iterates docked charts first, then floating charts.
+/// `Arc::make_mut` only clones when the Arc is actually shared; when
+/// the app owns the only handle the update lands in place and the
+/// next `view()` picks up the version bump on the candle buffer.
+///
+/// Complexity is O(charts) per tick; charts are a small bounded set
+/// (~20 docked, single-digit floating) so this is trivially cheap
+/// at 250 ms cadence. If charts grow into the hundreds we can index
+/// by bound symbol at bind-time instead of scanning.
+fn apply_quote_to_matching_charts(
+    charts: &mut std::collections::HashMap<midas_core::ChartId, crate::app::ChartPanel>,
+    floating_charts: &mut std::collections::HashMap<iced::window::Id, crate::app::ChartPanel>,
+    symbol_str: &str,
+    price: f32,
+) {
+    for chart in charts.values_mut() {
+        if chart.symbol.eq_ignore_ascii_case(symbol_str) {
+            if let Some(arc) = chart.data.as_mut() {
+                let buf = std::sync::Arc::make_mut(arc);
+                buf.update_last_price(price);
+                chart.chart_state.dirty.mark_data();
+            }
+        }
+    }
+    for chart in floating_charts.values_mut() {
+        if chart.symbol.eq_ignore_ascii_case(symbol_str) {
+            if let Some(arc) = chart.data.as_mut() {
+                let buf = std::sync::Arc::make_mut(arc);
+                buf.update_last_price(price);
+                chart.chart_state.dirty.mark_data();
+            }
+        }
+    }
+}
+
 /// Fold a single `Bar` (router-era) into a `CandleBuffer` via
 /// `apply_bar`. Narrows the `u64` volume to `u32` with saturation.
 fn apply_bar_to_buffer(
@@ -4443,9 +4479,16 @@ impl MidasApp {
                 Task::none()
             }
             Message::QuoteBatch(batch) => {
-                // Fold each (symbol, quote) into market_cache.
-                // Prefer `last` for the row's headline price; fall
-                // back to mid-quote if the broker hasn't emitted a
+                // Fold each (symbol, quote) into market_cache AND
+                // drive the matching chart's last-candle close.
+                // Watchlist and chart share the same funnel — this
+                // one broadcast is the source of truth for both
+                // surfaces. Prior to this, chart updates lagged
+                // watchlist by up to the bar stream's sampling
+                // interval (~5 s on the sim, 5 s on real IB).
+                //
+                // Prefer `last` for the headline price; fall back
+                // to the mid-quote if the broker hasn't emitted a
                 // trade yet — same rule as the legacy
                 // `BrokerEvent::Tick` arm so the UI behaves
                 // identically regardless of which path drove the
@@ -4466,6 +4509,21 @@ impl MidasApp {
                             }
                         }
                         self.market_cache.insert(key, merged);
+
+                        // Every chart bound to this symbol gets the
+                        // same tick applied to its last candle so
+                        // the visible close tracks the watchlist at
+                        // quote cadence. Authoritative bar updates
+                        // (ChartBarBatch / ChartSubBarBatch) still
+                        // overwrite/merge on their own cadence; the
+                        // two paths agree at bar close.
+                        let price_f32 = price as f32;
+                        apply_quote_to_matching_charts(
+                            &mut self.charts,
+                            &mut self.floating_charts,
+                            &sym.symbol,
+                            price_f32,
+                        );
                     }
                 }
                 Task::none()

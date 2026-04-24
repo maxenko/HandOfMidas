@@ -278,6 +278,40 @@ impl CandleBuffer {
         }
     }
 
+    /// Tick-rate update of the last candle's close price.
+    ///
+    /// Extends the current candle in place: `close = price`, `high =
+    /// max(high, price)`, `low = min(low, price)`. Volume, open, and
+    /// timestamp are not touched. Drives the chart at quote cadence
+    /// (~250 ms default — the same funnel the watchlist reads from)
+    /// between authoritative bar emissions so the last candle visibly
+    /// tracks the watchlist price instead of lagging by the
+    /// bar-stream sampling interval (typically 5 s on the sim and
+    /// `reqRealTimeBars`).
+    ///
+    /// No-op when the buffer is empty — the first bar has to arrive
+    /// through `push` / `apply_bar` / `merge_bar` before ticks can
+    /// refine it. No-op on non-finite prices to stay robust against
+    /// upstream NaN / Inf.
+    pub fn update_last_price(&mut self, price: f32) {
+        if !price.is_finite() {
+            return;
+        }
+        if self.closes.is_empty() {
+            return;
+        }
+        let h_last = self.highs.last_mut().expect("highs out of sync");
+        if price > *h_last {
+            *h_last = price;
+        }
+        let l_last = self.lows.last_mut().expect("lows out of sync");
+        if price < *l_last {
+            *l_last = price;
+        }
+        *self.closes.last_mut().expect("closes out of sync") = price;
+        self.version.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Incrementally merge a sub-bucket bar into the current bucket.
     ///
     /// Where `apply_bar` is an authoritative overwrite (the aggregator
