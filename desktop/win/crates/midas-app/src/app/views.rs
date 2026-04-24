@@ -3,27 +3,19 @@
 //! Builds the widget tree: toolbar, pane grid, title bars, chart body,
 //! status bar, and floating chart windows.
 //!
-//! ## Slice 8f — feature-gate × config mismatch (reserved for slice 9a)
+//! ## Slice 9a — feature-gate × config matrix (implemented)
 //!
-//! Plan `chart-transition` Scenario 9 specifies that when a build is
-//! compiled WITHOUT `--features session_chart` but a user config
-//! selects `backend: "New"`, the dispatch inside this module must:
+//! Plan `chart-transition` Scenario 9: when a build is compiled
+//! WITHOUT `--features session_chart` but a user config selects
+//! `backend: "New"`, the dispatch inside this module must:
 //!
 //! 1. Still parse the `ChartBackend` enum (enum parsing is
-//!    feature-independent).
+//!    feature-independent — lives in `midas-core`).
 //! 2. Fall back to `Legacy` with a `tracing::warn!` on first encounter.
 //! 3. Never panic, never silently drop the selection.
 //!
-//! The `ChartBackend` enum + the per-panel `backend` field land in
-//! slice 9a — that slice owns the four-cell matrix test
-//! `{feature on/off} × {config New/Legacy}`. No work to do in slice
-//! 8f beyond this signpost.
-//
-// TODO(chart-transition slice 9a): add the per-panel `ChartBackend`
-// selector + dispatch fall-through when the config selects a backend
-// the build can't service. See `plan/chart-transition/00-index.md`
-// slice 9a, "Feature gate × config mismatch" for the 4-cell matrix
-// the dispatch must satisfy.
+//! Implemented by [`resolve_backend`] — called from every chart-panel
+//! render site. Four-cell matrix covered by the dispatch tests.
 
 use iced::widget::pane_grid::{self, PaneGrid};
 use iced::widget::{
@@ -33,8 +25,68 @@ use iced::widget::{
 use iced::{window, Color, Element, Fill, Length};
 
 use midas_core::{
-    AccountPanelId, ChartId, LinkColor, LinkMode, OrderPanelId, Timeframe, WatchlistId,
+    AccountPanelId, ChartBackend, ChartId, LinkColor, LinkMode, OrderPanelId, Timeframe,
+    WatchlistId,
 };
+
+/// Latches to `true` after the first config-vs-feature mismatch
+/// fall-back log (plan Scenario 9). Prevents a chatty stream of
+/// `tracing::warn!`s when a user reloads a config that selects `New`
+/// under a build without `--features session_chart`.
+///
+/// Only relevant when `session_chart` is OFF — the `New` branch in
+/// [`resolve_backend`] consults the latch. Feature-gated so the
+/// variable never exists in builds that enable the feature (avoids a
+/// dead-code warning).
+#[cfg(not(feature = "session_chart"))]
+static BACKEND_FALLBACK_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Resolve the effective rendering backend for a panel given the
+/// stored [`ChartBackend`] and this build's feature flags (plan
+/// Scenario 9 / R4).
+///
+/// - `Legacy` always resolves to `Legacy` (feature on or off).
+/// - `New` with `--features session_chart` resolves to `New`.
+/// - `New` without the feature falls back to `Legacy` with a
+///   `tracing::warn!` the first time it fires per process.
+///
+/// Pure function — the fallback warning is the only side-effect.
+///
+/// The `#[allow]` is necessary because under `--features session_chart`
+/// this function reduces to an identity (both arms map to themselves);
+/// clippy's `needless_match` doesn't know the `#[cfg]` branches carry
+/// the actual feature-gate logic.
+#[allow(clippy::needless_match)]
+pub(crate) fn resolve_backend(selected: ChartBackend) -> ChartBackend {
+    match selected {
+        ChartBackend::Legacy => ChartBackend::Legacy,
+        ChartBackend::New => {
+            #[cfg(feature = "session_chart")]
+            {
+                ChartBackend::New
+            }
+            #[cfg(not(feature = "session_chart"))]
+            {
+                if !BACKEND_FALLBACK_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    tracing::warn!(
+                        "config selects New backend but build lacks session_chart feature; \
+                         falling back to Legacy"
+                    );
+                }
+                ChartBackend::Legacy
+            }
+        }
+    }
+}
+
+/// Test-only reset for the once-per-process fallback warning latch.
+/// Lets dispatch-matrix tests assert the warning fires for every
+/// "feature off + New" cell without interference across tests.
+#[cfg(all(test, not(feature = "session_chart")))]
+pub(crate) fn reset_backend_fallback_warned() {
+    BACKEND_FALLBACK_WARNED.store(false, std::sync::atomic::Ordering::Relaxed);
+}
 
 use crate::layout::PanelContent;
 use crate::link::{link_color_rgba, link_mode_indicator_rgba, LinkDimension, PickerTarget};
@@ -693,6 +745,22 @@ impl MidasApp {
             .padding([1, 4])
             .style(button::text);
 
+        // Chart-transition slice 9a: per-panel backend toggle chip.
+        // Styled to match the existing toolbar chips (`session_chart_window.rs`
+        // pattern: `button::primary` when active, `button::text` when
+        // inactive). Label reflects the CURRENT backend; click flips
+        // via [`Message::ToggleChartBackend`].
+        let backend_btn = match vm.backend {
+            midas_core::ChartBackend::New => button(text("New").size(10).color(Color::WHITE))
+                .on_press(Message::ToggleChartBackend(chart_id))
+                .padding([1, 4])
+                .style(button::primary),
+            midas_core::ChartBackend::Legacy => button(text("Legacy").size(10))
+                .on_press(Message::ToggleChartBackend(chart_id))
+                .padding([1, 4])
+                .style(button::text),
+        };
+
         row![
             ticker_input,
             tf_row,
@@ -700,6 +768,7 @@ impl MidasApp {
             vp_btn,
             levels_btn,
             reset_btn,
+            backend_btn,
         ]
         .spacing(4)
         .align_y(iced::Alignment::Center)
@@ -795,6 +864,15 @@ impl MidasApp {
             Some(c) => c,
             None => return self.view_empty_placeholder(),
         };
+
+        // Chart-transition slice 9a: resolve per-panel backend vs
+        // feature-gate (plan Scenario 9). `resolve_backend` emits the
+        // once-per-process warning when the feature is off but the
+        // panel selected `New`.
+        let effective_backend = resolve_backend(chart.backend);
+        if effective_backend == ChartBackend::New {
+            return self.view_pane_body_new_backend(chart_id);
+        }
 
         if let Some(snapshot) = self.chart_render_snapshot(chart_id) {
             let overlays = self
@@ -900,6 +978,70 @@ impl MidasApp {
             .padding(2) // Inset so Content's focus border is visible.
             .style(move |_theme| container::Style {
                 background: Some(bg_color.into()),
+                ..Default::default()
+            })
+            .into()
+    }
+
+    /// Render the docked pane body under the session-aware new
+    /// backend (chart-transition slice 9a).
+    ///
+    /// The floating-window session-chart path is fully wired end-to-end
+    /// via [`crate::session_chart_window::SessionChartWindow::view`];
+    /// the docked in-pane wiring lands in a follow-up slice that
+    /// extracts the shader + driver plumbing out of the window host.
+    /// For slice 9a the docked `New` panel renders a distinct
+    /// placeholder so the dispatch + toggle + config-restore paths
+    /// are visually verifiable and unit-testable without dragging the
+    /// full session-chart surface into the pane grid.
+    ///
+    /// Key guarantees satisfied in this slice:
+    ///
+    /// - The panel paints WITHOUT panicking (plan Scenario 9 / R14).
+    /// - Live bracket state is preserved in `TickerState.live_bracket`;
+    ///   the new layer will seed from it on scene rebuild.
+    /// - Active bracket DRAFTs were cancelled in the
+    ///   `Message::SetChartBackend` handler before we got here.
+    fn view_pane_body_new_backend(&self, chart_id: ChartId) -> Element<'_, Message> {
+        let chart = match self.charts.get(&chart_id) {
+            Some(c) => c,
+            None => return self.view_empty_placeholder(),
+        };
+        let header_lines = vec![
+            "New chart backend (session-aware)".to_string(),
+            format!(
+                "symbol={} timeframe={}",
+                if chart.symbol.is_empty() {
+                    "—"
+                } else {
+                    chart.symbol.as_str()
+                },
+                chart.timeframe.display_name(),
+            ),
+            "Slice 9a placeholder — docked wiring follows in a later slice".to_string(),
+        ];
+        let body = Column::with_children(
+            header_lines
+                .into_iter()
+                .map(|s| text(s).size(12).color(crate::theme::TEXT_SECONDARY).into())
+                .collect::<Vec<_>>(),
+        )
+        .spacing(4)
+        .align_x(iced::alignment::Horizontal::Center);
+
+        container(body)
+            .width(Fill)
+            .height(Fill)
+            .center_x(Fill)
+            .center_y(Fill)
+            .padding(2)
+            .style(|_theme| container::Style {
+                background: Some(crate::theme::CHART_EMPTY_BG.into()),
+                border: iced::Border {
+                    color: Color::from_rgba(0.24, 0.45, 0.78, 1.0),
+                    width: 1.0,
+                    radius: 0.0.into(),
+                },
                 ..Default::default()
             })
             .into()
@@ -3658,4 +3800,47 @@ fn active_neutral_button_style(_theme: &iced::Theme, _status: button::Status) ->
 fn thumbnail_color(closes: &[f32]) -> [f32; 4] {
     let palette = theme::ThumbnailPalette::dark_default();
     palette.color_for_closes(closes.first().copied(), closes.last().copied())
+}
+
+// ── Chart-transition slice 9a: backend-dispatch tests ────────────────
+//
+// Covers plan Scenario 9 — the four-cell feature-gate × config matrix
+// (feature on/off × config Legacy/New). The tests split along `cfg`
+// so each test only compiles under the feature-flag value it
+// exercises: without the feature, `New` must fall back to `Legacy`
+// and emit the one-shot warning; with the feature, `New` stays `New`.
+#[cfg(test)]
+mod backend_dispatch_tests {
+    use super::{resolve_backend, ChartBackend};
+
+    /// Cell 2 (feature ON + config Legacy) — always Legacy.
+    #[test]
+    fn resolve_legacy_always_returns_legacy() {
+        assert_eq!(resolve_backend(ChartBackend::Legacy), ChartBackend::Legacy);
+    }
+
+    /// Cell 1 (feature ON + config New) — stays New.
+    #[cfg(feature = "session_chart")]
+    #[test]
+    fn resolve_new_with_feature_stays_new() {
+        assert_eq!(resolve_backend(ChartBackend::New), ChartBackend::New);
+    }
+
+    /// Cell 3 (feature OFF + config New) — falls back to Legacy.
+    #[cfg(not(feature = "session_chart"))]
+    #[test]
+    fn resolve_new_without_feature_falls_back_to_legacy() {
+        super::reset_backend_fallback_warned();
+        assert_eq!(resolve_backend(ChartBackend::New), ChartBackend::Legacy);
+        // Second call is still Legacy — the latch only suppresses the
+        // warning, not the fall-back itself.
+        assert_eq!(resolve_backend(ChartBackend::New), ChartBackend::Legacy);
+    }
+
+    /// Cell 4 (feature OFF + config Legacy) — Legacy.
+    #[cfg(not(feature = "session_chart"))]
+    #[test]
+    fn resolve_legacy_without_feature_is_legacy() {
+        assert_eq!(resolve_backend(ChartBackend::Legacy), ChartBackend::Legacy);
+    }
 }

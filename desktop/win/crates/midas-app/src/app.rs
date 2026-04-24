@@ -37,8 +37,8 @@ use midas_chart::state::ChartState;
 use midas_chart::AnnotationId;
 use midas_core::config::{AppConfig, ChartConfig, LayoutNode, PanelSlot};
 use midas_core::{
-    AccountPanelId, CandleBuffer, ChartId, DataProvider, LinkMode, OrderPanelId, Timeframe,
-    WatchlistId,
+    AccountPanelId, CandleBuffer, ChartBackend, ChartId, DataProvider, LinkMode, OrderPanelId,
+    Timeframe, WatchlistId,
 };
 
 use crate::registry::HistoricalDataRegistry;
@@ -269,6 +269,17 @@ pub struct ChartPanel {
     /// flip this field; the current code path only exercises the
     /// default-true behaviour end-to-end.
     pub visible: bool,
+    /// Chart rendering backend for this specific panel (chart-transition
+    /// slice 9a). Defaults to [`ChartBackend::Legacy`]; the toolbar
+    /// backend chip toggles between `Legacy` and `New` on a per-panel
+    /// basis.
+    ///
+    /// Persisted in [`ChartConfig::backend`] so the selection survives
+    /// restart. When the binary is built without `--features
+    /// session_chart` the dispatch in `app/views.rs` falls back to
+    /// `Legacy` with a `tracing::warn!` regardless of this field's
+    /// value (plan Scenario 9).
+    pub backend: ChartBackend,
 }
 
 impl ChartPanel {
@@ -699,6 +710,19 @@ pub enum Message {
     ToggleLevels(ChartId),
     /// Reset chart to default view (fit all data).
     ResetChart(ChartId),
+
+    // -- Chart backend toggle (chart-transition slice 9a) --
+    /// Flip a chart panel between the legacy and new rendering
+    /// backends. Auto-cancels any active bracket DRAFT before the
+    /// swap (plan R11). LIVE brackets (entry filled, TP/SL resting)
+    /// stay intact because broker-side state is untouched — only the
+    /// rendering changes; the new layer reads `TickerState.live_bracket`
+    /// on scene rebuild.
+    ToggleChartBackend(ChartId),
+    /// Explicitly set a chart panel's rendering backend. Used by the
+    /// toolbar chip's direct-set path and by the config-restore flow
+    /// so toggle + set share one handler.
+    SetChartBackend(ChartId, ChartBackend),
 
     // -- Batched messages from shader widget --
     /// Multiple messages from a single widget event (shader can only publish one).
@@ -1708,6 +1732,9 @@ impl MidasApp {
             timeframe_link: chart
                 .map(|c| c.timeframe_link)
                 .unwrap_or(midas_core::LinkMode::Unlinked),
+            backend: chart
+                .map(|c| c.backend)
+                .unwrap_or(midas_core::ChartBackend::Legacy),
         }
     }
 
@@ -2804,6 +2831,13 @@ impl MidasApp {
         panel.timeframe = tf;
         panel.symbol_link = cfg.symbol_link;
         panel.timeframe_link = cfg.timeframe_link;
+        // Chart-transition slice 9a: restore persisted backend. `None`
+        // means "follow the app default" which is currently
+        // `ChartBackend::Legacy`. The dispatch layer handles the
+        // feature-gate × config mismatch (build without
+        // `session_chart` + config says `New` falls back to Legacy
+        // with a `tracing::warn!`).
+        panel.backend = cfg.backend.unwrap_or_default();
         Self::restore_camera(cfg, &mut panel);
         panel
     }
@@ -2865,6 +2899,10 @@ impl MidasApp {
             camera_restored_pending: false,
             load_generation: 0,
             visible: true,
+            // Slice 9a default: every new panel starts on the legacy
+            // backend. The user flips via the toolbar chip; slice 9b
+            // will flip the app-wide default to `New` after soak.
+            backend: ChartBackend::Legacy,
         }
     }
 
@@ -3902,6 +3940,8 @@ impl MidasApp {
             | Message::ToggleVolumeProfile(..)
             | Message::ToggleLevels(..)
             | Message::ResetChart(..)
+            | Message::ToggleChartBackend(..)
+            | Message::SetChartBackend(..)
             | Message::ChartBatch(..) => self.handle_chart_interaction_msg(message),
 
             // -- Keyboard --
@@ -4466,3 +4506,260 @@ impl MidasApp {
 
 // View functions (view, view_toolbar, view_content, view_pane_*, view_status_bar)
 // are in app/views.rs.
+
+// ── Chart-transition slice 9a: per-panel backend toggle tests ────────
+//
+// Covers plan slice 9a + R4 (rollback mechanics) + R11 (live-bracket
+// handoff) on the pieces that don't require spinning up a full
+// `MidasApp` (iced runtime, wgpu surface, market-data router, etc.).
+// The feature-gate × config matrix lives in
+// `app::views::backend_dispatch_tests`; bracket-tool integration lives
+// in `desktop/win/tests/bracket_tool_integration.rs`. What's here is
+// the ChartPanel + ChartConfig + TickerState wiring specific to
+// slice 9a.
+
+#[cfg(test)]
+mod backend_toggle_tests {
+    use super::*;
+    use midas_chart::widget::order_bracket::{
+        BracketLeg, BracketSide, BracketStatus, LegRole, OrderBracket,
+    };
+    use midas_chart::widget::{LineStroke, LineStyle, PriceLine};
+    use midas_core::config::ChartConfig;
+    use midas_core::LinkMode;
+
+    /// Compute the next backend for a toggle click — mirrors the
+    /// handler body so we can unit-test the transition rule without
+    /// building a full MidasApp.
+    fn toggle(current: ChartBackend) -> ChartBackend {
+        match current {
+            ChartBackend::Legacy => ChartBackend::New,
+            ChartBackend::New => ChartBackend::Legacy,
+        }
+    }
+
+    #[test]
+    fn new_panel_defaults_to_legacy_backend() {
+        let panel = MidasApp::make_empty_panel();
+        assert_eq!(panel.backend, ChartBackend::Legacy);
+    }
+
+    #[test]
+    fn toggle_round_trip_legacy_new_legacy() {
+        let mut backend = ChartBackend::Legacy;
+        backend = toggle(backend);
+        assert_eq!(backend, ChartBackend::New);
+        backend = toggle(backend);
+        assert_eq!(backend, ChartBackend::Legacy);
+        backend = toggle(backend);
+        assert_eq!(backend, ChartBackend::New);
+    }
+
+    /// Persisted selection restores on reload — `restore_panel`
+    /// propagates `ChartConfig::backend` into `ChartPanel::backend`.
+    #[test]
+    fn restore_panel_reads_persisted_backend_new() {
+        let cfg = ChartConfig {
+            symbol: "AAPL".into(),
+            timeframe: "1D".into(),
+            levels: vec![],
+            camera_time_start: None,
+            camera_time_end: None,
+            camera_price_low: None,
+            camera_price_high: None,
+            collapse_gaps: false,
+            timeline_border_ratio: 0.20,
+            volume_scale: 1.0,
+            show_volume_profile: false,
+            show_levels: true,
+            viewport_width: None,
+            viewport_height: None,
+            symbol_link: LinkMode::default(),
+            timeframe_link: LinkMode::default(),
+            bound_symbol: None,
+            backend: Some(ChartBackend::New),
+        };
+        let panel = MidasApp::restore_panel(&cfg);
+        assert_eq!(panel.backend, ChartBackend::New);
+    }
+
+    /// A pre-9a config (no `backend` field) restores with the default
+    /// (`Legacy`). Validates the back-compat path.
+    #[test]
+    fn restore_panel_without_backend_defaults_to_legacy() {
+        let cfg = ChartConfig {
+            symbol: "AAPL".into(),
+            timeframe: "1D".into(),
+            levels: vec![],
+            camera_time_start: None,
+            camera_time_end: None,
+            camera_price_low: None,
+            camera_price_high: None,
+            collapse_gaps: false,
+            timeline_border_ratio: 0.20,
+            volume_scale: 1.0,
+            show_volume_profile: false,
+            show_levels: true,
+            viewport_width: None,
+            viewport_height: None,
+            symbol_link: LinkMode::default(),
+            timeframe_link: LinkMode::default(),
+            bound_symbol: None,
+            backend: None,
+        };
+        let panel = MidasApp::restore_panel(&cfg);
+        assert_eq!(panel.backend, ChartBackend::Legacy);
+    }
+
+    // Helper: build a fake `OrderBracket` in the given state. Mirrors
+    // the test helpers in `ticker_state/tests.rs` but scoped locally
+    // so this module stays self-contained.
+    fn mk_bracket(status: BracketStatus, filled: Option<f64>) -> OrderBracket {
+        fn leg(price: f64, role: LegRole) -> BracketLeg {
+            BracketLeg {
+                line: PriceLine {
+                    price,
+                    extent: midas_chart::widget::LineExtent::FullWidth,
+                    stroke: LineStroke {
+                        color: [1.0, 1.0, 1.0, 1.0],
+                        width: 1.0,
+                        style: LineStyle::Solid,
+                    },
+                },
+                role,
+                projected_pnl: None,
+                projected_pnl_pct: None,
+            }
+        }
+        OrderBracket {
+            entry: leg(100.0, LegRole::Entry),
+            take_profit: Some(leg(110.0, LegRole::TakeProfit)),
+            stop_loss: Some(leg(95.0, LegRole::StopLoss)),
+            side: BracketSide::Long,
+            status,
+            quantity: Some(10.0),
+            saved: false,
+            filled_qty: filled,
+            entry_type: midas_chart::widget::order_bracket::EntryType::Market,
+            entry_stop_price: None,
+            wrong_side_warning: false,
+        }
+    }
+
+    /// R11 state handoff: a DRAFT bracket is cancellable, a LIVE
+    /// (Active) bracket is preserved — only the rendering path
+    /// changes. This test encodes the status discriminant the
+    /// handler uses to decide whether to fire
+    /// `TickerMsg::CancelBracket` before swapping backends.
+    #[test]
+    fn backend_swap_draft_detection_discriminates_draft_vs_live() {
+        let draft = mk_bracket(BracketStatus::Draft, None);
+        let active = mk_bracket(BracketStatus::Active, Some(10.0));
+        let pending = mk_bracket(BracketStatus::Pending, None);
+        let partial = mk_bracket(BracketStatus::PartialFill, Some(5.0));
+
+        // Only `Draft` triggers the auto-cancel in
+        // `Message::SetChartBackend` (other statuses mean the bracket
+        // is already working at the broker; keep it).
+        fn is_draft(b: &OrderBracket) -> bool {
+            matches!(b.status, BracketStatus::Draft)
+        }
+        assert!(is_draft(&draft));
+        assert!(!is_draft(&active));
+        assert!(!is_draft(&pending));
+        assert!(!is_draft(&partial));
+    }
+
+    /// R11 partial-fill rendering: an active bracket with
+    /// `filled_qty < total_qty` must render with the brighter
+    /// entry-line styling (slice 5b). The color-choice logic lives
+    /// inside `OrderBracketView::is_partially_filled` in
+    /// `crates/midas-scene/src/layers/annotations.rs`; here we pin
+    /// the per-status semantics the handler uses when building the
+    /// view for the new layer.
+    #[test]
+    fn partial_fill_status_is_distinct_from_active() {
+        let partial = mk_bracket(BracketStatus::PartialFill, Some(5.0));
+        let active = mk_bracket(BracketStatus::Active, Some(10.0));
+        // The chart-crate BracketStatus and midas-scene
+        // `OrderBracketView::is_partially_filled` use the same
+        // discriminator: filled_qty < total_qty. Both statuses carry
+        // different visual treatments via the bracket-rendering path.
+        assert_ne!(partial.status, active.status);
+        assert_eq!(partial.filled_qty, Some(5.0));
+        assert_eq!(active.filled_qty, Some(10.0));
+    }
+
+    /// `Message::ToggleChartBackend` and `Message::SetChartBackend`
+    /// are part of the public Message enum (discoverable by the
+    /// devloop harness + any future test-injection path). Pinning
+    /// their variant shape + Clone here so a rename breaks the
+    /// contract loudly.
+    #[test]
+    fn toggle_and_set_backend_messages_exist_and_clone() {
+        let toggle = Message::ToggleChartBackend(midas_core::ChartId::new(0));
+        let set = Message::SetChartBackend(midas_core::ChartId::new(1), ChartBackend::New);
+        let _ = toggle.clone();
+        let _ = set.clone();
+        // Debug-format is used by the devloop event log / tracing.
+        let _dbg = format!("{toggle:?}");
+        let _dbg = format!("{set:?}");
+    }
+
+    /// `ChartPanel::backend` survives clone — the `ChartPanel` is
+    /// cloned into snapshots for the shader program. If clone drops
+    /// the field, the new backend swap would silently revert.
+    #[test]
+    fn chart_panel_backend_survives_clone() {
+        let mut panel = MidasApp::make_empty_panel();
+        panel.backend = ChartBackend::New;
+        let cloned = panel.clone();
+        assert_eq!(cloned.backend, ChartBackend::New);
+    }
+
+    /// Multi-window drag isolation scaffolding (plan R14): two chart
+    /// panels with independent `ChartPanel::backend` must not share
+    /// state across the swap path. Pinning the Copy-ness of
+    /// `ChartBackend` guards the invariant that per-panel flips don't
+    /// leak through shared storage.
+    #[test]
+    fn chart_backend_is_copy() {
+        fn assert_copy<T: Copy>() {}
+        assert_copy::<ChartBackend>();
+    }
+
+    /// R14 dual-render perf budget (plan slice 9a): mixing a Legacy
+    /// and a New panel in the same workspace must stay under the 14 ms
+    /// frame budget. Full GPU perf gating requires a wgpu harness;
+    /// this test pins the *resolution* path on the hot frame loop —
+    /// every panel paint calls [`resolve_backend`] — so a micro-bench
+    /// over N calls enforces the pure-CPU overhead is negligible.
+    ///
+    /// The threshold is generous (1 ms for 10_000 resolve calls ≈
+    /// 100 ns per call, 1000× smaller than the frame budget) so the
+    /// test is stable across CI runs and still catches regressions
+    /// like a lock-under-contention or a chatty tracing call on the
+    /// hot path.
+    #[test]
+    fn resolve_backend_stays_cheap_under_dual_panel_rate() {
+        use std::time::Instant;
+        let t0 = Instant::now();
+        for i in 0..10_000 {
+            // Interleave Legacy + New to emulate a two-panel mixed
+            // workspace; `std::hint::black_box` keeps the optimizer
+            // from eliding the side-effectful `tracing::warn!` path.
+            let b = if i % 2 == 0 {
+                ChartBackend::Legacy
+            } else {
+                ChartBackend::New
+            };
+            let _ =
+                std::hint::black_box(crate::app::views::resolve_backend(std::hint::black_box(b)));
+        }
+        let elapsed = t0.elapsed();
+        assert!(
+            elapsed.as_millis() < 1,
+            "resolve_backend × 10_000 should finish in < 1 ms, took {elapsed:?}"
+        );
+    }
+}

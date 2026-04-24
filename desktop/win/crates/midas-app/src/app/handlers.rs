@@ -1046,6 +1046,90 @@ impl MidasApp {
                 Task::batch(tasks)
             }
 
+            // Chart-transition slice 9a: per-panel backend toggle.
+            Message::ToggleChartBackend(chart_id) => {
+                let next = self.charts.get(&chart_id).map(|panel| match panel.backend {
+                    midas_core::ChartBackend::Legacy => midas_core::ChartBackend::New,
+                    midas_core::ChartBackend::New => midas_core::ChartBackend::Legacy,
+                });
+                if let Some(next) = next {
+                    return self.update(Message::SetChartBackend(chart_id, next));
+                }
+                Task::none()
+            }
+
+            // Chart-transition slice 9a: explicit backend set. Shared
+            // handler for toolbar toggle + config-restore flows.
+            //
+            // R11 state handoff: an active bracket DRAFT on the target
+            // symbol is auto-cancelled before the swap so no orphan
+            // draft survives the backend change. LIVE brackets (entry
+            // filled, TP/SL resting at broker) stay intact —
+            // broker-side state is never touched here; only the
+            // rendering path changes. The new-stack `OrderBracketLayer`
+            // reads `TickerState.live_bracket` on scene rebuild and
+            // seeds its legs (including `filled_qty / total_qty` for
+            // partial-fill colouring per slice 5b).
+            Message::SetChartBackend(chart_id, backend) => {
+                // Read the current state upfront so we can decide
+                // whether to fire a TickerMsg::CancelBracket before we
+                // take a mutable borrow of `self.charts`.
+                let (current, sym_key, has_draft) = match self.charts.get(&chart_id) {
+                    Some(panel) => {
+                        let sym = panel.bound_symbol.clone();
+                        let has_draft = sym
+                            .as_ref()
+                            .and_then(|key| self.tickers.get(key))
+                            .and_then(|ts| ts.live_bracket())
+                            .map(|b| {
+                                matches!(
+                                    b.status,
+                                    midas_chart::widget::order_bracket::BracketStatus::Draft
+                                )
+                            })
+                            .unwrap_or(false);
+                        (panel.backend, sym, has_draft)
+                    }
+                    None => return Task::none(),
+                };
+
+                // No-op when the selection is identical.
+                if current == backend {
+                    return Task::none();
+                }
+
+                // R11: auto-cancel an in-progress DRAFT bracket. Must
+                // fire BEFORE the backend swap so the legacy chart
+                // widget's draft state is drained through the normal
+                // TickerState effects pipeline.
+                if has_draft {
+                    if let Some(key) = sym_key {
+                        tracing::debug!(
+                            chart_id = ?chart_id,
+                            "slice 9a: cancelling draft bracket before backend swap"
+                        );
+                        let _ = self.update(Message::Ticker(
+                            key,
+                            crate::ticker_state::TickerMsg::CancelBracket,
+                        ));
+                    }
+                }
+
+                if let Some(panel) = self.charts.get_mut(&chart_id) {
+                    panel.backend = backend;
+                    // Force a full rebuild so the new backend picks up
+                    // the current data + live_bracket on next paint.
+                    panel.chart_state.dirty.mark_data();
+                    tracing::info!(
+                        chart_id = ?chart_id,
+                        ?backend,
+                        "chart backend swapped"
+                    );
+                }
+                self.mark_config_dirty();
+                Task::none()
+            }
+
             _ => unreachable!(),
         }
     }
@@ -4851,6 +4935,7 @@ mod visibility_tests {
             camera_restored_pending: false,
             load_generation: 0,
             visible,
+            backend: midas_core::ChartBackend::Legacy,
         };
         let sym = SymbolKey::new(symbol);
         apply_symbol_to_panel(&mut panel, symbol, sym);

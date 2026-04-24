@@ -150,6 +150,7 @@ fn save_load_roundtrip_preserves_all_fields() {
             symbol_link: LinkMode::default(),
             timeframe_link: LinkMode::default(),
             bound_symbol: None,
+            backend: None,
         }],
         levels: msft_levels,
         watchlists: Vec::new(),
@@ -295,6 +296,7 @@ fn chart_config_with_levels_survives_roundtrip() {
                 symbol_link: LinkMode::default(),
                 timeframe_link: LinkMode::default(),
                 bound_symbol: None,
+                backend: None,
             },
             ChartConfig {
                 symbol: "TSLA".into(),
@@ -314,6 +316,7 @@ fn chart_config_with_levels_survives_roundtrip() {
                 symbol_link: LinkMode::default(),
                 timeframe_link: LinkMode::default(),
                 bound_symbol: None,
+                backend: None,
             },
         ],
         levels: aapl_levels,
@@ -499,6 +502,7 @@ fn atomic_write_does_not_corrupt_on_success() {
             symbol_link: LinkMode::default(),
             timeframe_link: LinkMode::default(),
             bound_symbol: None,
+            backend: None,
         }],
         levels: HashMap::new(),
         watchlists: Vec::new(),
@@ -602,6 +606,7 @@ fn roundtrip_with_camera_and_collapse_gaps_and_line_width() {
                 symbol_link: LinkMode::default(),
                 timeframe_link: LinkMode::default(),
                 bound_symbol: None,
+                backend: None,
             },
             ChartConfig {
                 symbol: "QQQ".into(),
@@ -621,6 +626,7 @@ fn roundtrip_with_camera_and_collapse_gaps_and_line_width() {
                 symbol_link: LinkMode::default(),
                 timeframe_link: LinkMode::default(),
                 bound_symbol: None,
+                backend: None,
             },
         ],
         levels: spy_levels,
@@ -844,6 +850,7 @@ fn chart_config_levels_not_serialized() {
             symbol_link: LinkMode::default(),
             timeframe_link: LinkMode::default(),
             bound_symbol: None,
+            backend: None,
         }],
         ..Default::default()
     };
@@ -962,6 +969,7 @@ fn non_default_link_modes_roundtrip() {
             symbol_link: LinkMode::Color(LinkColor::Blue),
             timeframe_link: LinkMode::ListenAll,
             bound_symbol: None,
+            backend: None,
         }],
         ..Default::default()
     };
@@ -1174,4 +1182,153 @@ mode = "dark"
     assert!(legacy.recent_symbols.is_empty(), "missing key => empty vec");
 
     cleanup(&dir);
+}
+
+// ── Chart-transition slice 9a: `ChartBackend` persistence tests ──────
+
+/// Default for `ChartBackend` is `Legacy` (slice 9a). Slice 9b flips
+/// this to `New`.
+#[test]
+fn chart_backend_default_is_legacy() {
+    assert_eq!(ChartBackend::default(), ChartBackend::Legacy);
+}
+
+/// Legacy enum variant serializes to the lowercase string `"legacy"`
+/// inside a TOML table (TOML can't serialize a bare enum, so we wrap
+/// in a `ChartConfig` context).
+#[test]
+fn chart_backend_serializes_lowercase() {
+    let cfg = ChartConfig {
+        symbol: "X".into(),
+        timeframe: "1D".into(),
+        levels: vec![],
+        camera_time_start: None,
+        camera_time_end: None,
+        camera_price_low: None,
+        camera_price_high: None,
+        collapse_gaps: false,
+        timeline_border_ratio: 0.20,
+        volume_scale: 1.0,
+        show_volume_profile: false,
+        show_levels: true,
+        viewport_width: None,
+        viewport_height: None,
+        symbol_link: LinkMode::default(),
+        timeframe_link: LinkMode::default(),
+        bound_symbol: None,
+        backend: Some(ChartBackend::Legacy),
+    };
+    let toml_str = toml::to_string_pretty(&cfg).expect("serialize legacy");
+    assert!(toml_str.contains("backend = \"legacy\""), "got: {toml_str}");
+    let cfg_new = ChartConfig {
+        backend: Some(ChartBackend::New),
+        ..cfg
+    };
+    let toml_str = toml::to_string_pretty(&cfg_new).expect("serialize new");
+    assert!(toml_str.contains("backend = \"new\""), "got: {toml_str}");
+}
+
+/// Deserializing `backend = "new"` yields [`ChartBackend::New`].
+/// Critically, this works regardless of the `session_chart` feature
+/// flag — the enum parse is feature-independent (plan Scenario 9).
+#[test]
+fn chart_backend_new_deserializes_without_feature() {
+    let cfg: ChartConfig = toml::from_str(
+        r#"
+            symbol = "AAPL"
+            timeframe = "1D"
+            backend = "new"
+        "#,
+    )
+    .expect("deserialize");
+    assert_eq!(cfg.backend, Some(ChartBackend::New));
+}
+
+/// Deserializing `backend = "legacy"` yields [`ChartBackend::Legacy`].
+#[test]
+fn chart_backend_legacy_deserializes() {
+    let cfg: ChartConfig = toml::from_str(
+        r#"
+            symbol = "AAPL"
+            timeframe = "1D"
+            backend = "legacy"
+        "#,
+    )
+    .expect("deserialize");
+    assert_eq!(cfg.backend, Some(ChartBackend::Legacy));
+}
+
+/// Backward compat: a config without the `backend` field loads
+/// cleanly, with `backend == None`. The app resolves `None` to
+/// the current default (`Legacy` in slice 9a, `New` after 9b).
+#[test]
+fn chart_backend_absent_defaults_to_none() {
+    let cfg: ChartConfig = toml::from_str(
+        r#"
+            symbol = "AAPL"
+            timeframe = "1D"
+        "#,
+    )
+    .expect("deserialize");
+    assert!(cfg.backend.is_none(), "absent field loads as None");
+}
+
+/// Full round-trip: `backend = Some(New)` survives save+load.
+#[test]
+fn chart_backend_roundtrip_new() {
+    let cfg = ChartConfig {
+        symbol: "MSFT".to_string(),
+        timeframe: "5m".to_string(),
+        levels: vec![],
+        camera_time_start: None,
+        camera_time_end: None,
+        camera_price_low: None,
+        camera_price_high: None,
+        collapse_gaps: false,
+        timeline_border_ratio: 0.20,
+        volume_scale: 1.0,
+        show_volume_profile: false,
+        show_levels: true,
+        viewport_width: None,
+        viewport_height: None,
+        symbol_link: LinkMode::default(),
+        timeframe_link: LinkMode::default(),
+        bound_symbol: None,
+        backend: Some(ChartBackend::New),
+    };
+    let toml_str = toml::to_string_pretty(&cfg).expect("serialize");
+    let restored: ChartConfig = toml::from_str(&toml_str).expect("deserialize");
+    assert_eq!(restored.backend, Some(ChartBackend::New));
+}
+
+/// `backend: None` is skipped during serialization so existing
+/// configs remain byte-identical after a save that only flipped
+/// unrelated fields (no stray `backend = "legacy"` pollution).
+#[test]
+fn chart_backend_none_skips_serialization() {
+    let cfg = ChartConfig {
+        symbol: "TSLA".to_string(),
+        timeframe: "1D".to_string(),
+        levels: vec![],
+        camera_time_start: None,
+        camera_time_end: None,
+        camera_price_low: None,
+        camera_price_high: None,
+        collapse_gaps: false,
+        timeline_border_ratio: 0.20,
+        volume_scale: 1.0,
+        show_volume_profile: false,
+        show_levels: true,
+        viewport_width: None,
+        viewport_height: None,
+        symbol_link: LinkMode::default(),
+        timeframe_link: LinkMode::default(),
+        bound_symbol: None,
+        backend: None,
+    };
+    let toml_str = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(
+        !toml_str.contains("backend"),
+        "backend: None must not serialize. got: {toml_str}"
+    );
 }

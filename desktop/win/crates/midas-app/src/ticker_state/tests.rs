@@ -1110,6 +1110,7 @@ fn config_bound_symbol_round_trip() {
         symbol_link: midas_core::link::LinkMode::Unlinked,
         timeframe_link: midas_core::link::LinkMode::Unlinked,
         bound_symbol: Some("AAPL".to_string()),
+        backend: None,
     };
 
     let toml_str = toml::to_string_pretty(&cfg).expect("serialize");

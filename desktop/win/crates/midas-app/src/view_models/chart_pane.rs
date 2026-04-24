@@ -19,7 +19,7 @@
 //! AND controls (link buttons + pop-out + close) consume it.
 
 use midas_chart::GerchikAtrRender;
-use midas_core::{LinkMode, Timeframe};
+use midas_core::{ChartBackend, LinkMode, Timeframe};
 
 use crate::annotation_store::StoredLevel;
 use crate::link::LinkDimension;
@@ -80,4 +80,8 @@ pub struct ChartPaneTitleBarVm {
     pub show_levels: bool,
     pub symbol_link: LinkMode,
     pub timeframe_link: LinkMode,
+    /// Currently-selected chart backend (chart-transition slice 9a).
+    /// Rendered as a toolbar chip; clicking toggles between
+    /// [`ChartBackend::Legacy`] and [`ChartBackend::New`].
+    pub backend: ChartBackend,
 }

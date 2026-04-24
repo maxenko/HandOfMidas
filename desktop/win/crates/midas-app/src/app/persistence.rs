@@ -205,6 +205,17 @@ impl MidasApp {
                                         .bound_symbol
                                         .as_ref()
                                         .map(|k| k.as_str().to_string()),
+                                    // Chart-transition slice 9a: persist the per-panel
+                                    // backend selection. `Legacy` is the app-wide
+                                    // default and also maps to `None` on load (see
+                                    // `ChartPanel::backend_or_default`), so we write
+                                    // `None` for `Legacy` to keep existing configs
+                                    // byte-identical and only emit the key when the
+                                    // user explicitly flipped to `New`.
+                                    backend: match panel.backend {
+                                        midas_core::ChartBackend::Legacy => None,
+                                        other => Some(other),
+                                    },
                                 });
                                 tree.push(LayoutNode::Chart { chart_index: idx });
                             }

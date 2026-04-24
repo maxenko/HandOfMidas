@@ -141,6 +141,36 @@ pub struct AppConfig {
     pub chart_view_store_schema: u32,
 }
 
+/// Which chart rendering backend a panel uses.
+///
+/// Added in chart-transition slice 9a. Each [`ChartConfig`] persists
+/// an optional value; unset (the on-disk default) means `Legacy`.
+///
+/// The enum is **feature-independent** — it always deserializes even
+/// when the binary is built without `--features session_chart`. The
+/// dispatch in `midas-app::app::views` handles the mismatch: if the
+/// build lacks `session_chart` but the config selects
+/// [`ChartBackend::New`], the panel falls back to legacy rendering
+/// with a `tracing::warn!` on first encounter (slice 9a, plan
+/// Scenario 9). No panic, no silent drop.
+///
+/// Serialized as a lower-case string in TOML so hand-edited configs
+/// stay readable: `backend = "new"` or `backend = "legacy"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChartBackend {
+    /// Legacy chart stack (`midas-chart`, `midas-render::ChartScene`,
+    /// `Camera2D`). Default until slice 9b flips the app-wide default
+    /// to `New` after the 14-day soak.
+    #[default]
+    Legacy,
+    /// Session-aware new stack (`midas-scene`, `midas-axis`,
+    /// `midas-bars`). Requires the `session_chart` Cargo feature to
+    /// be enabled on `midas-app`; otherwise the dispatch falls back
+    /// to `Legacy`.
+    New,
+}
+
 /// Which broker backend the app connects to on startup.
 ///
 /// Serialized as the `type` tag inside the `[broker]` TOML table so
@@ -308,6 +338,20 @@ pub struct ChartConfig {
     /// to the legacy `symbol` field during restoration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bound_symbol: Option<String>,
+    /// Chart rendering backend selection (chart-transition slice 9a).
+    ///
+    /// `None` (the on-disk default) means "follow the app default",
+    /// which is currently [`ChartBackend::Legacy`]. Slice 9b flips the
+    /// default to [`ChartBackend::New`] after the 14-day soak; at that
+    /// point existing configs without this field keep rendering with
+    /// the new default (because `None` maps to whatever
+    /// `ChartBackend::default()` returns).
+    ///
+    /// The enum always deserializes, even when the binary is built
+    /// without `--features session_chart`; the feature-gate × config
+    /// mismatch is handled in the app's dispatch layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<ChartBackend>,
 }
 
 /// Serde default for bool fields that should default to `true`.
