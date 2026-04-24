@@ -3,6 +3,7 @@
 use crate::error::SceneError;
 use crate::input::{EventStatus, Hit, InputEvent, Point};
 use crate::paint::PaintContext;
+use crate::tools::ToolEffect;
 use midas_axis::PriceRange;
 
 /// Human-readable layer identifier. Not load-bearing for ordering — the
@@ -172,13 +173,19 @@ pub trait InteractiveLayer: SceneLayer + Send + Sync {
 
 /// Context threaded to [`InteractiveLayer::update`]. Carries the
 /// scene's per-frame projection state + a channel for emitting errors
-/// that surface on [`crate::scene::ChartScene::last_error`].
+/// that surface on [`crate::scene::ChartScene::last_error`] plus a
+/// queue for [`ToolEffect`]s that the host widget drains per frame via
+/// [`crate::scene::ChartScene::take_effects`].
 ///
-/// Slice 1 ships the minimum shape; slice 4 extends with `ToolEffect`
-/// emission (cross-slice coupling pre-agreed in slice 4's spec).
+/// Slice 1 shipped the minimum shape (axis + error sink). Slice 4
+/// extends with `effects: &'a mut Vec<ToolEffect>` — the cross-slice
+/// coupling pre-agreed in slice 4's spec.
 pub struct ToolContext<'a> {
     pub price_range: &'a PriceRange,
     pub last_error: &'a mut Option<SceneError>,
+    /// Effect queue — tools push here; the widget drains per frame.
+    /// Added in slice 4 of the chart-transition plan.
+    pub effects: &'a mut Vec<ToolEffect>,
 }
 
 impl<'a> ToolContext<'a> {
@@ -187,6 +194,14 @@ impl<'a> ToolContext<'a> {
     pub fn emit_error(&mut self, err: SceneError) {
         tracing::warn!(error = ?err, "tool emitted SceneError");
         *self.last_error = Some(err);
+    }
+
+    /// Push a [`ToolEffect`] onto the scene's per-frame queue. The
+    /// widget drains via [`crate::scene::ChartScene::take_effects`] at
+    /// the end of each input cycle.
+    pub fn emit_effect(&mut self, effect: ToolEffect) {
+        tracing::debug!(target: "midas_scene::tool_context", effect = ?effect, "tool emitted effect");
+        self.effects.push(effect);
     }
 }
 

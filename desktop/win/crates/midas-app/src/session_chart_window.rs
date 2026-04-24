@@ -163,12 +163,21 @@ impl SessionChartWindow {
             .on_press(crate::app::Message::SessionChartCyclePolicy(window_id))
             .padding([2, 8]);
 
+        // Slice 4 chart-transition: "Add Level" toolbar button.
+        // Toggles the level-placement tool on the `SessionChart`
+        // widget. The app-side message handler flips the tool state.
+        let level_active = { self.widget.read().is_level_tool_active() };
+        let add_level_btn =
+            button(text(if level_active { "Level *" } else { "Add Level" }).size(11))
+                .on_press(crate::app::Message::SessionChartToggleLevelTool(window_id))
+                .padding([2, 8]);
+
         let close_btn = button(text("Close").size(11))
             .on_press(crate::app::Message::FloatingWindowClosed(window_id))
             .padding([2, 8]);
 
         let overlay = container(
-            row![header, eh_btn, close_btn]
+            row![header, eh_btn, add_level_btn, close_btn]
                 .spacing(8)
                 .align_y(Alignment::Center),
         )

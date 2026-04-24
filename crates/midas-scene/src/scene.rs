@@ -14,6 +14,7 @@ use crate::input::{EventStatus, Hit, InputEvent, Point};
 use crate::layer::{InteractiveLayer, LayerId, LayerZ, SceneLayer, ToolContext};
 use crate::paint::PaintContext;
 use crate::primitives::{QuadInstance, ScenePrimitives};
+use crate::tools::ToolEffect;
 use crate::ThemePalette;
 
 /// Declarative layer-toggle set for a scene. Callers build a scene
@@ -104,6 +105,11 @@ pub struct ChartScene {
     active_tool: Option<Box<dyn InteractiveLayer>>,
     drag_focus: Option<LayerId>,
     last_error: Option<SceneError>,
+    /// Per-frame queue of [`ToolEffect`]s emitted by interactive
+    /// layers. The widget drains this via
+    /// [`ChartScene::take_effects`] at the end of each input cycle.
+    /// Slice 4 of the chart-transition plan.
+    effects: Vec<ToolEffect>,
 }
 
 impl std::fmt::Debug for ChartScene {
@@ -262,6 +268,22 @@ impl ChartScene {
         self.last_error.take()
     }
 
+    /// Drain and return every [`ToolEffect`] emitted by interactive
+    /// layers since the last call. The widget translates each effect
+    /// into an app `Message` per slice 4 of the chart-transition plan.
+    /// Returning `Vec<ToolEffect>` (rather than a slice) transfers
+    /// ownership so the widget can mutate the app state without
+    /// re-borrowing the scene.
+    pub fn take_effects(&mut self) -> Vec<ToolEffect> {
+        std::mem::take(&mut self.effects)
+    }
+
+    /// Observer — number of queued effects without draining. Useful in
+    /// tests that want to assert emission counts between events.
+    pub fn pending_effect_count(&self) -> usize {
+        self.effects.len()
+    }
+
     /// Dispatch an input event.
     ///
     /// Routing order (per plan D4):
@@ -310,6 +332,7 @@ impl ChartScene {
             let mut tool_ctx = ToolContext {
                 price_range: &self.price_range,
                 last_error: &mut self.last_error,
+                effects: &mut self.effects,
             };
             if let Some(tool) = self.active_tool.as_mut() {
                 let s = tool.update(ev, &mut tool_ctx);
@@ -338,6 +361,7 @@ impl ChartScene {
                 let mut tool_ctx = ToolContext {
                     price_range: &self.price_range,
                     last_error: &mut self.last_error,
+                    effects: &mut self.effects,
                 };
                 let s = il.update(ev, &mut tool_ctx);
                 if matches!(s, EventStatus::Captured) {
@@ -366,6 +390,7 @@ impl ChartScene {
                 let mut ctx = ToolContext {
                     price_range: &self.price_range,
                     last_error: &mut self.last_error,
+                    effects: &mut self.effects,
                 };
                 return tool.update(ev, &mut ctx);
             }
@@ -376,6 +401,7 @@ impl ChartScene {
                     let mut ctx = ToolContext {
                         price_range: &self.price_range,
                         last_error: &mut self.last_error,
+                        effects: &mut self.effects,
                     };
                     return il.update(ev, &mut ctx);
                 }
@@ -516,6 +542,7 @@ impl ChartSceneBuilder {
             active_tool: self.active_tool,
             drag_focus: None,
             last_error: None,
+            effects: Vec::new(),
         })
     }
 }
@@ -740,12 +767,14 @@ mod tests {
             price: 101.0,
             label: Cow::Borrowed("L1"),
             color: [7, 0, 0, 255],
+            locked: false,
         }]);
         let l2 = LevelLayer::new(vec![LevelView {
             id: 2,
             price: 102.0,
             label: Cow::Borrowed("L2"),
             color: [8, 0, 0, 255],
+            locked: false,
         }]);
 
         // Insert Level2 BEFORE Level1 but both after PriceLine —

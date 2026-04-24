@@ -76,8 +76,10 @@ use std::sync::Arc;
 use midas_axis::{AxisError, CompressedAxis, ContinuousAxis, PriceRange, Viewport};
 use midas_bars::{BarPeriod, CandleSeries};
 use midas_calendar::{ExchangeCalendar, Timestamp};
+use midas_scene::layers::{LevelDragState, LevelView, SharedLevelDrag};
+use midas_scene::tools::{ContextMenuAction, LevelTool, ToolEffect};
 use midas_scene::{InteractionState, ScenePrimitives, SharedCandleSeries, ThemePalette};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 
 use super::axis_box::AxisBox;
 use super::driver::SessionChartDriver;
@@ -99,6 +101,131 @@ pub enum SessionChartError {
     /// [`AxisError`] for diagnostics.
     #[error("session chart axis construction failed: {0}")]
     Axis(#[from] AxisError),
+}
+
+/// Slice 4 chart-transition: persistent holder for the level-placement
+/// tool + shared drag state. Lives on [`SessionChart`] so the tool FSM
+/// and drag session survive the per-frame scene rebuild.
+#[derive(Debug, Default)]
+pub struct LevelToolHost {
+    /// Active level-placement tool, if the user activated the toolbar
+    /// "Add Level" button. `None` while the tool is off.
+    pub tool: Option<LevelTool>,
+    /// Shared drag-state Arc — cloned into every `LevelLayer` the
+    /// widget builds per frame so drag session survives scene rebuilds.
+    pub drag: SharedLevelDrag,
+    /// Cached level views painted this frame. Built by the host from
+    /// `AnnotationStore::levels_for` and handed to the scene via the
+    /// layer pipeline; kept here so `project_effects` can resolve
+    /// `UpdateLevel { id, price }` back to the owning symbol.
+    pub levels: Vec<LevelView>,
+}
+
+impl LevelToolHost {
+    pub fn new() -> Self {
+        Self {
+            tool: None,
+            drag: Arc::new(Mutex::new(LevelDragState::default())),
+            levels: Vec::new(),
+        }
+    }
+
+    /// Is the placement tool currently active (user clicked "Add Level")?
+    pub fn is_active(&self) -> bool {
+        self.tool.as_ref().is_some_and(|t| t.is_placing())
+    }
+
+    /// Activate the tool. Caller is the widget's toolbar handler.
+    pub fn activate(&mut self) {
+        self.tool = Some(LevelTool::placing());
+    }
+
+    /// Deactivate the tool. Called on Escape at the widget edge and on
+    /// window close.
+    pub fn deactivate(&mut self) {
+        self.tool = None;
+    }
+
+    /// Replace the level-view list — typically called once per frame
+    /// from the level list the `AnnotationStore` exposes for the
+    /// current symbol.
+    pub fn set_levels(&mut self, levels: Vec<LevelView>) {
+        self.levels = levels;
+    }
+}
+
+/// A single translated effect ready for the app's `update()` to route.
+///
+/// Widget-level helper returned by [`SessionChart::drain_level_effects`]
+/// so the caller (dev-harness scripts, unit tests, the app binary's
+/// message translator) never has to match on the raw [`ToolEffect`]
+/// variant — the host maps unknown variants (brackets — slice 5b) into
+/// [`ProjectedEffect::BracketDeferred`] so slice 4 code compiles with
+/// forward-compatible bracket plumbing.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ProjectedEffect {
+    /// Commit a new level at `price`. Host translates to
+    /// `Message::CreateLevel(symbol, price, lock)`.
+    CreateLevel { price: f64, lock: bool },
+    /// Update an existing level's price. Host translates to
+    /// `Message::UpdateLevel(symbol, id, price)`.
+    UpdateLevel { id: u64, price: f64 },
+    /// Delete a level.
+    DeleteLevel { id: u64 },
+    /// Open a context menu.
+    OpenContextMenu {
+        x: f32,
+        y: f32,
+        annotation_id: u64,
+        action: ContextMenuAction,
+    },
+    /// A bracket-shape effect arrived. Slice 5b handles these; slice 4
+    /// just tracks that one fired so tests can assert the shape is
+    /// forward-compatible.
+    BracketDeferred,
+    /// Tool-layer error (panic fallback, persistence fault, etc.).
+    Error(String),
+}
+
+impl ProjectedEffect {
+    /// Translate one raw [`ToolEffect`] into the projected form. Context
+    /// menu variants expand to one `ProjectedEffect` per item so the
+    /// host can wire each action independently.
+    pub fn from_tool_effect(raw: ToolEffect) -> Vec<Self> {
+        match raw {
+            ToolEffect::CreateLevel { price, lock } => {
+                vec![ProjectedEffect::CreateLevel { price, lock }]
+            }
+            ToolEffect::UpdateLevel { id, price } => {
+                vec![ProjectedEffect::UpdateLevel { id, price }]
+            }
+            ToolEffect::DeleteLevel { id } => vec![ProjectedEffect::DeleteLevel { id }],
+            ToolEffect::OpenContextMenu { pt, items } => items
+                .into_iter()
+                .map(|item| {
+                    let annotation_id = match item.action {
+                        ContextMenuAction::Edit { id } => id,
+                        ContextMenuAction::ToggleLock { id } => id,
+                        ContextMenuAction::Delete { id } => id,
+                    };
+                    ProjectedEffect::OpenContextMenu {
+                        x: pt.x,
+                        y: pt.y,
+                        annotation_id,
+                        action: item.action,
+                    }
+                })
+                .collect(),
+            ToolEffect::ReportError(err) => vec![ProjectedEffect::Error(err.to_string())],
+            // Slice 5b variants — shape-reserved; slice 4 just flags
+            // them so a future commit surface doesn't churn this file.
+            ToolEffect::BeginDraftBracket { .. }
+            | ToolEffect::SetDraftLeg { .. }
+            | ToolEffect::CommitDraftBracket
+            | ToolEffect::CancelDraftBracket
+            | ToolEffect::UpdateBracketLeg { .. } => vec![ProjectedEffect::BracketDeferred],
+        }
+    }
 }
 
 /// Calendar-agnostic scaffold widget. Holds per-frame inputs for the
@@ -143,6 +270,14 @@ pub struct SessionChart {
     /// advanced — tracking R1's "avoid rebuilding sessions-buffer if
     /// version hasn't changed" follow-on.
     version_at_paint: u64,
+    /// Slice 4 of chart-transition: persistent level-tool + drag state
+    /// + cached level views. Survives the per-frame scene rebuild.
+    level_host: LevelToolHost,
+    /// Slice 4: queue of projected tool effects. The widget drives the
+    /// scene through `handle_input` (slice 1), then drains the effect
+    /// queue into this vec. Host code calls
+    /// [`drain_level_effects`](Self::drain_level_effects) per frame.
+    pending_effects: Vec<ProjectedEffect>,
 }
 
 impl SessionChart {
@@ -184,6 +319,8 @@ impl SessionChart {
             // `series.version()` so the first paint always runs the
             // full band/separator compute path.
             version_at_paint: u64::MAX,
+            level_host: LevelToolHost::new(),
+            pending_effects: Vec::new(),
         })
     }
 
@@ -544,6 +681,122 @@ impl SessionChart {
     /// from the paint step.
     pub fn layers_for_policy(&self, is_xnys: bool) -> SceneLayers {
         SceneLayers::from_eh_policy(self.eh_policy, is_xnys)
+    }
+
+    // ── Slice 4 chart-transition: level tool + effect drain ─────────
+
+    /// Toggle the level-placement tool on. Toolbar "Add Level" button
+    /// dispatches here.
+    pub fn activate_level_tool(&mut self) {
+        tracing::debug!(target: "midas_app::session_chart::widget", "activate level tool");
+        self.level_host.activate();
+    }
+
+    /// Turn the level-placement tool off. Called on Escape / window
+    /// close / tool swap.
+    pub fn deactivate_level_tool(&mut self) {
+        tracing::debug!(target: "midas_app::session_chart::widget", "deactivate level tool");
+        self.level_host.deactivate();
+    }
+
+    /// True iff the level tool is currently active + in `Placing`.
+    pub fn is_level_tool_active(&self) -> bool {
+        self.level_host.is_active()
+    }
+
+    /// Update the cached level views (typically called from the host
+    /// when `AnnotationStore::generation` bumps for the current
+    /// symbol).
+    pub fn set_level_views(&mut self, levels: Vec<LevelView>) {
+        self.level_host.set_levels(levels);
+    }
+
+    /// Feed a tool-snap result in before dispatching a `MouseMove`
+    /// that should update the preview. The caller runs
+    /// [`midas_scene::tools::snap_to_ohlc`] with the visible candles.
+    pub fn update_level_snap(&mut self, snapped_price: f64, cursor_y_px: f32) {
+        if let Some(tool) = self.level_host.tool.as_mut() {
+            tool.update_snap(snapped_price, cursor_y_px);
+        }
+    }
+
+    /// Dispatch an [`InputEvent`] through a transient scene containing
+    /// the active level tool + a `LevelLayer` populated from the
+    /// cached level views. The scene's `take_effects` output is
+    /// projected into [`ProjectedEffect`]s and queued on
+    /// `pending_effects`.
+    ///
+    /// Construction cost: O(number of level views) per call. Acceptable
+    /// because input events are rare compared to paint frames.
+    pub fn handle_level_input(&mut self, ev: midas_scene::InputEvent) -> midas_scene::EventStatus {
+        use midas_scene::layers::LevelLayer;
+        use midas_scene::ChartScene;
+
+        // Build a one-shot scene for input dispatch. We can't share the
+        // paint-time scene because paint builds it inside `paint_buckets`
+        // and throws it away; input can happen between paints.
+        let mut builder = ChartScene::builder()
+            .axis_boxed(self.axis.as_time_axis_boxed())
+            .price_range(self.price_range)
+            .viewport(self.viewport)
+            .palette(self.palette);
+
+        // Install the LevelLayer so its interactive handlers fire.
+        let layer = LevelLayer::new(self.level_host.levels.clone())
+            .with_interaction(Arc::clone(&self.level_host.drag));
+        builder = builder.layer(layer);
+
+        // Install the tool if active.
+        if let Some(tool) = self.level_host.tool.as_ref() {
+            builder = builder.active_tool(tool.clone());
+        }
+
+        let mut scene = builder
+            .build()
+            .expect("transient input scene with canonical inputs");
+        // Prime the LevelLayer's viewport cache so hit-testing works.
+        let mut scratch = midas_scene::primitives::ScenePrimitives::default();
+        scene.paint(&mut scratch);
+
+        let status = scene.handle_input(ev);
+
+        // Drain scene effects → project → queue.
+        for raw in scene.take_effects() {
+            for projected in ProjectedEffect::from_tool_effect(raw) {
+                self.pending_effects.push(projected);
+            }
+        }
+        // Surface any recovered-panic / tool-layer error.
+        if let Some(err) = scene.take_last_error() {
+            self.pending_effects
+                .push(ProjectedEffect::Error(err.to_string()));
+        }
+
+        status
+    }
+
+    /// Drain projected effects. The host translates each into an app
+    /// `Message` per the slice 4 plan:
+    ///
+    /// - `CreateLevel` → `Message::CreateLevel(symbol, price, lock)`
+    /// - `UpdateLevel` → `Message::UpdateLevel(symbol, id, price)`
+    /// - `DeleteLevel` → `Message::DeleteLevel(symbol, id)`
+    /// - `OpenContextMenu` → routed by `action`
+    /// - `BracketDeferred` → slice 5b wires this up
+    /// - `Error` → toast
+    pub fn drain_level_effects(&mut self) -> Vec<ProjectedEffect> {
+        std::mem::take(&mut self.pending_effects)
+    }
+
+    /// Observer — current tool (for the dev-harness `DumpState`
+    /// projection).
+    pub fn level_tool_mode(&self) -> Option<midas_scene::tools::LevelToolMode> {
+        self.level_host.tool.as_ref().map(|t| t.mode())
+    }
+
+    /// Borrow the shared drag state so tests can inspect it.
+    pub fn level_drag_state(&self) -> SharedLevelDrag {
+        Arc::clone(&self.level_host.drag)
     }
 }
 

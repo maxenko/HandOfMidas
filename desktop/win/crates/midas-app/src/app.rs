@@ -1087,6 +1087,13 @@ pub enum Message {
     /// only — a TODO tracked in `session_chart/mod.rs`.
     #[cfg(feature = "session_chart")]
     SessionChartCyclePolicy(window::Id),
+
+    /// Slice 4 of chart-transition plan: toolbar "Add Level" button on
+    /// the session-chart window toggles the level-placement tool. The
+    /// handler flips the widget's tool state; subsequent mouse clicks
+    /// on the chart surface commit level annotations.
+    #[cfg(feature = "session_chart")]
+    SessionChartToggleLevelTool(window::Id),
 }
 
 /// Payload for [`Message::SessionChartWindowOpened`]. Carries the
@@ -3947,6 +3954,10 @@ impl MidasApp {
             Message::SessionChartCyclePolicy(window_id) => {
                 self.handle_session_chart_cycle_policy(window_id)
             }
+            #[cfg(feature = "session_chart")]
+            Message::SessionChartToggleLevelTool(window_id) => {
+                self.handle_session_chart_toggle_level_tool(window_id)
+            }
 
             // -- Dev harness (feature-gated) --
             #[cfg(feature = "dev_harness")]
@@ -4284,6 +4295,24 @@ impl MidasApp {
                 window_id,
                 new_policy
             );
+        }
+        Task::none()
+    }
+
+    /// Slice 4 chart-transition: toggle the level-placement tool on
+    /// the session-chart widget tied to `window_id`. Flips
+    /// `level_host.tool` between active (`LevelTool::placing()`) and
+    /// off. Subsequent mouse clicks on the chart commit level
+    /// annotations via the `ProjectedEffect::CreateLevel` path.
+    #[cfg(feature = "session_chart")]
+    fn handle_session_chart_toggle_level_tool(&mut self, window_id: window::Id) -> Task<Message> {
+        if let Some(state) = self.floating_session_charts.get_mut(&window_id) {
+            let mut g = state.widget.write();
+            if g.is_level_tool_active() {
+                g.deactivate_level_tool();
+            } else {
+                g.activate_level_tool();
+            }
         }
         Task::none()
     }

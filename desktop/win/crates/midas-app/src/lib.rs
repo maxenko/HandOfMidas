@@ -35,3 +35,10 @@ pub mod session_chart;
 /// command dispatch re-exports from here.
 #[cfg(feature = "dev_harness")]
 pub mod chart_parity;
+
+/// Annotation store — centralised per-symbol annotation state.
+/// Exposed at lib-root so slice-4 chart-transition integration tests
+/// (`desktop/win/tests/level_end_to_end.rs`) can exercise the full
+/// `ToolEffect::CreateLevel` → `AnnotationStore::add_level` round-trip
+/// without pulling in the binary-only `app.rs` module.
+pub mod annotation_store;

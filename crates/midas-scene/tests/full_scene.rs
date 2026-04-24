@@ -107,6 +107,7 @@ fn full_xnys_scene_with_all_layers_emits_expected_primitives() {
         price: 99.5,
         label: Cow::Borrowed("S1"),
         color: [255, 0, 0, 255],
+        locked: false,
     }]);
 
     let crosshair = CrosshairLayer::with_position((500.0, 300.0));

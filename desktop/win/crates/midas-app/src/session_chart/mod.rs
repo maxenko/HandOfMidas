@@ -118,6 +118,7 @@
 pub mod axis_box;
 pub mod driver;
 pub mod gpu_renderer;
+pub mod level_popup;
 pub mod policy;
 pub mod primitives_bridge;
 pub mod registry;
@@ -141,7 +142,8 @@ pub use shader::{
 // `session_chart_window.rs` parameterize with `crate::app::Message`
 // while the library target (integration tests) can parameterize with
 // any Message type they define.
-pub use widget::{SessionChart, SessionChartError};
+pub use level_popup::LevelEditPopup;
+pub use widget::{LevelToolHost, ProjectedEffect, SessionChart, SessionChartError};
 
 use midas_bars::BarPeriod;
 use midas_calendar::CalendarId;

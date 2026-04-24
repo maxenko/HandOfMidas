@@ -36,6 +36,7 @@ pub mod layers;
 pub mod paint;
 pub mod primitives;
 pub mod scene;
+pub mod tools;
 
 pub use crate::error::SceneError;
 pub use crate::input::{
@@ -49,10 +50,10 @@ pub use crate::layer::{InteractiveLayer, LayerId, LayerZ, SceneLayer, ToolContex
 pub use crate::layers::{
     bin_count_for_viewport, AtrLayer, AtrStyle, BrightIndices, CandleLayer, CandleStyle,
     CrosshairLayer, DecoratorLayer, GerchikAtrLayer, GerchikStyle, GridLayer, GridStyle,
-    HolidayMarkerLayer, LevelLayer, LevelView, OrderBracketLayer, OrderBracketView, PriceLineLayer,
-    PriceLineView, SeparatorStyle, SessionBandLayer, SessionBoundary, SessionPalette,
-    SessionSeparatorLayer, SharedCandleSeries, Side, VolumeLayer, VolumeProfileLayer,
-    VolumeProfileStyle, VolumeStyle,
+    HolidayMarkerLayer, LevelDragState, LevelHit, LevelHitTarget, LevelLayer, LevelView,
+    OrderBracketLayer, OrderBracketView, PriceLineLayer, PriceLineView, SeparatorStyle,
+    SessionBandLayer, SessionBoundary, SessionPalette, SessionSeparatorLayer, SharedCandleSeries,
+    SharedLevelDrag, Side, VolumeLayer, VolumeProfileLayer, VolumeProfileStyle, VolumeStyle,
 };
 pub use crate::paint::PaintContext;
 pub use crate::primitives::{
@@ -60,6 +61,11 @@ pub use crate::primitives::{
     TextInstance,
 };
 pub use crate::scene::{ChartScene, ChartSceneBuilder, LayerConfig, SceneBuildError};
+pub use crate::tools::{
+    snap_to_ohlc, AnnotationId as ToolAnnotationId, CandleRef as SnapCandleRef, ContextMenuAction,
+    ContextMenuItem, LegRole, LevelTool, LevelToolMode, Side as ToolSide, ToolEffect,
+    SNAP_THRESHOLD_MAX_PX, SNAP_THRESHOLD_MIN_PX,
+};
 
 // Convenience re-exports — downstream crates pull the full scene surface
 // from `midas-scene` without a second `midas-axis` / `midas-calendar`

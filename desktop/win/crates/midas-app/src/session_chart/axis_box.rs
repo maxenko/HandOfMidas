@@ -77,6 +77,16 @@ impl AxisBox {
         }
     }
 
+    /// Clone into a boxed `dyn TimeAxis`. Used by the slice 4
+    /// level-tool input path (widget's `handle_level_input`) which
+    /// builds a transient `ChartScene` for input dispatch.
+    pub(super) fn as_time_axis_boxed(&self) -> Box<dyn TimeAxis> {
+        match self {
+            AxisBox::Continuous(a) => Box::new(a.clone()),
+            AxisBox::Compressed(a) => Box::new((**a).clone()),
+        }
+    }
+
     /// Construct the axis implied by `calendar.time_axis_policy()` for
     /// the given time window and viewport width. Returns an
     /// [`AxisError`] on invalid inputs (degenerate time window, NaN

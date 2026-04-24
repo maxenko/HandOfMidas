@@ -12,10 +12,16 @@
 //!   a list of `marker_xs`).
 
 use std::borrow::Cow;
+use std::sync::Arc;
 
-use crate::layer::{LayerId, LayerZ, SceneLayer};
+use midas_axis::PriceRange;
+use parking_lot::Mutex;
+
+use crate::input::{CursorShape, EventStatus, Hit, InputEvent, Key, MouseButton, Point};
+use crate::layer::{InteractiveLayer, LayerId, LayerZ, SceneLayer, ToolContext};
 use crate::paint::PaintContext;
 use crate::primitives::{BadgeInstance, LineInstance, TextAnchor, TextInstance};
+use crate::tools::{ContextMenuAction, ContextMenuItem, ToolEffect};
 
 /// Long or short side. Only used by [`OrderBracketLayer`] to pick
 /// leg colours.
@@ -181,7 +187,37 @@ pub struct LevelView {
     pub price: f64,
     pub label: Cow<'static, str>,
     pub color: [u8; 4],
+    /// Whether the level is locked — drag + delete paths respect this
+    /// flag. Added in slice 4 of the chart-transition plan; defaults
+    /// to `false` for constructors that predate the addition.
+    pub locked: bool,
 }
+
+/// In-flight drag state for a [`LevelLayer`].
+///
+/// Held in an `Arc<Mutex<_>>` so the layer can be rebuilt per frame
+/// (the scene builder constructs fresh layer instances) while the drag
+/// session persists across frames. The widget creates the Arc once
+/// during widget init and hands one `Arc::clone` to every `LevelLayer`
+/// it constructs afterwards.
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct LevelDragState {
+    /// The id of the level currently being dragged. `None` while not
+    /// dragging.
+    pub dragging: Option<u64>,
+}
+
+/// Shared handle — the widget clones the `Arc` into each
+/// [`LevelLayer::with_interaction`] call so drag state outlives the
+/// per-frame layer instances.
+pub type SharedLevelDrag = Arc<Mutex<LevelDragState>>;
+
+/// Constants governing the level-layer hit-test geometry. Lifted from
+/// plan slice 4 "Key implementation details".
+const LEVEL_BAND_PX: f32 = 4.0;
+const LOCK_ICON_SIZE_PX: f32 = 16.0;
+const LOCK_ICON_OFFSET_PX: f32 = 24.0;
+const DRAG_HANDLE_WIDTH_PX: f32 = 4.0;
 
 /// Named price levels — visually distinct from price lines by a
 /// reduced alpha channel (the spec notes dashed/thicker in the GPU
@@ -193,6 +229,18 @@ pub struct LevelLayer {
     /// Alpha scale applied to each level's colour to visually separate
     /// levels from price lines. `0.65` by default.
     pub alpha_scale: f32,
+    /// Shared drag state (slice 4). `None` for read-only / testing
+    /// fixtures; construct with [`LevelLayer::with_interaction`] for
+    /// the interactive path.
+    drag: Option<SharedLevelDrag>,
+    /// Viewport width remembered from the last paint. The hit-test path
+    /// needs it to compute the lock-icon position (`width - 24`) and
+    /// the drag-handle position (`width - DRAG_HANDLE_WIDTH_PX`).
+    /// `paint` writes this via a `Mutex` to keep the `SceneLayer::paint`
+    /// method signature `&self`.
+    last_viewport_w: Arc<Mutex<f32>>,
+    /// Viewport height last seen. Mirror of `last_viewport_w`.
+    last_viewport_h: Arc<Mutex<f32>>,
 }
 
 impl LevelLayer {
@@ -201,8 +249,106 @@ impl LevelLayer {
             levels,
             line_width_px: 1.0,
             alpha_scale: 0.65,
+            drag: None,
+            last_viewport_w: Arc::new(Mutex::new(0.0)),
+            last_viewport_h: Arc::new(Mutex::new(0.0)),
         }
     }
+
+    /// Install a shared drag-state handle. Required for the
+    /// interactive path (drag, hit-test).
+    pub fn with_interaction(mut self, drag: SharedLevelDrag) -> Self {
+        self.drag = Some(drag);
+        self
+    }
+
+    /// Hit-test at `pt`. Returns `Some(LevelHit)` describing which
+    /// level + target the cursor is over, or `None`.
+    ///
+    /// Priority (per slice 4):
+    /// - Lock icon (16×16 at `width - LOCK_ICON_OFFSET_PX`) wins over
+    ///   drag handle.
+    /// - Drag handle (right `DRAG_HANDLE_WIDTH_PX` px) wins over the
+    ///   line band.
+    /// - Line band (±`LEVEL_BAND_PX` vertical) is the lowest.
+    fn hit_level(&self, pt: Point, price_range: &PriceRange) -> Option<LevelHit> {
+        let vp_w = *self.last_viewport_w.lock();
+        let vp_h = *self.last_viewport_h.lock();
+        if vp_h <= 0.0 {
+            return None;
+        }
+        // Build an ephemeral PriceAxis so hit-test math matches paint.
+        let paxis = midas_axis::LinearPriceAxis::new(*price_range, vp_h);
+        for lv in &self.levels {
+            let y = midas_axis::PriceAxis::to_y(&paxis, lv.price);
+            if (pt.y - y).abs() > LEVEL_BAND_PX {
+                continue;
+            }
+            // Lock icon: highest priority. Only present on locked
+            // levels (a padlock glyph for unlocked could be added later
+            // but is not in the MVP scope). We still report the target
+            // for UNLOCKED levels so the widget can render a faint
+            // icon-slot to discoverability — but we distinguish via
+            // `.locked`.
+            let lock_x0 = vp_w - LOCK_ICON_OFFSET_PX;
+            let lock_x1 = lock_x0 + LOCK_ICON_SIZE_PX;
+            let lock_y0 = y - LOCK_ICON_SIZE_PX / 2.0;
+            let lock_y1 = y + LOCK_ICON_SIZE_PX / 2.0;
+            if pt.x >= lock_x0 && pt.x <= lock_x1 && pt.y >= lock_y0 && pt.y <= lock_y1 {
+                return Some(LevelHit {
+                    level_id: lv.id,
+                    target: LevelHitTarget::LockIcon,
+                });
+            }
+            // Drag handle at right edge (but outside the lock-icon
+            // band so they don't overlap).
+            if pt.x >= vp_w - DRAG_HANDLE_WIDTH_PX && pt.x <= vp_w {
+                return Some(LevelHit {
+                    level_id: lv.id,
+                    target: LevelHitTarget::DragHandle,
+                });
+            }
+            // Line band — anywhere else within the vertical tolerance.
+            return Some(LevelHit {
+                level_id: lv.id,
+                target: LevelHitTarget::LineBand,
+            });
+        }
+        None
+    }
+
+    /// Compute the price under `pt.y` for a given price range (used by
+    /// drag-move to translate the cursor position into a new price).
+    fn y_to_price(&self, y: f32, price_range: &PriceRange) -> f64 {
+        let vp_h = *self.last_viewport_h.lock();
+        if vp_h <= 0.0 {
+            return price_range.high();
+        }
+        let paxis = midas_axis::LinearPriceAxis::new(*price_range, vp_h);
+        midas_axis::PriceAxis::from_y(&paxis, y).unwrap_or_else(|| price_range.high())
+    }
+
+    fn find_level(&self, id: u64) -> Option<&LevelView> {
+        self.levels.iter().find(|l| l.id == id)
+    }
+}
+
+/// Which visual affordance on a level the cursor is over.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum LevelHitTarget {
+    /// The line band (anywhere within ±4 px vertically).
+    LineBand,
+    /// The right-edge drag handle.
+    DragHandle,
+    /// The lock icon at `x = viewport.width - 24`.
+    LockIcon,
+}
+
+/// One hit result from [`LevelLayer::hit_level`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct LevelHit {
+    pub level_id: u64,
+    pub target: LevelHitTarget,
 }
 
 impl SceneLayer for LevelLayer {
@@ -216,6 +362,9 @@ impl SceneLayer for LevelLayer {
 
     fn paint(&self, ctx: &mut PaintContext<'_>) {
         let w_px = ctx.viewport.width_px;
+        // Remember viewport dims for the next hit-test call.
+        *self.last_viewport_w.lock() = w_px;
+        *self.last_viewport_h.lock() = ctx.viewport.height_px;
         for lv in &self.levels {
             let y = ctx.price_to_y(lv.price);
             let mut color = lv.color;
@@ -238,6 +387,166 @@ impl SceneLayer for LevelLayer {
                 size_px: 11.0,
                 anchor: TextAnchor::MiddleLeft,
             });
+            if lv.locked {
+                // Lock icon: a small dimmed badge at right edge.
+                let icon_x = w_px - LOCK_ICON_OFFSET_PX;
+                let icon_y = y - LOCK_ICON_SIZE_PX / 2.0;
+                ctx.out.badges.push(BadgeInstance {
+                    x: icon_x,
+                    y: icon_y,
+                    w: LOCK_ICON_SIZE_PX,
+                    h: LOCK_ICON_SIZE_PX,
+                    color: ctx.palette.text,
+                    text: Cow::Borrowed("L"),
+                });
+            }
+        }
+    }
+
+    fn as_interactive(&mut self) -> Option<&mut dyn InteractiveLayer> {
+        if self.drag.is_some() {
+            Some(self)
+        } else {
+            None
+        }
+    }
+}
+
+impl InteractiveLayer for LevelLayer {
+    fn update(&mut self, ev: InputEvent, ctx: &mut ToolContext<'_>) -> EventStatus {
+        // Interactive path requires the shared drag handle.
+        let Some(drag_state) = self.drag.as_ref() else {
+            return EventStatus::Ignored;
+        };
+        match ev {
+            InputEvent::MouseDown {
+                button: MouseButton::Left,
+                pt,
+                ..
+            } => {
+                let Some(hit) = self.hit_level(pt, ctx.price_range) else {
+                    return EventStatus::Ignored;
+                };
+                let level = match self.find_level(hit.level_id) {
+                    Some(lv) => lv.clone(),
+                    None => return EventStatus::Ignored,
+                };
+                if level.locked {
+                    // Locked levels reject drag. Don't start a drag
+                    // session; let the click fall through (e.g. for a
+                    // future unlock-by-shift-click UX).
+                    return EventStatus::Ignored;
+                }
+                // Only line-band + drag-handle hits start a drag.
+                // Lock-icon on an unlocked level is not a drag gesture.
+                if matches!(
+                    hit.target,
+                    LevelHitTarget::LineBand | LevelHitTarget::DragHandle
+                ) {
+                    drag_state.lock().dragging = Some(hit.level_id);
+                    tracing::debug!(
+                        target: "midas_scene::layers::annotations::level",
+                        level_id = hit.level_id,
+                        "LevelLayer began drag",
+                    );
+                    return EventStatus::Captured;
+                }
+                EventStatus::Ignored
+            }
+            InputEvent::MouseDown {
+                button: MouseButton::Right,
+                pt,
+                ..
+            } => {
+                let Some(hit) = self.hit_level(pt, ctx.price_range) else {
+                    return EventStatus::Ignored;
+                };
+                let level = match self.find_level(hit.level_id) {
+                    Some(lv) => lv.clone(),
+                    None => return EventStatus::Ignored,
+                };
+                let lock_label = if level.locked { "Unlock" } else { "Lock" };
+                let items = vec![
+                    ContextMenuItem {
+                        label: "Edit".to_string(),
+                        action: ContextMenuAction::Edit { id: level.id },
+                    },
+                    ContextMenuItem {
+                        label: lock_label.to_string(),
+                        action: ContextMenuAction::ToggleLock { id: level.id },
+                    },
+                    ContextMenuItem {
+                        label: "Delete".to_string(),
+                        action: ContextMenuAction::Delete { id: level.id },
+                    },
+                ];
+                ctx.emit_effect(ToolEffect::OpenContextMenu { pt, items });
+                EventStatus::Captured
+            }
+            InputEvent::MouseMove { pt } => {
+                let dragging = { drag_state.lock().dragging };
+                let Some(id) = dragging else {
+                    return EventStatus::Ignored;
+                };
+                // Emit an UpdateLevel at the cursor's price. Caller
+                // clamps / validates; the layer doesn't police the
+                // value.
+                let price = self.y_to_price(pt.y, ctx.price_range);
+                ctx.emit_effect(ToolEffect::UpdateLevel { id, price });
+                EventStatus::Captured
+            }
+            InputEvent::MouseUp { .. } => {
+                let was_dragging = drag_state.lock().dragging.take();
+                if was_dragging.is_some() {
+                    tracing::debug!(
+                        target: "midas_scene::layers::annotations::level",
+                        "LevelLayer drag released",
+                    );
+                    EventStatus::Captured
+                } else {
+                    EventStatus::Ignored
+                }
+            }
+            InputEvent::KeyDown {
+                key: Key::Escape, ..
+            } => {
+                // Escape cancels an in-flight drag; we don't emit
+                // UpdateLevel to restore the original price (the drag
+                // already emitted `UpdateLevel`s continuously; the app
+                // can implement "revert on escape" as a separate
+                // bookkeeping layer).
+                let was_dragging = drag_state.lock().dragging.take();
+                if was_dragging.is_some() {
+                    EventStatus::Captured
+                } else {
+                    EventStatus::Ignored
+                }
+            }
+            _ => EventStatus::Ignored,
+        }
+    }
+
+    fn hit_test(&self, pt: Point, price_range: &PriceRange) -> Option<Hit> {
+        let hit = self.hit_level(pt, price_range)?;
+        let cursor = match hit.target {
+            LevelHitTarget::LineBand => CursorShape::ResizeNorthSouth,
+            LevelHitTarget::DragHandle => CursorShape::Grab,
+            LevelHitTarget::LockIcon => CursorShape::Pointer,
+        };
+        Some(Hit {
+            layer_id: LayerId("levels"),
+            sub_z: match hit.target {
+                LevelHitTarget::LineBand => 0,
+                LevelHitTarget::DragHandle => 1,
+                LevelHitTarget::LockIcon => 2,
+            },
+            cursor,
+        })
+    }
+
+    fn cancel(&mut self) {
+        if let Some(drag) = &self.drag {
+            drag.lock().dragging = None;
         }
     }
 }
@@ -418,6 +727,7 @@ mod tests {
             price: 100.0,
             label: "L".into(),
             color: [255, 255, 255, 200],
+            locked: false,
         }]);
         layer.paint(&mut ctx);
         assert_eq!(out.lines.len(), 1);

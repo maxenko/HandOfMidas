@@ -18,8 +18,8 @@ mod volume;
 mod volume_profile;
 
 pub use annotations::{
-    DecoratorLayer, LevelLayer, LevelView, OrderBracketLayer, OrderBracketView, PriceLineLayer,
-    PriceLineView, Side,
+    DecoratorLayer, LevelDragState, LevelHit, LevelHitTarget, LevelLayer, LevelView,
+    OrderBracketLayer, OrderBracketView, PriceLineLayer, PriceLineView, SharedLevelDrag, Side,
 };
 pub use candle::{BrightIndices, CandleLayer, CandleStyle, SharedCandleSeries};
 pub use crosshair::CrosshairLayer;
