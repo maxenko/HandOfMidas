@@ -162,6 +162,7 @@ fn save_load_roundtrip_preserves_all_fields() {
         store: StoreConfig::default(),
         providers: None,
         broker: BrokerConnectionConfig::default(),
+        chart_view_store_schema: 0,
     };
 
     config.save(&path).expect("save config");
@@ -326,6 +327,7 @@ fn chart_config_with_levels_survives_roundtrip() {
         store: StoreConfig::default(),
         providers: None,
         broker: BrokerConnectionConfig::default(),
+        chart_view_store_schema: 0,
     };
 
     config.save(&path).expect("save config");
@@ -509,6 +511,7 @@ fn atomic_write_does_not_corrupt_on_success() {
         store: StoreConfig::default(),
         providers: None,
         broker: BrokerConnectionConfig::default(),
+        chart_view_store_schema: 0,
     };
 
     // Write multiple times to ensure atomic replacement works.
@@ -631,6 +634,7 @@ fn roundtrip_with_camera_and_collapse_gaps_and_line_width() {
         store: StoreConfig::default(),
         providers: None,
         broker: BrokerConnectionConfig::default(),
+        chart_view_store_schema: 0,
     };
 
     config.save(&path).expect("save full config");

@@ -49,6 +49,14 @@ pub struct StateProjection<'a> {
 /// opaque — we don't know its wire representation, but the `Debug`
 /// form is stable for any given iced version and that's all the
 /// devloop needs for disambiguation.
+///
+/// ## Slice 8b — chart-transition integration projection
+///
+/// The projection now carries the fields devloop tests need to assert
+/// that a session-chart panel is in the expected interactive state.
+/// Every field is auto-derived via `Serialize` (plan R7 — no manual
+/// projection). See [`ToolKind`] for the reserved bracket tool
+/// variant (slice 5b).
 #[cfg(feature = "session_chart")]
 #[derive(Serialize)]
 pub struct SessionChartProjection {
@@ -60,6 +68,50 @@ pub struct SessionChartProjection {
     pub series_len: usize,
     pub version: u64,
     pub axis_kind: String,
+    /// Visible time axis extent in UTC nanos `(start, end)`. Captured
+    /// from the widget's current axis; `None` before the first paint.
+    /// Serde-serialised as a JSON array `[start, end]` so devloop
+    /// assertions can inspect the viewport boundaries without
+    /// reaching into the axis type.
+    pub axis_range: Option<(i64, i64)>,
+    /// Visible price axis extent `(low, high)`. `None` before the first
+    /// paint. Mirrors `PriceRange::{low, high}` on the panel's scene.
+    pub price_range: Option<(f64, f64)>,
+    /// Widget size in logical pixels `(width, height)`.
+    pub viewport_size: (f32, f32),
+    /// Which interactive tool is currently active on this panel. See
+    /// [`ToolKind`] — `None` means the panel is in the default "pan /
+    /// zoom / hover" mode with no tool installed. Tests use this to
+    /// assert that a toolbar click correctly transferred the tool onto
+    /// the scene's `active_tool` slot.
+    pub active_tool: Option<ToolKind>,
+    /// Annotation ids projected out of `AnnotationStore::get(ticker)`
+    /// at dump-state time. Each entry is the raw `AnnotationId`
+    /// (`u64`) — devloop tests that seeded a level / bracket assert
+    /// the returned id is present after a round-trip.
+    pub annotation_ids: Vec<u64>,
+    /// Layer id that currently owns drag focus, as a string. Mirrors
+    /// `ChartScene::drag_focus()` projected via `Display` on
+    /// `LayerId`. `None` means no layer is capturing events.
+    pub drag_focus: Option<String>,
+}
+
+/// Which interactive tool is active on a session-chart panel.
+///
+/// Mirrors the tool variants the scene supports today. Marked
+/// `#[non_exhaustive]` so slice 5b can fold in `Bracket` (reserved)
+/// without semver-breaking downstream devloop drivers that match on
+/// this enum.
+#[cfg(feature = "session_chart")]
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolKind {
+    /// `LevelTool` — click-to-place horizontal price level. Slice 4.
+    Level,
+    /// `BracketTool` — 3-click bracket placement FSM. Reserved for
+    /// slice 5b; no session-chart panel returns this variant today.
+    Bracket,
 }
 
 /// Router state projection for the devloop dump (S7e / BR-15).
@@ -225,14 +277,53 @@ pub fn build(app: &MidasApp) -> serde_json::Value {
             // to pull scalar fields. `series()` returns a fresh Arc
             // clone — we drop the outer guard before reading the
             // inner series so we never hold two guards concurrently.
-            let (eh_policy, axis_kind, series_arc) = {
+            //
+            // Slice 8b: the same guard pulls the slice-8b fields
+            // (axis_range, price_range, viewport_size, active_tool,
+            // drag_focus) in the same snapshot so the projection is
+            // temporally coherent.
+            let (
+                eh_policy,
+                axis_kind,
+                series_arc,
+                axis_range,
+                price_range_out,
+                viewport,
+                active_tool,
+                drag_focus,
+            ) = {
                 let g = state.widget.read();
-                (g.eh_policy(), g.axis_kind(), g.series())
+                let pr = g.price_range();
+                let vp = g.viewport();
+                let window = g.time_window();
+                (
+                    g.eh_policy(),
+                    g.axis_kind(),
+                    g.series(),
+                    (
+                        window.0.timestamp_nanos_opt().unwrap_or(i64::MIN),
+                        window.1.timestamp_nanos_opt().unwrap_or(i64::MAX),
+                    ),
+                    (pr.low(), pr.high()),
+                    (vp.width_px, vp.height_px),
+                    tool_kind_for_label(g.active_tool_label()),
+                    g.drag_focus_label().map(|s| s.to_string()),
+                )
             };
             let (series_len, version) = {
                 let g = series_arc.read();
                 (g.len(), g.version())
             };
+            // Project annotation ids for the widget's bound ticker.
+            // The devloop dumps a deterministic ordering so seeded
+            // tests can assert presence-by-id without sorting at the
+            // call site.
+            let annotation_ids: Vec<u64> = app
+                .annotation_store
+                .get(&state.request.ticker)
+                .iter()
+                .map(|ann| ann.id.0)
+                .collect();
             SessionChartProjection {
                 window_id: format!("{win_id:?}"),
                 ticker: state.request.ticker.clone(),
@@ -242,6 +333,12 @@ pub fn build(app: &MidasApp) -> serde_json::Value {
                 series_len,
                 version,
                 axis_kind: axis_kind_label(axis_kind).to_string(),
+                axis_range: Some(axis_range),
+                price_range: Some(price_range_out),
+                viewport_size: viewport,
+                active_tool,
+                annotation_ids,
+                drag_focus,
             }
         })
         .collect();
@@ -271,6 +368,27 @@ fn axis_kind_label(kind: crate::session_chart::AxisKind) -> &'static str {
         crate::session_chart::AxisKind::Continuous => "Continuous",
         crate::session_chart::AxisKind::Compressed => "Compressed",
         crate::session_chart::AxisKind::SessionIndex => "SessionIndex",
+    }
+}
+
+/// Map the widget's short tool label ("level", "bracket") onto the
+/// typed [`ToolKind`]. `None` means the widget has no active tool.
+/// Unknown labels fall through to `None` + a `tracing::warn!` so a
+/// future tool variant that lands here without a matching enum
+/// entry is loud, not silently dropped.
+#[cfg(feature = "session_chart")]
+fn tool_kind_for_label(label: Option<&'static str>) -> Option<ToolKind> {
+    match label {
+        Some("level") => Some(ToolKind::Level),
+        Some("bracket") => Some(ToolKind::Bracket),
+        Some(other) => {
+            tracing::warn!(
+                label = other,
+                "dump_state: unknown active_tool label; projecting None"
+            );
+            None
+        }
+        None => None,
     }
 }
 
@@ -355,6 +473,12 @@ mod tests {
             series_len: 42,
             version: 100,
             axis_kind: "Compressed".into(),
+            axis_range: Some((1_700_000_000_000_000_000, 1_700_000_086_400_000_000)),
+            price_range: Some((180.0, 220.0)),
+            viewport_size: (1024.0, 600.0),
+            active_tool: None,
+            annotation_ids: vec![1, 2, 3],
+            drag_focus: None,
         };
         let v = serde_json::to_value(&p).unwrap();
         assert_eq!(v["ticker"], json!("AAPL"));
@@ -363,5 +487,79 @@ mod tests {
         assert_eq!(v["series_len"], json!(42));
         assert_eq!(v["version"], json!(100));
         assert_eq!(v["axis_kind"], json!("Compressed"));
+        // Slice 8b additions.
+        assert_eq!(v["axis_range"].as_array().unwrap().len(), 2);
+        assert_eq!(v["price_range"], json!([180.0, 220.0]));
+        assert_eq!(v["viewport_size"], json!([1024.0, 600.0]));
+        assert_eq!(v["active_tool"], json!(null));
+        assert_eq!(v["annotation_ids"], json!([1, 2, 3]));
+        assert_eq!(v["drag_focus"], json!(null));
+    }
+
+    /// Slice 8b: `ToolKind` serialises as lower_snake_case matching the
+    /// devloop wire convention. Drivers that match on string values
+    /// rely on these exact labels.
+    #[cfg(feature = "session_chart")]
+    #[test]
+    fn tool_kind_wire_labels_stable() {
+        let l = serde_json::to_string(&ToolKind::Level).unwrap();
+        let b = serde_json::to_string(&ToolKind::Bracket).unwrap();
+        assert_eq!(l, "\"level\"");
+        assert_eq!(b, "\"bracket\"");
+    }
+
+    /// Slice 8b: `tool_kind_for_label` maps the widget's short string
+    /// form onto the typed enum. Unknown labels return `None`, which
+    /// the dump projection encodes as `null` — never a panic.
+    #[cfg(feature = "session_chart")]
+    #[test]
+    fn tool_kind_for_label_maps_known_values() {
+        assert_eq!(tool_kind_for_label(Some("level")), Some(ToolKind::Level));
+        assert_eq!(
+            tool_kind_for_label(Some("bracket")),
+            Some(ToolKind::Bracket)
+        );
+        assert_eq!(tool_kind_for_label(None), None);
+    }
+
+    /// Slice 8b: unknown label does not panic and does not project a
+    /// bogus variant. Covers the forward-compat path where a future
+    /// tool emits a label this build doesn't know.
+    #[cfg(feature = "session_chart")]
+    #[test]
+    fn tool_kind_for_label_unknown_returns_none() {
+        assert_eq!(tool_kind_for_label(Some("teleporter")), None);
+    }
+
+    /// Slice 8b plan-eval Scenario 11: `active_data_provider` is a
+    /// runtime-only value (not persisted on `AppConfig`). Any fixture
+    /// carrying the field from old dumps is dropped by serde's default
+    /// non-strict deserialisation; no panic, no error.
+    ///
+    /// This test guards the fact that `AppConfig` doesn't mark any of
+    /// its chart-transition fields with `deny_unknown_fields` so
+    /// rollback from slice 9c (which removes the field) is safe.
+    #[test]
+    fn unknown_top_level_keys_are_tolerated_by_appconfig() {
+        use midas_core::config::AppConfig;
+        // Forge a config blob with an `active_data_provider` key that
+        // doesn't exist in the in-memory type.
+        let raw = toml::from_str::<AppConfig>(
+            r#"
+            active_data_provider = "test"
+
+            [window]
+            width = 1280
+            height = 800
+
+            [theme]
+            mode = "dark"
+
+            [broker]
+        "#,
+        )
+        .expect("AppConfig should accept unknown top-level keys");
+        // The tolerated field is silently dropped.
+        assert!(raw.charts.is_empty());
     }
 }

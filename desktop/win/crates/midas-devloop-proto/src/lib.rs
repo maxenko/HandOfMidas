@@ -16,7 +16,35 @@ use serde::{Deserialize, Serialize};
 
 /// Current envelope version. Bumped when [`FixtureEnvelope`]'s shape
 /// changes in a way that breaks forward-reading.
-pub const DEVLOOP_FIXTURE_VERSION: u32 = 1;
+///
+/// ## Version history
+///
+/// - `1` (retired) — original shape; no `schema` field on the envelope.
+///   Deserialisation still accepts this via `#[serde(default)]` on the
+///   new field.
+/// - `2` (current) — adds the per-envelope `schema: u32` stamp so future
+///   schema bumps don't require another top-level version churn. Slice
+///   8c of the chart-transition plan.
+pub const DEVLOOP_FIXTURE_VERSION: u32 = 2;
+
+/// The oldest `devloop_fixture_version` this build accepts on load.
+/// Setting this to `1` preserves the slice-8c backward-compat story —
+/// a v1 fixture loads, upgrades forward in memory, and saves as v2.
+pub const MIN_SUPPORTED_FIXTURE_VERSION: u32 = 1;
+
+/// Default schema for [`FixtureEnvelope::schema`] when the field is
+/// missing on a v1 envelope. Mirrors the legacy "implicit v1" shape.
+pub const FIXTURE_SCHEMA_V1: u32 = 1;
+
+/// Current schema version stamped by new-stack writers. Slice 8c.
+pub const CURRENT_FIXTURE_SCHEMA: u32 = 2;
+
+/// Returns the default fixture schema for new envelopes. Used as a
+/// serde `default = ...` callback on [`FixtureEnvelope::schema`] so
+/// older on-disk fixtures that lack the field round-trip as v1.
+fn default_fixture_schema() -> u32 {
+    FIXTURE_SCHEMA_V1
+}
 
 /// Default TCP port the harness listens on. Override with the
 /// `DEVLOOP_PORT` environment variable for parallel app instances.
@@ -351,6 +379,17 @@ pub struct Modifiers {
 pub struct FixtureEnvelope {
     /// Bumped whenever this envelope's shape changes incompatibly.
     pub devloop_fixture_version: u32,
+    /// Per-envelope schema stamp — orthogonal to
+    /// [`Self::devloop_fixture_version`]. Slice 8c of the
+    /// chart-transition plan. Carries the chart-view-store schema the
+    /// capturing binary wrote; the loader forwards-migrates v1 → v2
+    /// on next snapshot.
+    ///
+    /// `default = 1` so a pre-slice-8c fixture file (no `schema` key)
+    /// deserialises as v1. Writers always emit
+    /// [`CURRENT_FIXTURE_SCHEMA`].
+    #[serde(default = "default_fixture_schema")]
+    pub schema: u32,
     /// Mirror of `midas-app`'s `TickerState::CURRENT_VERSION` at capture.
     /// Mismatch with the running build errors loudly; fixtures are
     /// disposable dev artefacts, not a persistence layer.
@@ -466,6 +505,7 @@ mod tests {
     fn fixture_envelope_roundtrips() {
         let env = FixtureEnvelope {
             devloop_fixture_version: DEVLOOP_FIXTURE_VERSION,
+            schema: CURRENT_FIXTURE_SCHEMA,
             ticker_state_version: 2,
             captured_at: "2026-04-17T14:22:00Z".to_owned(),
             note: Some("SL drag bug reproduction".to_owned()),
@@ -477,6 +517,46 @@ mod tests {
         assert_eq!(back.ticker_state_version, 2);
         assert_eq!(back.active_ticker.as_deref(), Some("AAPL"));
         assert_eq!(back.ticker_states.len(), 1);
+        assert_eq!(back.schema, CURRENT_FIXTURE_SCHEMA);
+    }
+
+    /// Slice 8c: a v1 envelope on disk lacks the `schema` field.
+    /// Deserialisation must succeed and default the field to
+    /// [`FIXTURE_SCHEMA_V1`] so the app-side loader can detect "this
+    /// came from an older build" and translate forward on next
+    /// snapshot.
+    #[test]
+    fn v1_envelope_missing_schema_defaults_to_v1() {
+        let raw = r#"{
+            "devloop_fixture_version": 1,
+            "ticker_state_version": 2,
+            "captured_at": "2026-04-17T00:00:00Z",
+            "note": null,
+            "active_ticker": null,
+            "app_config": {},
+            "ticker_states": []
+        }"#;
+        let env: FixtureEnvelope = serde_json::from_str(raw).expect("v1 parse");
+        assert_eq!(env.schema, FIXTURE_SCHEMA_V1);
+        assert_eq!(env.devloop_fixture_version, 1);
+    }
+
+    /// Slice 8c: v2 envelopes carry the `schema` field explicitly.
+    #[test]
+    fn v2_envelope_carries_explicit_schema() {
+        let raw = r#"{
+            "devloop_fixture_version": 2,
+            "schema": 2,
+            "ticker_state_version": 2,
+            "captured_at": "2026-04-17T00:00:00Z",
+            "note": null,
+            "active_ticker": null,
+            "app_config": {},
+            "ticker_states": []
+        }"#;
+        let env: FixtureEnvelope = serde_json::from_str(raw).expect("v2 parse");
+        assert_eq!(env.schema, 2);
+        assert_eq!(env.devloop_fixture_version, 2);
     }
 
     #[test]

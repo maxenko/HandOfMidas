@@ -142,6 +142,12 @@ impl MidasApp {
             // at runtime; when the settings panel lands, bumps
             // will flow through `app.broker_cfg`.
             broker: self.broker_cfg.clone(),
+            // Slice 8a of the chart-transition plan: stamp the
+            // chart-view-store schema this binary writes. Drives the
+            // R6 rollback coordination — a reverted binary reading a
+            // newer stamp than it understands logs a warning and
+            // falls back to the v1 reader path.
+            chart_view_store_schema: self.chart_views.schema_version(),
         }
     }
 

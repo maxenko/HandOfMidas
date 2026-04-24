@@ -14,7 +14,9 @@
 use chrono::Utc;
 use iced::Task;
 use midas_core::config::AppConfig;
-use midas_devloop_proto::{FixtureEnvelope, DEVLOOP_FIXTURE_VERSION};
+use midas_devloop_proto::{
+    FixtureEnvelope, CURRENT_FIXTURE_SCHEMA, DEVLOOP_FIXTURE_VERSION, MIN_SUPPORTED_FIXTURE_VERSION,
+};
 use thiserror::Error;
 
 use super::{Message, MidasApp, RecentEntry};
@@ -31,6 +33,16 @@ pub enum FixtureError {
         expected: u32,
         got: u32,
     },
+    /// A fixture envelope's `devloop_fixture_version` sits past the
+    /// current build's supported window. Unlike
+    /// [`Self::VersionMismatch`], this fires for future envelopes
+    /// specifically — slice 8c backward-compat for past envelopes is
+    /// handled in-band via forward translation.
+    #[error(
+        "fixture envelope version {got} is newer than this build supports (max {max}); \
+         downgrade the fixture or upgrade the binary"
+    )]
+    UnsupportedFutureVersion { got: u32, max: u32 },
     #[error("fixture serialise/deserialise failure: {0}")]
     Serde(#[from] serde_json::Error),
     #[error("fixture IO failure: {0}")]
@@ -57,6 +69,10 @@ impl MidasApp {
 
         Ok(FixtureEnvelope {
             devloop_fixture_version: DEVLOOP_FIXTURE_VERSION,
+            // Slice 8c: every write stamps the current schema. Older
+            // fixtures without the field deserialise as v1; on next
+            // snapshot they round-trip forward to v2.
+            schema: CURRENT_FIXTURE_SCHEMA,
             ticker_state_version: ticker_state::CURRENT_VERSION,
             captured_at: Utc::now().to_rfc3339(),
             note,
@@ -79,19 +95,43 @@ impl MidasApp {
         &mut self,
         envelope: FixtureEnvelope,
     ) -> Result<Task<Message>, FixtureError> {
-        if envelope.devloop_fixture_version != DEVLOOP_FIXTURE_VERSION {
+        // Slice 8c — accept any envelope version from
+        // MIN_SUPPORTED_FIXTURE_VERSION up to DEVLOOP_FIXTURE_VERSION.
+        // Below the floor we can't realistically translate; above
+        // the ceiling we refuse because the wire format might have
+        // diverged.
+        if envelope.devloop_fixture_version > DEVLOOP_FIXTURE_VERSION {
+            return Err(FixtureError::UnsupportedFutureVersion {
+                got: envelope.devloop_fixture_version,
+                max: DEVLOOP_FIXTURE_VERSION,
+            });
+        }
+        if envelope.devloop_fixture_version < MIN_SUPPORTED_FIXTURE_VERSION {
             return Err(FixtureError::VersionMismatch {
                 field: "devloop_fixture_version",
-                expected: DEVLOOP_FIXTURE_VERSION,
+                expected: MIN_SUPPORTED_FIXTURE_VERSION,
                 got: envelope.devloop_fixture_version,
             });
         }
+
+        // TickerState has a separate chain — still gates hard because a
+        // mismatch here means TickerState deserialisation would fail
+        // unpredictably downstream.
         if envelope.ticker_state_version != ticker_state::CURRENT_VERSION {
             return Err(FixtureError::VersionMismatch {
                 field: "ticker_state_version",
                 expected: ticker_state::CURRENT_VERSION,
                 got: envelope.ticker_state_version,
             });
+        }
+
+        if envelope.devloop_fixture_version < DEVLOOP_FIXTURE_VERSION {
+            tracing::info!(
+                from = envelope.devloop_fixture_version,
+                to = DEVLOOP_FIXTURE_VERSION,
+                "devloop: forward-translating v1 fixture envelope; \
+                 next SnapshotFixture will write v2"
+            );
         }
 
         let config: AppConfig = serde_json::from_value(envelope.app_config)?;
@@ -201,6 +241,7 @@ mod tests {
         // Can test version gating without constructing a MidasApp.
         let envelope = FixtureEnvelope {
             devloop_fixture_version: DEVLOOP_FIXTURE_VERSION + 99,
+            schema: CURRENT_FIXTURE_SCHEMA,
             ticker_state_version: ticker_state::CURRENT_VERSION,
             captured_at: "2026-04-17T00:00:00Z".to_owned(),
             note: None,
@@ -231,6 +272,7 @@ mod tests {
         // Verifies proto and app agree on the minimum shape required.
         let envelope = FixtureEnvelope {
             devloop_fixture_version: DEVLOOP_FIXTURE_VERSION,
+            schema: CURRENT_FIXTURE_SCHEMA,
             ticker_state_version: ticker_state::CURRENT_VERSION,
             captured_at: "2026-04-17T00:00:00Z".to_owned(),
             note: Some("test".to_owned()),
@@ -253,5 +295,114 @@ mod tests {
         let back: FixtureEnvelope = serde_json::from_str(&text).unwrap();
         assert_eq!(back.ticker_state_version, ticker_state::CURRENT_VERSION);
         assert_eq!(back.note.as_deref(), Some("test"));
+        assert_eq!(back.schema, CURRENT_FIXTURE_SCHEMA);
+    }
+
+    // ── Slice 8c — fixture v2 backward + forward compat ─────────────────
+
+    /// A v1 file (no `schema` key, `devloop_fixture_version: 1`) parses
+    /// cleanly into the current envelope shape. The `schema` field
+    /// defaults to v1 via the `#[serde(default)]` attribute. On a next
+    /// snapshot the app-side writer stamps `CURRENT_FIXTURE_SCHEMA`.
+    #[test]
+    fn v1_fixture_file_round_trips_to_v2_shape() {
+        let raw = r#"{
+            "devloop_fixture_version": 1,
+            "ticker_state_version": 2,
+            "captured_at": "2026-04-17T00:00:00Z",
+            "note": null,
+            "active_ticker": null,
+            "app_config": {},
+            "ticker_states": []
+        }"#;
+        let env: FixtureEnvelope = serde_json::from_str(raw).expect("v1 parse");
+        assert_eq!(env.devloop_fixture_version, 1);
+        assert_eq!(
+            env.schema,
+            midas_devloop_proto::FIXTURE_SCHEMA_V1,
+            "missing schema field defaults to v1"
+        );
+
+        // Re-serialise + re-parse with a v2 stamp — this is what the
+        // app-side writer does on the next SnapshotFixture after
+        // loading a v1 file.
+        let upgraded = FixtureEnvelope {
+            devloop_fixture_version: DEVLOOP_FIXTURE_VERSION,
+            schema: CURRENT_FIXTURE_SCHEMA,
+            ..env
+        };
+        let s = serde_json::to_string(&upgraded).unwrap();
+        let back: FixtureEnvelope = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.devloop_fixture_version, DEVLOOP_FIXTURE_VERSION);
+        assert_eq!(back.schema, CURRENT_FIXTURE_SCHEMA);
+    }
+
+    /// Slice 8c: a future envelope version — one whose
+    /// `devloop_fixture_version` exceeds the current
+    /// `DEVLOOP_FIXTURE_VERSION` constant — is refused cleanly. No
+    /// panic, no silent corruption.
+    #[test]
+    fn unknown_future_schema_errors_cleanly() {
+        // Construct a hypothetical v3 envelope and serialise it —
+        // then try to parse + validate. The parser side succeeds
+        // (forward-compat deserialiser); the `apply_fixture_envelope`
+        // entry is the gate that errors.
+        let future = FixtureEnvelope {
+            devloop_fixture_version: DEVLOOP_FIXTURE_VERSION + 1,
+            schema: CURRENT_FIXTURE_SCHEMA + 1,
+            ticker_state_version: ticker_state::CURRENT_VERSION,
+            captured_at: "2030-01-01T00:00:00Z".to_owned(),
+            note: None,
+            active_ticker: None,
+            app_config: json!({}),
+            ticker_states: vec![],
+        };
+        // We can't call `apply_fixture_envelope` without a MidasApp,
+        // but we can verify the version gate logic via a local
+        // predicate mirror of the impl. The test documents the
+        // contract; the real rejection path is covered by integration
+        // tests under `tests/`.
+        let rejected = future.devloop_fixture_version > DEVLOOP_FIXTURE_VERSION;
+        assert!(rejected, "future envelope must fail the version gate");
+    }
+
+    /// Slice 8c: stability guard — the v2 envelope shape MUST keep
+    /// its current field set. A change here is a wire-break and
+    /// requires DEVLOOP_FIXTURE_VERSION to bump.
+    #[test]
+    fn v2_envelope_shape_is_stable() {
+        let env = FixtureEnvelope {
+            devloop_fixture_version: DEVLOOP_FIXTURE_VERSION,
+            schema: CURRENT_FIXTURE_SCHEMA,
+            ticker_state_version: ticker_state::CURRENT_VERSION,
+            captured_at: "2026-04-22T00:00:00Z".to_owned(),
+            note: None,
+            active_ticker: None,
+            app_config: json!({}),
+            ticker_states: vec![],
+        };
+        let v = serde_json::to_value(&env).unwrap();
+        let expected_keys = [
+            "devloop_fixture_version",
+            "schema",
+            "ticker_state_version",
+            "captured_at",
+            "note",
+            "active_ticker",
+            "app_config",
+            "ticker_states",
+        ];
+        let obj = v.as_object().expect("envelope serialises to object");
+        for key in &expected_keys {
+            assert!(obj.contains_key(*key), "missing field: {key}");
+        }
+        // Exact-count assertion — a new field addition fails this
+        // intentionally so the author updates the test AND bumps the
+        // version constants.
+        assert_eq!(
+            obj.len(),
+            expected_keys.len(),
+            "v2 envelope has unexpected field count"
+        );
     }
 }

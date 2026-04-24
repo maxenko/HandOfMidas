@@ -616,6 +616,46 @@ impl SessionChart {
         Arc::clone(&self.series)
     }
 
+    /// Current time-axis window (`(start, end)` UTC). Exposed for slice
+    /// 8b of the chart-transition plan so the devloop `DumpState`
+    /// projection can surface the visible axis range without rebuilding
+    /// a scene.
+    pub fn time_window(&self) -> (Timestamp, Timestamp) {
+        self.time_window
+    }
+
+    /// String projection of the "layer id that currently captures
+    /// events", used by the slice-8b `DumpState` projection. Mirrors
+    /// the intent of `ChartScene::drag_focus()` but reads from the
+    /// widget's `InteractionState.drag` because the scene is rebuilt
+    /// per frame and doesn't hold stateful drag focus.
+    ///
+    /// Maps:
+    /// - active level tool drag → `"levels"`
+    /// - bracket leg drag → `"order_bracket"` (reserved, slice 5b)
+    /// - price-line drag → `"price_line"`
+    /// - candle / no drag → `None`
+    pub fn drag_focus_label(&self) -> Option<&'static str> {
+        self.interaction.drag.as_ref().map(|d| match d.target {
+            midas_scene::HoverTarget::Level(_) => "levels",
+            midas_scene::HoverTarget::Bracket { .. } => "order_bracket",
+            midas_scene::HoverTarget::PriceLine(_) => "price_line",
+            midas_scene::HoverTarget::Candle(_) => "candles",
+        })
+    }
+
+    /// Which interactive tool is currently active on the widget. Slice
+    /// 4 wires only the level tool; slice 5b adds the bracket tool.
+    /// Exposed for slice 8b's `DumpState` projection — returns the
+    /// string form as the devloop proto knows it ("level" / "bracket").
+    pub fn active_tool_label(&self) -> Option<&'static str> {
+        if self.level_host.is_active() {
+            Some("level")
+        } else {
+            None
+        }
+    }
+
     /// End-to-end: snapshot the current series version, build a scene
     /// (sharing the same `Arc<RwLock<CandleSeries>>` with the driver —
     /// no deep-copy per frame, arch-audit F1 / R1), paint primitives,

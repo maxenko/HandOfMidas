@@ -2286,7 +2286,18 @@ impl MidasApp {
             // it to "Ready". Without this, the first paint briefly
             // flashes "Disconnected" which reads as an error state.
             broker_connection_display: "Connecting".to_string(),
-            chart_views: crate::chart_view::ChartViewStore::default(),
+            chart_views: {
+                // Slice 8a of chart-transition: stamp the persisted
+                // schema onto the fresh in-memory store so the rollback
+                // coordination picks up where the previous run left off.
+                // `0` (missing) means "never written" — store keeps its
+                // default stamp, and the first write lifts it to v2.
+                let mut cvs = crate::chart_view::ChartViewStore::default();
+                if config.chart_view_store_schema > 0 {
+                    cvs.set_schema_version(config.chart_view_store_schema);
+                }
+                cvs
+            },
             thumbnail_store: crate::thumbnail_store::ThumbnailStore::default(),
             thumbnail_data: crate::thumbnail_data::ThumbnailDataStore::default(),
             tickers,
@@ -3132,8 +3143,20 @@ impl MidasApp {
 
     /// Propagate a symbol change from source chart to all linked charts
     /// (both docked and floating).
+    ///
+    /// ## Slice 8e — 4-step link-propagation checklist
+    ///
+    /// For every linked receiver the method emits four `tracing::debug!`
+    /// events in the canonical order defined by
+    /// [`crate::link::LINK_PROPAGATION_ORDER`]. The steps themselves
+    /// execute through the existing `load_symbol_for_chart` path —
+    /// this is an observability overlay, not a new code path. The
+    /// ordering invariant is enforced by the unit tests in
+    /// `crate::link`; integration tests consume the `tracing` events
+    /// to assert the 4-step sequence fired exactly once per linked
+    /// receiver.
     fn propagate_symbol_change(&mut self, source_id: ChartId, new_symbol: &str) -> Task<Message> {
-        use crate::link::find_link_targets;
+        use crate::link::{find_link_targets, log_link_propagation_step, LinkPropagationStep};
 
         let source_link = self
             .charts
@@ -3152,10 +3175,62 @@ impl MidasApp {
 
         let mut tasks: Vec<Task<Message>> = Vec::new();
         for id in pane_targets {
+            // Outgoing symbol captured BEFORE any mutation so the
+            // 4-step log has both old and new values.
+            let old_sym = self
+                .charts
+                .get(&id)
+                .map(|c| c.symbol.clone())
+                .unwrap_or_default();
+            // Step 1 — clear dependent caches (ATR / VP / bright
+            // highlights) before the new handle fires so the first
+            // post-swap frame sees a clean slate.
+            //
+            // `load_symbol_for_chart` already calls
+            // `chart.data = None` + `mark_data()` which drops every
+            // version-keyed layer cache; the log below makes the step
+            // auditable from the event tail without duplicating the
+            // cache clear here.
+            log_link_propagation_step(LinkPropagationStep::ClearCaches, id.0, &old_sym, new_symbol);
+            // Step 2 — drop the old SubscriptionHandle. Implicit via
+            // the next iced `subscription()` diff: the upcoming
+            // `bind_chart_to_symbol` inside `load_symbol_for_chart`
+            // mutates `bound_symbol`, which changes the subscription
+            // closure's capture and causes iced to tear down the
+            // existing handle.
+            log_link_propagation_step(
+                LinkPropagationStep::DropSubscription,
+                id.0,
+                &old_sym,
+                new_symbol,
+            );
             if let Some(chart) = self.charts.get_mut(&id) {
                 chart.gatr_hover = false;
             }
+            // Step 3 — acquire the new SubscriptionHandle. Also
+            // implicit via the subscription re-diff after
+            // `load_symbol_for_chart` flips `bound_symbol`.
+            log_link_propagation_step(
+                LinkPropagationStep::AcquireSubscription,
+                id.0,
+                &old_sym,
+                new_symbol,
+            );
             tasks.push(self.load_symbol_for_chart(id, new_symbol));
+            // Step 4 — reset + auto-scale. `load_symbol_for_chart`
+            // returns a task that on completion invokes
+            // `apply_candle_data` with a fresh `ChartViewState`,
+            // which triggers the camera reposition (auto-scale
+            // equivalent for the legacy chart surface). The log
+            // below stamps the logical step; the observable effect
+            // lands when `Message::DataLoaded` fires for this
+            // receiver.
+            log_link_propagation_step(
+                LinkPropagationStep::ResetAndAutoScale,
+                id.0,
+                &old_sym,
+                new_symbol,
+            );
         }
 
         // Floating charts.

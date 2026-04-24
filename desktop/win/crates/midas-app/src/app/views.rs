@@ -2,6 +2,28 @@
 //!
 //! Builds the widget tree: toolbar, pane grid, title bars, chart body,
 //! status bar, and floating chart windows.
+//!
+//! ## Slice 8f — feature-gate × config mismatch (reserved for slice 9a)
+//!
+//! Plan `chart-transition` Scenario 9 specifies that when a build is
+//! compiled WITHOUT `--features session_chart` but a user config
+//! selects `backend: "New"`, the dispatch inside this module must:
+//!
+//! 1. Still parse the `ChartBackend` enum (enum parsing is
+//!    feature-independent).
+//! 2. Fall back to `Legacy` with a `tracing::warn!` on first encounter.
+//! 3. Never panic, never silently drop the selection.
+//!
+//! The `ChartBackend` enum + the per-panel `backend` field land in
+//! slice 9a — that slice owns the four-cell matrix test
+//! `{feature on/off} × {config New/Legacy}`. No work to do in slice
+//! 8f beyond this signpost.
+//
+// TODO(chart-transition slice 9a): add the per-panel `ChartBackend`
+// selector + dispatch fall-through when the config selects a backend
+// the build can't service. See `plan/chart-transition/00-index.md`
+// slice 9a, "Feature gate × config mismatch" for the 4-cell matrix
+// the dispatch must satisfy.
 
 use iced::widget::pane_grid::{self, PaneGrid};
 use iced::widget::{
@@ -3627,10 +3649,13 @@ fn active_neutral_button_style(_theme: &iced::Theme, _status: button::Status) ->
 /// equal / empty → flat (muted grey). The thresholds use strict
 /// inequalities so truly-equal closes land on the flat color rather
 /// than the slightly warmer up color.
+///
+/// Slice 8d of chart-transition: the lookup now routes through
+/// [`theme::ThumbnailPalette`] so this surface and the main chart
+/// read from the SAME palette instance. Prior to slice 8d each side
+/// read its own constants and could drift under a theme swap (plan
+/// R9).
 fn thumbnail_color(closes: &[f32]) -> [f32; 4] {
-    match (closes.first(), closes.last()) {
-        (Some(&first), Some(&last)) if last > first => theme::THUMBNAIL_UP,
-        (Some(&first), Some(&last)) if last < first => theme::THUMBNAIL_DOWN,
-        _ => theme::THUMBNAIL_FLAT,
-    }
+    let palette = theme::ThumbnailPalette::dark_default();
+    palette.color_for_closes(closes.first().copied(), closes.last().copied())
 }

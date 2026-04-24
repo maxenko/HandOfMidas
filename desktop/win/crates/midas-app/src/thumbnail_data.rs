@@ -8,6 +8,21 @@
 //! [`fetch`](ThumbnailDataStore::fetch) reslices.
 //!
 //! See `plan/feature-chart-thumbnail-cells.md` Decision 4 + 9.
+//!
+//! ## Slice 8d — `CandleSeries` alternate source
+//!
+//! The store accepts two source shapes:
+//!
+//! - Legacy [`CandleBuffer`] — primary path today, retained through
+//!   slice 9c so the transition window still services the main chart.
+//! - New-stack `Arc<RwLock<CandleSeries>>` via [`Self::install_series`]
+//!   / [`Self::fetch_from_series`] — lands in slice 8d so the
+//!   watchlist can seed thumbnails from a live session-chart panel's
+//!   series without going through the legacy buffer path.
+//!
+//! Both paths produce an identical `Vec<f32>` of closes for the same
+//! underlying data. The `ThemePalette` that tints the thumbnail is
+//! shared with the main chart (plan R9) — see [`crate::theme::ThumbnailPalette`].
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -295,6 +310,70 @@ impl ThumbnailDataStore {
         self.pending.clear();
         self.waiting.clear();
     }
+
+    // ── Slice 8d — `CandleSeries` alternate source ───────────────────────
+
+    /// Fetch (or reslice) the thumbnail entry for `(symbol, tf)` from a
+    /// new-stack [`midas_bars::CandleSeries`] handle instead of the
+    /// legacy [`CandleBuffer`].
+    ///
+    /// Produces an identical `Vec<f32>` of closes to
+    /// [`Self::fetch`] on equivalent data. The series' `version()` is
+    /// compared against the cached `source_version`, matching the
+    /// buffer-source invalidation semantics.
+    ///
+    /// Feature-gated because `midas_bars` is only linked under the
+    /// `session_chart` feature. Slice 9c drops the gate once the
+    /// new-stack becomes unconditional.
+    #[cfg(feature = "session_chart")]
+    pub fn fetch_from_series(
+        &mut self,
+        symbol: &str,
+        tf: Timeframe,
+        source: Option<&parking_lot::RwLock<midas_bars::CandleSeries>>,
+    ) -> Entry {
+        let key = (symbol.to_string(), tf);
+
+        if let Some(series_lock) = source {
+            // Short-lived read guard — matches the driver's "read one
+            // scalar then drop" pattern so the write side (tick fold)
+            // doesn't wait.
+            let guard = series_lock.read();
+            let live_version = guard.version();
+            let needs_reslice = self
+                .cache
+                .get(&key)
+                .is_none_or(|entry| entry.source_version != live_version);
+            if needs_reslice {
+                let entry = slice_from_series(&guard, self.tail_len);
+                self.cache.insert(key.clone(), entry);
+            }
+        }
+
+        match self.cache.get(&key) {
+            Some(entry) => entry.clone(),
+            None => empty_entry(),
+        }
+    }
+
+    /// Install a freshly-loaded `CandleSeries` slice for `(symbol, tf)`.
+    /// Mirrors [`Self::install`] for the new-stack source shape.
+    ///
+    /// Useful when the app seeds the thumbnail cache from a snapshot
+    /// the session-chart driver already produced — avoids a redundant
+    /// provider round-trip.
+    #[cfg(feature = "session_chart")]
+    pub fn install_series(
+        &mut self,
+        symbol: &str,
+        tf: Timeframe,
+        series: &midas_bars::CandleSeries,
+    ) {
+        let key = (symbol.to_string(), tf);
+        self.pending.remove(&key);
+        let entry = slice_from_series(series, self.tail_len);
+        self.cache.insert(key, entry);
+    }
 }
 
 impl Default for ThumbnailDataStore {
@@ -339,6 +418,65 @@ fn empty_entry() -> Entry {
         y_min: 0.0,
         y_max: 1.0,
         source_version: 0,
+    }
+}
+
+/// Slice 8d: extract the last `tail_len` closes from a
+/// [`midas_bars::CandleSeries`] + compute the price range over that
+/// window. Semantically equivalent to [`slice_from_buffer`] — both
+/// paths produce an identical `Vec<f32>` for the same data.
+///
+/// Reads happen through [`midas_bars::CandleSeries::iter`] +
+/// [`midas_bars::CandleRef`] accessors. The closes column is stored
+/// as `f32` on both stacks so no precision loss occurs.
+#[cfg(feature = "session_chart")]
+fn slice_from_series(series: &midas_bars::CandleSeries, tail_len: usize) -> Entry {
+    let len = series.len();
+    let version = series.version();
+
+    if len == 0 {
+        return Entry {
+            closes: Arc::new(Vec::new()),
+            y_min: 0.0,
+            y_max: 1.0,
+            source_version: version,
+        };
+    }
+
+    let start = len.saturating_sub(tail_len);
+    // Walk the tail directly via CandleRef so we don't materialise a
+    // full Vec<Candle> on the hot path. Closes are already f32 in the
+    // SoA storage; CandleRef::close returns f64 for API uniformity —
+    // we narrow back to f32 for thumbnail storage (match the legacy
+    // source contract exactly).
+    let mut closes: Vec<f32> = Vec::with_capacity(len - start);
+    let mut y_min = f32::INFINITY;
+    let mut y_max = f32::NEG_INFINITY;
+    for idx in start..len {
+        let row = series.at(idx).expect("idx in bounds");
+        let c = row.close() as f32;
+        closes.push(c);
+        let h = row.high() as f32;
+        let l = row.low() as f32;
+        if h > y_max {
+            y_max = h;
+        }
+        if l < y_min {
+            y_min = l;
+        }
+    }
+    if !y_min.is_finite() {
+        y_min = 0.0;
+    }
+    if !y_max.is_finite() {
+        y_max = 1.0;
+    }
+
+    Entry {
+        closes: Arc::new(closes),
+        y_min,
+        y_max,
+        source_version: version,
     }
 }
 
@@ -550,5 +688,278 @@ mod tests {
         assert!(store.drain_next().is_none());
         assert!(store.request_load("A", Timeframe::M1, 1).is_some());
         assert!(store.drain_next().is_none());
+    }
+
+    // ── Slice 8d — `CandleSeries` alternate source + palette share ──────
+
+    /// Shared `ThumbnailPalette` yields the same tint for the same
+    /// first/last pair regardless of which source the caller seeded
+    /// from. Plan R9 invariant: thumbnail sparkline and main chart
+    /// read from the SAME palette so they cannot drift.
+    #[test]
+    fn thumbnail_palette_produces_consistent_colors() {
+        use crate::theme::ThumbnailPalette;
+        let pal = ThumbnailPalette::dark_default();
+        // Same palette, same closes → same color.
+        let up_a = pal.color_for_closes(Some(100.0), Some(110.0));
+        let up_b = pal.color_for_closes(Some(100.0), Some(110.0));
+        assert_eq!(up_a, up_b);
+        // Direction changes route to the expected face.
+        assert_eq!(pal.color_for_closes(Some(100.0), Some(110.0)), pal.up);
+        assert_eq!(pal.color_for_closes(Some(110.0), Some(100.0)), pal.down);
+        assert_eq!(pal.color_for_closes(Some(100.0), Some(100.0)), pal.flat);
+        assert_eq!(pal.color_for_closes(None, None), pal.flat);
+    }
+
+    /// Both halves of the R9 invariant: the legacy chart surface (via
+    /// `thumbnail_color` in views.rs) and the thumbnail widget (via
+    /// `ThumbnailPalette::color_for_closes`) agree on identical input.
+    /// Seed both with the same palette → assert same color.
+    #[test]
+    fn main_chart_and_thumbnail_share_palette() {
+        use crate::theme::{ThumbnailPalette, THUMBNAIL_DOWN, THUMBNAIL_FLAT, THUMBNAIL_UP};
+        let pal = ThumbnailPalette::dark_default();
+        // The legacy constants MUST equal the palette faces — the
+        // "shared palette" invariant (R9).
+        assert_eq!(pal.up, THUMBNAIL_UP);
+        assert_eq!(pal.down, THUMBNAIL_DOWN);
+        assert_eq!(pal.flat, THUMBNAIL_FLAT);
+    }
+
+    /// Slice 8d: the `CandleSeries` source produces an identical
+    /// `Vec<f32>` of closes to the `CandleBuffer` source on
+    /// equivalent data. Parity is the migration gate — a differing
+    /// close here means the thumbnail would flicker colour across a
+    /// backend swap.
+    #[cfg(feature = "session_chart")]
+    #[test]
+    fn candle_series_source_matches_buffer_source() {
+        use chrono::TimeZone;
+        use midas_bars::{Candle, CandleSeries, Completeness, Ohlcv, Symbol};
+        use midas_calendar::{xnys, BarPeriod, Timestamp};
+
+        // Build a 20-candle CandleSeries with recognisable closes.
+        let cal = xnys();
+        let sym = Symbol::new("SPY", cal.id());
+        let mut series = CandleSeries::new(cal.id(), BarPeriod::m1(), sym);
+        let start: Timestamp = chrono::Utc
+            .with_ymd_and_hms(2024, 1, 17, 14, 30, 0)
+            .unwrap();
+        for i in 0..20 {
+            let ts = start + chrono::Duration::minutes(i);
+            let p = 100.0 + i as f64 * 0.5;
+            let ohlcv = Ohlcv::new(p, p + 0.1, p - 0.1, p, 100, 1, None).unwrap();
+            let c = Candle::new(
+                sym,
+                cal,
+                BarPeriod::m1(),
+                cal.classify(ts),
+                cal.bar_window(ts, BarPeriod::m1()).unwrap(),
+                ohlcv,
+                Completeness::Completed,
+            )
+            .unwrap();
+            series.push(c);
+        }
+
+        // Build a matching CandleBuffer with identical closes. The
+        // timestamps differ in encoding (ms for legacy buffer vs ns
+        // for the new-stack series) — we only need the CLOSES to line
+        // up bit-identically, which is the invariant thumbnails
+        // depend on.
+        let mut buf = CandleBuffer::new();
+        for i in 0..20 {
+            let p = 100.0 + i as f32 * 0.5;
+            buf.push(
+                start.timestamp_millis() + (i as i64) * 60_000,
+                p,
+                p + 0.1,
+                p - 0.1,
+                p,
+                100,
+            );
+        }
+
+        // Slice both via store — same tail length, same `tail_len`.
+        let mut store = ThumbnailDataStore::with_tail_len(20);
+        let from_buf = store.fetch("SPY", Timeframe::M1, Some(&buf));
+        assert_eq!(from_buf.closes.len(), 20);
+
+        // Clear so the series-based slice doesn't short-circuit on
+        // the buf entry.
+        store.clear();
+        let lock = parking_lot::RwLock::new(series);
+        let from_series = store.fetch_from_series("SPY", Timeframe::M1, Some(&lock));
+        assert_eq!(from_series.closes.len(), 20);
+
+        assert_eq!(
+            from_buf.closes.as_slice(),
+            from_series.closes.as_slice(),
+            "closes MUST match across source shapes"
+        );
+    }
+
+    /// Slice 8d: empty `CandleSeries` yields an empty entry with
+    /// `source_version == 0`, matching the buffer path.
+    #[cfg(feature = "session_chart")]
+    #[test]
+    fn empty_candle_series_yields_empty_entry() {
+        use midas_bars::{CandleSeries, Symbol};
+        use midas_calendar::{xnys, BarPeriod};
+
+        let cal = xnys();
+        let sym = Symbol::new("SPY", cal.id());
+        let series = CandleSeries::new(cal.id(), BarPeriod::m1(), sym);
+        let lock = parking_lot::RwLock::new(series);
+
+        let mut store = ThumbnailDataStore::new();
+        let entry = store.fetch_from_series("SPY", Timeframe::M1, Some(&lock));
+        assert!(entry.closes.is_empty());
+        // Version is 0 for an empty series because nothing has been
+        // pushed yet.
+        assert_eq!(entry.source_version, 0);
+    }
+
+    /// Slice 8d: `install_series` clears the pending marker + inserts
+    /// a sliced entry, matching the buffer-source `install` contract.
+    #[cfg(feature = "session_chart")]
+    #[test]
+    fn install_series_clears_pending() {
+        use chrono::TimeZone;
+        use midas_bars::{Candle, CandleSeries, Completeness, Ohlcv, Symbol};
+        use midas_calendar::{xnys, BarPeriod};
+
+        let cal = xnys();
+        let sym = Symbol::new("SPY", cal.id());
+        let mut series = CandleSeries::new(cal.id(), BarPeriod::m1(), sym);
+        let ts = chrono::Utc
+            .with_ymd_and_hms(2024, 1, 17, 14, 30, 0)
+            .unwrap();
+        let ohlcv = Ohlcv::new(100.0, 101.0, 99.0, 100.5, 100, 1, None).unwrap();
+        series.push(
+            Candle::new(
+                sym,
+                cal,
+                BarPeriod::m1(),
+                cal.classify(ts),
+                cal.bar_window(ts, BarPeriod::m1()).unwrap(),
+                ohlcv,
+                Completeness::Completed,
+            )
+            .unwrap(),
+        );
+
+        let mut store = ThumbnailDataStore::new();
+        assert!(store.request_load("SPY", Timeframe::M1, 1).is_some());
+        assert_eq!(store.pending_count(), 1);
+
+        store.install_series("SPY", Timeframe::M1, &series);
+        assert_eq!(store.pending_count(), 0);
+        // request_load now declines because the entry has real data.
+        assert!(store.request_load("SPY", Timeframe::M1, 1).is_none());
+    }
+
+    /// Slice 8d: version-bump on the series invalidates the cached
+    /// slice, matching the buffer's `version()` invariant.
+    #[cfg(feature = "session_chart")]
+    #[test]
+    fn candle_series_version_bump_triggers_reslice() {
+        use chrono::TimeZone;
+        use midas_bars::{Candle, CandleSeries, Completeness, Ohlcv, Symbol};
+        use midas_calendar::{xnys, BarPeriod};
+
+        let cal = xnys();
+        let sym = Symbol::new("SPY", cal.id());
+        let mut series = CandleSeries::new(cal.id(), BarPeriod::m1(), sym);
+        let start = chrono::Utc
+            .with_ymd_and_hms(2024, 1, 17, 14, 30, 0)
+            .unwrap();
+        for i in 0..3 {
+            let ts = start + chrono::Duration::minutes(i);
+            let p = 100.0 + i as f64;
+            let ohlcv = Ohlcv::new(p, p + 0.1, p - 0.1, p, 100, 1, None).unwrap();
+            series.push(
+                Candle::new(
+                    sym,
+                    cal,
+                    BarPeriod::m1(),
+                    cal.classify(ts),
+                    cal.bar_window(ts, BarPeriod::m1()).unwrap(),
+                    ohlcv,
+                    Completeness::Completed,
+                )
+                .unwrap(),
+            );
+        }
+        let lock = parking_lot::RwLock::new(series);
+
+        let mut store = ThumbnailDataStore::new();
+        let a = store.fetch_from_series("SPY", Timeframe::M1, Some(&lock));
+        assert_eq!(a.closes.len(), 3);
+
+        // Mutate under the write lock — version bumps.
+        {
+            let mut g = lock.write();
+            let ts = start + chrono::Duration::minutes(3);
+            let p = 200.0;
+            let ohlcv = Ohlcv::new(p, p + 0.1, p - 0.1, p, 100, 1, None).unwrap();
+            g.push(
+                Candle::new(
+                    sym,
+                    cal,
+                    BarPeriod::m1(),
+                    cal.classify(ts),
+                    cal.bar_window(ts, BarPeriod::m1()).unwrap(),
+                    ohlcv,
+                    Completeness::Completed,
+                )
+                .unwrap(),
+            );
+        }
+        let b = store.fetch_from_series("SPY", Timeframe::M1, Some(&lock));
+        assert_eq!(b.closes.len(), 4);
+        assert!(b.source_version > a.source_version);
+    }
+
+    /// Slice 8d: `fetch_from_series` honours `tail_len`, clamping a
+    /// 30-candle series to the last 10 when the tail is shorter than
+    /// the series.
+    #[cfg(feature = "session_chart")]
+    #[test]
+    fn candle_series_tail_len_is_respected() {
+        use chrono::TimeZone;
+        use midas_bars::{Candle, CandleSeries, Completeness, Ohlcv, Symbol};
+        use midas_calendar::{xnys, BarPeriod};
+
+        let cal = xnys();
+        let sym = Symbol::new("SPY", cal.id());
+        let mut series = CandleSeries::new(cal.id(), BarPeriod::m1(), sym);
+        let start = chrono::Utc
+            .with_ymd_and_hms(2024, 1, 17, 14, 30, 0)
+            .unwrap();
+        for i in 0..30 {
+            let ts = start + chrono::Duration::minutes(i);
+            let p = 100.0 + i as f64;
+            let ohlcv = Ohlcv::new(p, p + 0.1, p - 0.1, p, 100, 1, None).unwrap();
+            series.push(
+                Candle::new(
+                    sym,
+                    cal,
+                    BarPeriod::m1(),
+                    cal.classify(ts),
+                    cal.bar_window(ts, BarPeriod::m1()).unwrap(),
+                    ohlcv,
+                    Completeness::Completed,
+                )
+                .unwrap(),
+            );
+        }
+        let lock = parking_lot::RwLock::new(series);
+
+        let mut store = ThumbnailDataStore::with_tail_len(10);
+        let entry = store.fetch_from_series("SPY", Timeframe::M1, Some(&lock));
+        assert_eq!(entry.closes.len(), 10);
+        // Last close in the tail is bar 29 (0-indexed).
+        assert!((entry.closes.last().unwrap() - 129.0).abs() < 1e-3);
     }
 }

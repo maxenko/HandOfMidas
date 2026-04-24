@@ -89,3 +89,69 @@ pub const THUMBNAIL_DOWN: [f32; 4] = [0.85, 0.30, 0.30, 0.85];
 /// Muted grey at 60% alpha — even less visually dominant than the
 /// trend colors because the line is expected to be nearly horizontal.
 pub const THUMBNAIL_FLAT: [f32; 4] = [0.55, 0.55, 0.55, 0.60];
+
+// ── Thumbnail palette (slice 8d / R9) ────────────────────────────────
+//
+// Single source of truth for thumbnail fill colors. Prior to slice 8d
+// the thumbnail sparkline and main chart each read from their own
+// constant set, which meant a future theme-swap could let them drift
+// (thumbnail reading "dark blue" while the chart rendered "light
+// blue"). The plan's R9 risk calls for sharing one `ThemePalette`
+// instance across both surfaces — this struct is the desktop-side
+// face of that instance.
+//
+// `ThumbnailPalette` is owned by the main chart stack's palette
+// (eventually `midas_scene::ThemePalette` in the session_chart path)
+// and projected down at paint time so the thumbnail widget never
+// picks its own default.
+
+/// Trend-aware thumbnail palette — one fill color per direction.
+///
+/// Built from the same `ThemePalette` the chart stack reads so
+/// thumbnail + chart colors can never drift (plan R9). Call sites
+/// (watchlist / orders-blotter columns) construct one per frame from
+/// [`ThumbnailPalette::dark_default`] and pass it to
+/// [`crate::thumbnail_data::ThumbnailDataStore::make_snapshot_color`].
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct ThumbnailPalette {
+    /// Fill color when `last > first` (up trend).
+    pub up: [f32; 4],
+    /// Fill color when `last < first` (down trend).
+    pub down: [f32; 4],
+    /// Fill color when `last == first` (flat).
+    pub flat: [f32; 4],
+}
+
+impl ThumbnailPalette {
+    /// Dark-theme default. Mirrors the [`THUMBNAIL_UP`] /
+    /// [`THUMBNAIL_DOWN`] / [`THUMBNAIL_FLAT`] constants so legacy
+    /// call sites stay pixel-identical during the slice-8d migration
+    /// window.
+    pub const fn dark_default() -> Self {
+        Self {
+            up: THUMBNAIL_UP,
+            down: THUMBNAIL_DOWN,
+            flat: THUMBNAIL_FLAT,
+        }
+    }
+
+    /// Pick the fill color for the given first/last close pair.
+    /// Returns [`Self::flat`] when either bound is absent.
+    ///
+    /// Plan R9 invariant: both the thumbnail widget and the main
+    /// chart's sparkline overlay pass through this one function so
+    /// colours never diverge on identical data.
+    pub fn color_for_closes(&self, first: Option<f32>, last: Option<f32>) -> [f32; 4] {
+        match (first, last) {
+            (Some(f), Some(l)) if l > f => self.up,
+            (Some(f), Some(l)) if l < f => self.down,
+            _ => self.flat,
+        }
+    }
+}
+
+impl Default for ThumbnailPalette {
+    fn default() -> Self {
+        Self::dark_default()
+    }
+}

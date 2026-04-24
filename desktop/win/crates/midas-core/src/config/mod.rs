@@ -127,6 +127,18 @@ pub struct AppConfig {
     /// for the backend-specific fields.
     #[serde(default)]
     pub broker: BrokerConnectionConfig,
+    /// Chart-view-store schema stamp — mirrors
+    /// `midas-app::chart_view::CURRENT_CHART_VIEW_STORE_SCHEMA`.
+    ///
+    /// Persisted so the chart-transition rollback story (R6) can tell
+    /// a pre-migration layout (v1-only) apart from a migrated layout
+    /// (v1+v2 dual-write). Unknown / missing defaults to `0`; the
+    /// in-memory store treats that as "never written" and boots with
+    /// the default stamp.
+    ///
+    /// Slice 9c bumps this to `3` when the v1 writes retire.
+    #[serde(default)]
+    pub chart_view_store_schema: u32,
 }
 
 /// Which broker backend the app connects to on startup.
@@ -734,6 +746,7 @@ impl Default for AppConfig {
             store: StoreConfig::default(),
             providers: None,
             broker: BrokerConnectionConfig::default(),
+            chart_view_store_schema: 0,
         }
     }
 }
