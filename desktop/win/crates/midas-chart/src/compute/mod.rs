@@ -302,7 +302,8 @@ fn compute_normal_scene(
     let price_grid_lines = compute_grid_lines(camera, &input.grid_color);
     let priceline_labels = compute_priceline_labels(camera);
     let timeline_ticks = compute_timeline_ticks(camera);
-    let (widget_output, layer_ends) = compute_widget_annotations(input.annotations, camera, input);
+    let (widget_output, mut layer_ends) =
+        compute_widget_annotations(input.annotations, camera, input);
     let crosshair = compute_crosshair_impl(input.crosshair, data, camera, input.symbol, &|cx| {
         let cursor_time = camera.x_to_time(cx);
         let idx = data.find_index_by_time(cursor_time as i64);
@@ -344,6 +345,7 @@ fn compute_normal_scene(
         &mut grid_instances,
         &mut badges,
         &mut labels,
+        &mut layer_ends,
     );
     // Axis text (priceline on the right edge, timeline on the
     // separator) shares one batch — the renderer draws them together
@@ -479,7 +481,8 @@ fn compute_collapsed_scene(
         &index_to_x,
     );
 
-    let (widget_output, layer_ends) = compute_widget_annotations(input.annotations, camera, input);
+    let (widget_output, mut layer_ends) =
+        compute_widget_annotations(input.annotations, camera, input);
 
     // Crosshair in collapsed mode: convert cursor X to the nearest candle index.
     let crosshair = compute_crosshair_impl(input.crosshair, data, camera, input.symbol, &|cx| {
@@ -534,6 +537,7 @@ fn compute_collapsed_scene(
         &mut grid_instances,
         &mut badges,
         &mut labels,
+        &mut layer_ends,
     );
     // Axis text (priceline on the right edge, timeline on the
     // separator) shares one batch — the renderer draws them together
@@ -1120,9 +1124,15 @@ pub fn timeline_labels_to_widget_labels(
 }
 
 /// Append the current-price indicator (dotted line + flat right-edge
-/// badge) to the scene's grid / badge / label vectors. Helper shared
-/// by `compute_normal_scene` and `compute_collapsed_scene` so both
-/// modes carry the indicator identically.
+/// badge + price text) to the scene's grid / badge / label vectors.
+/// Helper shared by `compute_normal_scene` and
+/// `compute_collapsed_scene` so both modes carry the indicator
+/// identically.
+///
+/// Critically, this also extends the last layer in `layer_ends` so the
+/// renderer's per-layer draw loop (`draw_pass` in `midas-render`)
+/// actually picks up the appended badge + label. Without that bump
+/// they live past the loop's range and never reach a draw call.
 ///
 /// No-op when [`current_price::compute_current_price_indicator`]
 /// returns `None` (empty data, NaN close, or degenerate viewport).
@@ -1133,6 +1143,7 @@ fn apply_current_price_indicator(
     grid_instances: &mut Vec<GridLineInstance>,
     badges: &mut Vec<midas_gpu_types::BadgeInstance>,
     labels: &mut Vec<crate::widget::compute::WidgetLabel>,
+    layer_ends: &mut [LayerEnd; ANNOTATION_LAYER_COUNT],
 ) {
     let Some(indicator) = current_price::compute_current_price_indicator(
         data,
@@ -1146,6 +1157,14 @@ fn apply_current_price_indicator(
     grid_instances.extend(indicator.line_dots);
     badges.push(indicator.badge);
     labels.push(indicator.price_text);
+    // Extend the topmost layer's range by 1 badge + 1 label so the
+    // renderer's per-layer draw includes the indicator. Top layer
+    // (drag-z) is the right place semantically: the live price floats
+    // above other annotations and never participates in hit-testing.
+    if let Some(top) = layer_ends.last_mut() {
+        top.badge_end += 1;
+        top.label_end += 1;
+    }
 }
 
 /// Translate the `AxisLabel` priceline list into `WidgetLabel`s the

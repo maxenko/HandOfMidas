@@ -45,6 +45,14 @@ const BADGE_FONT_SIZE_PX: f32 = 11.0;
 /// Inset from the right edge of the chart for the badge text.
 const BADGE_TEXT_RIGHT_INSET_PX: f32 = 6.0;
 
+/// White rectangular fill for the badge — the indicator is a system
+/// signal (current live price), so it deliberately doesn't borrow the
+/// bull/bear palette. That keeps it visually distinct from
+/// user-placed colored levels and brackets.
+const BADGE_FILL_WHITE: [f32; 4] = [0.96, 0.96, 0.97, 1.0];
+/// Near-black text against the white fill.
+const BADGE_TEXT_BLACK: [f32; 4] = [0.08, 0.08, 0.10, 1.0];
+
 /// Output of [`compute_current_price_indicator`]. The caller appends
 /// each field to the matching `ChartScene` slot.
 pub struct CurrentPriceIndicator {
@@ -87,8 +95,9 @@ pub fn compute_current_price_indicator(
 
     let y = camera.snap_to_pixel(camera.price_to_y(close as f64));
 
-    // Pick bull/bear from the last candle's direction. Doji (open ==
-    // close) goes bull — matches the candle pipeline's convention.
+    // Line keeps a bull/bear tint (close ≥ open → bull) so a glance
+    // at the dotted line still conveys direction. Badge stays white
+    // so it reads as a system indicator, not a user annotation.
     let direction_color = if close >= open {
         bull_color
     } else {
@@ -103,8 +112,8 @@ pub fn compute_current_price_indicator(
     ];
 
     let line_dots = build_dots(priceline_x, y, line_color);
-    let badge = build_badge(viewport_width, y, direction_color);
-    let price_text = build_text(viewport_width, y, close, direction_color);
+    let badge = build_badge(viewport_width, y);
+    let price_text = build_text(viewport_width, y, close);
 
     Some(CurrentPriceIndicator {
         line_dots,
@@ -136,7 +145,7 @@ fn build_dots(priceline_x: f32, y: f32, color: [f32; 4]) -> Vec<GridLineInstance
     out
 }
 
-fn build_badge(viewport_width: f32, y: f32, fill: [f32; 4]) -> BadgeInstance {
+fn build_badge(viewport_width: f32, y: f32) -> BadgeInstance {
     // Body sits inside the right-side priceline gutter, flush against
     // the border line. No triangular nose — `shape_id = 0` (Rect).
     let body_left = viewport_width - PRICELINE_WIDTH;
@@ -144,7 +153,7 @@ fn build_badge(viewport_width: f32, y: f32, fill: [f32; 4]) -> BadgeInstance {
     let half_h = BADGE_HEIGHT_PX * 0.5;
     BadgeInstance {
         rect: [body_left, y - half_h, body_right, y + half_h],
-        fill: [fill[0], fill[1], fill[2], 1.0],
+        fill: BADGE_FILL_WHITE,
         border: [0.0; 4],
         shape_id: 0, // BadgeShape::Rect — see midas_gpu_types::BadgeInstance docs.
         shape_param: 0.0,
@@ -153,13 +162,13 @@ fn build_badge(viewport_width: f32, y: f32, fill: [f32; 4]) -> BadgeInstance {
     }
 }
 
-fn build_text(viewport_width: f32, y: f32, price: f32, fill: [f32; 4]) -> WidgetLabel {
+fn build_text(viewport_width: f32, y: f32, price: f32) -> WidgetLabel {
     WidgetLabel {
         text: format!("{price:.2}"),
         screen_x: viewport_width - BADGE_TEXT_RIGHT_INSET_PX,
         screen_y: y,
         bg_color: [0.0; 4],
-        text_color: crate::color::contrast_text_color(fill),
+        text_color: BADGE_TEXT_BLACK,
         font_size: BADGE_FONT_SIZE_PX,
         anchor: LabelAnchor::Right,
     }
@@ -248,38 +257,48 @@ mod tests {
     }
 
     #[test]
-    fn bull_close_picks_bull_color() {
-        let data = StubData {
-            opens: vec![100.0],
-            closes: vec![100.5],
-        };
-        let cam = camera(99.0, 101.0, 600);
+    fn badge_fill_is_white_regardless_of_direction() {
         let bull = [0.1, 0.8, 0.2, 1.0];
         let bear = [0.9, 0.1, 0.1, 1.0];
-        let ind =
-            compute_current_price_indicator(&data, &cam, 1000.0, bull, bear).expect("indicator");
-        // Badge fill alpha is forced to 1.0; RGB matches bull.
-        assert!((ind.badge.fill[0] - bull[0]).abs() < 1e-6);
-        assert!((ind.badge.fill[1] - bull[1]).abs() < 1e-6);
-        assert!((ind.badge.fill[2] - bull[2]).abs() < 1e-6);
-        // Line color shares RGB but uses dim alpha.
-        assert!(ind.line_dots[0].color[3] < 0.5);
+        let cam = camera(99.0, 101.0, 600);
+        for closes in [vec![100.5_f32], vec![99.5_f32]] {
+            let data = StubData {
+                opens: vec![100.0],
+                closes,
+            };
+            let ind = compute_current_price_indicator(&data, &cam, 1000.0, bull, bear)
+                .expect("indicator");
+            // Badge stays white — system signal, not a coloured annotation.
+            assert!((ind.badge.fill[0] - BADGE_FILL_WHITE[0]).abs() < 1e-6);
+            assert!((ind.badge.fill[1] - BADGE_FILL_WHITE[1]).abs() < 1e-6);
+            assert!((ind.badge.fill[2] - BADGE_FILL_WHITE[2]).abs() < 1e-6);
+            // Text is the near-black contrast colour.
+            assert!((ind.price_text.text_color[0] - BADGE_TEXT_BLACK[0]).abs() < 1e-6);
+        }
     }
 
     #[test]
-    fn bear_close_picks_bear_color() {
-        let data = StubData {
+    fn line_dots_track_direction_color() {
+        let bull = [0.1, 0.8, 0.2, 1.0];
+        let bear = [0.9, 0.1, 0.1, 1.0];
+        let cam = camera(99.0, 101.0, 600);
+        // Bull close → green dots.
+        let data_bull = StubData {
+            opens: vec![100.0],
+            closes: vec![100.5],
+        };
+        let ind = compute_current_price_indicator(&data_bull, &cam, 1000.0, bull, bear)
+            .expect("indicator");
+        assert!((ind.line_dots[0].color[1] - bull[1]).abs() < 1e-6);
+        assert!(ind.line_dots[0].color[3] < 0.5, "line dim alpha");
+        // Bear close → red dots.
+        let data_bear = StubData {
             opens: vec![100.0],
             closes: vec![99.5],
         };
-        let cam = camera(99.0, 101.0, 600);
-        let bull = [0.1, 0.8, 0.2, 1.0];
-        let bear = [0.9, 0.1, 0.1, 1.0];
-        let ind =
-            compute_current_price_indicator(&data, &cam, 1000.0, bull, bear).expect("indicator");
-        assert!((ind.badge.fill[0] - bear[0]).abs() < 1e-6);
-        assert!((ind.badge.fill[1] - bear[1]).abs() < 1e-6);
-        assert!((ind.badge.fill[2] - bear[2]).abs() < 1e-6);
+        let ind = compute_current_price_indicator(&data_bear, &cam, 1000.0, bull, bear)
+            .expect("indicator");
+        assert!((ind.line_dots[0].color[0] - bear[0]).abs() < 1e-6);
     }
 
     #[test]
