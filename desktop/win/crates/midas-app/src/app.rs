@@ -1132,6 +1132,16 @@ pub enum Message {
     SessionChartActivateSellBracketTool(window::Id),
 }
 
+// Size guard — `Message` is dispatched through iced's update queue on
+// every frame; an unbounded payload would balloon the queue. The
+// threshold is set above the current size with headroom for ~1 small
+// new variant. If a future change pushes past the limit, either box
+// the offending payload (`Box<LargeStruct>`) or split the variant.
+const _: () = assert!(
+    std::mem::size_of::<Message>() <= 256,
+    "Message enum exceeds size budget — box a large variant payload"
+);
+
 /// Payload for [`Message::SessionChartWindowOpened`]. Carries the
 /// freshly-spawned driver + request so the update handler can build
 /// the widget once it knows the window `Id`. Feature-gated.
