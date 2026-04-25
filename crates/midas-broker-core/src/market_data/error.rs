@@ -103,6 +103,20 @@ pub enum MarketDataError {
     /// `inject_for_test` on the real IB adapter).
     #[error("unsupported on this source")]
     Unsupported,
+    /// Attempt to connect to the live-trading port (`4001`) without
+    /// `allow_live = true` in the broker configuration.
+    ///
+    /// Defence-in-depth complement to
+    /// [`BrokerConfig::validate`](crate::) — the TOML-load path already
+    /// rejects this misconfig, but this variant catches programmatic
+    /// mutation (e.g. post-construction `cfg.port = 4001`) that never
+    /// flows through `validate()`.
+    #[error(
+        "live-trading port 4001 used without allow_live = true; \
+         set allow_live = true in [connection] (or on IbMarketDataConfig) \
+         to confirm live trading"
+    )]
+    LiveTradingNotConfirmed,
     /// Raw I/O failure bubbled up from a provider.
     #[error("i/o: {0}")]
     Io(#[from] std::io::Error),

@@ -43,6 +43,17 @@ pub struct IbMarketDataConfig {
     /// shorter than `ib_op_timeout` so a stuck leg doesn't lock out
     /// cancellation of the other two.
     pub cancel_leg_timeout: Duration,
+    /// Must be `true` to allow connecting to the live-trading port
+    /// (`4001`). Defence-in-depth complement to
+    /// [`BrokerConfig::validate`](crate::BrokerConfig::validate) — the
+    /// TOML-load path already rejects this misconfig, but this field
+    /// catches programmatic construction or post-construction mutation
+    /// (e.g. `cfg.port = 4001`) that never flows through `validate()`.
+    ///
+    /// Defaults to `false`. When constructing from
+    /// [`BrokerConfig`](crate::BrokerConfig), copy
+    /// `connection.allow_live` over.
+    pub allow_live: bool,
 }
 
 impl Default for IbMarketDataConfig {
@@ -55,6 +66,7 @@ impl Default for IbMarketDataConfig {
             default_exchange: "SMART".to_string(),
             ib_op_timeout: Duration::from_secs(10),
             cancel_leg_timeout: Duration::from_secs(5),
+            allow_live: false,
         }
     }
 }

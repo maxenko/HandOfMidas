@@ -2587,6 +2587,7 @@ impl MidasApp {
                     host: config.broker.host.clone(),
                     port: config.broker.port,
                     client_id: config.broker.client_id,
+                    allow_live: config.broker.allow_live,
                     ..Default::default()
                 };
                 Task::perform(build_ib_router(ib_cfg), |result| match result {

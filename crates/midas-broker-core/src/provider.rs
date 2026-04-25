@@ -153,8 +153,12 @@ pub trait MarketDataSource: Send + Sync {
 
     /// Connection state watch.
     ///
-    /// `Ready` is the "safe to send orders" marker (connected AND all
-    /// farms up AND `nextValidId` received — see M-23).
+    /// `Ready` is the "safe to send orders" marker (connected AND
+    /// `nextValidId` received AND the MKT data farm up — see M-23).
+    /// Implementations MUST NOT transition to `Ready` until they have
+    /// observed at least one `FarmStatus { code: MarketDataFarmOk,
+    /// connected: true, .. }` on [`farm_status`](Self::farm_status) —
+    /// otherwise stay in `Connected { .. }` and surface the timeout.
     fn connection_state(&self) -> watch::Receiver<ConnectionState>;
 
     /// Stable identity for logs and diagnostics (e.g. `"sim"`, `"ib"`).

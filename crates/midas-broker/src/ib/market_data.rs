@@ -21,8 +21,8 @@ use chrono::{DateTime, Utc};
 #[cfg(any(test, feature = "test_inject"))]
 use midas_broker_core::market_data::MarketEvent;
 use midas_broker_core::market_data::{
-    Bar, ConnectionState, ContractDetails, FarmStatus, GenericTicks, IbDuration, MarketDataError,
-    ReqId, SecurityType, SymbolKey, TickByTickKind, Timeframe, WhatToShow,
+    Bar, ConnectionState, ContractDetails, FarmCode, FarmStatus, GenericTicks, IbDuration,
+    MarketDataError, ReqId, SecurityType, SymbolKey, TickByTickKind, Timeframe, WhatToShow,
 };
 use midas_broker_core::market_data::{Tick, TickAttributes, TickKind, TickType, TickValue};
 use tokio::sync::{broadcast, mpsc, watch};
@@ -53,6 +53,42 @@ where
         Err(_) => Err(MarketDataError::Other(format!(
             "ib {label} timed out after {timeout:?}"
         ))),
+    }
+}
+
+/// `with_ib_timeout` label used by both the production `connect` path
+/// and tests that exercise [`wait_for_mkt_farm_up`]. Keeping the literal
+/// in one place keeps test assertions and operator log fields in sync
+/// when the label is renamed.
+const FARM_UP_LABEL: &str = "farm_up_mkt";
+
+/// Drain `farm_rx` until the first MKT data-farm-up event.
+///
+/// Implements the M-23 gate used by [`IbMarketData::connect`]:
+///
+/// * Returns `Ok(())` on the first
+///   `FarmStatus { code: MarketDataFarmOk, connected: true, .. }`.
+/// * Ignores other farm transitions (e.g. HMDS/SecDef `Ok`, MKT
+///   `Inactive` / `Broken`) — callers that care about those subscribe
+///   to [`MarketDataSource::farm_status`] directly.
+/// * Treats [`broadcast::error::RecvError::Lagged`] as non-fatal (a
+///   slow consumer is not a disconnect) and continues looping.
+/// * Returns `Err(..)` on [`broadcast::error::RecvError::Closed`] — the
+///   sender was dropped, so no more events can arrive.
+async fn wait_for_mkt_farm_up(
+    farm_rx: &mut broadcast::Receiver<FarmStatus>,
+) -> Result<(), MarketDataError> {
+    loop {
+        match farm_rx.recv().await {
+            Ok(s) if s.code == FarmCode::MarketDataFarmOk && s.connected => return Ok(()),
+            Ok(_) => continue, // ignore other farm transitions
+            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(broadcast::error::RecvError::Closed) => {
+                return Err(MarketDataError::Other(
+                    "farm-status channel closed before MKT farm-up".into(),
+                ));
+            }
+        }
     }
 }
 
@@ -107,6 +143,13 @@ impl IbMarketData {
     /// way up. The router's retry logic (S5) owns the `Reconnecting`
     /// transition — this method is single-shot.
     pub async fn connect(&self) -> Result<(), MarketDataError> {
+        // Defence-in-depth live-trading guard: `BrokerConfig::validate`
+        // catches this at TOML load, but programmatic construction /
+        // post-construction mutation (e.g. `cfg.port = 4001`) never
+        // flows through `validate()`. Fail fast before any I/O.
+        if self.config.port == 4001 && !self.config.allow_live {
+            return Err(MarketDataError::LiveTradingNotConfirmed);
+        }
         let _ = self.conn_state_tx.send(ConnectionState::Connecting);
         let address = self.config.address();
         let ib_timeout = self.config.ib_op_timeout;
@@ -126,6 +169,14 @@ impl IbMarketData {
             .send(ConnectionState::Connected { server_version });
         // M-14/M-23: fetch nextValidId once connected so OrderClient
         // callers block on `ordering_ready_tx` getting `Some(_)`.
+        //
+        // Subscribe to `farm_status_tx` BEFORE awaiting
+        // `next_valid_order_id` — otherwise a fast gateway that emits
+        // `MarketDataFarmOk` between `nextValidId` returning and the
+        // farm-up loop arming would deadlock the gate until timeout.
+        // The broadcast receiver buffers everything from subscription
+        // onward, so subscribing early and then draining later is safe.
+        let mut farm_rx = self.farm_status_tx.subscribe();
         if let Some(c) = self.client.read().await.clone() {
             let id_fut = async {
                 c.next_valid_order_id()
@@ -134,11 +185,20 @@ impl IbMarketData {
             };
             if let Ok(id) = with_ib_timeout(ib_timeout, "next_valid_order_id", id_fut).await {
                 let _ = self.ordering_ready_tx.send(Some(id));
+
+                // M-23: gate `Ready` on the first MKT data-farm-up
+                // event. If farm-up never arrives within `ib_timeout`,
+                // the connect call returns the timeout error and we
+                // stay in `Connected { .. }` — caller observes a
+                // failed connect, not a stuck `Connecting`.
+                with_ib_timeout(
+                    ib_timeout,
+                    FARM_UP_LABEL,
+                    wait_for_mkt_farm_up(&mut farm_rx),
+                )
+                .await?;
+                let _ = self.conn_state_tx.send(ConnectionState::Ready);
             }
-            // Mark Ready once we have nextValidId; farm-up notifications
-            // flow via `farm_status_tx` but do not gate Ready here (the
-            // router policy decides — M-23).
-            let _ = self.conn_state_tx.send(ConnectionState::Ready);
         }
         Ok(())
     }
@@ -880,4 +940,170 @@ fn spawn_historical_publisher(
             }
         }
     })
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Tests
+// ───────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Direct construction with `port = 4001` and `allow_live = false`
+    /// must be refused by `connect()` before any I/O is attempted.
+    #[tokio::test]
+    async fn connect_refuses_live_port_without_allow_live() {
+        let cfg = IbMarketDataConfig {
+            port: 4001,
+            allow_live: false,
+            ..IbMarketDataConfig::paper(7)
+        };
+        let mkt = IbMarketData::new(cfg);
+        let err = mkt.connect().await.unwrap_err();
+        assert!(
+            matches!(err, MarketDataError::LiveTradingNotConfirmed),
+            "expected LiveTradingNotConfirmed, got {err:?}"
+        );
+    }
+
+    /// Defence-in-depth: a caller that starts from the safe
+    /// `paper(..)` constructor and then mutates the port must still
+    /// be rejected — the TOML `validate()` path never ran.
+    #[tokio::test]
+    async fn connect_refuses_post_construction_port_swap() {
+        let mut cfg = IbMarketDataConfig::paper(7); // port 7497, safe
+        cfg.port = 4001; // simulate programmatic mistake
+        let mkt = IbMarketData::new(cfg);
+        let err = mkt.connect().await.unwrap_err();
+        assert!(
+            matches!(err, MarketDataError::LiveTradingNotConfirmed),
+            "expected LiveTradingNotConfirmed, got {err:?}"
+        );
+    }
+
+    /// With `allow_live = true` the guard must NOT fire — the connect
+    /// proceeds and eventually fails for a different reason (no real
+    /// IB gateway at 127.0.0.1:4001).
+    #[tokio::test]
+    async fn connect_allows_live_port_when_confirmed() {
+        let cfg = IbMarketDataConfig {
+            port: 4001,
+            allow_live: true,
+            ib_op_timeout: Duration::from_millis(50),
+            ..IbMarketDataConfig::default()
+        };
+        let mkt = IbMarketData::new(cfg);
+        let err = mkt.connect().await.unwrap_err();
+        // Any error OTHER than the guard is acceptable — we just
+        // need proof that the guard did not short-circuit.
+        assert!(
+            !matches!(err, MarketDataError::LiveTradingNotConfirmed),
+            "guard fired with allow_live = true; got {err:?}"
+        );
+    }
+
+    // ── Slice B1: farm-up gate ───────────────────────────────────────────
+
+    fn farm(code: FarmCode, connected: bool) -> FarmStatus {
+        FarmStatus {
+            code,
+            connected,
+            detail: String::new(),
+        }
+    }
+
+    /// Happy path: the very first event is the MKT farm-up we want.
+    #[tokio::test]
+    async fn wait_for_mkt_farm_up_resolves_on_first_match() {
+        let (tx, _orig_rx) = broadcast::channel::<FarmStatus>(16);
+        let mut rx = tx.subscribe();
+        tx.send(farm(FarmCode::MarketDataFarmOk, true)).unwrap();
+        wait_for_mkt_farm_up(&mut rx).await.expect("farm-up");
+    }
+
+    /// The loop must skip unrelated farm events (HMDS, SecDef, MKT
+    /// transitions that are NOT `Ok + connected`).
+    #[tokio::test]
+    async fn wait_for_mkt_farm_up_skips_unrelated_events() {
+        let (tx, _orig_rx) = broadcast::channel::<FarmStatus>(16);
+        let mut rx = tx.subscribe();
+        // Noise first, then the match.
+        tx.send(farm(FarmCode::HistoricalDataFarmOk, true)).unwrap();
+        tx.send(farm(FarmCode::SecDefFarmOk, true)).unwrap();
+        tx.send(farm(FarmCode::MarketDataFarmInactive, false))
+            .unwrap();
+        tx.send(farm(FarmCode::MarketDataFarmBroken, false))
+            .unwrap();
+        // MKT code but `connected = false` must NOT satisfy the gate.
+        tx.send(farm(FarmCode::MarketDataFarmOk, false)).unwrap();
+        tx.send(farm(FarmCode::MarketDataFarmOk, true)).unwrap();
+        wait_for_mkt_farm_up(&mut rx).await.expect("farm-up");
+    }
+
+    /// Sender drop surfaces as an `Err`, not a hang.
+    #[tokio::test]
+    async fn wait_for_mkt_farm_up_errors_on_closed() {
+        let (tx, _orig_rx) = broadcast::channel::<FarmStatus>(4);
+        let mut rx = tx.subscribe();
+        drop(tx); // close the channel
+        let err = wait_for_mkt_farm_up(&mut rx).await.unwrap_err();
+        assert!(
+            matches!(err, MarketDataError::Other(ref s) if s.contains("farm-status")),
+            "expected closed-channel error, got {err:?}"
+        );
+    }
+
+    /// Core B1 behaviour: until the MKT farm-up event arrives, the
+    /// gate must NOT return — and a `tokio::time` timeout is what the
+    /// production code uses to bound the wait. `start_paused = true`
+    /// lets us assert "no resolution for 500ms" without real sleep.
+    #[tokio::test(start_paused = true)]
+    async fn ready_waits_for_farm_up_mkt() {
+        let (tx, _orig_rx) = broadcast::channel::<FarmStatus>(16);
+        let mut rx = tx.subscribe();
+
+        // Emulate the exact snippet used by `connect()`: wrap the
+        // farm-up wait in a `with_ib_timeout` budget.
+        let ib_timeout = Duration::from_secs(5);
+        let gate = tokio::spawn(async move {
+            with_ib_timeout(ib_timeout, FARM_UP_LABEL, wait_for_mkt_farm_up(&mut rx)).await
+        });
+
+        // Drive virtual time forward without any farm event — the
+        // gate must remain unresolved.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            !gate.is_finished(),
+            "gate resolved before MKT farm-up was emitted"
+        );
+
+        // Now publish the expected farm-up; the gate must unblock.
+        tx.send(farm(FarmCode::MarketDataFarmOk, true)).unwrap();
+        // Yield the scheduler so the gate task can observe the event.
+        tokio::task::yield_now().await;
+        let res = tokio::time::timeout(Duration::from_secs(1), gate)
+            .await
+            .expect("gate did not complete after farm-up")
+            .expect("gate task panicked");
+        res.expect("gate future returned Err after farm-up");
+    }
+
+    /// Subscription-before-send ordering: if we subscribe BEFORE the
+    /// farm-up is sent, the event is buffered and the gate still
+    /// resolves. This is the invariant the `connect()` body relies on
+    /// when it subscribes before awaiting `next_valid_order_id`.
+    #[tokio::test(start_paused = true)]
+    async fn farm_rx_subscribed_before_send_buffers_event() {
+        let (tx, _orig_rx) = broadcast::channel::<FarmStatus>(16);
+        // Subscribe FIRST …
+        let mut rx = tx.subscribe();
+        // … then a simulated "fast gateway" emits the farm-up before
+        // the gate future is even polled.
+        tx.send(farm(FarmCode::MarketDataFarmOk, true)).unwrap();
+        // The buffered event must drive the gate to completion.
+        wait_for_mkt_farm_up(&mut rx)
+            .await
+            .expect("buffered farm-up should satisfy gate");
+    }
 }
