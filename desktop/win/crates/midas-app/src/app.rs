@@ -7,6 +7,7 @@
 //! - `persistence`: config build, save, and debounce
 
 mod chart_subscription;
+pub mod connection_subscription;
 #[cfg(feature = "dev_harness")]
 mod fixture;
 mod handlers;

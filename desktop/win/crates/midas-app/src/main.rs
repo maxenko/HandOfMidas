@@ -227,6 +227,21 @@ fn subscription(state: &MidasApp) -> Subscription<Message> {
     subs.push(state.watchlist_subscription());
     subs.push(state.ticker_subscription());
 
+    // Router connection-state stream. Drives the title-bar status and
+    // the per-account-panel "Disconnected — data may be stale" banner
+    // off the router's actual `ConnectionState` watch instead of the
+    // legacy broker-engine path that doesn't fire for sim or IB-router
+    // construction. Without this, the banner is always on.
+    if let Some(ref router) = state.router {
+        let source = crate::app::connection_subscription::ConnectionStateSource {
+            router: router.clone(),
+        };
+        subs.push(Subscription::run_with(
+            source,
+            crate::app::connection_subscription::connection_state_stream,
+        ));
+    }
+
     // Router-era positions subscription (BR-14).
     if let Some(ref order_client) = state.router_order_client {
         let source = crate::account_panel::PositionEventsSource {
