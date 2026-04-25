@@ -141,6 +141,8 @@ cargo run -p midas-app --features dev_harness   # run with devloop TCP harness o
 cargo build --workspace --release
 ```
 
+Both workspaces pin the Rust toolchain via `rust-toolchain.toml` — root at the repo root (host target), desktop at `desktop/win/rust-toolchain.toml` (x86_64-pc-windows-msvc). `rustup` respects these automatically; no explicit `+stable` flag needed.
+
 ## Documentation Map
 
 | Topic | Where to look |
