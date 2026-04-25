@@ -12,7 +12,6 @@ use midas_chart::camera::Camera2D;
 use midas_chart::compute::compute_chart_scene;
 use midas_chart::dirty::DirtyFlags;
 use midas_chart::input::ChartInput;
-use midas_chart::instances::CandleInstance;
 use midas_chart::level_tool::LevelTool;
 use midas_chart::scene::ChartScene;
 use midas_chart::widget::Annotation;
@@ -20,6 +19,7 @@ use midas_data::binary::{write_midas_file, MmapCandleFile, MIDAS_MAGIC, MIDAS_VE
 use midas_data::candle::CandleBuffer;
 use midas_data::lod::downsample_minmax;
 use midas_feed::import_csv;
+use midas_gpu_types::CandleInstance;
 
 // ─── Default LevelTool for tests ────────────────────────────────────────
 

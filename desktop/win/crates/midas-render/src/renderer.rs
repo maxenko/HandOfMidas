@@ -6,9 +6,8 @@
 
 use midas_chart::compute::{LayerEnd, ANNOTATION_LAYER_COUNT};
 use midas_chart::widget::compute::WidgetLabel;
-use midas_chart::{
-    BadgeInstance, CandleInstance, DirtyFlags, DirtyTracker, GridLineInstance, VolumeInstance,
-};
+use midas_chart::{DirtyFlags, DirtyTracker};
+use midas_gpu_types::{BadgeInstance, CandleInstance, GridLineInstance, VolumeInstance};
 
 use crate::pipelines::{
     badge::BadgePipeline, candle::CandlePipeline, grid::GridPipeline, text::TextPipeline,

@@ -103,7 +103,7 @@ fn validate_valid_bracket() {
 
 #[test]
 fn create_bracket_long_with_tp_sl() {
-    use midas_chart::widget::order_bracket::*;
+    use midas_annotation_types::order_bracket::*;
 
     let bracket =
         create_bracket_annotation(BracketSide::Long, 185.0, Some(192.0), Some(182.0), 100.0);
@@ -119,7 +119,7 @@ fn create_bracket_long_with_tp_sl() {
 
 #[test]
 fn create_bracket_short_no_tp() {
-    use midas_chart::widget::order_bracket::*;
+    use midas_annotation_types::order_bracket::*;
 
     let bracket = create_bracket_annotation(BracketSide::Short, 185.0, None, Some(188.0), 50.0);
     assert_eq!(bracket.side, BracketSide::Short);
@@ -131,7 +131,7 @@ fn create_bracket_short_no_tp() {
 
 #[test]
 fn create_bracket_no_legs() {
-    use midas_chart::widget::order_bracket::*;
+    use midas_annotation_types::order_bracket::*;
 
     let bracket = create_bracket_annotation(BracketSide::Long, 185.0, None, None, 200.0);
     assert!(bracket.take_profit.is_none());
@@ -143,7 +143,7 @@ fn create_bracket_no_legs() {
 
 #[test]
 fn lifecycle_submitted_maps_to_pending() {
-    use midas_chart::widget::order_bracket::BracketStatus;
+    use midas_annotation_types::order_bracket::BracketStatus;
     assert_eq!(
         map_lifecycle_to_chart_status("Submitted"),
         BracketStatus::Pending
@@ -152,7 +152,7 @@ fn lifecycle_submitted_maps_to_pending() {
 
 #[test]
 fn lifecycle_entry_filled_maps_to_active() {
-    use midas_chart::widget::order_bracket::BracketStatus;
+    use midas_annotation_types::order_bracket::BracketStatus;
     assert_eq!(
         map_lifecycle_to_chart_status("EntryFilled"),
         BracketStatus::Active
@@ -161,7 +161,7 @@ fn lifecycle_entry_filled_maps_to_active() {
 
 #[test]
 fn lifecycle_take_profit_hit_maps_to_closed() {
-    use midas_chart::widget::order_bracket::BracketStatus;
+    use midas_annotation_types::order_bracket::BracketStatus;
     assert_eq!(
         map_lifecycle_to_chart_status("TakeProfitHit"),
         BracketStatus::Closed
@@ -170,7 +170,7 @@ fn lifecycle_take_profit_hit_maps_to_closed() {
 
 #[test]
 fn lifecycle_stop_loss_hit_maps_to_closed() {
-    use midas_chart::widget::order_bracket::BracketStatus;
+    use midas_annotation_types::order_bracket::BracketStatus;
     assert_eq!(
         map_lifecycle_to_chart_status("StopLossHit"),
         BracketStatus::Closed
@@ -179,7 +179,7 @@ fn lifecycle_stop_loss_hit_maps_to_closed() {
 
 #[test]
 fn lifecycle_cancelled_maps_to_cancelled() {
-    use midas_chart::widget::order_bracket::BracketStatus;
+    use midas_annotation_types::order_bracket::BracketStatus;
     assert_eq!(
         map_lifecycle_to_chart_status("Cancelled"),
         BracketStatus::Cancelled
@@ -188,7 +188,7 @@ fn lifecycle_cancelled_maps_to_cancelled() {
 
 #[test]
 fn lifecycle_rejected_maps_to_cancelled() {
-    use midas_chart::widget::order_bracket::BracketStatus;
+    use midas_annotation_types::order_bracket::BracketStatus;
     assert_eq!(
         map_lifecycle_to_chart_status("Rejected"),
         BracketStatus::Cancelled
@@ -197,7 +197,7 @@ fn lifecycle_rejected_maps_to_cancelled() {
 
 #[test]
 fn lifecycle_unknown_defaults_to_pending() {
-    use midas_chart::widget::order_bracket::BracketStatus;
+    use midas_annotation_types::order_bracket::BracketStatus;
     assert_eq!(
         map_lifecycle_to_chart_status("SomethingNew"),
         BracketStatus::Pending
@@ -278,15 +278,15 @@ fn validate_non_numeric_sl_value() {
 
 #[test]
 fn validate_bracket_valid_long_with_sl() {
-    use midas_chart::widget::level::LineStyle;
-    use midas_chart::widget::order_bracket::*;
+    use midas_annotation_types::order_bracket::*;
+    use midas_annotation_types::LineStyle;
 
     let bracket = OrderBracket {
         entry: BracketLeg {
-            line: midas_chart::widget::PriceLine {
+            line: midas_annotation_types::PriceLine {
                 price: 185.0,
-                extent: midas_chart::widget::LineExtent::FullWidth,
-                stroke: midas_chart::widget::LineStroke {
+                extent: midas_annotation_types::LineExtent::FullWidth,
+                stroke: midas_annotation_types::LineStroke {
                     color: [0.0, 0.0, 0.0, 1.0],
                     width: 1.5,
                     style: LineStyle::Solid,
@@ -298,10 +298,10 @@ fn validate_bracket_valid_long_with_sl() {
         },
         take_profit: None,
         stop_loss: Some(BracketLeg {
-            line: midas_chart::widget::PriceLine {
+            line: midas_annotation_types::PriceLine {
                 price: 180.0,
-                extent: midas_chart::widget::LineExtent::FullWidth,
-                stroke: midas_chart::widget::LineStroke {
+                extent: midas_annotation_types::LineExtent::FullWidth,
+                stroke: midas_annotation_types::LineStroke {
                     color: [0.0, 0.0, 0.0, 1.0],
                     width: 1.5,
                     style: LineStyle::Solid,
@@ -326,15 +326,15 @@ fn validate_bracket_valid_long_with_sl() {
 
 #[test]
 fn validate_bracket_zero_entry_price() {
-    use midas_chart::widget::level::LineStyle;
-    use midas_chart::widget::order_bracket::*;
+    use midas_annotation_types::order_bracket::*;
+    use midas_annotation_types::LineStyle;
 
     let bracket = OrderBracket {
         entry: BracketLeg {
-            line: midas_chart::widget::PriceLine {
+            line: midas_annotation_types::PriceLine {
                 price: 0.0,
-                extent: midas_chart::widget::LineExtent::FullWidth,
-                stroke: midas_chart::widget::LineStroke {
+                extent: midas_annotation_types::LineExtent::FullWidth,
+                stroke: midas_annotation_types::LineStroke {
                     color: [0.0, 0.0, 0.0, 1.0],
                     width: 1.5,
                     style: LineStyle::Solid,
@@ -364,15 +364,15 @@ fn validate_bracket_zero_entry_price() {
 
 #[test]
 fn validate_bracket_zero_quantity() {
-    use midas_chart::widget::level::LineStyle;
-    use midas_chart::widget::order_bracket::*;
+    use midas_annotation_types::order_bracket::*;
+    use midas_annotation_types::LineStyle;
 
     let bracket = OrderBracket {
         entry: BracketLeg {
-            line: midas_chart::widget::PriceLine {
+            line: midas_annotation_types::PriceLine {
                 price: 185.0,
-                extent: midas_chart::widget::LineExtent::FullWidth,
-                stroke: midas_chart::widget::LineStroke {
+                extent: midas_annotation_types::LineExtent::FullWidth,
+                stroke: midas_annotation_types::LineStroke {
                     color: [0.0, 0.0, 0.0, 1.0],
                     width: 1.5,
                     style: LineStyle::Solid,
@@ -410,15 +410,15 @@ fn validate_bracket_zero_quantity() {
 
 fn normalize_test_leg(
     price: f64,
-    role: midas_chart::widget::order_bracket::LegRole,
-) -> midas_chart::widget::order_bracket::BracketLeg {
-    use midas_chart::widget::level::LineStyle;
-    use midas_chart::widget::order_bracket::*;
+    role: midas_annotation_types::order_bracket::LegRole,
+) -> midas_annotation_types::order_bracket::BracketLeg {
+    use midas_annotation_types::order_bracket::*;
+    use midas_annotation_types::LineStyle;
     BracketLeg {
-        line: midas_chart::widget::PriceLine {
+        line: midas_annotation_types::PriceLine {
             price,
-            extent: midas_chart::widget::LineExtent::FullWidth,
-            stroke: midas_chart::widget::LineStroke {
+            extent: midas_annotation_types::LineExtent::FullWidth,
+            stroke: midas_annotation_types::LineStroke {
                 color: [0.0, 0.0, 0.0, 1.0],
                 width: 1.5,
                 style: LineStyle::Solid,
@@ -434,8 +434,8 @@ fn normalize_test_long_bracket(
     entry_price: f64,
     tp_price: Option<f64>,
     sl_price: Option<f64>,
-) -> midas_chart::widget::order_bracket::OrderBracket {
-    use midas_chart::widget::order_bracket::*;
+) -> midas_annotation_types::order_bracket::OrderBracket {
+    use midas_annotation_types::order_bracket::*;
     OrderBracket {
         entry: normalize_test_leg(entry_price, LegRole::Entry),
         take_profit: tp_price.map(|p| normalize_test_leg(p, LegRole::TakeProfit)),
@@ -525,15 +525,15 @@ fn normalize_bracket_preserves_correct_side_legs() {
 
 #[test]
 fn validate_bracket_long_sl_above_entry() {
-    use midas_chart::widget::level::LineStyle;
-    use midas_chart::widget::order_bracket::*;
+    use midas_annotation_types::order_bracket::*;
+    use midas_annotation_types::LineStyle;
 
     let bracket = OrderBracket {
         entry: BracketLeg {
-            line: midas_chart::widget::PriceLine {
+            line: midas_annotation_types::PriceLine {
                 price: 185.0,
-                extent: midas_chart::widget::LineExtent::FullWidth,
-                stroke: midas_chart::widget::LineStroke {
+                extent: midas_annotation_types::LineExtent::FullWidth,
+                stroke: midas_annotation_types::LineStroke {
                     color: [0.0, 0.0, 0.0, 1.0],
                     width: 1.5,
                     style: LineStyle::Solid,
@@ -545,10 +545,10 @@ fn validate_bracket_long_sl_above_entry() {
         },
         take_profit: None,
         stop_loss: Some(BracketLeg {
-            line: midas_chart::widget::PriceLine {
+            line: midas_annotation_types::PriceLine {
                 price: 190.0,
-                extent: midas_chart::widget::LineExtent::FullWidth,
-                stroke: midas_chart::widget::LineStroke {
+                extent: midas_annotation_types::LineExtent::FullWidth,
+                stroke: midas_annotation_types::LineStroke {
                     color: [0.0, 0.0, 0.0, 1.0],
                     width: 1.5,
                     style: LineStyle::Solid,
@@ -578,15 +578,15 @@ fn validate_bracket_long_sl_above_entry() {
 
 #[test]
 fn validate_bracket_short_sl_below_entry() {
-    use midas_chart::widget::level::LineStyle;
-    use midas_chart::widget::order_bracket::*;
+    use midas_annotation_types::order_bracket::*;
+    use midas_annotation_types::LineStyle;
 
     let bracket = OrderBracket {
         entry: BracketLeg {
-            line: midas_chart::widget::PriceLine {
+            line: midas_annotation_types::PriceLine {
                 price: 185.0,
-                extent: midas_chart::widget::LineExtent::FullWidth,
-                stroke: midas_chart::widget::LineStroke {
+                extent: midas_annotation_types::LineExtent::FullWidth,
+                stroke: midas_annotation_types::LineStroke {
                     color: [0.0, 0.0, 0.0, 1.0],
                     width: 1.5,
                     style: LineStyle::Solid,
@@ -598,10 +598,10 @@ fn validate_bracket_short_sl_below_entry() {
         },
         take_profit: None,
         stop_loss: Some(BracketLeg {
-            line: midas_chart::widget::PriceLine {
+            line: midas_annotation_types::PriceLine {
                 price: 180.0,
-                extent: midas_chart::widget::LineExtent::FullWidth,
-                stroke: midas_chart::widget::LineStroke {
+                extent: midas_annotation_types::LineExtent::FullWidth,
+                stroke: midas_annotation_types::LineStroke {
                     color: [0.0, 0.0, 0.0, 1.0],
                     width: 1.5,
                     style: LineStyle::Solid,
@@ -633,15 +633,15 @@ fn validate_bracket_short_sl_below_entry() {
 
 #[test]
 fn validate_bracket_stop_limit_missing_stop_price() {
-    use midas_chart::widget::level::LineStyle;
-    use midas_chart::widget::order_bracket::*;
+    use midas_annotation_types::order_bracket::*;
+    use midas_annotation_types::LineStyle;
 
     let bracket = OrderBracket {
         entry: BracketLeg {
-            line: midas_chart::widget::PriceLine {
+            line: midas_annotation_types::PriceLine {
                 price: 184.50,
-                extent: midas_chart::widget::LineExtent::FullWidth,
-                stroke: midas_chart::widget::LineStroke {
+                extent: midas_annotation_types::LineExtent::FullWidth,
+                stroke: midas_annotation_types::LineStroke {
                     color: [0.0, 0.0, 0.0, 1.0],
                     width: 1.5,
                     style: LineStyle::Solid,
@@ -673,15 +673,15 @@ fn validate_bracket_stop_limit_missing_stop_price() {
 
 #[test]
 fn validate_bracket_stop_limit_buy_limit_above_stop() {
-    use midas_chart::widget::level::LineStyle;
-    use midas_chart::widget::order_bracket::*;
+    use midas_annotation_types::order_bracket::*;
+    use midas_annotation_types::LineStyle;
 
     let bracket = OrderBracket {
         entry: BracketLeg {
-            line: midas_chart::widget::PriceLine {
+            line: midas_annotation_types::PriceLine {
                 price: 186.00,
-                extent: midas_chart::widget::LineExtent::FullWidth,
-                stroke: midas_chart::widget::LineStroke {
+                extent: midas_annotation_types::LineExtent::FullWidth,
+                stroke: midas_annotation_types::LineStroke {
                     color: [0.0, 0.0, 0.0, 1.0],
                     width: 1.5,
                     style: LineStyle::Solid,
@@ -713,15 +713,15 @@ fn validate_bracket_stop_limit_buy_limit_above_stop() {
 
 #[test]
 fn validate_bracket_stop_limit_valid_buy() {
-    use midas_chart::widget::level::LineStyle;
-    use midas_chart::widget::order_bracket::*;
+    use midas_annotation_types::order_bracket::*;
+    use midas_annotation_types::LineStyle;
 
     let bracket = OrderBracket {
         entry: BracketLeg {
-            line: midas_chart::widget::PriceLine {
+            line: midas_annotation_types::PriceLine {
                 price: 184.50,
-                extent: midas_chart::widget::LineExtent::FullWidth,
-                stroke: midas_chart::widget::LineStroke {
+                extent: midas_annotation_types::LineExtent::FullWidth,
+                stroke: midas_annotation_types::LineStroke {
                     color: [0.0, 0.0, 0.0, 1.0],
                     width: 1.5,
                     style: LineStyle::Solid,
@@ -951,15 +951,15 @@ fn default_bracket_prices_pixel_minimum_overrides_pct() {
 
 #[test]
 fn sync_panel_from_bracket_populates_tp_sl() {
-    use midas_chart::widget::level::LineStyle;
-    use midas_chart::widget::order_bracket::*;
+    use midas_annotation_types::order_bracket::*;
+    use midas_annotation_types::LineStyle;
 
     let bracket = OrderBracket {
         entry: BracketLeg {
-            line: midas_chart::widget::PriceLine {
+            line: midas_annotation_types::PriceLine {
                 price: 100.0,
-                extent: midas_chart::widget::LineExtent::FullWidth,
-                stroke: midas_chart::widget::LineStroke {
+                extent: midas_annotation_types::LineExtent::FullWidth,
+                stroke: midas_annotation_types::LineStroke {
                     color: [0.0, 0.0, 0.0, 1.0],
                     width: 1.0,
                     style: LineStyle::Solid,
@@ -970,10 +970,10 @@ fn sync_panel_from_bracket_populates_tp_sl() {
             projected_pnl_pct: None,
         },
         take_profit: Some(BracketLeg {
-            line: midas_chart::widget::PriceLine {
+            line: midas_annotation_types::PriceLine {
                 price: 101.0,
-                extent: midas_chart::widget::LineExtent::FullWidth,
-                stroke: midas_chart::widget::LineStroke {
+                extent: midas_annotation_types::LineExtent::FullWidth,
+                stroke: midas_annotation_types::LineStroke {
                     color: [0.0, 0.0, 0.0, 1.0],
                     width: 1.0,
                     style: LineStyle::Solid,
@@ -984,10 +984,10 @@ fn sync_panel_from_bracket_populates_tp_sl() {
             projected_pnl_pct: None,
         }),
         stop_loss: Some(BracketLeg {
-            line: midas_chart::widget::PriceLine {
+            line: midas_annotation_types::PriceLine {
                 price: 99.5,
-                extent: midas_chart::widget::LineExtent::FullWidth,
-                stroke: midas_chart::widget::LineStroke {
+                extent: midas_annotation_types::LineExtent::FullWidth,
+                stroke: midas_annotation_types::LineStroke {
                     color: [0.0, 0.0, 0.0, 1.0],
                     width: 1.0,
                     style: LineStyle::Solid,
@@ -1015,15 +1015,15 @@ fn sync_panel_from_bracket_populates_tp_sl() {
 
 #[test]
 fn sync_panel_from_bracket_clears_missing_legs() {
-    use midas_chart::widget::level::LineStyle;
-    use midas_chart::widget::order_bracket::*;
+    use midas_annotation_types::order_bracket::*;
+    use midas_annotation_types::LineStyle;
 
     let bracket = OrderBracket {
         entry: BracketLeg {
-            line: midas_chart::widget::PriceLine {
+            line: midas_annotation_types::PriceLine {
                 price: 100.0,
-                extent: midas_chart::widget::LineExtent::FullWidth,
-                stroke: midas_chart::widget::LineStroke {
+                extent: midas_annotation_types::LineExtent::FullWidth,
+                stroke: midas_annotation_types::LineStroke {
                     color: [0.0, 0.0, 0.0, 1.0],
                     width: 1.0,
                     style: LineStyle::Solid,
@@ -1057,15 +1057,15 @@ fn sync_panel_from_bracket_clears_missing_legs() {
 
 #[test]
 fn sync_panel_from_bracket_limit_entry() {
-    use midas_chart::widget::level::LineStyle;
-    use midas_chart::widget::order_bracket::*;
+    use midas_annotation_types::order_bracket::*;
+    use midas_annotation_types::LineStyle;
 
     let bracket = OrderBracket {
         entry: BracketLeg {
-            line: midas_chart::widget::PriceLine {
+            line: midas_annotation_types::PriceLine {
                 price: 180.50,
-                extent: midas_chart::widget::LineExtent::FullWidth,
-                stroke: midas_chart::widget::LineStroke {
+                extent: midas_annotation_types::LineExtent::FullWidth,
+                stroke: midas_annotation_types::LineStroke {
                     color: [0.0, 0.0, 0.0, 1.0],
                     width: 1.0,
                     style: LineStyle::Solid,
@@ -1117,15 +1117,15 @@ fn should_reposition_fallback_to_5_pct() {
 
 #[test]
 fn reposition_bracket_shifts_all_legs() {
-    use midas_chart::widget::level::LineStyle;
-    use midas_chart::widget::order_bracket::*;
+    use midas_annotation_types::order_bracket::*;
+    use midas_annotation_types::LineStyle;
 
     let mut bracket = OrderBracket {
         entry: BracketLeg {
-            line: midas_chart::widget::PriceLine {
+            line: midas_annotation_types::PriceLine {
                 price: 100.0,
-                extent: midas_chart::widget::LineExtent::FullWidth,
-                stroke: midas_chart::widget::LineStroke {
+                extent: midas_annotation_types::LineExtent::FullWidth,
+                stroke: midas_annotation_types::LineStroke {
                     color: [0.0, 0.0, 0.0, 1.0],
                     width: 1.0,
                     style: LineStyle::Solid,
@@ -1136,10 +1136,10 @@ fn reposition_bracket_shifts_all_legs() {
             projected_pnl_pct: None,
         },
         take_profit: Some(BracketLeg {
-            line: midas_chart::widget::PriceLine {
+            line: midas_annotation_types::PriceLine {
                 price: 102.0,
-                extent: midas_chart::widget::LineExtent::FullWidth,
-                stroke: midas_chart::widget::LineStroke {
+                extent: midas_annotation_types::LineExtent::FullWidth,
+                stroke: midas_annotation_types::LineStroke {
                     color: [0.0, 0.0, 0.0, 1.0],
                     width: 1.0,
                     style: LineStyle::Solid,
@@ -1150,10 +1150,10 @@ fn reposition_bracket_shifts_all_legs() {
             projected_pnl_pct: None,
         }),
         stop_loss: Some(BracketLeg {
-            line: midas_chart::widget::PriceLine {
+            line: midas_annotation_types::PriceLine {
                 price: 99.0,
-                extent: midas_chart::widget::LineExtent::FullWidth,
-                stroke: midas_chart::widget::LineStroke {
+                extent: midas_annotation_types::LineExtent::FullWidth,
+                stroke: midas_annotation_types::LineStroke {
                     color: [0.0, 0.0, 0.0, 1.0],
                     width: 1.0,
                     style: LineStyle::Solid,
@@ -1187,7 +1187,7 @@ mod hydration {
     use super::*;
     use crate::annotation_store::SymbolKey;
     use crate::ticker_state::{EntryMemory, GatrAnchor, TickerOrderIntentV1, TickerState};
-    use midas_chart::widget::order_bracket::EntryType;
+    use midas_annotation_types::order_bracket::EntryType;
     use std::collections::HashMap;
 
     /// Build a TickerState with `(Buy, Stop)` populated with custom prices

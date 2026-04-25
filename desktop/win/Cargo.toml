@@ -12,6 +12,8 @@ members = [
     "crates/midas-core",
     "crates/midas-data",
     "crates/midas-indicators",
+    "crates/midas-annotation-types",
+    "crates/midas-gpu-types",
     "crates/midas-chart",
     "crates/midas-render",
     "crates/midas-feed",
@@ -25,11 +27,12 @@ default-members = ["crates/midas-app"]
 exclude = ["duckdb-spike"]
 
 [dependencies]
-midas-core  = { path = "crates/midas-core" }
-midas-data  = { path = "crates/midas-data" }
-midas-chart = { path = "crates/midas-chart" }
-midas-feed  = { path = "crates/midas-feed" }
-glam        = { workspace = true }
+midas-core      = { path = "crates/midas-core" }
+midas-data      = { path = "crates/midas-data" }
+midas-chart     = { path = "crates/midas-chart" }
+midas-feed      = { path = "crates/midas-feed" }
+midas-gpu-types = { workspace = true }
+glam            = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
@@ -74,6 +77,19 @@ chart_parity_tests = ["midas-app/dev_harness"]
 # ─── Workspace-wide dependency versions ───────────────────────────────
 # Crates reference these via: dep = { workspace = true }
 [workspace.dependencies]
+
+# Persistent annotation types (extracted from midas-chart in slice A1
+# so the chart crate can be retired without dragging the wire-format
+# types with it). Pure-data leaf — no GPU / framework deps.
+midas-annotation-types = { path = "crates/midas-annotation-types", version = "0.1.0" }
+
+# GPU-buffer-shaped instance types + render-adjacent metadata
+# (CandleInstance, VolumeInstance, GridLineInstance, BadgeInstance,
+# AxisLabel, CrosshairRender, TimelineLabel) extracted from midas-chart
+# in slice A2 for the same retire-the-chart-crate reason. Strict leaf —
+# only `bytemuck`. WGSL shaders read these by byte offset, so field
+# order is wire format.
+midas-gpu-types = { path = "crates/midas-gpu-types", version = "0.1.0" }
 
 # GPU rendering
 wgpu = "27"

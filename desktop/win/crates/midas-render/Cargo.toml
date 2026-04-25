@@ -5,9 +5,10 @@ edition = "2021"
 publish = false
 
 [dependencies]
-midas-core  = { path = "../midas-core" }
-midas-data  = { path = "../midas-data" }
-midas-chart = { path = "../midas-chart" }
+midas-core      = { path = "../midas-core" }
+midas-data      = { path = "../midas-data" }
+midas-chart     = { path = "../midas-chart" }
+midas-gpu-types = { workspace = true }
 
 wgpu      = { workspace = true }
 bytemuck  = { workspace = true }

@@ -2807,6 +2807,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "midas-annotation-types"
+version = "0.1.0"
+dependencies = [
+ "midas-core",
+ "serde",
+ "serde_json",
+ "smallvec",
+ "tracing",
+]
+
+[[package]]
 name = "midas-app"
 version = "0.1.0"
 dependencies = [
@@ -2823,6 +2834,7 @@ dependencies = [
  "image-compare",
  "libc",
  "mailbox_processor",
+ "midas-annotation-types",
  "midas-axis",
  "midas-bars",
  "midas-bars-adapter",
@@ -2835,6 +2847,7 @@ dependencies = [
  "midas-data",
  "midas-devloop-proto",
  "midas-feed",
+ "midas-gpu-types",
  "midas-grid",
  "midas-market-data",
  "midas-render",
@@ -2955,8 +2968,10 @@ dependencies = [
  "chrono",
  "criterion",
  "glam 0.29.3",
+ "midas-annotation-types",
  "midas-core",
  "midas-data",
+ "midas-gpu-types",
  "midas-indicators",
  "serde",
  "serde_json",
@@ -3035,6 +3050,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "midas-gpu-types"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+]
+
+[[package]]
 name = "midas-grid"
 version = "0.1.0"
 dependencies = [
@@ -3076,6 +3098,7 @@ dependencies = [
  "midas-chart",
  "midas-core",
  "midas-data",
+ "midas-gpu-types",
  "png 0.17.16",
  "pollster",
  "thiserror 2.0.18",
@@ -3155,6 +3178,7 @@ dependencies = [
  "midas-data",
  "midas-devloop-proto",
  "midas-feed",
+ "midas-gpu-types",
  "midas-scene",
  "midas-stream",
  "parking_lot",

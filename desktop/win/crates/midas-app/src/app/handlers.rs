@@ -523,19 +523,20 @@ impl MidasApp {
                     self.annotation_store.add_level(
                         &ticker,
                         crate::annotation_store::StoredLevel {
-                            level: midas_chart::levels::HorizontalLevel {
+                            level: midas_annotation_types::HorizontalLevel {
                                 id: level_id,
-                                line: midas_chart::widget::price_line::PriceLine {
+                                line: midas_annotation_types::price_line::PriceLine {
                                     price,
-                                    extent: midas_chart::widget::price_line::LineExtent::default(),
-                                    stroke: midas_chart::widget::price_line::LineStroke {
+                                    extent: midas_annotation_types::price_line::LineExtent::default(
+                                    ),
+                                    stroke: midas_annotation_types::price_line::LineStroke {
                                         color: [0.85, 0.85, 0.85, 0.8],
                                         width: 1.0,
-                                        style: midas_chart::widget::LineStyle::default(),
+                                        style: midas_annotation_types::LineStyle::default(),
                                     },
                                 },
                                 label: None,
-                                icon: midas_chart::LevelIcon::None,
+                                icon: midas_annotation_types::LevelIcon::None,
                             },
                             locked: false,
                         },
@@ -1084,7 +1085,7 @@ impl MidasApp {
                             .map(|b| {
                                 matches!(
                                     b.status,
-                                    midas_chart::widget::order_bracket::BracketStatus::Draft
+                                    midas_annotation_types::order_bracket::BracketStatus::Draft
                                 )
                             })
                             .unwrap_or(false);
@@ -1314,8 +1315,10 @@ impl MidasApp {
                     };
 
                     let action = match state.side {
-                        OrderSide::Buy => midas_chart::widget::order_bracket::BracketSide::Long,
-                        OrderSide::Sell => midas_chart::widget::order_bracket::BracketSide::Short,
+                        OrderSide::Buy => midas_annotation_types::order_bracket::BracketSide::Long,
+                        OrderSide::Sell => {
+                            midas_annotation_types::order_bracket::BracketSide::Short
+                        }
                     };
                     let quantity: f64 = state.quantity.parse().unwrap_or(100.0);
                     let symbol = state.symbol.clone();
@@ -1678,10 +1681,10 @@ impl MidasApp {
                 if let Some((_ann_id, symbol, field, price)) = annotation_sync {
                     let sym_key = crate::annotation_store::SymbolKey::new(&symbol);
                     let role = match field {
-                        "tp" => Some(midas_chart::widget::order_bracket::LegRole::TakeProfit),
-                        "sl" => Some(midas_chart::widget::order_bracket::LegRole::StopLoss),
-                        "limit" => Some(midas_chart::widget::order_bracket::LegRole::Entry),
-                        "stop" => Some(midas_chart::widget::order_bracket::LegRole::StopTrigger),
+                        "tp" => Some(midas_annotation_types::order_bracket::LegRole::TakeProfit),
+                        "sl" => Some(midas_annotation_types::order_bracket::LegRole::StopLoss),
+                        "limit" => Some(midas_annotation_types::order_bracket::LegRole::Entry),
+                        "stop" => Some(midas_annotation_types::order_bracket::LegRole::StopTrigger),
                         _ => None,
                     };
                     if let Some(role) = role {
@@ -2581,7 +2584,7 @@ impl MidasApp {
                         .get(&key)
                         .and_then(|ts| ts.live_bracket())
                         .map(|b| {
-                            b.entry_type == midas_chart::widget::order_bracket::EntryType::Market
+                            b.entry_type == midas_annotation_types::order_bracket::EntryType::Market
                                 && (new_price - b.entry.line.price).abs() >= 0.01
                         })
                         .unwrap_or(false);
@@ -2589,7 +2592,7 @@ impl MidasApp {
                         let _ = self.update(Message::Ticker(
                             key.clone(),
                             crate::ticker_state::TickerMsg::SetLegPrice {
-                                role: midas_chart::widget::order_bracket::LegRole::Entry,
+                                role: midas_annotation_types::order_bracket::LegRole::Entry,
                                 price: new_price,
                             },
                         ));
@@ -2639,7 +2642,7 @@ impl MidasApp {
                 if no_bracket && mode_active {
                     let targets: Vec<(
                         crate::order_panel::OrderSide,
-                        midas_chart::widget::order_bracket::EntryType,
+                        midas_annotation_types::order_bracket::EntryType,
                     )> = self
                         .order_panels
                         .values()
@@ -3176,18 +3179,18 @@ impl MidasApp {
         entry: f64,
         tp: f64,
         sl: f64,
-        side: midas_chart::widget::order_bracket::BracketSide,
+        side: midas_annotation_types::order_bracket::BracketSide,
     ) -> Task<Message> {
         let ticker = self.chart_ticker(chart_id).map(str::to_owned);
         if let Some(ticker) = ticker {
-            use midas_chart::widget::level::LineStyle;
-            use midas_chart::widget::order_bracket::*;
+            use midas_annotation_types::order_bracket::*;
+            use midas_annotation_types::LineStyle;
 
             let make_leg = |price: f64| BracketLeg {
-                line: midas_chart::widget::PriceLine {
+                line: midas_annotation_types::PriceLine {
                     price,
-                    extent: midas_chart::widget::LineExtent::FullWidth,
-                    stroke: midas_chart::widget::LineStroke {
+                    extent: midas_annotation_types::LineExtent::FullWidth,
+                    stroke: midas_annotation_types::LineStroke {
                         color: [0.0, 0.0, 0.0, 1.0],
                         width: 1.5,
                         style: LineStyle::Solid,
@@ -3206,13 +3209,13 @@ impl MidasApp {
                 quantity: None,
                 saved: false,
                 filled_qty: None,
-                entry_type: midas_chart::widget::order_bracket::EntryType::Market,
+                entry_type: midas_annotation_types::order_bracket::EntryType::Market,
                 entry_stop_price: None,
                 wrong_side_warning: false,
             };
             let annotation_id = self.annotation_store.add(
                 &ticker,
-                midas_chart::widget::AnnotationKind::OrderBracket(Box::new(bracket)),
+                midas_annotation_types::AnnotationKind::OrderBracket(Box::new(bracket)),
             );
             self.mark_levels_dirty_for_ticker(&ticker);
             tracing::info!(
@@ -3229,7 +3232,7 @@ impl MidasApp {
         &mut self,
         chart_id: ChartId,
         annotation_id: AnnotationId,
-        leg: midas_chart::widget::order_bracket::LegRole,
+        leg: midas_annotation_types::order_bracket::LegRole,
         new_price: f64,
     ) -> Task<Message> {
         let ticker = self.chart_ticker(chart_id).map(str::to_owned);
@@ -3250,10 +3253,10 @@ impl MidasApp {
                 .values()
                 .find(|link| link.annotation_id == annotation_id.0)
                 .and_then(|link| match leg {
-                    midas_chart::widget::order_bracket::LegRole::TakeProfit => {
+                    midas_annotation_types::order_bracket::LegRole::TakeProfit => {
                         link.tp_ib_id.map(|id| (id, false))
                     }
-                    midas_chart::widget::order_bracket::LegRole::StopLoss => {
+                    midas_annotation_types::order_bracket::LegRole::StopLoss => {
                         link.sl_ib_id.map(|id| (id, true))
                     }
                     _ => None,
@@ -3286,7 +3289,7 @@ impl MidasApp {
         &mut self,
         chart_id: ChartId,
         annotation_id: AnnotationId,
-        leg: midas_chart::widget::order_bracket::LegRole,
+        leg: midas_annotation_types::order_bracket::LegRole,
         x: f32,
         y: f32,
     ) -> Task<Message> {
@@ -3313,7 +3316,9 @@ impl MidasApp {
             .iter()
             .find(|a| a.id == ann_id)
             .and_then(|a| match &a.kind {
-                midas_chart::widget::AnnotationKind::OrderBracket(b) => Some(b.stop_loss.is_some()),
+                midas_annotation_types::AnnotationKind::OrderBracket(b) => {
+                    Some(b.stop_loss.is_some())
+                }
                 _ => None,
             })
             .unwrap_or(false);
@@ -3403,7 +3408,7 @@ impl MidasApp {
             .iter()
             .find(|a| a.id == ann_id)
             .and_then(|a| match &a.kind {
-                midas_chart::widget::AnnotationKind::OrderBracket(b) => Some(b.as_ref().clone()),
+                midas_annotation_types::AnnotationKind::OrderBracket(b) => Some(b.as_ref().clone()),
                 _ => None,
             });
 
@@ -3433,32 +3438,36 @@ impl MidasApp {
         }
 
         let entry_kind = match bracket.entry_type {
-            midas_chart::widget::order_bracket::EntryType::Market => {
+            midas_annotation_types::order_bracket::EntryType::Market => {
                 midas_broker::OrderKind::Market
             }
-            midas_chart::widget::order_bracket::EntryType::Limit => midas_broker::OrderKind::Limit,
-            midas_chart::widget::order_bracket::EntryType::Stop => midas_broker::OrderKind::Stop,
-            midas_chart::widget::order_bracket::EntryType::StopLimit => {
+            midas_annotation_types::order_bracket::EntryType::Limit => {
+                midas_broker::OrderKind::Limit
+            }
+            midas_annotation_types::order_bracket::EntryType::Stop => midas_broker::OrderKind::Stop,
+            midas_annotation_types::order_bracket::EntryType::StopLimit => {
                 midas_broker::OrderKind::StopLimit
             }
         };
 
         let (entry_price, entry_stop_price) = match bracket.entry_type {
-            midas_chart::widget::order_bracket::EntryType::Market => (None, None),
-            midas_chart::widget::order_bracket::EntryType::Limit => {
+            midas_annotation_types::order_bracket::EntryType::Market => (None, None),
+            midas_annotation_types::order_bracket::EntryType::Limit => {
                 (Some(bracket.entry.line.price), None)
             }
-            midas_chart::widget::order_bracket::EntryType::Stop => {
+            midas_annotation_types::order_bracket::EntryType::Stop => {
                 (None, Some(bracket.entry.line.price))
             }
-            midas_chart::widget::order_bracket::EntryType::StopLimit => {
+            midas_annotation_types::order_bracket::EntryType::StopLimit => {
                 (Some(bracket.entry.line.price), bracket.entry_stop_price)
             }
         };
 
         let action = match bracket.side {
-            midas_chart::widget::order_bracket::BracketSide::Long => midas_broker::OrderAction::Buy,
-            midas_chart::widget::order_bracket::BracketSide::Short => {
+            midas_annotation_types::order_bracket::BracketSide::Long => {
+                midas_broker::OrderAction::Buy
+            }
+            midas_annotation_types::order_bracket::BracketSide::Short => {
                 midas_broker::OrderAction::Sell
             }
         };
@@ -3727,8 +3736,8 @@ impl MidasApp {
                     } => {
                         // Reconcile: find the existing annotation created locally
                         // by matching symbol + side + quantity using cached fields.
+                        use midas_annotation_types::order_bracket::BracketSide;
                         use midas_broker::OrderAction;
-                        use midas_chart::widget::order_bracket::BracketSide;
                         let side = match action {
                             OrderAction::Buy => BracketSide::Long,
                             OrderAction::Sell => BracketSide::Short,
@@ -3780,7 +3789,7 @@ impl MidasApp {
                         status,
                         entry_fill_price,
                     } => {
-                        use midas_chart::widget::order_bracket::BracketStatus;
+                        use midas_annotation_types::order_bracket::BracketStatus;
                         let chart_status = match status {
                             midas_broker::BracketLifecycleStatus::Submitted => {
                                 BracketStatus::Pending
@@ -4062,7 +4071,7 @@ impl MidasApp {
                     let sym_key = crate::annotation_store::SymbolKey::new(&link.symbol);
 
                     // Route status change through TickerState.
-                    use midas_chart::widget::order_bracket::BracketStatus;
+                    use midas_annotation_types::order_bracket::BracketStatus;
                     let ticker_msg = match status {
                         BracketStatus::Active => crate::ticker_state::TickerMsg::OrderFilled {
                             filled_qty: link.quantity,

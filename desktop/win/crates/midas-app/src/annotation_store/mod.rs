@@ -42,9 +42,10 @@
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 
-use midas_chart::widget::price_line::{LineExtent, LineStroke, PriceLine};
-use midas_chart::widget::{Annotation, AnnotationId, AnnotationKind, LineStyle, Presence};
-use midas_chart::HorizontalLevel;
+use midas_annotation_types::price_line::{LineExtent, LineStroke, PriceLine};
+use midas_annotation_types::{
+    Annotation, AnnotationId, AnnotationKind, HorizontalLevel, LineStyle, Presence,
+};
 use midas_core::config::LevelConfig;
 use midas_core::Timeframe;
 
@@ -197,7 +198,7 @@ impl AnnotationStore {
         &self,
         symbol: &str,
         id: AnnotationId,
-    ) -> Option<&midas_chart::widget::order_bracket::OrderBracket> {
+    ) -> Option<&midas_annotation_types::order_bracket::OrderBracket> {
         self.get_by_id(symbol, id).and_then(|a| match &a.kind {
             AnnotationKind::OrderBracket(b) => Some(b.as_ref()),
             _ => None,
@@ -525,7 +526,7 @@ impl AnnotationStore {
                         },
                     },
                     label: cfg.label.clone(),
-                    icon: midas_chart::LevelIcon::from_str_id(&cfg.icon),
+                    icon: midas_annotation_types::LevelIcon::from_str_id(&cfg.icon),
                 };
                 self.add_level(
                     symbol,

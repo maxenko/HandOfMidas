@@ -1627,7 +1627,7 @@ impl MidasApp {
 
         // Entry type tabs: [Market] [Limit] [Stop] [Stop Limit].
         let entry_type = state.entry_type;
-        use midas_chart::widget::order_bracket::EntryType;
+        use midas_annotation_types::order_bracket::EntryType;
         let type_btn = |label: &'static str, et: EntryType| -> Element<'_, Message> {
             let style: fn(&iced::Theme, button::Status) -> button::Style = if entry_type == et {
                 active_neutral_button_style
@@ -1710,7 +1710,7 @@ impl MidasApp {
         // Entry price inputs (shown for non-Market types).
         // Each row is wrapped in mouse_area for scroll-wheel adjustment.
         let entry_price_section = {
-            use midas_chart::widget::order_bracket::EntryType;
+            use midas_annotation_types::order_bracket::EntryType;
 
             let limit_scroll = move |delta: iced::mouse::ScrollDelta| {
                 let lines = match delta {
@@ -1987,10 +1987,10 @@ impl MidasApp {
                 .into()
         } else {
             let type_label = match state.entry_type {
-                midas_chart::widget::order_bracket::EntryType::Market => "Market",
-                midas_chart::widget::order_bracket::EntryType::Limit => "Limit",
-                midas_chart::widget::order_bracket::EntryType::Stop => "Stop",
-                midas_chart::widget::order_bracket::EntryType::StopLimit => "Stop Limit",
+                midas_annotation_types::order_bracket::EntryType::Market => "Market",
+                midas_annotation_types::order_bracket::EntryType::Limit => "Limit",
+                midas_annotation_types::order_bracket::EntryType::Stop => "Stop",
+                midas_annotation_types::order_bracket::EntryType::StopLimit => "Stop Limit",
             };
             let side_label = match state.side {
                 crate::order_panel::OrderSide::Buy => "BUY",
@@ -2053,10 +2053,10 @@ impl MidasApp {
                 crate::order_panel::OrderSide::Sell => "SELL",
             };
             let type_name = match state.entry_type {
-                midas_chart::widget::order_bracket::EntryType::Market => "Market",
-                midas_chart::widget::order_bracket::EntryType::Limit => "Limit",
-                midas_chart::widget::order_bracket::EntryType::Stop => "Stop",
-                midas_chart::widget::order_bracket::EntryType::StopLimit => "Stop Limit",
+                midas_annotation_types::order_bracket::EntryType::Market => "Market",
+                midas_annotation_types::order_bracket::EntryType::Limit => "Limit",
+                midas_annotation_types::order_bracket::EntryType::Stop => "Stop",
+                midas_annotation_types::order_bracket::EntryType::StopLimit => "Stop Limit",
             };
             let order_summary = format!(
                 "{} {} {} at {}",
@@ -3128,7 +3128,7 @@ fn build_level_editor<'a>(
     viewport_height: u32,
 ) -> Element<'a, Message> {
     let level_id = level.id;
-    let (coarse_step, _fine_step) = midas_chart::price_step_for(level.line.price);
+    let (coarse_step, _fine_step) = midas_annotation_types::price_step_for(level.line.price);
 
     // -- Header --
     let header = row![
@@ -3286,7 +3286,7 @@ fn build_level_editor<'a>(
 
     // -- Icon selector --
     let mut icon_buttons = Row::new().spacing(3);
-    for icon_variant in midas_chart::LevelIcon::all() {
+    for icon_variant in midas_annotation_types::LevelIcon::all() {
         let is_sel = level.icon == *icon_variant;
         let label = match icon_variant.as_char() {
             Some(ch) => ch.to_string(),

@@ -1,6 +1,7 @@
 use super::*;
 use crate::levels::LevelIcon;
 use crate::widget::price_line::{LineExtent, LineStroke, PriceLine};
+use midas_core::Timeframe;
 use smallvec::smallvec;
 
 fn make_annotation(id: u64, price: f64) -> Annotation {

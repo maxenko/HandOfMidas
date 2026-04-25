@@ -32,9 +32,9 @@ use std::time::Instant;
 use iced::widget::pane_grid;
 use iced::{window, Task};
 
+use midas_annotation_types::AnnotationId;
 use midas_chart::camera::Camera2D;
 use midas_chart::state::ChartState;
-use midas_chart::AnnotationId;
 use midas_core::config::{AppConfig, ChartConfig, LayoutNode, PanelSlot};
 use midas_core::{
     AccountPanelId, CandleBuffer, ChartBackend, ChartId, DataProvider, LinkMode, OrderPanelId,
@@ -390,7 +390,7 @@ pub struct MidasApp {
     /// dragged level into its drag-pass z-layer — otherwise only the
     /// chart receiving events would see the per-element z-order fix,
     /// and the other charts' text would mix with neighbouring levels.
-    pub dragging_annotation: Option<midas_chart::widget::AnnotationId>,
+    pub dragging_annotation: Option<midas_annotation_types::AnnotationId>,
     /// Cross-chart crosshair sync: (source chart, timestamp_ms, price, symbol).
     /// When set, sibling charts (same symbol, different chart) render
     /// ghost crosshair lines at the corresponding timestamp and price.
@@ -467,7 +467,7 @@ pub struct MidasApp {
     pub bracket_context_menu: Option<(
         ChartId,
         u64,
-        midas_chart::widget::order_bracket::LegRole,
+        midas_annotation_types::order_bracket::LegRole,
         f32,
         f32,
     )>,
@@ -695,7 +695,7 @@ pub enum Message {
     /// Update a level's line thickness.
     LevelEditorThicknessChanged(ChartId, u64, f32),
     /// Update a level's icon.
-    LevelEditorIconChanged(ChartId, u64, midas_chart::LevelIcon),
+    LevelEditorIconChanged(ChartId, u64, midas_annotation_types::LevelIcon),
     /// Toggle a level's lock state.
     LevelEditorToggleLock(ChartId, u64),
     /// Create a new level from the drawing panel (at center of visible price range).
@@ -863,7 +863,7 @@ pub enum Message {
         take_profit_id: Option<uuid::Uuid>,
         stop_loss_id: Option<uuid::Uuid>,
         symbol: String,
-        action: midas_chart::widget::order_bracket::BracketSide,
+        action: midas_annotation_types::order_bracket::BracketSide,
         quantity: f64,
         entry_price: Option<f64>,
         tp_price: Option<f64>,
@@ -872,7 +872,7 @@ pub enum Message {
     /// A bracket's status changed (broker lifecycle update).
     BrokerBracketStatusChanged {
         parent_id: uuid::Uuid,
-        status: midas_chart::widget::order_bracket::BracketStatus,
+        status: midas_annotation_types::order_bracket::BracketStatus,
         entry_fill_price: Option<f64>,
     },
 
@@ -1620,7 +1620,8 @@ impl MidasApp {
                 &panel.state.symbol,
             ))
             .and_then(|snap| snap.last_price);
-        let (coarse_step, _fine_step) = midas_chart::price_step_for(last_price.unwrap_or(100.0));
+        let (coarse_step, _fine_step) =
+            midas_annotation_types::price_step_for(last_price.unwrap_or(100.0));
         Some(OrderPanelBodyVm {
             state: &panel.state,
             last_price,
@@ -2129,7 +2130,7 @@ impl MidasApp {
                         let sym_key = crate::annotation_store::SymbolKey::new(symbol);
                         // Find the first OrderBracket annotation for this symbol.
                         let bracket_info = annotations.iter().find_map(|ann| {
-                            if let midas_chart::widget::AnnotationKind::OrderBracket(ref b) =
+                            if let midas_annotation_types::AnnotationKind::OrderBracket(ref b) =
                                 ann.kind
                             {
                                 Some((ann.id, b.as_ref().clone()))
@@ -2169,8 +2170,8 @@ impl MidasApp {
             // levels yet.
             {
                 use crate::annotation_store::StoredLevel;
-                use midas_chart::widget::price_line::{LineExtent, LineStroke, PriceLine};
-                use midas_chart::widget::LineStyle;
+                use midas_annotation_types::price_line::{LineExtent, LineStroke, PriceLine};
+                use midas_annotation_types::LineStyle;
                 let mut next_migration_id: u64 = 1;
                 for (ticker, level_cfgs) in &config.levels {
                     if level_cfgs.is_empty() {
@@ -2189,7 +2190,7 @@ impl MidasApp {
                             let id = next_migration_id;
                             next_migration_id += 1;
                             StoredLevel {
-                                level: midas_chart::HorizontalLevel {
+                                level: midas_annotation_types::HorizontalLevel {
                                     id,
                                     line: PriceLine {
                                         price: cfg.price,
@@ -2201,7 +2202,7 @@ impl MidasApp {
                                         },
                                     },
                                     label: cfg.label.clone(),
-                                    icon: midas_chart::LevelIcon::from_str_id(&cfg.icon),
+                                    icon: midas_annotation_types::LevelIcon::from_str_id(&cfg.icon),
                                 },
                                 locked: cfg.locked,
                             }
@@ -2405,16 +2406,16 @@ impl MidasApp {
                     .get(&symbol)
                     .iter()
                     .find(|a| {
-                        a.presence == midas_chart::widget::Presence::Active
+                        a.presence == midas_annotation_types::Presence::Active
                             && matches!(
                                 &a.kind,
-                                midas_chart::widget::AnnotationKind::OrderBracket(b)
-                                    if b.status == midas_chart::widget::order_bracket::BracketStatus::Draft
+                                midas_annotation_types::AnnotationKind::OrderBracket(b)
+                                    if b.status == midas_annotation_types::order_bracket::BracketStatus::Draft
                             )
                     })
                     .map(|a| {
                         let side = match &a.kind {
-                            midas_chart::widget::AnnotationKind::OrderBracket(b) => b.side,
+                            midas_annotation_types::AnnotationKind::OrderBracket(b) => b.side,
                             _ => unreachable!(),
                         };
                         (a.id, side)
@@ -2429,7 +2430,7 @@ impl MidasApp {
                         .iter()
                         .find(|a| a.id == ann_id)
                         .and_then(|a| match &a.kind {
-                            midas_chart::widget::AnnotationKind::OrderBracket(b) => {
+                            midas_annotation_types::AnnotationKind::OrderBracket(b) => {
                                 Some(b.as_ref())
                             }
                             _ => None,
@@ -2993,7 +2994,7 @@ impl MidasApp {
     fn sync_panel_and_redraw(
         &mut self,
         panel_id: midas_core::OrderPanelId,
-        ann_id: midas_chart::widget::AnnotationId,
+        ann_id: midas_annotation_types::AnnotationId,
         symbol: &str,
     ) {
         if let Some(bracket_data) = self.annotation_store.get_bracket(symbol, ann_id) {
@@ -3106,7 +3107,7 @@ impl MidasApp {
             .get(&sym_key)
             .and_then(|ts| ts.live_bracket())
             .map(|b| {
-                b.status == midas_chart::widget::order_bracket::BracketStatus::Draft
+                b.status == midas_annotation_types::order_bracket::BracketStatus::Draft
                     && b.entry.line.price.abs() < f64::EPSILON
             })
             .unwrap_or(false);
@@ -3115,7 +3116,7 @@ impl MidasApp {
             let _ = self.update(Message::Ticker(
                 sym_key,
                 crate::ticker_state::TickerMsg::SetLegPrice {
-                    role: midas_chart::widget::order_bracket::LegRole::Entry,
+                    role: midas_annotation_types::order_bracket::LegRole::Entry,
                     price,
                 },
             ));
@@ -4522,10 +4523,10 @@ impl MidasApp {
 #[cfg(test)]
 mod backend_toggle_tests {
     use super::*;
-    use midas_chart::widget::order_bracket::{
+    use midas_annotation_types::order_bracket::{
         BracketLeg, BracketSide, BracketStatus, LegRole, OrderBracket,
     };
-    use midas_chart::widget::{LineStroke, LineStyle, PriceLine};
+    use midas_annotation_types::{LineStroke, LineStyle, PriceLine};
     use midas_core::config::ChartConfig;
     use midas_core::LinkMode;
 
@@ -4620,7 +4621,7 @@ mod backend_toggle_tests {
             BracketLeg {
                 line: PriceLine {
                     price,
-                    extent: midas_chart::widget::LineExtent::FullWidth,
+                    extent: midas_annotation_types::LineExtent::FullWidth,
                     stroke: LineStroke {
                         color: [1.0, 1.0, 1.0, 1.0],
                         width: 1.0,
@@ -4641,7 +4642,7 @@ mod backend_toggle_tests {
             quantity: Some(10.0),
             saved: false,
             filled_qty: filled,
-            entry_type: midas_chart::widget::order_bracket::EntryType::Market,
+            entry_type: midas_annotation_types::order_bracket::EntryType::Market,
             entry_stop_price: None,
             wrong_side_warning: false,
         }

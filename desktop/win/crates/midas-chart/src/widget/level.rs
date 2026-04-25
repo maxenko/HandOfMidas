@@ -16,67 +16,24 @@
 //!    into the same `WidgetOutput`.
 
 use crate::instances::GridLineInstance;
-use crate::levels::HorizontalLevel;
+use crate::levels::{HorizontalLevel, HorizontalLevelExt};
 use crate::widget::decorator::compute_decorator_group;
 use crate::widget::price_line::PriceLine;
-use serde::{Deserialize, Serialize};
-use smallvec::{smallvec, SmallVec};
 
 use super::compute::{ComputeContext, WidgetOutput};
 use super::hit_test::{CursorIcon, HitZone, HitZoneKind};
 use super::AnnotationId;
 
-/// Line rendering style.
-///
-/// `Pattern` holds an SVG-style `stroke-dasharray`: alternating on/off run
-/// lengths in logical pixels, walked cyclically starting with an "on" run.
-/// An empty pattern is equivalent to `Solid`. Dashed and dotted lines are
-/// rendered as multiple short `GridLineInstance` segments; the GPU pipeline
-/// still draws axis-aligned rectangles.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub enum LineStyle {
-    /// Continuous line.
-    #[default]
-    Solid,
-    /// SVG-style dash pattern. Alternating on/off run lengths in logical
-    /// pixels, walked cyclically. An empty pattern is equivalent to `Solid`.
-    Pattern(SmallVec<[f32; 6]>),
-}
-
-impl LineStyle {
-    /// 1-on / 3-off dotted rhythm.
-    pub fn dotted() -> Self {
-        Self::Pattern(smallvec![1.0, 3.0])
-    }
-    /// 1-on / 6-off sparse dotted rhythm.
-    pub fn sparse_dotted() -> Self {
-        Self::Pattern(smallvec![1.0, 6.0])
-    }
-    /// 6-on / 3-off dashed rhythm.
-    pub fn dashed() -> Self {
-        Self::Pattern(smallvec![6.0, 3.0])
-    }
-    /// 10-on / 4-off long-dash rhythm.
-    pub fn dashed_long() -> Self {
-        Self::Pattern(smallvec![10.0, 4.0])
-    }
-    /// 6-on / 3-off / 1-on / 3-off dash-dot rhythm.
-    pub fn dash_dot() -> Self {
-        Self::Pattern(smallvec![6.0, 3.0, 1.0, 3.0])
-    }
-    /// 6-on / 3-off / 1-on / 3-off / 1-on / 3-off dash-dot-dot rhythm.
-    pub fn dash_dot_dot() -> Self {
-        Self::Pattern(smallvec![6.0, 3.0, 1.0, 3.0, 1.0, 3.0])
-    }
-
-    /// True when this style draws as a single continuous segment.
-    pub fn is_solid(&self) -> bool {
-        match self {
-            Self::Solid => true,
-            Self::Pattern(p) => p.is_empty(),
-        }
-    }
-}
+// `LineStyle` moved to `midas-annotation-types` (Slice A1). Re-exported
+// here so existing `midas_chart::widget::level::LineStyle` and
+// `midas_chart::widget::LineStyle` import paths keep resolving via the
+// shim. A1b added `#[deprecated]` after consumer-side migration so any
+// new imports through this path emit warnings (turned into errors by
+// `cargo clippy --workspace -- -D warnings`).
+#[deprecated(
+    note = "import from midas_annotation_types directly; midas-chart will be deleted in slice 9c"
+)]
+pub use midas_annotation_types::LineStyle;
 
 // ── Shared line renderer ────────────────────────────────────────────
 

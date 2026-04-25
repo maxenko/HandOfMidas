@@ -12,7 +12,7 @@
 
 use iced::Task;
 
-use midas_chart::AnnotationId;
+use midas_annotation_types::AnnotationId;
 use midas_core::{ChartId, LinkMode, OrderPanelId};
 
 use super::{Message, MidasApp};
@@ -373,7 +373,7 @@ impl MidasApp {
         chart_id: ChartId,
     ) -> Option<(
         crate::order_panel::OrderSide,
-        midas_chart::widget::order_bracket::EntryType,
+        midas_annotation_types::order_bracket::EntryType,
     )> {
         let chart_symbol = self.charts.get(&chart_id).map(|c| c.symbol.clone());
         // (1) Direct `source_chart` link.
@@ -539,10 +539,10 @@ impl MidasApp {
                     if let (Some(ann_id), true) = (ann_id_opt, ann_exists) {
                         // Update existing annotation.
                         self.annotation_store.update(sym.as_str(), ann_id, |ann| {
-                            ann.kind = midas_chart::widget::AnnotationKind::OrderBracket(Box::new(
-                                bracket.clone(),
-                            ));
-                            ann.presence = midas_chart::widget::Presence::Active;
+                            ann.kind = midas_annotation_types::AnnotationKind::OrderBracket(
+                                Box::new(bracket.clone()),
+                            );
+                            ann.presence = midas_annotation_types::Presence::Active;
                         });
                     } else {
                         // Stale or missing ID — clear and create fresh.
@@ -552,7 +552,7 @@ impl MidasApp {
                         // Add new annotation.
                         let new_id = self.annotation_store.add(
                             sym.as_str(),
-                            midas_chart::widget::AnnotationKind::OrderBracket(Box::new(
+                            midas_annotation_types::AnnotationKind::OrderBracket(Box::new(
                                 bracket.clone(),
                             )),
                         );
@@ -608,29 +608,29 @@ impl MidasApp {
                     // back through the effect handler return type.
                     if let Some(submitter) = self.bracket_submitter() {
                         let action = match bracket.side {
-                            midas_chart::widget::order_bracket::BracketSide::Long => {
+                            midas_annotation_types::order_bracket::BracketSide::Long => {
                                 midas_broker::OrderAction::Buy
                             }
-                            midas_chart::widget::order_bracket::BracketSide::Short => {
+                            midas_annotation_types::order_bracket::BracketSide::Short => {
                                 midas_broker::OrderAction::Sell
                             }
                         };
                         let quantity = bracket.quantity.unwrap_or(0.0);
                         let (entry_kind, entry_price, entry_stop_price) = match bracket.entry_type {
-                            midas_chart::widget::order_bracket::EntryType::Market => {
+                            midas_annotation_types::order_bracket::EntryType::Market => {
                                 (midas_broker::OrderKind::Market, None, None)
                             }
-                            midas_chart::widget::order_bracket::EntryType::Limit => (
+                            midas_annotation_types::order_bracket::EntryType::Limit => (
                                 midas_broker::OrderKind::Limit,
                                 Some(bracket.entry.line.price),
                                 None,
                             ),
-                            midas_chart::widget::order_bracket::EntryType::Stop => (
+                            midas_annotation_types::order_bracket::EntryType::Stop => (
                                 midas_broker::OrderKind::Stop,
                                 None,
                                 Some(bracket.entry.line.price),
                             ),
-                            midas_chart::widget::order_bracket::EntryType::StopLimit => (
+                            midas_annotation_types::order_bracket::EntryType::StopLimit => (
                                 midas_broker::OrderKind::StopLimit,
                                 Some(bracket.entry.line.price),
                                 bracket.entry_stop_price,

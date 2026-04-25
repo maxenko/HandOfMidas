@@ -12,10 +12,10 @@
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use midas_chart::widget::order_bracket::{
+use midas_annotation_types::order_bracket::{
     BracketLeg, BracketSide, BracketStatus, EntryType, LegRole, OrderBracket,
 };
-use midas_chart::widget::AnnotationId;
+use midas_annotation_types::AnnotationId;
 
 use crate::annotation_store::StoredLevel;
 use crate::app::ToastAction;
@@ -260,13 +260,13 @@ pub enum TickerEffect {
 /// Create a `BracketLeg` with default stroke at the given price.
 fn make_leg(price: f64, role: LegRole) -> BracketLeg {
     BracketLeg {
-        line: midas_chart::widget::PriceLine {
+        line: midas_annotation_types::PriceLine {
             price,
-            extent: midas_chart::widget::LineExtent::FullWidth,
-            stroke: midas_chart::widget::LineStroke {
+            extent: midas_annotation_types::LineExtent::FullWidth,
+            stroke: midas_annotation_types::LineStroke {
                 color: [0.0, 0.0, 0.0, 1.0],
                 width: 1.0,
-                style: midas_chart::widget::LineStyle::Solid,
+                style: midas_annotation_types::LineStyle::Solid,
             },
         },
         role,

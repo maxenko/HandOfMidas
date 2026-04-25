@@ -51,8 +51,8 @@ use std::borrow::Cow;
 // GPU-primitive crate; the move lands as part of 9c's atomic deletion
 // PR, not here. Tracked under `plan/chart-transition/00-index.md`
 // slice 9c pre-deletion checklist.
-use midas_chart::instances::{CandleInstance, GridLineInstance, VolumeInstance};
 use midas_chart::widget::compute::{LabelAnchor, WidgetLabel};
+use midas_gpu_types::{CandleInstance, GridLineInstance, VolumeInstance};
 use midas_scene::{
     BadgeInstance as SceneBadge, CandleInstance as SceneCandle, LineInstance as SceneLine,
     QuadInstance as SceneQuad, ScenePrimitives, TextAnchor as SceneTextAnchor,

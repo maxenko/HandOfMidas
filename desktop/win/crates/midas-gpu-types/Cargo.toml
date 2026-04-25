@@ -1,0 +1,19 @@
+[package]
+name = "midas-gpu-types"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Pure-data leaf crate carrying the GPU-buffer-shaped instance structs
+# (`CandleInstance`, `VolumeInstance`, `GridLineInstance`, `BadgeInstance`)
+# plus their render-adjacent metadata (`AxisLabel`, `CrosshairRender`,
+# `TimelineLabel`) extracted from `midas-chart` so the chart crate can be
+# deleted in a downstream slice (9c) without taking the GPU wire-format
+# types with it.
+#
+# Strict leaf: only `bytemuck` (Pod/Zeroable derives). No `midas-core`,
+# no `midas-chart`, no `wgpu`, no `iced`, no `serde`. WGSL shaders read
+# the Pod structs by byte offset, so field order here is wire format.
+
+[dependencies]
+bytemuck = { workspace = true }

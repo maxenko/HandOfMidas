@@ -1,7 +1,6 @@
 use super::*;
-use midas_chart::levels::LevelIcon;
-use midas_chart::widget::price_line::{LineExtent, LineStroke, PriceLine};
-use midas_chart::widget::{HorizontalLevel, LineStyle};
+use midas_annotation_types::price_line::{LineExtent, LineStroke, PriceLine};
+use midas_annotation_types::{HorizontalLevel, LevelIcon, LineStyle};
 use midas_core::config::LevelConfig;
 
 fn make_level(price: f64) -> AnnotationKind {
@@ -315,7 +314,7 @@ fn remove_nonexistent_level_returns_false() {
 
 #[test]
 fn clear_levels_empties_only_levels() {
-    use midas_chart::widget::order_bracket::{
+    use midas_annotation_types::order_bracket::{
         BracketLeg, BracketSide, BracketStatus, EntryType, LegRole, OrderBracket,
     };
     let mut store = AnnotationStore::new();

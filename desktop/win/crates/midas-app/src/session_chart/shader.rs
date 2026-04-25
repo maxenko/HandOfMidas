@@ -395,7 +395,7 @@ mod tests {
     /// bucket counts flow through the primitive verbatim.
     #[test]
     fn ten_candles_preserves_instance_count() {
-        use midas_chart::instances::CandleInstance;
+        use midas_gpu_types::CandleInstance;
         let candles = vec![
             CandleInstance {
                 x: 10.0,

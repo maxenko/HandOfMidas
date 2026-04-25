@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use midas_chart::widget::order_bracket::EntryType;
+use midas_annotation_types::order_bracket::EntryType;
 
 use crate::annotation_store::SymbolKey;
 use crate::order_panel::OrderSide;
@@ -148,7 +148,7 @@ fn migrate_v1_v2_preserves_annotation_id() {
         last_entry_type: EntryType::Market,
         entries: HashMap::new(),
         gatr_anchor: GatrAnchor::default(),
-        live_annotation_id: Some(midas_chart::widget::AnnotationId(42)),
+        live_annotation_id: Some(midas_annotation_types::AnnotationId(42)),
         broker_order_id: None,
         pinned: false,
         updated_at: chrono::Utc::now(),
@@ -157,7 +157,7 @@ fn migrate_v1_v2_preserves_annotation_id() {
     let state = migrate_v1_v2(&intent);
     assert_eq!(
         state.live_annotation_id(),
-        Some(midas_chart::widget::AnnotationId(42))
+        Some(midas_annotation_types::AnnotationId(42))
     );
 }
 
@@ -247,7 +247,7 @@ fn factory_from_legacy() {
             anchor_price: Some(800.0),
             anchor_gatr: Some(15.0),
         },
-        live_annotation_id: Some(midas_chart::widget::AnnotationId(99)),
+        live_annotation_id: Some(midas_annotation_types::AnnotationId(99)),
         broker_order_id: None,
         pinned: true,
         updated_at: chrono::Utc::now(),
@@ -258,7 +258,7 @@ fn factory_from_legacy() {
     assert!(state.pinned());
     assert_eq!(
         state.live_annotation_id(),
-        Some(midas_chart::widget::AnnotationId(99))
+        Some(midas_annotation_types::AnnotationId(99))
     );
 }
 
@@ -267,19 +267,19 @@ fn factory_from_legacy() {
 /// Build a test level with the given price and id.
 fn test_level(id: u64, price: f64) -> crate::annotation_store::StoredLevel {
     crate::annotation_store::StoredLevel {
-        level: midas_chart::HorizontalLevel {
+        level: midas_annotation_types::HorizontalLevel {
             id,
-            line: midas_chart::widget::price_line::PriceLine {
+            line: midas_annotation_types::price_line::PriceLine {
                 price,
-                extent: midas_chart::widget::price_line::LineExtent::FullWidth,
-                stroke: midas_chart::widget::price_line::LineStroke {
+                extent: midas_annotation_types::price_line::LineExtent::FullWidth,
+                stroke: midas_annotation_types::price_line::LineStroke {
                     color: [1.0, 1.0, 1.0, 1.0],
                     width: 1.0,
-                    style: midas_chart::widget::LineStyle::Solid,
+                    style: midas_annotation_types::LineStyle::Solid,
                 },
             },
             label: None,
-            icon: midas_chart::LevelIcon::default(),
+            icon: midas_annotation_types::LevelIcon::default(),
         },
         locked: false,
     }
@@ -431,7 +431,7 @@ fn undo_snap_expired_ttl_is_noop() {
 
 #[test]
 fn submit_pending_filled_lifecycle() {
-    use midas_chart::widget::order_bracket::BracketStatus;
+    use midas_annotation_types::order_bracket::BracketStatus;
 
     let mut state = TickerState::new_with_defaults(SymbolKey::new("LIFE"), 150.0, Some(2.0));
     state.force_bracket_mode(Some(OrderSide::Buy));
@@ -494,7 +494,7 @@ fn submit_pending_filled_lifecycle() {
 
 #[test]
 fn order_rejected_reverts_to_draft() {
-    use midas_chart::widget::order_bracket::BracketStatus;
+    use midas_annotation_types::order_bracket::BracketStatus;
 
     let mut state = TickerState::new_with_defaults(SymbolKey::new("REJ"), 200.0, Some(3.0));
     state.force_bracket_mode(Some(OrderSide::Sell));
@@ -523,7 +523,7 @@ fn order_rejected_reverts_to_draft() {
 
 #[test]
 fn order_partial_fill_updates_qty() {
-    use midas_chart::widget::order_bracket::BracketStatus;
+    use midas_annotation_types::order_bracket::BracketStatus;
 
     let mut state = TickerState::new_with_defaults(SymbolKey::new("PART"), 100.0, Some(1.0));
     state.force_bracket_mode(Some(OrderSide::Buy));
@@ -546,7 +546,7 @@ fn order_partial_fill_updates_qty() {
 
 #[test]
 fn order_cancelled_reverts_to_draft() {
-    use midas_chart::widget::order_bracket::BracketStatus;
+    use midas_annotation_types::order_bracket::BracketStatus;
 
     let mut state = TickerState::new_with_defaults(SymbolKey::new("CANC"), 100.0, Some(1.0));
     state.force_bracket_mode(Some(OrderSide::Buy));
@@ -754,7 +754,7 @@ fn apply_cancel_bracket_saved_hides() {
     state.apply(TickerMsg::SaveBracket);
     assert!(state.live_bracket().unwrap().saved);
     // Simulate the effect handler having set the annotation id.
-    state.set_live_annotation_id(Some(midas_chart::widget::AnnotationId(99)));
+    state.set_live_annotation_id(Some(midas_annotation_types::AnnotationId(99)));
 
     let effects = state.apply(TickerMsg::CancelBracket);
     assert!(state.live_bracket().is_none());
@@ -772,7 +772,7 @@ fn apply_cancel_bracket_unsaved_deletes() {
         entry_type: EntryType::Market,
     });
     assert!(!state.live_bracket().unwrap().saved);
-    state.set_live_annotation_id(Some(midas_chart::widget::AnnotationId(1)));
+    state.set_live_annotation_id(Some(midas_annotation_types::AnnotationId(1)));
 
     let effects = state.apply(TickerMsg::CancelBracket);
     assert!(state.live_bracket().is_none());
@@ -790,7 +790,7 @@ fn apply_set_leg_price_updates_entry() {
         entry_type: EntryType::Limit,
     });
     let effects = state.apply(TickerMsg::SetLegPrice {
-        role: midas_chart::widget::order_bracket::LegRole::Entry,
+        role: midas_annotation_types::order_bracket::LegRole::Entry,
         price: 145.0,
     });
     assert!((state.live_bracket().unwrap().entry.line.price - 145.0).abs() < f64::EPSILON);
@@ -830,7 +830,7 @@ fn apply_drag_leg_updates_price_and_pnl() {
     state.apply(TickerMsg::SetQuantity(100.0));
 
     let effects = state.apply(TickerMsg::DragLeg {
-        role: midas_chart::widget::order_bracket::LegRole::Entry,
+        role: midas_annotation_types::order_bracket::LegRole::Entry,
         new_price: 105.0,
     });
     assert!((state.live_bracket().unwrap().entry.line.price - 105.0).abs() < f64::EPSILON);
@@ -855,7 +855,7 @@ fn apply_drag_leg_accepts_price_across_entry() {
 
     // Long bracket, entry = 100, drag TP below entry to 95.
     state.apply(TickerMsg::DragLeg {
-        role: midas_chart::widget::order_bracket::LegRole::TakeProfit,
+        role: midas_annotation_types::order_bracket::LegRole::TakeProfit,
         new_price: 95.0,
     });
     let tp_price = state
@@ -873,7 +873,7 @@ fn apply_drag_leg_accepts_price_across_entry() {
 
     // Mirror case: drag SL above entry to 106.
     state.apply(TickerMsg::DragLeg {
-        role: midas_chart::widget::order_bracket::LegRole::StopLoss,
+        role: midas_annotation_types::order_bracket::LegRole::StopLoss,
         new_price: 106.0,
     });
     let sl_price = state
@@ -957,7 +957,7 @@ fn apply_no_panic_when_no_live_bracket() {
     // All field mutations on empty state should return empty effects, not panic.
     assert!(state
         .apply(TickerMsg::SetLegPrice {
-            role: midas_chart::widget::order_bracket::LegRole::Entry,
+            role: midas_annotation_types::order_bracket::LegRole::Entry,
             price: 100.0,
         })
         .is_empty());
@@ -966,7 +966,7 @@ fn apply_no_panic_when_no_live_bracket() {
     assert!(state.apply(TickerMsg::SetQuantity(50.0)).is_empty());
     assert!(state
         .apply(TickerMsg::DragLeg {
-            role: midas_chart::widget::order_bracket::LegRole::Entry,
+            role: midas_annotation_types::order_bracket::LegRole::Entry,
             new_price: 100.0,
         })
         .is_empty());
@@ -1293,7 +1293,7 @@ fn set_bracket_mode_none_cancels_bracket() {
     // Activate bracket mode first.
     state.apply(TickerMsg::SetBracketMode(Some(OrderSide::Buy)));
     assert!(state.live_bracket().is_some());
-    state.set_live_annotation_id(Some(midas_chart::widget::AnnotationId(42)));
+    state.set_live_annotation_id(Some(midas_annotation_types::AnnotationId(42)));
 
     // Deactivate.
     let effects = state.apply(TickerMsg::SetBracketMode(None));
@@ -1530,9 +1530,9 @@ fn persist_forget_removes_from_cache() {
 #[test]
 fn inject_levels_populates_ticker_state() {
     use crate::annotation_store::StoredLevel;
-    use midas_chart::widget::price_line::{LineExtent, LineStroke, PriceLine};
-    use midas_chart::widget::LineStyle;
-    use midas_chart::HorizontalLevel;
+    use midas_annotation_types::price_line::{LineExtent, LineStroke, PriceLine};
+    use midas_annotation_types::HorizontalLevel;
+    use midas_annotation_types::LineStyle;
 
     let mut state = TickerState::new(SymbolKey::new("TEST"));
     assert!(state.levels().is_empty());
@@ -1550,7 +1550,7 @@ fn inject_levels_populates_ticker_state() {
                 },
             },
             label: Some("Support".into()),
-            icon: midas_chart::levels::LevelIcon::None,
+            icon: midas_annotation_types::LevelIcon::None,
         },
         locked: false,
     }];

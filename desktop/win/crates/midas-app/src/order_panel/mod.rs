@@ -6,7 +6,7 @@
 //!
 //! ## Chart-transition slice 8.5 status
 //!
-//! The `midas_chart::widget::order_bracket::*` + `AnnotationId` imports
+//! The `midas_annotation_types::order_bracket::*` + `AnnotationId` imports
 //! below are the shared **OrderBracket persistent shape** (plan D9 —
 //! format unchanged). Both the legacy chart and the session-chart path
 //! (via `ticker_state::TickerState.live_bracket`) round-trip this same
@@ -16,8 +16,8 @@
 //! legacy-side wiring, not a session-chart consumer. The types migrate
 //! in slice 9c's atomic deletion PR.
 
-use midas_chart::widget::order_bracket::EntryType;
-use midas_chart::widget::AnnotationId;
+use midas_annotation_types::order_bracket::EntryType;
+use midas_annotation_types::AnnotationId;
 use midas_core::link::LinkMode;
 use midas_core::ChartId;
 use midas_core::OrderPanelId;
@@ -460,10 +460,10 @@ pub fn validate_panel(state: &OrderPanelState) -> Vec<(String, String)> {
 /// this validates `OrderBracket` f64 data directly for the
 /// chart-driven bracket flow.
 pub fn validate_bracket(
-    bracket: &midas_chart::widget::order_bracket::OrderBracket,
+    bracket: &midas_annotation_types::order_bracket::OrderBracket,
     quantity: f64,
 ) -> Vec<(String, String)> {
-    use midas_chart::widget::order_bracket::{BracketSide, EntryType};
+    use midas_annotation_types::order_bracket::{BracketSide, EntryType};
     let mut errors = Vec::new();
 
     if quantity <= 0.0 {
@@ -595,15 +595,15 @@ pub fn default_bracket_prices(
 /// panel in sync with the annotation store (single source of truth).
 pub fn sync_panel_from_bracket(
     state: &mut OrderPanelState,
-    bracket: &midas_chart::widget::order_bracket::OrderBracket,
+    bracket: &midas_annotation_types::order_bracket::OrderBracket,
 ) {
     // Sync entry type so the panel dropdown matches the bracket.
     state.entry_type = bracket.entry_type;
 
     // Sync side.
     state.side = match bracket.side {
-        midas_chart::widget::order_bracket::BracketSide::Long => OrderSide::Buy,
-        midas_chart::widget::order_bracket::BracketSide::Short => OrderSide::Sell,
+        midas_annotation_types::order_bracket::BracketSide::Long => OrderSide::Buy,
+        midas_annotation_types::order_bracket::BracketSide::Short => OrderSide::Sell,
     };
 
     // Sync quantity.
@@ -614,16 +614,16 @@ pub fn sync_panel_from_bracket(
     // Entry price → limit_price / stop_price depending on entry_type.
     let entry_str = format!("{:.2}", bracket.entry.line.price);
     match bracket.entry_type {
-        midas_chart::widget::order_bracket::EntryType::Market => {
+        midas_annotation_types::order_bracket::EntryType::Market => {
             // Market entry tracks last_price; no panel input to sync.
         }
-        midas_chart::widget::order_bracket::EntryType::Limit => {
+        midas_annotation_types::order_bracket::EntryType::Limit => {
             state.limit_price = entry_str;
         }
-        midas_chart::widget::order_bracket::EntryType::Stop => {
+        midas_annotation_types::order_bracket::EntryType::Stop => {
             state.stop_price = entry_str;
         }
-        midas_chart::widget::order_bracket::EntryType::StopLimit => {
+        midas_annotation_types::order_bracket::EntryType::StopLimit => {
             state.limit_price = entry_str;
             if let Some(sp) = bracket.entry_stop_price {
                 state.stop_price = format!("{:.2}", sp);
@@ -673,10 +673,10 @@ pub fn sync_panel_from_bracket(
 /// **Side constraints:** This function does **not** enforce TP/SL
 /// direction any more. Brackets are free-form; legs that cross entry
 /// are classified visually by the decorator layer via
-/// [`midas_chart::widget::order_bracket::is_leg_on_wrong_side`]
+/// [`midas_annotation_types::order_bracket::is_leg_on_wrong_side`]
 /// (see `plan/live-sim-and-free-brackets.md`).
-pub fn normalize_bracket(bracket: &mut midas_chart::widget::order_bracket::OrderBracket) {
-    use midas_chart::widget::order_bracket::EntryType;
+pub fn normalize_bracket(bracket: &mut midas_annotation_types::order_bracket::OrderBracket) {
+    use midas_annotation_types::order_bracket::EntryType;
 
     // ── Entry stop_price by type ───────────────────────────────────
     match bracket.entry_type {
@@ -710,7 +710,7 @@ pub fn normalize_bracket(bracket: &mut midas_chart::widget::order_bracket::Order
     if bracket.entry.line.price <= 0.0 {
         // Degenerate bracket — mark as cancelled so it doesn't render
         // interactively but is still visible as a dim line.
-        bracket.status = midas_chart::widget::order_bracket::BracketStatus::Cancelled;
+        bracket.status = midas_annotation_types::order_bracket::BracketStatus::Cancelled;
     }
 }
 
@@ -731,7 +731,7 @@ pub fn should_reposition(entry_price: f64, current_price: f64, gatr_abs: Option<
 /// Shift all bracket legs by a delta to center the entry near the
 /// current price. Preserves R:R shape (TP and SL offsets unchanged).
 pub fn reposition_bracket(
-    bracket: &mut midas_chart::widget::order_bracket::OrderBracket,
+    bracket: &mut midas_annotation_types::order_bracket::OrderBracket,
     current_price: f64,
 ) {
     let delta = current_price - bracket.entry.line.price;
@@ -774,7 +774,7 @@ pub struct OrderAnnotationLink {
     /// Symbol (for quick lookup without loading orders).
     pub symbol: String,
     /// Side of the bracket (Long/Short), cached at creation time for reconciliation.
-    pub side: midas_chart::widget::order_bracket::BracketSide,
+    pub side: midas_annotation_types::order_bracket::BracketSide,
     /// Quantity submitted, cached at creation time for reconciliation.
     pub quantity: f64,
     /// When this link was created, for FIFO ordering during reconciliation.
@@ -791,20 +791,20 @@ pub struct OrderAnnotationLink {
 /// sets the initial status to `Pending`. The returned value is ready to
 /// wrap in an `AnnotationKind::OrderBracket` and add to the annotation store.
 pub fn create_bracket_annotation(
-    side: midas_chart::widget::order_bracket::BracketSide,
+    side: midas_annotation_types::order_bracket::BracketSide,
     entry_price: f64,
     tp_price: Option<f64>,
     sl_price: Option<f64>,
     quantity: f64,
-) -> midas_chart::widget::order_bracket::OrderBracket {
-    use midas_chart::widget::level::LineStyle;
-    use midas_chart::widget::order_bracket::*;
+) -> midas_annotation_types::order_bracket::OrderBracket {
+    use midas_annotation_types::order_bracket::*;
+    use midas_annotation_types::LineStyle;
 
     let make_leg = |price: f64| BracketLeg {
-        line: midas_chart::widget::PriceLine {
+        line: midas_annotation_types::PriceLine {
             price,
-            extent: midas_chart::widget::LineExtent::FullWidth,
-            stroke: midas_chart::widget::LineStroke {
+            extent: midas_annotation_types::LineExtent::FullWidth,
+            stroke: midas_annotation_types::LineStroke {
                 color: [0.0, 0.0, 0.0, 1.0],
                 width: 1.5,
                 style: LineStyle::Solid,
@@ -839,8 +839,8 @@ pub fn create_bracket_annotation(
 #[allow(dead_code)] // part of planned API
 pub fn map_lifecycle_to_chart_status(
     status: &str,
-) -> midas_chart::widget::order_bracket::BracketStatus {
-    use midas_chart::widget::order_bracket::BracketStatus;
+) -> midas_annotation_types::order_bracket::BracketStatus {
+    use midas_annotation_types::order_bracket::BracketStatus;
     match status {
         "Submitted" => BracketStatus::Pending,
         "PartialFill" | "PartiallyFilled" => BracketStatus::PartialFill,
@@ -954,9 +954,9 @@ impl OrderPanel {
     /// saved Draft bracket found is claimed. Only the first panel for a
     /// given symbol should call this (ownership semantics).
     #[allow(dead_code)] // called from app init path (not yet wired)
-    pub fn relink_hidden_bracket(&mut self, annotations: &[midas_chart::widget::Annotation]) {
-        use midas_chart::widget::order_bracket::BracketStatus;
-        use midas_chart::widget::{AnnotationKind, Presence};
+    pub fn relink_hidden_bracket(&mut self, annotations: &[midas_annotation_types::Annotation]) {
+        use midas_annotation_types::order_bracket::BracketStatus;
+        use midas_annotation_types::{AnnotationKind, Presence};
 
         if self.state.bracket_annotation_id.is_some() {
             return; // Already linked

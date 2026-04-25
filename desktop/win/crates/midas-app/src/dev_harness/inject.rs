@@ -18,7 +18,7 @@
 //! rejected with [`InjectError::NotSupported`] — callers should use
 //! click/drag simulation or fixtures for those cases.
 
-use midas_chart::widget::order_bracket::{EntryType, LegRole};
+use midas_annotation_types::order_bracket::{EntryType, LegRole};
 use serde::Deserialize;
 use thiserror::Error;
 use uuid::Uuid;

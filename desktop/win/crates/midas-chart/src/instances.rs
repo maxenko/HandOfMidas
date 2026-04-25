@@ -1,233 +1,27 @@
 //! GPU-layout instance types for chart rendering.
 //!
-//! These are pure data structs with `#[repr(C)]` and `bytemuck::Pod` derives.
-//! They have **no wgpu dependency**. `midas-render` imports them from this
-//! module to build GPU vertex/instance buffers.
+//! As of slice A2, the actual type definitions live in the
+//! [`midas_gpu_types`] leaf crate so the chart crate can be retired
+//! without dragging the GPU wire-format types with it. This module is a
+//! pass-through re-export; the layout-regression tests below still run
+//! against the `midas-chart` build to keep the size/alignment guard in
+//! both crates' test surfaces.
 //!
-//! All pixel coordinates are in logical pixels (pre-DPI-scaling). The
-//! projection matrix handles the mapping to NDC.
+//! Slice A2b will add `#[deprecated]` to the re-export once consumer
+//! migration is complete.
 
-use bytemuck::{Pod, Zeroable};
-
-// ── Candlestick instances ──────────────────────────────────────────
-
-/// GPU instance data for a single candlestick.
-///
-/// Used by both wick pass and body pass -- the vertex shader reads different
-/// fields depending on the `draw_mode` uniform.
-///
-/// Size: 48 bytes per instance (12 floats). Aligned to 16 bytes naturally.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
-pub struct CandleInstance {
-    /// Center X of this candle in pixel coordinates.
-    pub x: f32,
-    /// Top of body (pixel Y -- smaller value = higher on screen).
-    pub body_top: f32,
-    /// Bottom of body (pixel Y -- larger value = lower on screen).
-    pub body_bottom: f32,
-    /// Top of wick = high price in pixel Y.
-    pub wick_top: f32,
-    /// Bottom of wick = low price in pixel Y.
-    pub wick_bottom: f32,
-    /// Body width in pixels (same for all candles in a frame).
-    pub width: f32,
-    /// Wick width in physical pixels (always 1.0 after DPI adjustment).
-    pub wick_width: f32,
-    /// Dim factor: 0.0 = full brightness, 1.0 = dimmed to 30% brightness.
-    /// Used for G.ATR hover highlighting.
-    pub dim: f32,
-    /// RGBA color (linear space, NOT sRGB).
-    pub color: [f32; 4],
-}
-
-// ── Volume bar instances ───────────────────────────────────────────
-
-/// GPU instance data for a single volume bar.
-///
-/// Drawn as a filled rectangle at the bottom of the chart area.
-/// Size: 32 bytes per instance (8 floats).
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
-pub struct VolumeInstance {
-    /// Center X of the bar in pixel coordinates (same as candle x).
-    pub x: f32,
-    /// Top of bar in pixel Y (higher volume = lower Y = higher on screen).
-    pub y_top: f32,
-    /// Bottom of bar in pixel Y (constant: bottom of volume area).
-    pub y_bottom: f32,
-    /// Bar width in pixels.
-    pub width: f32,
-    /// RGBA color with alpha for semi-transparency.
-    pub color: [f32; 4],
-}
-
-// ── Grid line instances ────────────────────────────────────────────
-
-/// GPU instance data for a single axis-aligned grid line.
-///
-/// Horizontal lines have constant Y and span the full chart width.
-/// Vertical lines have constant X and span the full chart height.
-/// Each line is rendered as a filled rectangle exactly 1 physical pixel wide.
-///
-/// Size: 32 bytes per instance (8 floats).
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
-pub struct GridLineInstance {
-    /// Rectangle bounds in pixel coordinates: `[left, top, right, bottom]`.
-    pub rect: [f32; 4],
-    /// RGBA color (low alpha for subtle grid).
-    pub color: [f32; 4],
-}
-
-// ── Session boundary marker ──────────────────────────────────────────
-
-/// A session boundary marker -- a faint vertical line between trading sessions.
-///
-/// Produced when `collapse_gaps` is enabled and there is a time gap between
-/// consecutive candles that exceeds the expected candle duration (e.g.,
-/// overnight gaps, weekend gaps).
-#[derive(Clone, Debug)]
-pub struct SessionBoundary {
-    /// X position in logical pixels (midpoint between the two adjacent candles).
-    pub x: f32,
-    /// RGBA color (typically very faint, e.g. `[0.3, 0.3, 0.4, 0.3]`).
-    pub color: [f32; 4],
-}
-
-// ── High-level scene types (non-Pod) ───────────────────────────────
-//
-// These are used by the chart logic layer (ChartScene) and are consumed
-// by both the grid/label builder and the renderer. They are NOT Pod because
-// they contain String and bool fields.
-
-/// A logical grid line with its position and label text.
-///
-/// Produced by the grid computation functions and consumed by both
-/// the label renderer and the grid line instance builder.
-#[derive(Clone, Debug)]
-pub struct GridLine {
-    /// Screen position: Y for horizontal (price) grid lines,
-    /// X for vertical (time) grid lines, in logical pixels.
-    pub position: f32,
-    /// Text to display on the axis (formatted price or time string).
-    pub label: String,
-    /// Major lines are brighter / thicker than minor lines.
-    pub is_major: bool,
-}
-
-/// A label displayed on the X or Y axis.
-///
-/// Used for crosshair axis labels and axis tick labels.
-#[derive(Clone, Debug)]
-pub struct AxisLabel {
-    /// The label text content.
-    pub text: String,
-    /// Screen X position in logical pixels.
-    pub screen_x: f32,
-    /// Screen Y position in logical pixels.
-    pub screen_y: f32,
-    /// Background color (RGBA) for the label badge.
-    pub bg_color: [f32; 4],
-    /// Text color (RGBA).
-    pub text_color: [f32; 4],
-}
-
-/// Render data for the crosshair overlay.
-///
-/// Produced by the chart state when the mouse is over the chart
-/// content area. Consumed by the crosshair rendering pipeline.
-#[derive(Clone, Debug)]
-pub struct CrosshairRender {
-    /// Vertical line X position (snapped to candle center), in logical pixels.
-    pub vertical_x: f32,
-    /// Horizontal line Y position (at cursor), in logical pixels.
-    pub horizontal_y: f32,
-    /// Price lens.
-    pub priceline_lens: AxisLabel,
-    /// Timeline lens.
-    pub timeline_lens: AxisLabel,
-    /// Line color (typically semi-transparent white or gray).
-    pub line_color: [f32; 4],
-    /// OHLCV data for the candle under the crosshair (TC2000-style data overlay).
-    pub ohlcv_overlay: Option<OhlcvOverlay>,
-}
-
-/// OHLCV data overlay displayed in the top-left corner of the chart
-/// when the crosshair is active (TC2000 "data box" style).
-#[derive(Clone, Debug)]
-pub struct OhlcvOverlay {
-    /// Symbol name (e.g. "AAPL").
-    pub symbol: String,
-    /// Formatted date/time string (e.g. "Fri 3/27/26 02:40:00 PM").
-    pub datetime: String,
-    /// Open price.
-    pub open: f32,
-    /// High price.
-    pub high: f32,
-    /// Low price.
-    pub low: f32,
-    /// Close price.
-    pub close: f32,
-    /// Volume.
-    pub volume: u32,
-    /// Whether this candle is bullish (close >= open).
-    pub is_bullish: bool,
-    /// Price change from previous candle close (if available).
-    pub change: Option<f32>,
-    /// Percentage change from previous candle close (if available).
-    pub change_pct: Option<f32>,
-}
-
-// ── Decorator badge instances ──────────────────────────────────────
-
-/// GPU instance data for a single decorator badge.
-///
-/// Consumed by the SDF `BadgePipeline` in `midas-render`; rendered with
-/// analytical anti-aliasing via `fwidth()`. The fragment shader dispatches
-/// on `shape_id` to pick an SDF primitive, so adding a shape means (a)
-/// appending a discriminant to `BadgeShape` in `widget::decorator::badge`
-/// and (b) adding a `case` to `badge.wgsl`. Reordering variants is
-/// forbidden — `badge_instance_shape_id_matches_enum` in this file's tests
-/// enforces the mapping.
-///
-/// Size: 64 bytes, 16-byte aligned — matches the WGSL vertex-attribute
-/// layout declared by `BadgePipeline`.
-///
-/// `shape_id` mapping:
-///
-/// | id | `BadgeShape`             | `shape_param`                   |
-/// |---:|--------------------------|---------------------------------|
-/// | 0  | `Rect`                   | unused                          |
-/// | 1  | `Rounded { radius }`     | `radius`                        |
-/// | 2  | `Pill`                   | unused (derived: `min(w,h)/2`)  |
-/// | 3  | `PointLeft { w }`        | `point_width`                   |
-/// | 4  | `PointRight { w }`       | `point_width`                   |
-/// | 5  | `DoublePoint { w }`      | `point_width`                   |
-/// | 6  | `Chevron { w }`          | `point_width`                   |
-/// | 7  | `Circle`                 | unused (derived: `min(w,h)/2`)  |
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
-pub struct BadgeInstance {
-    /// Screen-space bounding box `[x0, y0, x1, y1]` in logical pixels.
-    pub rect: [f32; 4],
-    /// Fill color in linear RGBA.
-    pub fill: [f32; 4],
-    /// Border color in linear RGBA; `alpha = 0` means no border.
-    pub border: [f32; 4],
-    /// Stable discriminant from `BadgeShape::shape_id()`.
-    pub shape_id: u32,
-    /// Shape parameter (radius / point_width) — see mapping table.
-    pub shape_param: f32,
-    /// Border thickness in logical pixels; `0.0` means no border.
-    pub border_thickness: f32,
-    /// Explicit padding to a 64-byte / 16-byte-aligned stride.
-    pub _pad: f32,
-}
+#[deprecated(
+    note = "import from midas_gpu_types directly; midas-chart will be deleted in slice 9c"
+)]
+pub use midas_gpu_types::{
+    AxisLabel, BadgeInstance, CandleInstance, CrosshairRender, GridLine, GridLineInstance,
+    OhlcvOverlay, SessionBoundary, VolumeInstance,
+};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytemuck::Zeroable;
     use std::mem;
 
     #[test]

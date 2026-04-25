@@ -9,7 +9,7 @@
 //! order is back-to-front and sits between candle bodies and the crosshair
 //! overlay — see `ChartRenderer::render()`.
 
-use midas_chart::BadgeInstance;
+use midas_gpu_types::BadgeInstance;
 use wgpu::util::DeviceExt;
 
 use super::{quad_vertex_buffer_layout, CameraUniform, UNIT_QUAD_VERTICES};

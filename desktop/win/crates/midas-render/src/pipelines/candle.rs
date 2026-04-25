@@ -7,7 +7,7 @@
 //! (swapped via bind group) controls which rectangle dimensions the
 //! vertex shader uses.
 
-use midas_chart::CandleInstance;
+use midas_gpu_types::CandleInstance;
 use wgpu::util::DeviceExt;
 
 use super::{quad_vertex_buffer_layout, CameraUniform, DrawParamsUniform, UNIT_QUAD_VERTICES};

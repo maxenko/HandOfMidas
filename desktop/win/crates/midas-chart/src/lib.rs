@@ -46,19 +46,25 @@ pub use crosshair_tool::{CrosshairMode, CrosshairTool};
 pub use dirty::{DirtyFlags, DirtyTracker};
 pub use gerchik_atr::GerchikAtrRender;
 pub use input::ChartInput;
-pub use instances::{
-    AxisLabel, BadgeInstance, CandleInstance, CrosshairRender, GridLine, GridLineInstance,
-    OhlcvOverlay, SessionBoundary, VolumeInstance,
-};
 pub use interaction::{
     handle_event, hit_to_chart_action, timeline_border_y, volume_handle_y, ChartAction, ChartEvent,
     Key, MouseButton,
 };
 pub use level_tool::{LevelTool, LevelToolMode};
 pub use levels::{price_step_for, HorizontalLevel, LevelIcon};
+#[deprecated(
+    note = "import from midas_gpu_types directly; midas-chart will be deleted in slice 9c"
+)]
+pub use midas_gpu_types::{
+    AxisLabel, BadgeInstance, CandleInstance, CrosshairRender, GridLine, GridLineInstance,
+    OhlcvOverlay, SessionBoundary, VolumeInstance,
+};
+#[deprecated(
+    note = "import from midas_gpu_types directly; midas-chart will be deleted in slice 9c"
+)]
+pub use midas_gpu_types::{Tier as TimelineTier, TimelineLabel};
 pub use scene::{ChartScene, SceneGenerations};
 pub use state::{ChartState, CursorClaim, InteractionMode, Momentum, YAnimation};
-pub use timeline::{Tier as TimelineTier, TimelineLabel};
 pub use volume_profile::{VolumeProfile, VolumeProfileBin};
 pub use widget::{Annotation, AnnotationId, AnnotationKind};
 

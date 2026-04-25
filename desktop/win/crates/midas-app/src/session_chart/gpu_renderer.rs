@@ -62,9 +62,9 @@
 // move lands as part of the atomic deletion PR, not here. Tracked under
 // `plan/chart-transition/00-index.md` slice 9c pre-deletion checklist.
 use midas_chart::compute::{LayerEnd, ANNOTATION_LAYER_COUNT};
-use midas_chart::instances::{GridLineInstance, VolumeInstance};
 use midas_chart::widget::compute::WidgetLabel;
-use midas_chart::{BadgeInstance, DirtyFlags, DirtyTracker};
+use midas_chart::{DirtyFlags, DirtyTracker};
+use midas_gpu_types::{BadgeInstance, GridLineInstance, VolumeInstance};
 use midas_render::renderer::{ChartRenderer, ChartScene};
 
 use super::primitives_bridge::{text_buckets_to_widget_labels, RenderBuckets};

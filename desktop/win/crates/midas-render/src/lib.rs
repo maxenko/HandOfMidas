@@ -60,7 +60,7 @@ mod tests {
 
     #[test]
     fn candle_instance_bytemuck_cast() {
-        use midas_chart::CandleInstance;
+        use midas_gpu_types::CandleInstance;
         let instance = CandleInstance {
             x: 100.0,
             body_top: 50.0,
@@ -78,7 +78,7 @@ mod tests {
 
     #[test]
     fn volume_instance_bytemuck_cast() {
-        use midas_chart::VolumeInstance;
+        use midas_gpu_types::VolumeInstance;
         let instance = VolumeInstance {
             x: 100.0,
             y_top: 800.0,
@@ -92,7 +92,7 @@ mod tests {
 
     #[test]
     fn grid_instance_bytemuck_cast() {
-        use midas_chart::GridLineInstance;
+        use midas_gpu_types::GridLineInstance;
         let instance = GridLineInstance {
             rect: [0.0, 500.0, 1920.0, 500.667],
             color: [1.0, 1.0, 1.0, 0.1],
@@ -103,7 +103,7 @@ mod tests {
 
     #[test]
     fn struct_sizes_match_gpu_layout() {
-        use midas_chart::{CandleInstance, GridLineInstance, VolumeInstance};
+        use midas_gpu_types::{CandleInstance, GridLineInstance, VolumeInstance};
         assert_eq!(std::mem::size_of::<CandleInstance>(), 48);
         assert_eq!(std::mem::size_of::<VolumeInstance>(), 32);
         assert_eq!(std::mem::size_of::<GridLineInstance>(), 32);

@@ -35,25 +35,22 @@ use std::sync::Arc;
 use iced::widget::shader::{self, Viewport};
 use iced::{mouse, Event, Rectangle};
 
+use midas_annotation_types::order_bracket::BracketStatus;
+use midas_annotation_types::{Annotation, AnnotationId, AnnotationKind};
 use midas_chart::camera::Camera2D;
 use midas_chart::dirty::{DirtyFlags, DirtyTracker};
 use midas_chart::input::ChartInput;
 use midas_chart::interaction::{handle_event, ChartEvent};
 use midas_chart::level_tool::LevelTool;
-#[allow(unused_imports)]
-use midas_chart::levels::HorizontalLevel;
+use midas_chart::levels::HorizontalLevelExt;
 
+use midas_chart::compute_chart_scene;
 use midas_chart::scene::ChartScene;
 use midas_chart::state::{ChartState, InteractionMode};
 use midas_chart::widget::hit_test::HitZoneKind;
-use midas_chart::widget::order_bracket::BracketStatus;
-use midas_chart::widget::{Annotation, AnnotationKind};
-use midas_chart::{
-    compute_chart_scene, AnnotationId, CandleInstance, CrosshairRender, GridLineInstance,
-    VolumeInstance,
-};
 use midas_core::ChartId;
 use midas_data::CandleBuffer;
+use midas_gpu_types::{CandleInstance, CrosshairRender, GridLineInstance, VolumeInstance};
 use midas_render::color::dark_theme;
 use midas_render::renderer::ChartScene as RenderScene;
 use midas_render::ChartRenderer;
@@ -192,7 +189,7 @@ fn annotation_at_cursor(
     camera: &Camera2D,
     cursor_y: f32,
 ) -> Option<(AnnotationId, HitZoneKind)> {
-    use midas_chart::widget::order_bracket::EntryType;
+    use midas_annotation_types::order_bracket::EntryType;
 
     let mut best: Option<(AnnotationId, HitZoneKind, f32)> = None;
     let tolerance = 6.0_f32;
@@ -835,7 +832,7 @@ impl shader::Program<Message> for ChartProgram {
             .and_then(|drag_id| {
                 snap.annotations.iter().find_map(|ann| match &ann.kind {
                     AnnotationKind::Level(level) if level.id == drag_id => Some((
-                        midas_chart::widget::AnnotationId(level.id),
+                        midas_annotation_types::AnnotationId(level.id),
                         level.line.price,
                     )),
                     _ => None,
@@ -1056,7 +1053,7 @@ struct ChartGpuResources {
     /// Cached Volume Profile histogram bars.
     volume_profile_instances: Vec<GridLineInstance>,
     /// Cached SDF decorator badge instances.
-    badges: Vec<midas_chart::BadgeInstance>,
+    badges: Vec<midas_gpu_types::BadgeInstance>,
     /// Cached widget text labels — rendered via the cryoglyph text
     /// pipeline alongside the SDF badges.
     labels: Vec<midas_chart::widget::compute::WidgetLabel>,

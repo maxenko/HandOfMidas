@@ -4,7 +4,7 @@
 //! `[left, top, right, bottom]` bounds. Uses alpha blending for
 //! subtle grid line appearance.
 
-use midas_chart::GridLineInstance;
+use midas_gpu_types::GridLineInstance;
 use wgpu::util::DeviceExt;
 
 use super::{quad_vertex_buffer_layout, CameraUniform, UNIT_QUAD_VERTICES};

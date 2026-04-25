@@ -5,7 +5,7 @@
 //! load?" and "what does the GATR snap fall back to when its math would
 //! land a leg exactly on the current price?".
 
-use midas_chart::widget::order_bracket::EntryType;
+use midas_annotation_types::order_bracket::EntryType;
 
 use crate::order_panel::OrderSide;
 

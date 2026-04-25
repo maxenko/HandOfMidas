@@ -6,14 +6,14 @@
 //!
 //! ## Chart-transition slice 8.5 status
 //!
-//! The `midas_chart::widget::Annotation` import is the shared persistent
+//! The `midas_annotation_types::Annotation` import is the shared persistent
 //! annotation shape (plan D9 — `AnnotationStore` format unchanged).
 //! Session-chart paths never call this module directly; all persistence
 //! lookups route through `AnnotationStore`. The type migrates to its
 //! new home in slice 9c's atomic deletion PR.
 
 use crate::annotation_store::AnnotationStore;
-use midas_chart::widget::Annotation;
+use midas_annotation_types::Annotation;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -205,12 +205,13 @@ pub fn store_from_files(files: HashMap<String, Vec<Annotation>>) -> AnnotationSt
             max_id = max_id.max(ann.id.0);
             let mut ann = ann.clone();
 
-            if let midas_chart::widget::AnnotationKind::OrderBracket(ref mut b) = ann.kind {
+            if let midas_annotation_types::AnnotationKind::OrderBracket(ref mut b) = ann.kind {
                 // Normalize bracket data to match entry_type rules.
                 crate::order_panel::normalize_bracket(b);
 
                 // Unsaved Draft brackets don't survive restart.
-                if b.status == midas_chart::widget::order_bracket::BracketStatus::Draft && !b.saved
+                if b.status == midas_annotation_types::order_bracket::BracketStatus::Draft
+                    && !b.saved
                 {
                     max_id = max_id.max(ann.id.0);
                     continue;
@@ -229,9 +230,10 @@ pub fn store_from_files(files: HashMap<String, Vec<Annotation>>) -> AnnotationSt
 #[cfg(test)]
 mod tests {
     use super::*;
-    use midas_chart::levels::LevelIcon;
-    use midas_chart::widget::price_line::{LineExtent, LineStroke, PriceLine};
-    use midas_chart::widget::{AnnotationId, AnnotationKind, HorizontalLevel, LineStyle, Presence};
+    use midas_annotation_types::price_line::{LineExtent, LineStroke, PriceLine};
+    use midas_annotation_types::{
+        AnnotationId, AnnotationKind, HorizontalLevel, LevelIcon, LineStyle, Presence,
+    };
     use tempfile::TempDir;
 
     fn make_test_annotation(id: u64, price: f64) -> Annotation {

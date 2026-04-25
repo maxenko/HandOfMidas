@@ -1,0 +1,28 @@
+[package]
+name = "midas-annotation-types"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Pure-data leaf crate carrying the persistent annotation type tree
+# (`Annotation`, `AnnotationKind`, `HorizontalLevel`, `OrderBracket`, …)
+# extracted from `midas-chart` so the chart crate can be deleted in a
+# downstream slice without dragging the wire-format types with it.
+#
+# **Deviation from the A1 plan:** the plan's "no `midas-core`
+# dependency" rule cannot be honoured because `Annotation` references
+# `midas_core::Timeframe` (`should_render_on(Timeframe) -> bool` etc.).
+# `midas-core` is a low-churn shared-types crate already present in
+# every dependent's graph, so the practical recompile impact is nil.
+# The dep is restricted to `Timeframe`; nothing else from `midas-core`
+# is used here.
+
+[dependencies]
+midas-core = { path = "../midas-core" }
+
+serde     = { workspace = true }
+smallvec  = { workspace = true }
+tracing   = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

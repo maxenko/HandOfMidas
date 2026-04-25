@@ -9,6 +9,7 @@
 //! or click to select. The `PendingDrag` state resolves this ambiguity once
 //! the mouse has moved past the drag threshold (4px).
 
+use crate::levels::HorizontalLevelExt;
 use crate::state::{ChartState, CursorClaim, InteractionMode};
 use crate::widget::decorator::DecoratorAction;
 use crate::widget::hit_test::{HitResult, HitZoneKind, ItemPath};

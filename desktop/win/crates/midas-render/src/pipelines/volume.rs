@@ -3,7 +3,7 @@
 //! Each volume bar is a filled rectangle with alpha blending. Unlike the
 //! candle pipeline, there is no draw_mode — it is a single draw call.
 
-use midas_chart::VolumeInstance;
+use midas_gpu_types::VolumeInstance;
 use wgpu::util::DeviceExt;
 
 use super::{quad_vertex_buffer_layout, CameraUniform, UNIT_QUAD_VERTICES};

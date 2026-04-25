@@ -28,35 +28,18 @@ const MAX_LABELS: usize = 50;
 const MIN_LABEL_SPACING_PX: f32 = 60.0;
 
 // ── Public types ────────────────────────────────────────────────────
+//
+// `Tier` and `TimelineLabel` were moved to the `midas-gpu-types` leaf
+// crate in slice A2 (so `midas-chart` can be retired without dragging
+// the rendered-label record with it). They are re-exported here so
+// callers using `midas_chart::timeline::TimelineLabel` keep compiling.
+// Slice A2b will add `#[deprecated]` to these re-exports once consumer
+// migration is complete.
 
-/// Display tier: which date component is shown as the primary label.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Tier {
-    /// "12:45 p", "1:00 p" — minute-level labels.
-    Minute,
-    /// "10 a", "1 p" — hour-level labels.
-    Hour,
-    /// "5", "12", "29" — day-of-month numbers.
-    Day,
-    /// "Jan", "Feb", "Mar" — month names.
-    Month,
-}
-
-/// A single positioned timeline label for the time axis.
-#[derive(Clone, Debug)]
-pub struct TimelineLabel {
-    /// Primary label text (e.g. "10 a", "5", "Jan").
-    pub text: String,
-    /// Boundary (secondary) text shown at tier transitions
-    /// (e.g. "Mar 26, 2026" at a day boundary). `None` for regular labels.
-    pub secondary: Option<String>,
-    /// Screen X position in logical pixels.
-    pub screen_x: f32,
-    /// Whether this label sits at a higher-order boundary.
-    pub is_boundary: bool,
-    /// The display tier this label belongs to (Minute, Hour, Day, Month).
-    pub tier: Tier,
-}
+#[deprecated(
+    note = "import from midas_gpu_types directly; midas-chart will be deleted in slice 9c"
+)]
+pub use midas_gpu_types::{Tier, TimelineLabel};
 
 // ── Public API ──────────────────────────────────────────────────────
 

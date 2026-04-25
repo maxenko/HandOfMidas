@@ -12,8 +12,8 @@
 use std::collections::HashMap;
 
 use chrono::Utc;
-use midas_chart::widget::order_bracket::{EntryType, OrderBracket};
-use midas_chart::widget::AnnotationId;
+use midas_annotation_types::order_bracket::{EntryType, OrderBracket};
+use midas_annotation_types::AnnotationId;
 
 use crate::annotation_store::{StoredLevel, SymbolKey};
 use crate::order_panel::OrderSide;
