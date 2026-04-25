@@ -25,7 +25,12 @@ pub struct SimMarketDataConfig {
     /// Tick sample window (BR-11). Default 250 ms.
     pub tick_cadence_ms: u64,
     /// Peak per-tick drift in basis points (uniform random in
-    /// `[-drift_bps, +drift_bps]`). Default 10 bps.
+    /// `[-drift_bps, +drift_bps]`). Default 1 bp — at the 250 ms tick
+    /// cadence that's ≈ 1.6 % std-dev per minute (ceiling), within
+    /// realistic intraday volatility for liquid US equities. The
+    /// previous default of 10 bps produced a 16 % per-minute std-dev
+    /// drift that visibly out-paced the historical-bar price action
+    /// on every chart load.
     pub tick_drift_bps: f64,
     /// Emit the initial burst on subscribe. Default `true`.
     pub burst_enabled: bool,
@@ -60,7 +65,7 @@ impl Default for SimMarketDataConfig {
     fn default() -> Self {
         Self {
             tick_cadence_ms: 250,
-            tick_drift_bps: 10.0,
+            tick_drift_bps: 1.0,
             burst_enabled: true,
             burst_delay_ms: 50,
             farm_up_delay_ms: 100,

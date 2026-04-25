@@ -122,6 +122,85 @@ async fn initial_burst_emits_all_tick_types() {
 }
 
 // ────────────────────────────────────────────────────────────────────────
+// 1c. Chart-load smoke: historical's last close ≈ burst's Last tick
+//
+// Mirrors the actual user-facing symptom: chart loads → calls
+// historical_bars(end=now) → subscribes for live ticks → first Quote.last
+// gets folded into the last historical bar via update_last_price. If
+// historical and live disagree (as they did before the seed_price_for
+// re-anchor), the gap shows as a runaway candle. This test pins the
+// invariant: |historical_last_close - burst_last_tick| stays small.
+// ────────────────────────────────────────────────────────────────────────
+#[tokio::test(start_paused = true)]
+async fn chart_load_historical_and_burst_agree_on_price() {
+    use midas_broker_core::market_data::{TickValue, WhatToShow};
+
+    let sim = SimMarketData::new(fast_config());
+
+    // Let the sim's tick emitter run for a while so market_price
+    // could (under the old behaviour) drift far from the historical
+    // price level. After this advance, a bug-resurrected sim would
+    // report a market_price several percent off the historical close.
+    advance_stepped(Duration::from_secs(60), Duration::from_millis(250)).await;
+
+    // The chart's actual call sequence: historical first, then subscribe.
+    let hist = sim
+        .historical_bars(
+            &aapl(),
+            1,
+            chrono::Utc::now(),
+            IbDuration::Days(1),
+            Timeframe::M1,
+            WhatToShow::Trades,
+            true,
+        )
+        .await
+        .unwrap();
+    let historical_last_close = hist
+        .bars
+        .last()
+        .expect("historical fetch returned no bars")
+        .c;
+
+    let mut stream = sim
+        .subscribe_ticks(&aapl(), 1, GenericTicks::new())
+        .await
+        .unwrap();
+    advance(Duration::from_millis(200)).await;
+
+    // First Last tick from the burst must agree with historical's
+    // last close — that's the value `update_last_price` will fold
+    // into the chart's in-progress candle.
+    let mut burst_last: Option<f64> = None;
+    for _ in 0..32 {
+        match stream.next().await {
+            Ok(t) if matches!(t.kind, TickKind::Price) && matches!(t.tick_type, TickType::Last) => {
+                if let TickValue::Price(p) = t.value {
+                    burst_last = Some(p);
+                    break;
+                }
+            }
+            Ok(_) => continue,
+            Err(_) => break,
+        }
+    }
+    let burst_last = burst_last.expect("burst missing Last tick");
+
+    // Tolerance: within 1% of the historical close. The re-anchor
+    // pulls market_price to the same TestDataProvider call the
+    // historical query used, so the only slack is the (tiny) clock
+    // skew between the two `Utc::now()` reads in the sim. A bug
+    // resurrection — drift from base_price unmoored from
+    // TestDataProvider — produces multi-percent gaps.
+    let gap_pct = ((burst_last - historical_last_close) / historical_last_close).abs() * 100.0;
+    assert!(
+        gap_pct < 1.0,
+        "historical last close ({historical_last_close}) and burst Last ({burst_last}) disagree by \
+         {gap_pct:.2}% — chart will show a runaway candle"
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────────
 // 2. Multiple subs fan out independently
 // ────────────────────────────────────────────────────────────────────────
 #[tokio::test(start_paused = true)]
