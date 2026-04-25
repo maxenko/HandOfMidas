@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use futures::Stream;
-use midas_broker_core::market_data::{Quote, SymbolKey};
+use midas_broker_core::market_data::{EndReason, Quote, SymbolKey};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio_stream::wrappers::BroadcastStream;
 
@@ -47,6 +47,17 @@ impl GuardCtrl {
     /// the actor's post-recv decrement; if the actor is already down
     /// we roll the bump back.
     fn send(&self, msg: RouterMsg) {
+        self.send_msg(msg);
+    }
+
+    /// Pub-crate fire-and-forget control-plane send. Same balanced
+    /// `bump_backlog` / `fetch_sub`-on-error semantics as
+    /// [`MarketDataRouter::send_control`] — used by publishers (slice
+    /// B2 `UpstreamClosed`) so the router-wide backlog counter stays
+    /// in lockstep with the actor's per-recv decrement.
+    ///
+    /// [`MarketDataRouter::send_control`]: super::MarketDataRouter
+    pub(crate) fn send_msg(&self, msg: RouterMsg) {
         bump_backlog(&self.backlog, &self.backlog_warned);
         if self.control.send(msg).is_err() {
             self.backlog
@@ -128,14 +139,42 @@ pub struct SubscriptionHandle<T> {
     /// `Some` while the handle is live. Holds the RAII guard whose
     /// drop fires `DecRef` on the router.
     _guard: Box<dyn Guard>,
+    /// Per-hub end-reason watch (slice B2).
+    ///
+    /// The router flips this to `Some(reason)` when the upstream
+    /// stream is fully closed (`broadcast::error::RecvError::Closed`)
+    /// before the hub's broadcast senders drop. Consumers that want
+    /// to distinguish "graceful upstream end" from "lagged" or "we
+    /// dropped" call [`SubscriptionHandle::end_reason`] to clone a
+    /// receiver they can observe alongside `recv`.
+    end_reason_rx: watch::Receiver<Option<EndReason>>,
 }
 
 impl<T: Clone + Send + Sync + 'static> SubscriptionHandle<T> {
     /// Build a handle from its parts.
     ///
     /// Pub-crate only — the router actor is the sole constructor.
-    pub(crate) fn new(rx: broadcast::Receiver<Arc<T>>, guard: Box<dyn Guard>) -> Self {
-        Self { rx, _guard: guard }
+    pub(crate) fn new(
+        rx: broadcast::Receiver<Arc<T>>,
+        guard: Box<dyn Guard>,
+        end_reason_rx: watch::Receiver<Option<EndReason>>,
+    ) -> Self {
+        Self {
+            rx,
+            _guard: guard,
+            end_reason_rx,
+        }
+    }
+
+    /// Clone a receiver on the per-hub end-reason watch (slice B2).
+    ///
+    /// The watch starts at `None`; the router flips it to
+    /// `Some(reason)` once the upstream stream closes. After the flip
+    /// the broadcast lane's `recv` will eventually return `Closed`,
+    /// at which point the consumer can read the reason via this
+    /// receiver to decide whether to re-subscribe.
+    pub fn end_reason(&self) -> watch::Receiver<Option<EndReason>> {
+        self.end_reason_rx.clone()
     }
 
     /// Borrow-based receive. Handle retains ownership of rx + guard,

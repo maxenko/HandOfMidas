@@ -11,11 +11,13 @@
 //! publisher holds `Arc<SymbolHub>` directly. The DashMap is only
 //! consulted by the control actor on subscribe/unsubscribe.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicI64, AtomicU32, AtomicUsize};
 use std::sync::{Arc, OnceLock, Weak};
+use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
-use midas_broker_core::market_data::{Bar, ContractDetails, Quote, SymbolKey, Tick};
+use midas_broker_core::market_data::{Bar, ContractDetails, EndReason, Quote, SymbolKey, Tick};
 use parking_lot::Mutex;
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
@@ -79,6 +81,13 @@ pub(crate) struct RouterState {
     /// we log at most once per lifetime of the router. Shared via
     /// `Arc` so per-guard DecRef sends can use the same one-shot gate.
     pub(crate) backlog_warned: Arc<std::sync::atomic::AtomicBool>,
+    /// Symbols whose hub was torn down by an `UpstreamClosed` event
+    /// and have not yet been re-subscribed (slice B2). The actor
+    /// inserts on tear-down and removes on the next first-subscribe
+    /// for that symbol; the latter path emits a `tracing::info!`
+    /// "upstream reopened; new hub" for diagnostic symmetry with the
+    /// tear-down warn.
+    pub(crate) previously_disconnected: Mutex<HashSet<SymbolKey>>,
 }
 
 /// Per-symbol fan-out record.
@@ -127,6 +136,22 @@ pub(crate) struct SymbolHub {
     /// Timestamp (unix-ms) of the most recent tick published through
     /// `ticks_tx`. Observability hook for `debug_dump` (M-28).
     pub(crate) last_tick_ts: AtomicI64,
+
+    /// Hub-creation instant — used by [`Self::uptime`] to surface
+    /// `hub_uptime_ms` in the `UpstreamClosed` warn log (slice B2).
+    pub(crate) created_at: Instant,
+
+    /// Per-hub end-reason watch (slice B2).
+    ///
+    /// Initial value is `None`; on `UpstreamClosed` the actor flips
+    /// it to `Some(reason)` BEFORE removing the hub from
+    /// `RouterState::per_symbol`, so consumers that subscribe to this
+    /// watch (via [`SubscriptionHandle::end_reason`]) can observe the
+    /// reason as the last lifecycle signal before the broadcast
+    /// channels close.
+    ///
+    /// [`SubscriptionHandle::end_reason`]: super::handle::SubscriptionHandle::end_reason
+    pub(crate) end_reason_tx: watch::Sender<Option<EndReason>>,
 }
 
 impl SymbolHub {
@@ -135,6 +160,7 @@ impl SymbolHub {
     pub(crate) fn new(symbol: SymbolKey) -> Arc<Self> {
         let (ticks_tx, _) = broadcast::channel(TICKS_CAP);
         let (last_quote_tx, _) = watch::channel(Quote::default());
+        let (end_reason_tx, _) = watch::channel(None);
         Arc::new(Self {
             symbol,
             ticks_tx,
@@ -146,6 +172,8 @@ impl SymbolHub {
             tick_publisher_task: Mutex::new(None),
             rt_bar_publisher_task: Mutex::new(None),
             last_tick_ts: AtomicI64::new(0),
+            created_at: Instant::now(),
+            end_reason_tx,
         })
     }
 
@@ -158,5 +186,30 @@ impl SymbolHub {
                 tx
             })
             .clone()
+    }
+
+    /// Sum of all live consumer refcounts (tick + rt-bar + watch).
+    ///
+    /// Surfaced in the `UpstreamClosed` warn log (slice B2) so the
+    /// operator sees how many consumers a tear-down affected.
+    pub(crate) fn refcount(&self) -> u32 {
+        self.tick_refcount
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .saturating_add(
+                self.rt_bar_refcount
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            )
+            .saturating_add(
+                self.watch_refcount
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            )
+    }
+
+    /// Wall-clock time since the hub was constructed.
+    ///
+    /// Surfaced in the `UpstreamClosed` warn log (slice B2) as
+    /// `hub_uptime_ms` so the operator can correlate disconnect bursts.
+    pub(crate) fn uptime(&self) -> Duration {
+        self.created_at.elapsed()
     }
 }

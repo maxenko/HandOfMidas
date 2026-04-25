@@ -11,7 +11,9 @@ use chrono::{TimeZone, Utc};
 use futures::StreamExt;
 use midas_broker::sim::{SimMarketData, SimMarketDataConfig};
 use midas_broker::MarketDataSource;
-use midas_broker_core::market_data::{IbDuration, MarketDataError, SymbolKey, Timeframe};
+use midas_broker_core::market_data::{
+    EndReason, IbDuration, MarketDataError, SymbolKey, Timeframe,
+};
 use midas_market_data::MarketDataRouter;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::time::sleep;
@@ -879,5 +881,126 @@ async fn control_backlog_drains_under_healthy_traffic() {
         router.control_backlog(),
         0,
         "backlog must drain to zero under healthy traffic"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Slice B2 — router disconnect policy: full upstream close emits
+// `EndReason::Disconnected` on the per-hub end-reason watch, then the
+// hub is dropped from `state.per_symbol` and a follow-up subscribe
+// re-spawns a fresh hub.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn upstream_disconnect_emits_end_reason_then_closes() {
+    use midas_broker_core::market_data::FarmCode;
+
+    let (router, sim) = build_router();
+    let sym = aapl();
+
+    // Two consumers on the same symbol — the disconnect policy must
+    // fan out the end-reason to both.
+    let h1 = router.subscribe_ticks(sym.clone()).await.expect("sub1");
+    let h2 = router.subscribe_ticks(sym.clone()).await.expect("sub2");
+
+    // Snapshot the end-reason watch BEFORE the disconnect — both
+    // receivers should observe `Some(Disconnected)` after the actor
+    // processes the publisher's `UpstreamClosed`.
+    let mut end1 = h1.end_reason();
+    let mut end2 = h2.end_reason();
+    assert_eq!(*end1.borrow(), None, "watch starts at None pre-disconnect");
+    assert_eq!(*end2.borrow(), None, "watch starts at None pre-disconnect");
+
+    // Sanity: hub is in the map before the disconnect.
+    let pre = router.debug_dump().await;
+    assert!(
+        pre.iter().any(|s| s.symbol == sym),
+        "hub must be present pre-disconnect: {pre:?}"
+    );
+
+    // Drop the upstream stream by simulating a full connection loss.
+    // `simulate_connection_lost(ConnectionLost)` synchronously closes
+    // every active subscription's broadcast sender; the router's tick
+    // publisher observes `RecvError::Closed` and notifies the actor
+    // via `UpstreamClosed`.
+    sim.simulate_connection_lost(FarmCode::ConnectionLost);
+
+    // Let the publisher task observe the close and the actor process
+    // the `UpstreamClosed` message. Under `start_paused = true` the
+    // tasks still run; we only need to advance once their work has
+    // hit a `tokio::time::*` boundary (none in this path), but a tiny
+    // advance lets the queued tasks make progress before we poll.
+    tokio::time::advance(Duration::from_millis(50)).await;
+
+    // Each consumer's end-reason watch must flip to
+    // `Some(EndReason::Disconnected)`. `changed()` returns once the
+    // value moves off the initial `None`.
+    let r1 = tokio::time::timeout(Duration::from_secs(1), end1.changed()).await;
+    assert!(
+        r1.is_ok() && r1.unwrap().is_ok(),
+        "consumer 1 should observe a watch change for the disconnect"
+    );
+    assert_eq!(
+        *end1.borrow(),
+        Some(EndReason::Disconnected),
+        "consumer 1 must see EndReason::Disconnected"
+    );
+
+    let r2 = tokio::time::timeout(Duration::from_secs(1), end2.changed()).await;
+    assert!(
+        r2.is_ok() && r2.unwrap().is_ok(),
+        "consumer 2 should observe a watch change for the disconnect"
+    );
+    assert_eq!(
+        *end2.borrow(),
+        Some(EndReason::Disconnected),
+        "consumer 2 must see EndReason::Disconnected"
+    );
+
+    // Subsequent broadcast `recv` on each handle must yield `Closed`
+    // (the hub Arc has dropped, taking its broadcast senders with it).
+    let mut h1 = h1;
+    let mut h2 = h2;
+    let recv1 = tokio::time::timeout(Duration::from_secs(1), h1.recv()).await;
+    assert!(
+        matches!(recv1, Ok(Err(RecvError::Closed))),
+        "consumer 1 broadcast must close after disconnect; got {recv1:?}"
+    );
+    let recv2 = tokio::time::timeout(Duration::from_secs(1), h2.recv()).await;
+    assert!(
+        matches!(recv2, Ok(Err(RecvError::Closed))),
+        "consumer 2 broadcast must close after disconnect; got {recv2:?}"
+    );
+
+    // `state.per_symbol` no longer contains the hub. The public
+    // `debug_dump()` is the in-process projection of that map.
+    let post = router.debug_dump().await;
+    assert!(
+        post.iter().all(|s| s.symbol != sym),
+        "per_symbol must drop the hub after upstream close: {post:?}"
+    );
+
+    // Drop the now-defunct handles so any DecRef draining is balanced.
+    drop(h1);
+    drop(h2);
+    tokio::time::advance(Duration::from_millis(50)).await;
+
+    // Follow-up subscribe re-spawns a fresh hub. The sim's emitter is
+    // silenced (`tick_cadence_ms: 60_000`) but the upstream call count
+    // increments — proving the router went through the first-subscribe
+    // path again rather than reusing a stale entry.
+    let pre_calls = sim.tick_subscribe_call_count();
+    let _h3 = router.subscribe_ticks(sym.clone()).await.expect("re-sub");
+    tokio::time::advance(Duration::from_millis(20)).await;
+
+    let dump = router.debug_dump().await;
+    assert!(
+        dump.iter().any(|s| s.symbol == sym),
+        "re-subscribe must spawn a fresh hub: {dump:?}"
+    );
+    assert_eq!(
+        sim.tick_subscribe_call_count(),
+        pre_calls + 1,
+        "re-subscribe must trigger a fresh upstream subscribe_ticks call"
     );
 }

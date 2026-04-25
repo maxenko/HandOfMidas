@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Weak};
 
 use midas_broker_core::market_data::{Bar, MarketDataError, SymbolKey, Timeframe};
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{broadcast, watch, Mutex, RwLock};
 use tokio::task::JoinHandle;
 
 use crate::router::{Guard, MarketDataRouter, SubscriptionHandle};
@@ -52,6 +52,20 @@ pub(crate) struct AggregatorEntry {
     /// turn drops the upstream `SubscriptionHandle<Bar>` and `DecRef`s
     /// the router's RT-bar hub.
     task: JoinHandle<()>,
+    /// Per-aggregator end-reason watch (slice B2 API parity).
+    ///
+    /// Aggregator handles do not flow through
+    /// `RouterState::per_symbol`, so the slice-B2 disconnect policy
+    /// does not flip this directly today — but
+    /// [`SubscriptionHandle::end_reason`] requires every handle to
+    /// carry one for shape consistency. Held in the entry so the
+    /// receiver clones we hand out stay open as long as the entry
+    /// lives; on entry drop the watch closes and any leftover
+    /// receivers observe `RecvError` on `changed()`, which is
+    /// indistinguishable from "aggregator exited".
+    ///
+    /// [`SubscriptionHandle::end_reason`]: crate::router::SubscriptionHandle::end_reason
+    end_reason_tx: watch::Sender<Option<midas_broker_core::market_data::EndReason>>,
 }
 
 impl Drop for AggregatorEntry {
@@ -144,11 +158,13 @@ impl BarAggregatorRegistry {
                 bars_tx.clone(),
                 last_bar_slot.clone(),
             ));
+            let (end_reason_tx, _) = watch::channel(None);
             let entry = Arc::new(AggregatorEntry {
                 bars_tx,
                 refcount: AtomicU32::new(0),
                 last_bar: last_bar_slot,
                 task,
+                end_reason_tx,
             });
             map.insert(key.clone(), entry.clone());
             entry
@@ -156,6 +172,7 @@ impl BarAggregatorRegistry {
 
         entry.refcount.fetch_add(1, Ordering::Relaxed);
         let rx = entry.bars_tx.subscribe();
+        let end_rx = entry.end_reason_tx.subscribe();
         // Release the map before constructing the handle so consumers
         // never see the map locked while the actor is pumping.
         drop(map);
@@ -164,7 +181,7 @@ impl BarAggregatorRegistry {
             key,
             registry: self.weak_self.clone(),
         });
-        Ok(SubscriptionHandle::new(rx, guard))
+        Ok(SubscriptionHandle::new(rx, guard, end_rx))
     }
 
     /// Snapshot accessor for `(symbol, tf)`'s most recent emitted bar.

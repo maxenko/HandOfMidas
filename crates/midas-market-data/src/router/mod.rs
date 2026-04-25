@@ -96,6 +96,7 @@ impl MarketDataRouter {
                 aggregator_registry: registry,
                 backlog: Arc::clone(&backlog),
                 backlog_warned: Arc::clone(&backlog_warned),
+                previously_disconnected: parking_lot::Mutex::new(std::collections::HashSet::new()),
             });
             let actor_state = state.clone();
             let actor_control = control_tx.clone();

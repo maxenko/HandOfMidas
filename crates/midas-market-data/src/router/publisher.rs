@@ -12,11 +12,27 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use midas_broker_core::market_data::{Quote, Tick, TickKind, TickType, TickValue};
+use midas_broker_core::market_data::{EndReason, Quote, Tick, TickKind, TickType, TickValue};
 use midas_broker_core::provider::{RealtimeBarStream, TickStream};
 use tokio::sync::broadcast::error::RecvError;
 
+use super::actor::RouterMsg;
+use super::handle::GuardCtrl;
 use super::state::{SymbolHub, PUBLISHER_AUTO_EXIT_STREAK};
+
+/// Notify the control actor that the publisher's upstream is fully
+/// closed (slice B2).
+///
+/// Fire-and-forget through [`GuardCtrl::send_msg`] so the backlog
+/// counter stays balanced with the actor's post-recv decrement (every
+/// other control-plane message goes through `bump_backlog` /
+/// `send_control`; this one must too, or the counter wraps).
+fn notify_upstream_closed(ctrl: &GuardCtrl, hub: &SymbolHub, reason: EndReason) {
+    ctrl.send_msg(RouterMsg::UpstreamClosed {
+        symbol: hub.symbol.clone(),
+        reason,
+    });
+}
 
 /// Tick publisher.
 ///
@@ -24,7 +40,17 @@ use super::state::{SymbolHub, PUBLISHER_AUTO_EXIT_STREAK};
 /// the wire subscription. Auto-exits after
 /// [`PUBLISHER_AUTO_EXIT_STREAK`] consecutive "no broadcast AND no
 /// watch receivers" iterations (M-4 + NB-3).
-pub(crate) async fn run_tick_publisher(hub: Arc<SymbolHub>, mut upstream: TickStream) {
+///
+/// On a full upstream close (`RecvError::Closed`) the publisher
+/// notifies the control actor with [`RouterMsg::UpstreamClosed`]
+/// (slice B2) before returning, so the actor can flip the per-hub
+/// end-reason watch, tear the hub down, and emit the structured warn
+/// log.
+pub(crate) async fn run_tick_publisher(
+    hub: Arc<SymbolHub>,
+    mut upstream: TickStream,
+    ctrl: GuardCtrl,
+) {
     let mut zero_streak: u32 = 0;
     loop {
         match upstream.next().await {
@@ -75,9 +101,13 @@ pub(crate) async fn run_tick_publisher(hub: Arc<SymbolHub>, mut upstream: TickSt
             }
             Err(RecvError::Closed) => {
                 tracing::debug!(symbol = %hub.symbol, "tick publisher upstream closed");
-                // Dropping `upstream` here cascades the cancel
-                // closure; consumers of `hub.ticks_tx` will observe
-                // `Closed` on next `recv()`.
+                // Slice B2: notify the actor so it can tear the hub
+                // down cleanly (publish EndReason on the per-hub
+                // watch + remove from per_symbol). Dropping `upstream`
+                // here also cascades the cancel closure; consumers of
+                // `hub.ticks_tx` will observe `Closed` on next
+                // `recv()` once the hub Arc finally drops.
+                notify_upstream_closed(&ctrl, &hub, EndReason::Disconnected);
                 return;
             }
         }
@@ -88,8 +118,14 @@ pub(crate) async fn run_tick_publisher(hub: Arc<SymbolHub>, mut upstream: TickSt
 ///
 /// Mirrors [`run_tick_publisher`] but against `hub.rt_bars_tx`.
 /// Auto-exit considers only the broadcast receiver count — there is
-/// no "watch counterpart" for RT bars.
-pub(crate) async fn run_rt_bar_publisher(hub: Arc<SymbolHub>, mut upstream: RealtimeBarStream) {
+/// no "watch counterpart" for RT bars. On full upstream close the
+/// publisher notifies the actor via [`RouterMsg::UpstreamClosed`]
+/// (slice B2).
+pub(crate) async fn run_rt_bar_publisher(
+    hub: Arc<SymbolHub>,
+    mut upstream: RealtimeBarStream,
+    ctrl: GuardCtrl,
+) {
     let mut zero_streak: u32 = 0;
     loop {
         match upstream.next().await {
@@ -130,6 +166,8 @@ pub(crate) async fn run_rt_bar_publisher(hub: Arc<SymbolHub>, mut upstream: Real
             }
             Err(RecvError::Closed) => {
                 tracing::debug!(symbol = %hub.symbol, "rt-bar publisher upstream closed");
+                // Slice B2: notify the actor (see tick publisher).
+                notify_upstream_closed(&ctrl, &hub, EndReason::Disconnected);
                 return;
             }
         }

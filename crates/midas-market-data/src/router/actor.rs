@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use midas_broker_core::market_data::{
-    Bar, MarketDataError, SecurityType, SymbolKey, Tick, WhatToShow,
+    Bar, EndReason, MarketDataError, SecurityType, SymbolKey, Tick, WhatToShow,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -114,6 +114,14 @@ pub(crate) enum RouterMsg {
     DebugDump {
         reply: oneshot::Sender<Vec<SymbolDebugInfo>>,
     },
+    /// Publisher observed `RecvError::Closed` on its upstream stream
+    /// (slice B2). The actor flips the per-hub end-reason watch,
+    /// emits a structured `warn!`, aborts any sibling publisher, and
+    /// drops the hub from `per_symbol`.
+    UpstreamClosed {
+        symbol: SymbolKey,
+        reason: EndReason,
+    },
     Shutdown,
 }
 
@@ -156,6 +164,9 @@ pub(crate) async fn run_control_actor(
             RouterMsg::DebugDump { reply } => {
                 let snap = collect_debug_dump(&state);
                 let _ = reply.send(snap);
+            }
+            RouterMsg::UpstreamClosed { symbol, reason } => {
+                handle_upstream_closed(&state, &symbol, reason);
             }
             RouterMsg::Shutdown => {
                 tracing::info!("router actor shutdown received; aborting publishers");
@@ -207,10 +218,15 @@ async fn handle_subscribe_ticks(
         // first, IncRef + handle construction last.
         // If the hub exists but no tick publisher is running (pure
         // rt-bar / watch-only hub), we still need one.
-        ensure_tick_publisher(state, &hub).await?;
+        ensure_tick_publisher(state, guard_ctrl, &hub).await?;
         hub.tick_refcount.fetch_add(1, Ordering::Relaxed);
         let rx = hub.ticks_tx.subscribe();
-        return Ok(SubscriptionHandle::new(rx, tick_guard(symbol, guard_ctrl)));
+        let end_rx = hub.end_reason_tx.subscribe();
+        return Ok(SubscriptionHandle::new(
+            rx,
+            tick_guard(symbol, guard_ctrl),
+            end_rx,
+        ));
     }
 
     // First subscribe for this symbol. NM-3: call source FIRST; on
@@ -224,11 +240,17 @@ async fn handle_subscribe_ticks(
 
     let hub = SymbolHub::new(symbol.clone());
     hub.tick_refcount.store(1, Ordering::Relaxed);
-    spawn_tick_publisher_on(&hub, upstream);
+    spawn_tick_publisher_on(&hub, upstream, guard_ctrl);
     state.per_symbol.insert(symbol.clone(), hub.clone());
+    note_resubscribe_after_disconnect(state, symbol);
 
     let rx = hub.ticks_tx.subscribe();
-    Ok(SubscriptionHandle::new(rx, tick_guard(symbol, guard_ctrl)))
+    let end_rx = hub.end_reason_tx.subscribe();
+    Ok(SubscriptionHandle::new(
+        rx,
+        tick_guard(symbol, guard_ctrl),
+        end_rx,
+    ))
 }
 
 /// Boxed `TickSubGuard` constructor — every tick-subscribe path needs
@@ -282,23 +304,41 @@ async fn subscribe_rt_bars_upstream(
 
 /// Spawn the tick publisher task against `hub` + `upstream` and stash
 /// the join handle in `hub.tick_publisher_task`.
+///
+/// `guard_ctrl` is cloned into the publisher task so it can fire
+/// `RouterMsg::UpstreamClosed` on a full upstream close (slice B2)
+/// through the same balanced `bump_backlog` path the guards use.
 fn spawn_tick_publisher_on(
     hub: &Arc<SymbolHub>,
     upstream: midas_broker_core::provider::TickStream,
+    guard_ctrl: &GuardCtrl,
 ) {
     let hub_for_task = hub.clone();
-    let handle = tokio::spawn(async move { run_tick_publisher(hub_for_task, upstream).await });
+    let ctrl_for_task = guard_ctrl.clone();
+    let handle =
+        tokio::spawn(
+            async move { run_tick_publisher(hub_for_task, upstream, ctrl_for_task).await },
+        );
     *hub.tick_publisher_task.lock() = Some(handle);
 }
 
 /// Spawn the RT-bar publisher task against `hub` + `upstream` and
 /// stash the join handle in `hub.rt_bar_publisher_task`.
+///
+/// `guard_ctrl` is cloned into the publisher task so it can fire
+/// `RouterMsg::UpstreamClosed` on a full upstream close (slice B2)
+/// through the same balanced `bump_backlog` path the guards use.
 fn spawn_rt_bar_publisher_on(
     hub: &Arc<SymbolHub>,
     upstream: midas_broker_core::provider::RealtimeBarStream,
+    guard_ctrl: &GuardCtrl,
 ) {
     let hub_for_task = hub.clone();
-    let handle = tokio::spawn(async move { run_rt_bar_publisher(hub_for_task, upstream).await });
+    let ctrl_for_task = guard_ctrl.clone();
+    let handle =
+        tokio::spawn(
+            async move { run_rt_bar_publisher(hub_for_task, upstream, ctrl_for_task).await },
+        );
     *hub.rt_bar_publisher_task.lock() = Some(handle);
 }
 
@@ -308,6 +348,7 @@ fn spawn_rt_bar_publisher_on(
 /// path or a watch-only path) but no tick publisher is running yet.
 async fn ensure_tick_publisher(
     state: &Arc<RouterState>,
+    guard_ctrl: &GuardCtrl,
     hub: &Arc<SymbolHub>,
 ) -> Result<(), MarketDataError> {
     // Fast path: a publisher is already running.
@@ -322,7 +363,7 @@ async fn ensure_tick_publisher(
     // Need to spawn. Resolve + subscribe + stash.
     let con_id = resolve_con_id(state, &hub.symbol).await?;
     let upstream = subscribe_ticks_upstream(state, &hub.symbol, con_id).await?;
-    spawn_tick_publisher_on(hub, upstream);
+    spawn_tick_publisher_on(hub, upstream, guard_ctrl);
     Ok(())
 }
 
@@ -349,13 +390,15 @@ async fn handle_subscribe_rt_bars(
             let con_id = resolve_con_id(state, symbol).await?;
             let upstream = subscribe_rt_bars_upstream(state, symbol, con_id).await?;
             hub.ensure_rt_bars_tx();
-            spawn_rt_bar_publisher_on(&hub, upstream);
+            spawn_rt_bar_publisher_on(&hub, upstream, guard_ctrl);
         }
         hub.rt_bar_refcount.fetch_add(1, Ordering::Relaxed);
         let rx = hub.ensure_rt_bars_tx().subscribe();
+        let end_rx = hub.end_reason_tx.subscribe();
         return Ok(SubscriptionHandle::new(
             rx,
             rt_bar_guard(symbol, guard_ctrl),
+            end_rx,
         ));
     }
 
@@ -366,12 +409,15 @@ async fn handle_subscribe_rt_bars(
     let hub = SymbolHub::new(symbol.clone());
     hub.rt_bar_refcount.store(1, Ordering::Relaxed);
     let rx = hub.ensure_rt_bars_tx().subscribe();
-    spawn_rt_bar_publisher_on(&hub, upstream);
+    let end_rx = hub.end_reason_tx.subscribe();
+    spawn_rt_bar_publisher_on(&hub, upstream, guard_ctrl);
     state.per_symbol.insert(symbol.clone(), hub.clone());
+    note_resubscribe_after_disconnect(state, symbol);
 
     Ok(SubscriptionHandle::new(
         rx,
         rt_bar_guard(symbol, guard_ctrl),
+        end_rx,
     ))
 }
 
@@ -391,7 +437,7 @@ async fn handle_open_hub_for_watch(
         // bumping the refcount before the await would leak it.
         // Make sure a tick publisher is running so the watch keeps
         // updating (NB-3 lazy-open).
-        ensure_tick_publisher(state, &hub).await?;
+        ensure_tick_publisher(state, guard_ctrl, &hub).await?;
         hub.watch_refcount.fetch_add(1, Ordering::Relaxed);
         let rx = hub.last_quote_tx.subscribe();
         return Ok(QuoteHandle::new(rx, watch_guard(symbol, guard_ctrl)));
@@ -403,9 +449,10 @@ async fn handle_open_hub_for_watch(
 
     let hub = SymbolHub::new(symbol.clone());
     hub.watch_refcount.store(1, Ordering::Relaxed);
-    spawn_tick_publisher_on(&hub, upstream);
+    spawn_tick_publisher_on(&hub, upstream, guard_ctrl);
     let rx = hub.last_quote_tx.subscribe();
     state.per_symbol.insert(symbol.clone(), hub);
+    note_resubscribe_after_disconnect(state, symbol);
 
     Ok(QuoteHandle::new(rx, watch_guard(symbol, guard_ctrl)))
 }
@@ -499,6 +546,88 @@ fn maybe_reap(state: &RouterState, hub: &Arc<SymbolHub>) {
     if ticks == 0 && watches == 0 && rt_bars == 0 {
         state.per_symbol.remove(&hub.symbol);
         tracing::debug!(symbol = %hub.symbol, "hub removed after last DecRef");
+    }
+}
+
+/// Slice B2 — handle a publisher's `UpstreamClosed` notification.
+///
+/// Steps, in order:
+///
+/// 1. Look up the hub. Idempotent — if it's already gone (e.g. both
+///    publishers fired `UpstreamClosed` and the second arrived after
+///    we removed the entry), do nothing. The first message has
+///    already published the end-reason.
+/// 2. Set the per-hub end-reason watch to `Some(reason)` BEFORE
+///    removing the hub from `per_symbol`. Consumers that subscribed
+///    via [`SubscriptionHandle::end_reason`] observe the reason as
+///    the last lifecycle signal; subsequent `recv` on the broadcast
+///    receivers will yield `Closed` once the hub `Arc` finally drops.
+/// 3. Emit a structured `warn!` so the operator sees the symbol +
+///    subscriber count + uptime + reason in logs.
+/// 4. Abort the sibling publisher (if any). The publisher that fired
+///    this message has already exited — its `JoinHandle` may still
+///    be in the `Mutex`, but `is_finished()` is `true`. Aborting the
+///    sibling drops its upstream and cancels the wire subscription.
+/// 5. Remove the hub from `per_symbol`. Once the publisher tasks have
+///    actually exited (drops their `Arc<SymbolHub>` clones), the
+///    hub's broadcast senders drop and consumers see `Closed`.
+/// 6. Mark the symbol "previously disconnected" so the next first-
+///    subscribe path can emit a matching `info!` log for diagnostic
+///    symmetry.
+///
+/// [`SubscriptionHandle::end_reason`]: super::handle::SubscriptionHandle::end_reason
+fn handle_upstream_closed(state: &RouterState, symbol: &SymbolKey, reason: EndReason) {
+    let Some(hub_entry) = state.per_symbol.get(symbol) else {
+        // Already torn down by a sibling publisher's UpstreamClosed.
+        return;
+    };
+    let hub = hub_entry.clone();
+    drop(hub_entry);
+
+    // Step 2: publish the end reason BEFORE the broadcast senders
+    // drop. `watch::Sender::send` returns `Err` if there are no
+    // receivers; that's fine.
+    let _ = hub.end_reason_tx.send(Some(reason));
+
+    // Step 3: structured warn for the operator.
+    tracing::warn!(
+        target: "midas_market_data::router",
+        symbol = %hub.symbol,
+        subscriber_count = hub.refcount(),
+        hub_uptime_ms = hub.uptime().as_millis() as u64,
+        reason = ?reason,
+        "upstream closed; tearing down hub"
+    );
+
+    // Step 4: abort the sibling publisher (and the one that fired —
+    // already exited, so this is a no-op for it).
+    if let Some(h) = hub.tick_publisher_task.lock().take() {
+        h.abort();
+    }
+    if let Some(h) = hub.rt_bar_publisher_task.lock().take() {
+        h.abort();
+    }
+
+    // Step 5: drop from the map. Last `Arc<SymbolHub>` strong-count
+    // drops once publisher tasks have observed the abort, after which
+    // the broadcast senders close.
+    state.per_symbol.remove(symbol);
+
+    // Step 6: remember for the next first-subscribe info log.
+    state.previously_disconnected.lock().insert(symbol.clone());
+}
+
+/// Slice B2 — emit `tracing::info!` when a first-subscribe path
+/// re-spawns a hub for a symbol that was previously torn down by an
+/// `UpstreamClosed`. Diagnostic symmetry with the tear-down warn.
+fn note_resubscribe_after_disconnect(state: &RouterState, symbol: &SymbolKey) {
+    let was_disconnected = state.previously_disconnected.lock().remove(symbol);
+    if was_disconnected {
+        tracing::info!(
+            target: "midas_market_data::router",
+            symbol = %symbol,
+            "upstream reopened; new hub"
+        );
     }
 }
 

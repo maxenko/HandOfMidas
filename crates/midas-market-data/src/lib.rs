@@ -12,6 +12,29 @@
 //! See the [plan](../../../plan/market-data-router/06-slice-5-router.md)
 //! for the authoritative design.
 //!
+//! # Disconnect policy (slice B2)
+//!
+//! When a publisher observes `RecvError::Closed` on its upstream
+//! stream — i.e. the underlying [`MarketDataSource`] dropped the
+//! corresponding broadcast sender — the publisher fires
+//! `RouterMsg::UpstreamClosed { symbol, reason }` to the control
+//! actor. The actor flips the per-hub `end_reason` watch to
+//! `Some(EndReason::Disconnected)` (consumers observe this via
+//! [`SubscriptionHandle::end_reason`]) BEFORE removing the hub from
+//! `state.per_symbol`, then aborts the sibling publisher and emits a
+//! structured `tracing::warn!` with `symbol`, `subscriber_count`,
+//! `hub_uptime_ms`, and `reason`. The next subscribe for that symbol
+//! goes through the first-subscribe path, spawns a fresh hub, and
+//! emits a matching `tracing::info!` "upstream reopened; new hub" for
+//! diagnostic symmetry. Farm-status transitions
+//! (`FarmStatus { code: MarketDataFarmInactive, .. }`) do NOT trigger
+//! this tear-down — they remain a side-channel signal on
+//! `farm_status_tx` to avoid resubscribe churn during routine
+//! IB-gateway hiccups.
+//!
+//! [`MarketDataSource`]: midas_broker_core::provider::MarketDataSource
+//! [`SubscriptionHandle::end_reason`]: crate::router::SubscriptionHandle::end_reason
+//!
 //! ```no_run
 //! # async fn example(router: std::sync::Arc<midas_market_data::MarketDataRouter>) {
 //! use midas_broker_core::SymbolKey;
