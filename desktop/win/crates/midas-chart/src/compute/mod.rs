@@ -5,6 +5,8 @@
 //! produces a [`ChartScene`] containing all the data needed to render a single
 //! chart frame. No GPU, no framework -- just math.
 
+mod current_price;
+
 use crate::camera::Camera2D;
 use crate::input::ChartInput;
 use crate::instances::{
@@ -332,8 +334,17 @@ fn compute_normal_scene(
     );
     let volume_profile_instances = build_volume_profile(input, data, camera, vis_start, vis_end);
 
-    let badges = widget_output.badges.clone();
-    let labels = widget_output.labels.clone();
+    let mut badges = widget_output.badges.clone();
+    let mut labels = widget_output.labels.clone();
+    let mut grid_instances = grid_instances;
+    apply_current_price_indicator(
+        input,
+        data,
+        camera,
+        &mut grid_instances,
+        &mut badges,
+        &mut labels,
+    );
     // Axis text (priceline on the right edge, timeline on the
     // separator) shares one batch — the renderer draws them together
     // BEFORE any annotation/decorator pass so they sit behind
@@ -513,8 +524,17 @@ fn compute_collapsed_scene(
     );
     let volume_profile_instances = build_volume_profile(input, data, camera, vis_start, vis_end);
 
-    let badges = widget_output.badges.clone();
-    let labels = widget_output.labels.clone();
+    let mut badges = widget_output.badges.clone();
+    let mut labels = widget_output.labels.clone();
+    let mut grid_instances = grid_instances;
+    apply_current_price_indicator(
+        input,
+        data,
+        camera,
+        &mut grid_instances,
+        &mut badges,
+        &mut labels,
+    );
     // Axis text (priceline on the right edge, timeline on the
     // separator) shares one batch — the renderer draws them together
     // BEFORE any annotation/decorator pass so they sit behind
@@ -1097,6 +1117,35 @@ pub fn timeline_labels_to_widget_labels(
         }
     }
     out
+}
+
+/// Append the current-price indicator (dotted line + flat right-edge
+/// badge) to the scene's grid / badge / label vectors. Helper shared
+/// by `compute_normal_scene` and `compute_collapsed_scene` so both
+/// modes carry the indicator identically.
+///
+/// No-op when [`current_price::compute_current_price_indicator`]
+/// returns `None` (empty data, NaN close, or degenerate viewport).
+fn apply_current_price_indicator(
+    input: &ChartInput<'_>,
+    data: &dyn CandleData,
+    camera: &Camera2D,
+    grid_instances: &mut Vec<GridLineInstance>,
+    badges: &mut Vec<midas_gpu_types::BadgeInstance>,
+    labels: &mut Vec<crate::widget::compute::WidgetLabel>,
+) {
+    let Some(indicator) = current_price::compute_current_price_indicator(
+        data,
+        camera,
+        input.viewport_width as f32,
+        input.bull_color,
+        input.bear_color,
+    ) else {
+        return;
+    };
+    grid_instances.extend(indicator.line_dots);
+    badges.push(indicator.badge);
+    labels.push(indicator.price_text);
 }
 
 /// Translate the `AxisLabel` priceline list into `WidgetLabel`s the

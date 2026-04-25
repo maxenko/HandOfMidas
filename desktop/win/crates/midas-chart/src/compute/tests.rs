@@ -451,11 +451,17 @@ fn grid_lines_bounded_by_max() {
 
     let scene = compute_chart_scene(&input);
 
+    // Price-grid + time-grid contribute at most `MAX_GRID_LINES * 2`.
+    // The current-price indicator (`compute::current_price`) adds dots
+    // along the chart-area X spaced at `DOT_PERIOD_PX` (6 px); for a
+    // 1920 px viewport that's ~320 extra entries. Bound deliberately
+    // generous to cover 4K viewports.
+    let limit = MAX_GRID_LINES * 2 + 500;
     assert!(
-        scene.grid_instances.len() <= MAX_GRID_LINES * 2,
+        scene.grid_instances.len() <= limit,
         "grid lines {} exceeds max {}",
         scene.grid_instances.len(),
-        MAX_GRID_LINES * 2
+        limit
     );
 }
 
