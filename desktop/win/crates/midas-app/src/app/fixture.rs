@@ -21,6 +21,7 @@ use thiserror::Error;
 
 use super::{Message, MidasApp, RecentEntry};
 use crate::annotation_store::SymbolKey;
+use crate::app::panel_ids::PanelId;
 use crate::ticker_state::{self, TickerState};
 
 #[derive(Debug, Error)]
@@ -144,6 +145,9 @@ impl MidasApp {
 
         // Rebuild workspace + panels. Reuses the same path config loads
         // use at startup, so any bug there shows up in both places.
+        // Reset the panel-id allocator and let the restore re-mint ids
+        // off the fixture's layout tree, mirroring `MidasApp::new`.
+        self.panel_ids = crate::app::panel_ids::PanelIdAllocator::default();
         let (workspace, charts, watchlists, order_panels, account_panels) =
             Self::restore_from_layout_tree(
                 &config.layout_tree,
@@ -151,13 +155,34 @@ impl MidasApp {
                 &config.watchlists,
                 &config.order_panels,
                 &config.account_panels,
+                &mut self.panel_ids,
             );
 
-        self.workspace = workspace;
+        // Reseat the main window's layout in place. Slice A1: only one
+        // window key exists; slice C will iterate `config.windows` and
+        // rebuild every entry.
+        let main = self.main_window_key.clone();
+        if let Some(ws) = self.windows.get_mut(&main) {
+            ws.layout = workspace;
+        }
         self.charts = charts;
         self.watchlists = watchlists;
         self.order_panels = order_panels;
         self.account_panels = account_panels;
+        // Rebuild `panel_to_window` from the restored layout — every
+        // pane belongs to the (sole) main window in slice A1.
+        self.panel_to_window.clear();
+        if let Some(ws) = self.windows.get(&main) {
+            for state in ws.layout.panes.panes.values() {
+                let panel = match state.content {
+                    crate::layout::PanelContent::Chart(id) => PanelId::Chart(id),
+                    crate::layout::PanelContent::Watchlist(id) => PanelId::Watchlist(id),
+                    crate::layout::PanelContent::Order(id) => PanelId::Order(id),
+                    crate::layout::PanelContent::Account(id) => PanelId::Account(id),
+                };
+                self.panel_to_window.insert(panel, main.clone());
+            }
+        }
         self.recent_symbols = config
             .recent_symbols
             .iter()

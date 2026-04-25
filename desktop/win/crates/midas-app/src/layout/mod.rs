@@ -9,7 +9,9 @@
 
 use iced::widget::pane_grid;
 
-use midas_core::{AccountPanelId, ChartId, OrderBlotterId, OrderPanelId, WatchlistId};
+use midas_core::{AccountPanelId, ChartId, OrderPanelId, WatchlistId};
+
+use crate::app::panel_ids::PanelIdAllocator;
 
 // ── Panel content ────────────────────────────────────────────────────
 
@@ -22,13 +24,6 @@ pub enum PanelContent {
     Watchlist(WatchlistId),
     /// An order panel identified by a stable `OrderPanelId`.
     Order(OrderPanelId),
-    /// An order-blotter panel (order history grid).
-    ///
-    /// Legacy: retained for enum-shape compatibility with existing
-    /// callers during the Account-panel refactor. New panes use
-    /// `Account` instead. Migration rewrites `OrderBlotter` pane slots
-    /// at config-load time.
-    OrderBlotter(OrderBlotterId),
     /// A tabbed Account panel (Positions / Orders / History / Recents).
     Account(AccountPanelId),
 }
@@ -73,18 +68,6 @@ impl PaneState {
         }
     }
 
-    /// Create a new pane state for an order-blotter panel.
-    ///
-    /// Legacy — new code uses [`Self::account`]. Retained for enum
-    /// shape parity with persisted layouts.
-    #[allow(dead_code)]
-    pub fn order_blotter(id: OrderBlotterId) -> Self {
-        Self {
-            content: PanelContent::OrderBlotter(id),
-            is_focused: false,
-        }
-    }
-
     /// Create a new pane state for an Account (tabbed) panel.
     pub fn account(id: AccountPanelId) -> Self {
         Self {
@@ -97,10 +80,7 @@ impl PaneState {
     pub fn chart_id(&self) -> Option<ChartId> {
         match self.content {
             PanelContent::Chart(id) => Some(id),
-            PanelContent::Watchlist(_)
-            | PanelContent::Order(_)
-            | PanelContent::OrderBlotter(_)
-            | PanelContent::Account(_) => None,
+            PanelContent::Watchlist(_) | PanelContent::Order(_) | PanelContent::Account(_) => None,
         }
     }
 }
@@ -111,45 +91,29 @@ impl PaneState {
 /// built-in `pane_grid` binary split tree.
 ///
 /// All layout mutations (split, close, resize) go through this struct,
-/// which delegates to `pane_grid::State` internally.
+/// which delegates to `pane_grid::State` internally. Panel ID
+/// allocation is owned by [`PanelIdAllocator`] (app-global) — the
+/// layout takes a `&mut` reference whenever it needs a fresh ID.
 pub struct WorkspaceLayout {
     /// The iced pane grid state (binary split tree + per-pane data).
     pub panes: pane_grid::State<PaneState>,
     /// The currently focused pane, if any.
     pub focus: Option<pane_grid::Pane>,
-    /// Monotonic counter for generating unique `ChartId` values.
-    pub(crate) next_chart_id: u32,
-    /// Monotonic counter for generating unique `WatchlistId` values.
-    pub(crate) next_watchlist_id: u32,
-    /// Monotonic counter for generating unique `OrderPanelId` values.
-    pub(crate) next_order_panel_id: u32,
-    /// Monotonic counter for generating unique `OrderBlotterId` values.
-    ///
-    /// Legacy — kept for layout-restore parity; account panels have
-    /// their own counter. This value is never incremented during a
-    /// normal run (migration rewrites blotter slots to `Account`).
-    #[allow(dead_code)]
-    pub(crate) next_order_blotter_id: u32,
-    /// Monotonic counter for generating unique `AccountPanelId` values.
-    pub(crate) next_account_panel_id: u32,
 }
 
 impl WorkspaceLayout {
     /// Create a workspace with a single pane filling the entire space.
     ///
-    /// Returns the layout and the `ChartId` assigned to the initial pane.
-    pub fn single() -> (Self, ChartId) {
-        let first_id = ChartId::new(1);
+    /// Allocates the initial `ChartId` from the supplied allocator.
+    /// Returns the layout and that id so the caller can register the
+    /// chart panel in `MidasApp::charts` + `panel_to_window`.
+    pub fn single(alloc: &mut PanelIdAllocator) -> (Self, ChartId) {
+        let first_id = alloc.next_chart();
         let (panes, pane) = pane_grid::State::new(PaneState::chart(first_id));
 
         let mut layout = Self {
             panes,
             focus: Some(pane),
-            next_chart_id: 2,
-            next_watchlist_id: 1,
-            next_order_panel_id: 1,
-            next_order_blotter_id: 1,
-            next_account_panel_id: 1,
         };
 
         // Mark the initial pane as focused.
@@ -160,57 +124,31 @@ impl WorkspaceLayout {
         (layout, first_id)
     }
 
-    /// Allocate a new unique `ChartId`.
-    pub fn next_chart_id(&mut self) -> ChartId {
-        let id = ChartId::new(self.next_chart_id);
-        self.next_chart_id += 1;
-        id
-    }
-
-    /// Allocate a new unique `WatchlistId`.
-    pub fn next_watchlist_id(&mut self) -> WatchlistId {
-        let id = WatchlistId::new(self.next_watchlist_id);
-        self.next_watchlist_id += 1;
-        id
-    }
-
-    /// Allocate a new unique `OrderPanelId`.
-    pub fn next_order_panel_id(&mut self) -> OrderPanelId {
-        let id = OrderPanelId::new(self.next_order_panel_id);
-        self.next_order_panel_id += 1;
-        id
-    }
-
-    /// Allocate a new unique `OrderBlotterId`.
-    ///
-    /// Legacy — no live call sites; retained for ABI parity.
-    #[allow(dead_code)]
-    pub fn next_order_blotter_id(&mut self) -> OrderBlotterId {
-        let id = OrderBlotterId::new(self.next_order_blotter_id);
-        self.next_order_blotter_id += 1;
-        id
-    }
-
-    /// Allocate a new unique `AccountPanelId`.
-    pub fn next_account_panel_id(&mut self) -> AccountPanelId {
-        let id = AccountPanelId::new(self.next_account_panel_id);
-        self.next_account_panel_id += 1;
-        id
+    /// Construct a layout from an already-built `pane_grid::State`.
+    /// Used by config-restore paths that build the configuration
+    /// directly from the persisted layout tree.
+    pub fn from_panes(panes: pane_grid::State<PaneState>) -> Self {
+        let focus = panes.panes.keys().next().copied();
+        Self { panes, focus }
     }
 
     /// Split the given pane along the specified axis.
     ///
     /// Always creates a new **chart** pane in the new half, regardless
-    /// of what panel type the source pane holds. Returns the new
-    /// `ChartId` and `Pane` handle if the split succeeded.
+    /// of what panel type the source pane holds. The caller supplies
+    /// the fresh `ChartId` (typically minted via
+    /// [`PanelIdAllocator::next_chart`]) — pre-allocating avoids the
+    /// `&mut self.workspace_mut()` + `&mut self.panel_ids` borrow
+    /// conflict at typical call sites in `MidasApp`. Returns `Some` if
+    /// the split succeeded; the returned `ChartId` is the same as the
+    /// one passed in.
     pub fn split(
         &mut self,
         axis: pane_grid::Axis,
         pane: pane_grid::Pane,
+        new_chart_id: ChartId,
     ) -> Option<(ChartId, pane_grid::Pane)> {
-        let new_chart_id = self.next_chart_id();
         let new_state = PaneState::chart(new_chart_id);
-
         let result = self.panes.split(axis, pane, new_state);
         result.map(|(new_pane, _split)| (new_chart_id, new_pane))
     }
@@ -317,24 +255,28 @@ impl WorkspaceLayout {
     ///
     /// Returns the list of `ChartId` values for all panes in the new
     /// layout (so the caller can insert `ChartPanel` entries).
-    pub fn apply_preset(&mut self, preset: &LayoutPresetKind) -> Vec<ChartId> {
+    pub fn apply_preset(
+        &mut self,
+        preset: &LayoutPresetKind,
+        alloc: &mut PanelIdAllocator,
+    ) -> Vec<ChartId> {
         match preset {
-            LayoutPresetKind::Single => self.preset_single(),
-            LayoutPresetKind::SplitH => self.preset_split(pane_grid::Axis::Vertical),
-            LayoutPresetKind::SplitV => self.preset_split(pane_grid::Axis::Horizontal),
-            LayoutPresetKind::Grid2x2 => self.preset_grid_2x2(),
+            LayoutPresetKind::Single => self.preset_single(alloc),
+            LayoutPresetKind::SplitH => self.preset_split(pane_grid::Axis::Vertical, alloc),
+            LayoutPresetKind::SplitV => self.preset_split(pane_grid::Axis::Horizontal, alloc),
+            LayoutPresetKind::Grid2x2 => self.preset_grid_2x2(alloc),
         }
     }
 
     /// Reset to a single-pane layout, reusing the focused chart if
     /// possible.
-    fn preset_single(&mut self) -> Vec<ChartId> {
+    fn preset_single(&mut self, alloc: &mut PanelIdAllocator) -> Vec<ChartId> {
         let keep_id = self.focused_chart_id().unwrap_or_else(|| {
             self.panes
                 .panes
                 .values()
                 .find_map(|s| s.chart_id())
-                .unwrap_or_else(|| self.next_chart_id())
+                .unwrap_or_else(|| alloc.next_chart())
         });
 
         let mut state = PaneState::chart(keep_id);
@@ -347,15 +289,19 @@ impl WorkspaceLayout {
     }
 
     /// Create a two-pane split layout.
-    fn preset_split(&mut self, axis: pane_grid::Axis) -> Vec<ChartId> {
+    fn preset_split(
+        &mut self,
+        axis: pane_grid::Axis,
+        alloc: &mut PanelIdAllocator,
+    ) -> Vec<ChartId> {
         let id_a = self.focused_chart_id().unwrap_or_else(|| {
             self.panes
                 .panes
                 .values()
                 .find_map(|s| s.chart_id())
-                .unwrap_or_else(|| self.next_chart_id())
+                .unwrap_or_else(|| alloc.next_chart())
         });
-        let id_b = self.next_chart_id();
+        let id_b = alloc.next_chart();
 
         let mut state_a = PaneState::chart(id_a);
         state_a.is_focused = true;
@@ -381,14 +327,14 @@ impl WorkspaceLayout {
     }
 
     /// Create a 2x2 grid layout (4 panes).
-    fn preset_grid_2x2(&mut self) -> Vec<ChartId> {
+    fn preset_grid_2x2(&mut self, alloc: &mut PanelIdAllocator) -> Vec<ChartId> {
         let existing: Vec<ChartId> = self.chart_ids();
         let mut ids = Vec::with_capacity(4);
         for i in 0..4 {
             if i < existing.len() {
                 ids.push(existing[i]);
             } else {
-                ids.push(self.next_chart_id());
+                ids.push(alloc.next_chart());
             }
         }
 

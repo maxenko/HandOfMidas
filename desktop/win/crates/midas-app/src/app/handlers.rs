@@ -253,11 +253,14 @@ impl MidasApp {
     pub(crate) fn handle_chart_management_msg(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::AddChart => {
-                if let Some(focused) = self.workspace.focus {
+                if let Some(focused) = self.workspace().focus {
+                    let new_id = self.panel_ids.next_chart();
                     if let Some((new_id, _new_pane)) =
-                        self.workspace.split(pane_grid::Axis::Vertical, focused)
+                        self.workspace_mut()
+                            .split(pane_grid::Axis::Vertical, focused, new_id)
                     {
-                        self.charts.insert(new_id, Self::make_empty_panel());
+                        let owner = self.main_window_key.clone();
+                        self.insert_chart(new_id, Self::make_empty_panel(), owner);
                         self.status_message = format!("Added {new_id}");
                         self.mark_config_dirty();
                     }
@@ -266,9 +269,9 @@ impl MidasApp {
             }
 
             Message::CloseChart(id) => {
-                if let Some(pane) = self.workspace.find_pane(id) {
-                    if let Some(PanelContent::Chart(closed_id)) = self.workspace.close(pane) {
-                        self.charts.remove(&closed_id);
+                if let Some(pane) = self.workspace().find_pane(id) {
+                    if let Some(PanelContent::Chart(closed_id)) = self.workspace_mut().close(pane) {
+                        self.remove_chart(closed_id);
                         crate::app::subscription_registry::remove_chart_handles_for_chart(
                             closed_id,
                         );
@@ -284,8 +287,8 @@ impl MidasApp {
             }
 
             Message::ActivateChart(id) => {
-                if let Some(pane) = self.workspace.find_pane(id) {
-                    self.workspace.set_focus(pane);
+                if let Some(pane) = self.workspace().find_pane(id) {
+                    self.workspace_mut().set_focus(pane);
                 }
                 // Bind through the single mutation point. Fires
                 // EnsureDraftBracket so the linked panel's bracket
@@ -307,18 +310,33 @@ impl MidasApp {
 
             Message::LayoutPreset(preset) => {
                 self.link_picker_open = None;
-                let new_ids = self.workspace.apply_preset(&preset);
+                let main = self.main_window_key.clone();
+                // Apply the preset via direct field access so the
+                // compiler can split the borrow between `self.windows`
+                // and `self.panel_ids`. Going through `workspace_mut()`
+                // would take `&mut self` and block the disjoint
+                // `&mut self.panel_ids` borrow.
+                let new_ids = {
+                    let layout = &mut self
+                        .windows
+                        .get_mut(&main)
+                        .expect("main window present")
+                        .layout;
+                    layout.apply_preset(&preset, &mut self.panel_ids)
+                };
                 for id in &new_ids {
                     self.charts
                         .entry(*id)
                         .or_insert_with(Self::make_empty_panel);
+                    self.panel_to_window
+                        .insert(PanelId::Chart(*id), main.clone());
                 }
                 let active_ids: std::collections::HashSet<ChartId> =
-                    self.workspace.chart_ids().into_iter().collect();
+                    self.workspace().chart_ids().into_iter().collect();
                 self.charts.retain(|id, _| active_ids.contains(id));
                 // Clean up orphaned watchlist panels (presets create chart-only layouts).
                 let active_wl_ids: std::collections::HashSet<WatchlistId> = self
-                    .workspace
+                    .workspace()
                     .panes
                     .panes
                     .values()
@@ -330,6 +348,13 @@ impl MidasApp {
                 self.watchlists.retain(|id, _| active_wl_ids.contains(id));
                 // Clean up orphaned order panels (presets create chart-only layouts).
                 self.order_panels.clear();
+                // Drop stale panel_to_window entries — only chart panels
+                // mint by the preset are alive.
+                self.panel_to_window.retain(|p, _| match p {
+                    PanelId::Chart(id) => active_ids.contains(id),
+                    PanelId::Watchlist(id) => active_wl_ids.contains(id),
+                    PanelId::Order(_) | PanelId::Account(_) => false,
+                });
                 self.mark_config_dirty();
                 Task::none()
             }
@@ -346,7 +371,7 @@ impl MidasApp {
     pub(crate) fn handle_pane_msg(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::PaneFocused(pane) => {
-                self.workspace.set_focus(pane);
+                self.workspace_mut().set_focus(pane);
                 // Single-source-of-truth refactor: the focus change
                 // routes through the reducer's `MaybeSnapToGatr`
                 // handler. The reducer corrects both surfaces (panel
@@ -372,20 +397,20 @@ impl MidasApp {
             }
 
             Message::PaneResized(pane_grid::ResizeEvent { split, ratio }) => {
-                self.workspace.panes.resize(split, ratio);
+                self.workspace_mut().panes.resize(split, ratio);
                 self.mark_config_dirty();
                 Task::none()
             }
 
             Message::PaneDragged(pane_grid::DragEvent::Picked { pane }) => {
-                self.workspace.set_focus(pane);
+                self.workspace_mut().set_focus(pane);
                 Task::none()
             }
 
             Message::PaneDragged(pane_grid::DragEvent::Dropped { pane, target }) => {
                 self.pending_drag = None;
                 self.dragging_ticker = None;
-                self.workspace.panes.drop(pane, target);
+                self.workspace_mut().panes.drop(pane, target);
                 self.mark_config_dirty();
                 Task::none()
             }
@@ -397,8 +422,10 @@ impl MidasApp {
             }
 
             Message::PaneSplit(axis, pane) => {
-                if let Some((new_id, _new_pane)) = self.workspace.split(axis, pane) {
-                    self.charts.insert(new_id, Self::make_empty_panel());
+                let new_id = self.panel_ids.next_chart();
+                if let Some((new_id, _new_pane)) = self.workspace_mut().split(axis, pane, new_id) {
+                    let owner = self.main_window_key.clone();
+                    self.insert_chart(new_id, Self::make_empty_panel(), owner);
                     self.status_message = format!("Split pane, added {new_id}");
                     self.mark_config_dirty();
                 }
@@ -406,9 +433,9 @@ impl MidasApp {
             }
 
             Message::PaneClose(pane) => {
-                match self.workspace.close(pane) {
+                match self.workspace_mut().close(pane) {
                     Some(PanelContent::Chart(closed_id)) => {
-                        self.charts.remove(&closed_id);
+                        self.remove_chart(closed_id);
                         crate::app::subscription_registry::remove_chart_handles_for_chart(
                             closed_id,
                         );
@@ -419,27 +446,19 @@ impl MidasApp {
                         self.status_message = format!("Closed {closed_id}");
                     }
                     Some(PanelContent::Watchlist(wl_id)) => {
-                        self.watchlists.remove(&wl_id);
+                        self.remove_watchlist(wl_id);
                         self.status_message = format!("Closed {wl_id}");
                     }
                     Some(PanelContent::Order(order_id)) => {
-                        self.order_panels.remove(&order_id);
+                        self.remove_order_panel(order_id);
                         if matches!(self.link_picker_open, Some((PickerTarget::Order(pid), _)) if pid == order_id)
                         {
                             self.link_picker_open = None;
                         }
                         self.status_message = format!("Closed {order_id}");
                     }
-                    Some(PanelContent::OrderBlotter(_blotter_id)) => {
-                        // Legacy — live panes are `Account` after migration.
-                        // If this fires it means a persisted layout from an
-                        // older build rehydrated an OrderBlotter slot that
-                        // slipped past migration. Nothing to clean up since
-                        // we never populate `order_blotters` in this build.
-                        self.status_message = "Closed legacy Orders pane".to_string();
-                    }
                     Some(PanelContent::Account(account_id)) => {
-                        self.account_panels.remove(&account_id);
+                        self.remove_account_panel(account_id);
                         if matches!(self.link_picker_open, Some((PickerTarget::Account(pid), _)) if pid == account_id)
                         {
                             self.link_picker_open = None;
@@ -1143,25 +1162,31 @@ impl MidasApp {
     pub(crate) fn handle_order_panel_msg(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::AddOrderPanel => {
-                if let Some(focused) = self.workspace.focus {
-                    let op_id = self.workspace.next_order_panel_id();
+                if let Some(focused) = self.workspace().focus {
+                    let op_id = self.panel_ids.next_order_panel();
+                    let new_chart_id = self.panel_ids.next_chart();
                     if let Some((chart_id, new_pane)) =
-                        self.workspace.split(pane_grid::Axis::Vertical, focused)
+                        self.workspace_mut()
+                            .split(pane_grid::Axis::Vertical, focused, new_chart_id)
                     {
                         // split() always creates a chart pane — replace it with an order panel.
-                        if let Some(state) = self.workspace.panes.get_mut(new_pane) {
+                        if let Some(state) = self.workspace_mut().panes.get_mut(new_pane) {
                             state.content = PanelContent::Order(op_id);
                         }
                         // Remove the chart entry that split() created.
-                        self.charts.remove(&chart_id);
+                        self.remove_chart(chart_id);
                         crate::app::subscription_registry::remove_chart_handles_for_chart(chart_id);
                         let symbol = self
                             .active_chart_id()
                             .and_then(|id| self.charts.get(&id))
                             .map(|p| p.symbol.clone())
                             .unwrap_or_default();
-                        self.order_panels
-                            .insert(op_id, crate::order_panel::OrderPanel::new(op_id, symbol));
+                        let owner = self.main_window_key.clone();
+                        self.insert_order_panel(
+                            op_id,
+                            crate::order_panel::OrderPanel::new(op_id, symbol),
+                            owner,
+                        );
                         self.status_message = format!("Added {op_id}");
                         return self.flush_config();
                     }
@@ -2036,7 +2061,7 @@ impl MidasApp {
         if trimmed.is_empty() {
             return Task::none();
         }
-        let Some(chart_id) = self.workspace.focused_chart_id() else {
+        let Some(chart_id) = self.workspace().focused_chart_id() else {
             tracing::debug!("RecentClicked({symbol}) ignored — no focused chart in workspace");
             return Task::none();
         };
@@ -2060,21 +2085,26 @@ impl MidasApp {
     /// a new pane from the focused pane, drop the auto-created chart,
     /// install the Account panel, flush config.
     fn handle_add_account_panel(&mut self) -> Task<Message> {
-        let Some(focused) = self.workspace.focus else {
+        let Some(focused) = self.workspace().focus else {
             return Task::none();
         };
-        let account_id = self.workspace.next_account_panel_id();
-        if let Some((chart_id, new_pane)) = self.workspace.split(pane_grid::Axis::Vertical, focused)
+        let account_id = self.panel_ids.next_account_panel();
+        let new_chart_id = self.panel_ids.next_chart();
+        if let Some((chart_id, new_pane)) =
+            self.workspace_mut()
+                .split(pane_grid::Axis::Vertical, focused, new_chart_id)
         {
             // split() always creates a chart pane — replace with Account.
-            if let Some(state) = self.workspace.panes.get_mut(new_pane) {
+            if let Some(state) = self.workspace_mut().panes.get_mut(new_pane) {
                 state.content = PanelContent::Account(account_id);
             }
-            self.charts.remove(&chart_id);
+            self.remove_chart(chart_id);
             crate::app::subscription_registry::remove_chart_handles_for_chart(chart_id);
-            self.account_panels.insert(
+            let owner = self.main_window_key.clone();
+            self.insert_account_panel(
                 account_id,
                 crate::account_panel::AccountPanel::new(account_id, "Account"),
+                owner,
             );
             self.status_message = format!("Added {account_id}");
             return self.flush_config();
@@ -2122,20 +2152,26 @@ impl MidasApp {
     pub(crate) fn handle_watchlist_msg(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::AddWatchlist => {
-                if let Some(focused) = self.workspace.focus {
-                    let wl_id = self.workspace.next_watchlist_id();
+                if let Some(focused) = self.workspace().focus {
+                    let wl_id = self.panel_ids.next_watchlist();
+                    let new_chart_id = self.panel_ids.next_chart();
                     if let Some((chart_id, new_pane)) =
-                        self.workspace.split(pane_grid::Axis::Vertical, focused)
+                        self.workspace_mut()
+                            .split(pane_grid::Axis::Vertical, focused, new_chart_id)
                     {
                         // split() always creates a chart pane — replace it with a watchlist.
-                        if let Some(state) = self.workspace.panes.get_mut(new_pane) {
+                        if let Some(state) = self.workspace_mut().panes.get_mut(new_pane) {
                             state.content = PanelContent::Watchlist(wl_id);
                         }
                         // Remove the chart entry that split() created.
-                        self.charts.remove(&chart_id);
+                        self.remove_chart(chart_id);
                         crate::app::subscription_registry::remove_chart_handles_for_chart(chart_id);
-                        self.watchlists
-                            .insert(wl_id, WatchlistPanel::new(wl_id, "Watchlist".into()));
+                        let owner = self.main_window_key.clone();
+                        self.insert_watchlist(
+                            wl_id,
+                            WatchlistPanel::new(wl_id, "Watchlist".into()),
+                            owner,
+                        );
                         self.status_message = format!("Added {wl_id}");
                         return self.flush_config();
                     }
@@ -2297,7 +2333,7 @@ impl MidasApp {
                 let grid_w = win_w as f32;
                 let grid_h = (win_h as f32 - TOOLBAR_H - STATUS_H).max(1.0);
 
-                let regions = self.workspace.panes.layout().pane_regions(
+                let regions = self.workspace().panes.layout().pane_regions(
                     1.0, // spacing
                     0.0, // min_size
                     iced::Size::new(grid_w, grid_h),
@@ -2314,9 +2350,9 @@ impl MidasApp {
                         && local_y >= rect.y
                         && local_y <= rect.y + rect.height
                     {
-                        if let Some(ps) = self.workspace.panes.get(*pane) {
+                        if let Some(ps) = self.workspace().panes.get(*pane) {
                             if let Some(chart_id) = ps.chart_id() {
-                                self.workspace.set_focus(*pane);
+                                self.workspace_mut().set_focus(*pane);
                                 // Drag-drop of a watchlist ticker onto a
                                 // chart is a user-visible symbol switch;
                                 // record it in the MRU.
@@ -2935,7 +2971,7 @@ impl MidasApp {
             }
 
             Message::PopOut(pane) => {
-                if let Some(pane_state) = self.workspace.panes.get(pane) {
+                if let Some(pane_state) = self.workspace().panes.get(pane) {
                     if let Some(chart_id) = pane_state.chart_id() {
                         if let Some(chart) = self.charts.get(&chart_id) {
                             let floating_chart = chart.clone();

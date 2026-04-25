@@ -12,6 +12,7 @@ pub mod connection_subscription;
 mod fixture;
 mod handlers;
 pub mod order_events_subscription;
+pub(crate) mod panel_ids;
 mod persistence;
 mod subscription_context;
 mod subscription_helpers;
@@ -21,11 +22,12 @@ mod ticker_subscription;
 mod ticker_wiring;
 mod views;
 mod watchlist_subscription;
+pub(crate) mod window_state;
 
 #[cfg(feature = "dev_harness")]
 pub use fixture::FixtureError;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -39,12 +41,14 @@ use midas_chart::state::ChartState;
 use midas_core::config::{AppConfig, ChartConfig, LayoutNode, PanelSlot};
 use midas_core::{
     AccountPanelId, CandleBuffer, ChartBackend, ChartId, DataProvider, LinkMode, OrderPanelId,
-    Timeframe, WatchlistId,
+    Timeframe, WatchlistId, WindowKey,
 };
 
 use crate::registry::HistoricalDataRegistry;
 
 use crate::annotation_store::AnnotationStore;
+use crate::app::panel_ids::{PanelId, PanelIdAllocator};
+use crate::app::window_state::WindowState;
 use crate::layout::{LayoutPresetKind, PanelContent, WorkspaceLayout};
 use crate::link::{LinkDimension, PickerTarget};
 use crate::order_panel::OrderSide;
@@ -358,8 +362,28 @@ pub enum ChartHandle {
 pub struct MidasApp {
     /// All chart panels keyed by stable ChartId.
     pub charts: HashMap<ChartId, ChartPanel>,
-    /// Workspace layout managed by iced's pane_grid.
-    pub workspace: WorkspaceLayout,
+    /// Per-window state. Replaces the singleton `workspace`. Slice A1
+    /// holds exactly one entry — the main window — keyed by
+    /// [`Self::main_window_key`]. Slice C populates additional entries
+    /// from config and runtime `CreateWindow` messages.
+    pub windows: BTreeMap<WindowKey, WindowState>,
+    /// Cached "which key is main" — used by accessors and helpers
+    /// when a panel-add fires without a focused window. Slice C
+    /// updates this on user rename.
+    pub main_window_key: WindowKey,
+    /// App-global panel ID allocator. Counters used to live on
+    /// `WorkspaceLayout`; with multiple windows coming online, two
+    /// layouts would otherwise mint colliding ids into the global
+    /// `charts` / `watchlists` / `order_panels` / `account_panels`
+    /// maps.
+    pub panel_ids: PanelIdAllocator,
+    /// Source of truth for "which window owns panel X". Maintained in
+    /// lockstep with the per-window [`WorkspaceLayout`] by the
+    /// `insert_*` / `remove_*` helpers on `MidasApp`. Without this
+    /// invariant Option B message routing (slice D) would have no
+    /// way to dispatch a panel-keyed message to the right window's
+    /// pane grid.
+    pub panel_to_window: HashMap<PanelId, WindowKey>,
     /// Status bar message text.
     pub status_message: String,
     /// Whether the FPS/frame-time debug overlay is visible.
@@ -1278,6 +1302,104 @@ async fn build_ib_router(
     }
 }
 
+// ── Window / panel state accessors (slice A1) ─────────────────────────
+
+impl MidasApp {
+    /// Borrow the main window's [`WorkspaceLayout`].
+    ///
+    /// Slice A1 transitional accessor — preserves the call-site shape
+    /// of the deleted `MidasApp.workspace` field. A2 inlines this to
+    /// `self.windows[&self.main_window_key].layout`.
+    pub(crate) fn workspace(&self) -> &WorkspaceLayout {
+        &self
+            .windows
+            .get(&self.main_window_key)
+            .expect("main window must always exist in windows map")
+            .layout
+    }
+
+    /// Mutable variant of [`Self::workspace`].
+    pub(crate) fn workspace_mut(&mut self) -> &mut WorkspaceLayout {
+        &mut self
+            .windows
+            .get_mut(&self.main_window_key)
+            .expect("main window must always exist in windows map")
+            .layout
+    }
+
+    /// Insert a chart panel and record its owning window. The single
+    /// entry-point that maintains the
+    /// `panel_to_window: HashMap<PanelId, WindowKey>` invariant for
+    /// charts.
+    pub(crate) fn insert_chart(&mut self, id: ChartId, panel: ChartPanel, owner: WindowKey) {
+        self.charts.insert(id, panel);
+        self.panel_to_window.insert(PanelId::Chart(id), owner);
+    }
+
+    /// Remove a chart panel and its `panel_to_window` entry together.
+    pub(crate) fn remove_chart(&mut self, id: ChartId) -> Option<ChartPanel> {
+        self.panel_to_window.remove(&PanelId::Chart(id));
+        self.charts.remove(&id)
+    }
+
+    /// Insert a watchlist panel under `owner`'s window key.
+    pub(crate) fn insert_watchlist(
+        &mut self,
+        id: WatchlistId,
+        panel: WatchlistPanel,
+        owner: WindowKey,
+    ) {
+        self.watchlists.insert(id, panel);
+        self.panel_to_window.insert(PanelId::Watchlist(id), owner);
+    }
+
+    /// Remove a watchlist panel and its `panel_to_window` entry.
+    pub(crate) fn remove_watchlist(&mut self, id: WatchlistId) -> Option<WatchlistPanel> {
+        self.panel_to_window.remove(&PanelId::Watchlist(id));
+        self.watchlists.remove(&id)
+    }
+
+    /// Insert an order panel under `owner`'s window key.
+    pub(crate) fn insert_order_panel(
+        &mut self,
+        id: OrderPanelId,
+        panel: crate::order_panel::OrderPanel,
+        owner: WindowKey,
+    ) {
+        self.order_panels.insert(id, panel);
+        self.panel_to_window.insert(PanelId::Order(id), owner);
+    }
+
+    /// Remove an order panel and its `panel_to_window` entry.
+    pub(crate) fn remove_order_panel(
+        &mut self,
+        id: OrderPanelId,
+    ) -> Option<crate::order_panel::OrderPanel> {
+        self.panel_to_window.remove(&PanelId::Order(id));
+        self.order_panels.remove(&id)
+    }
+
+    /// Insert an Account panel under `owner`'s window key.
+    pub(crate) fn insert_account_panel(
+        &mut self,
+        id: AccountPanelId,
+        panel: crate::account_panel::AccountPanel,
+        owner: WindowKey,
+    ) {
+        self.account_panels.insert(id, panel);
+        self.panel_to_window.insert(PanelId::Account(id), owner);
+    }
+
+    /// Remove an Account panel and its `panel_to_window` entry.
+    pub(crate) fn remove_account_panel(
+        &mut self,
+        id: AccountPanelId,
+    ) -> Option<crate::account_panel::AccountPanel> {
+        self.panel_to_window.remove(&PanelId::Account(id));
+        self.account_panels.remove(&id)
+    }
+}
+
 // ── Constructor + helpers ─────────────────────────────────────────────
 
 impl MidasApp {
@@ -1705,7 +1827,7 @@ impl MidasApp {
 
         StatusBarVm {
             active_info,
-            pane_count: self.workspace.pane_count(),
+            pane_count: self.workspace().pane_count(),
             overlay_indicator: if self.show_frame_overlay {
                 " | F11: overlay ON"
             } else {
@@ -1874,6 +1996,12 @@ impl MidasApp {
             ))
         });
 
+        // App-global panel ID allocator. Replaces the per-layout
+        // counters that lived on `WorkspaceLayout`. Restoration paths
+        // that mint fresh ids do so through this allocator so a future
+        // second window can't collide with the first.
+        let mut panel_ids = PanelIdAllocator::default();
+
         // Build workspace, charts, watchlists, and order/account panels from config.
         let (
             workspace,
@@ -1892,6 +2020,7 @@ impl MidasApp {
                 &config.watchlists,
                 &config.order_panels,
                 &config.account_panels,
+                &mut panel_ids,
             );
             let n = ch.len() + wl.len() + op.len() + ap.len();
             workspace = ws;
@@ -1902,7 +2031,7 @@ impl MidasApp {
             status_message = format!("Restored {n} panel(s) from layout tree");
         } else if !config.panel_order.is_empty() {
             // Legacy: panel_order-driven restoration (flat, no topology).
-            let (mut ws, first_chart_id) = WorkspaceLayout::single();
+            let (mut ws, first_chart_id) = WorkspaceLayout::single(&mut panel_ids);
             let mut ch = HashMap::new();
             let mut wl = HashMap::new();
             let first_pane = ws.focus.unwrap();
@@ -1919,9 +2048,11 @@ impl MidasApp {
                         if is_first {
                             ch.insert(first_chart_id, panel);
                             is_first = false;
-                        } else if let Some((new_id, _)) =
-                            ws.split(pane_grid::Axis::Vertical, first_pane)
-                        {
+                        } else if let Some((new_id, _)) = ws.split(
+                            pane_grid::Axis::Vertical,
+                            first_pane,
+                            panel_ids.next_chart(),
+                        ) {
                             ch.insert(new_id, panel);
                         }
                     }
@@ -1930,7 +2061,7 @@ impl MidasApp {
                             Some(cfg) => cfg,
                             None => continue,
                         };
-                        let wl_id = ws.next_watchlist_id();
+                        let wl_id = panel_ids.next_watchlist();
                         let panel = WatchlistPanel::from_config(wl_id, wl_cfg);
                         if is_first {
                             if let Some(state) = ws.panes.get_mut(first_pane) {
@@ -1938,9 +2069,11 @@ impl MidasApp {
                             }
                             wl.insert(wl_id, panel);
                             is_first = false;
-                        } else if let Some((_dummy_id, new_pane)) =
-                            ws.split(pane_grid::Axis::Vertical, first_pane)
-                        {
+                        } else if let Some((_dummy_id, new_pane)) = ws.split(
+                            pane_grid::Axis::Vertical,
+                            first_pane,
+                            panel_ids.next_chart(),
+                        ) {
                             if let Some(state) = ws.panes.get_mut(new_pane) {
                                 state.content = PanelContent::Watchlist(wl_id);
                             }
@@ -1980,7 +2113,7 @@ impl MidasApp {
             status_message = format!("Restored {n} panel(s) from config");
         } else if !config.charts.is_empty() {
             // Legacy path: charts only (backward compat).
-            let (mut ws, first_id) = WorkspaceLayout::single();
+            let (mut ws, first_id) = WorkspaceLayout::single(&mut panel_ids);
             let mut ch = HashMap::new();
 
             let first_cfg = &config.charts[0];
@@ -1989,7 +2122,11 @@ impl MidasApp {
             let first_pane = ws.focus.unwrap();
             for chart_cfg in config.charts.iter().skip(1) {
                 let panel = Self::restore_panel(chart_cfg);
-                if let Some((new_id, _)) = ws.split(pane_grid::Axis::Vertical, first_pane) {
+                if let Some((new_id, _)) = ws.split(
+                    pane_grid::Axis::Vertical,
+                    first_pane,
+                    panel_ids.next_chart(),
+                ) {
                     ch.insert(new_id, panel);
                 }
             }
@@ -2003,7 +2140,7 @@ impl MidasApp {
             restored_account_panels = std::collections::BTreeMap::new();
             status_message = format!("Restored {n} chart(s) from config");
         } else {
-            let (ws, first_id) = WorkspaceLayout::single();
+            let (ws, first_id) = WorkspaceLayout::single(&mut panel_ids);
             let mut ch = HashMap::new();
             ch.insert(first_id, Self::make_empty_panel());
             workspace = ws;
@@ -2276,9 +2413,37 @@ impl MidasApp {
             crate::app::subscription_registry::install_router(r.clone());
         }
 
+        // Bootstrap the per-window state. Slice A1 has exactly one
+        // entry — the main window — keyed by [`WindowKey::main_default`].
+        // Slice C populates additional entries from `config.windows`.
+        let main_window_key = WindowKey::main_default();
+        let mut windows = BTreeMap::new();
+        windows.insert(main_window_key.clone(), WindowState::new(workspace));
+
+        // Seed `panel_to_window` from the freshly restored layout so
+        // every panel id is reachable from a single window key. The
+        // helper `insert_*` methods land on `MidasApp` and maintain
+        // this invariant from here on; restore is the one place we
+        // populate it from existing pane content.
+        let mut panel_to_window: HashMap<PanelId, WindowKey> = HashMap::new();
+        {
+            let layout = &windows[&main_window_key].layout;
+            for state in layout.panes.panes.values() {
+                let panel = match state.content {
+                    PanelContent::Chart(id) => PanelId::Chart(id),
+                    PanelContent::Watchlist(id) => PanelId::Watchlist(id),
+                    PanelContent::Order(id) => PanelId::Order(id),
+                    PanelContent::Account(id) => PanelId::Account(id),
+                };
+                panel_to_window.insert(panel, main_window_key.clone());
+            }
+        }
         let mut app = Self {
             charts,
-            workspace,
+            windows,
+            main_window_key,
+            panel_ids,
+            panel_to_window,
             status_message,
             show_frame_overlay: false,
             config_path,
@@ -2634,6 +2799,8 @@ impl MidasApp {
     ///
     /// Parses the pre-order traversal, builds a `pane_grid::Configuration`,
     /// and creates the `WorkspaceLayout` with correct axes and ratios.
+    /// The supplied `alloc` is bumped past every minted id so a
+    /// subsequent `next_chart()` etc. cannot collide.
     #[expect(clippy::type_complexity, reason = "used only in one internal method")]
     fn restore_from_layout_tree(
         tree: &[LayoutNode],
@@ -2641,6 +2808,7 @@ impl MidasApp {
         watchlist_cfgs: &[midas_core::config::WatchlistConfig],
         order_panel_cfgs: &[midas_core::config::OrderPanelConfig],
         account_panel_cfgs: &[midas_core::config::AccountPanelConfig],
+        alloc: &mut PanelIdAllocator,
     ) -> (
         WorkspaceLayout,
         HashMap<ChartId, ChartPanel>,
@@ -2650,20 +2818,17 @@ impl MidasApp {
     ) {
         use crate::layout::PaneState;
 
-        struct RestoreCtx {
+        struct RestoreCtx<'a> {
             charts: HashMap<ChartId, ChartPanel>,
             watchlists: HashMap<WatchlistId, WatchlistPanel>,
             order_panels: HashMap<OrderPanelId, crate::order_panel::OrderPanel>,
             account_panels:
                 std::collections::BTreeMap<AccountPanelId, crate::account_panel::AccountPanel>,
-            next_chart_id: u32,
-            next_wl_id: u32,
-            next_order_id: u32,
-            next_account_id: u32,
+            alloc: &'a mut PanelIdAllocator,
             cursor: usize,
         }
 
-        impl RestoreCtx {
+        impl RestoreCtx<'_> {
             fn parse_node(
                 &mut self,
                 tree: &[LayoutNode],
@@ -2673,8 +2838,7 @@ impl MidasApp {
                 account_panel_cfgs: &[midas_core::config::AccountPanelConfig],
             ) -> pane_grid::Configuration<PaneState> {
                 if self.cursor >= tree.len() {
-                    let id = ChartId::new(self.next_chart_id);
-                    self.next_chart_id += 1;
+                    let id = self.alloc.next_chart();
                     self.charts.insert(id, MidasApp::make_empty_panel());
                     return pane_grid::Configuration::Pane(PaneState::chart(id));
                 }
@@ -2709,8 +2873,7 @@ impl MidasApp {
                         }
                     }
                     LayoutNode::Chart { chart_index } => {
-                        let id = ChartId::new(self.next_chart_id);
-                        self.next_chart_id += 1;
+                        let id = self.alloc.next_chart();
                         let panel = chart_cfgs
                             .get(*chart_index)
                             .map(MidasApp::restore_panel)
@@ -2720,8 +2883,7 @@ impl MidasApp {
                         pane_grid::Configuration::Pane(PaneState::chart(id))
                     }
                     LayoutNode::Watchlist { watchlist_index } => {
-                        let wl_id = WatchlistId::new(self.next_wl_id);
-                        self.next_wl_id += 1;
+                        let wl_id = self.alloc.next_watchlist();
                         if let Some(wl_cfg) = watchlist_cfgs.get(*watchlist_index) {
                             let panel = WatchlistPanel::from_config(wl_id, wl_cfg);
                             self.watchlists.insert(wl_id, panel);
@@ -2730,8 +2892,7 @@ impl MidasApp {
                         pane_grid::Configuration::Pane(PaneState::watchlist(wl_id))
                     }
                     LayoutNode::OrderPanel { order_panel_index } => {
-                        let op_id = OrderPanelId::new(self.next_order_id);
-                        self.next_order_id += 1;
+                        let op_id = self.alloc.next_order_panel();
                         if let Some(op_cfg) = order_panel_cfgs.get(*order_panel_index) {
                             let panel = crate::order_panel::OrderPanel::from_config(op_id, op_cfg);
                             self.order_panels.insert(op_id, panel);
@@ -2742,8 +2903,7 @@ impl MidasApp {
                     LayoutNode::Account {
                         account_panel_index,
                     } => {
-                        let account_id = AccountPanelId::new(self.next_account_id);
-                        self.next_account_id += 1;
+                        let account_id = self.alloc.next_account_panel();
                         let panel = match account_panel_cfgs.get(*account_panel_index) {
                             Some(cfg) => {
                                 crate::account_panel::AccountPanel::from_config(account_id, cfg)
@@ -2764,8 +2924,7 @@ impl MidasApp {
                             "Unexpected legacy OrderBlotter layout node — \
                              migration should have rewritten it. Falling back to empty chart."
                         );
-                        let id = ChartId::new(self.next_chart_id);
-                        self.next_chart_id += 1;
+                        let id = self.alloc.next_chart();
                         self.charts.insert(id, MidasApp::make_empty_panel());
                         self.cursor += 1;
                         pane_grid::Configuration::Pane(PaneState::chart(id))
@@ -2773,8 +2932,7 @@ impl MidasApp {
                     LayoutNode::Unknown => {
                         // Forward-compatibility: skip unknown node types gracefully.
                         tracing::warn!("Skipping unknown layout node at index {}", self.cursor);
-                        let id = ChartId::new(self.next_chart_id);
-                        self.next_chart_id += 1;
+                        let id = self.alloc.next_chart();
                         self.charts.insert(id, MidasApp::make_empty_panel());
                         self.cursor += 1;
                         pane_grid::Configuration::Pane(PaneState::chart(id))
@@ -2788,10 +2946,7 @@ impl MidasApp {
             watchlists: HashMap::new(),
             order_panels: HashMap::new(),
             account_panels: std::collections::BTreeMap::new(),
-            next_chart_id: 1,
-            next_wl_id: 1,
-            next_order_id: 1,
-            next_account_id: 1,
+            alloc,
             cursor: 0,
         };
 
@@ -2804,16 +2959,7 @@ impl MidasApp {
         );
 
         let panes = pane_grid::State::with_configuration(config);
-        let first_pane = panes.panes.keys().next().copied();
-        let ws = WorkspaceLayout {
-            panes,
-            focus: first_pane,
-            next_chart_id: ctx.next_chart_id,
-            next_watchlist_id: ctx.next_wl_id,
-            next_order_panel_id: ctx.next_order_id,
-            next_order_blotter_id: 1,
-            next_account_panel_id: ctx.next_account_id,
-        };
+        let ws = WorkspaceLayout::from_panes(panes);
 
         (
             ws,
@@ -3808,7 +3954,7 @@ impl MidasApp {
 
     /// Get the active chart's ChartId (from workspace focus).
     fn active_chart_id(&self) -> Option<ChartId> {
-        self.workspace.focused_chart_id()
+        self.workspace().focused_chart_id()
     }
 
     /// Returns the symbol currently displayed on the focused chart,
@@ -3832,8 +3978,8 @@ impl MidasApp {
     /// initial mouse-press and prevented title-bar buttons on unfocused
     /// panes from registering clicks.
     fn focus_chart(&mut self, chart_id: ChartId) {
-        if let Some(pane) = self.workspace.find_pane(chart_id) {
-            self.workspace.set_focus(pane);
+        if let Some(pane) = self.workspace().find_pane(chart_id) {
+            self.workspace_mut().set_focus(pane);
         }
     }
 
@@ -4157,8 +4303,8 @@ impl MidasApp {
                 }
                 "t" | "T" => {
                     // Focus nearest order panel, or create one if none exists.
-                    if let Some(pane) = self.workspace.find_any_order_pane() {
-                        self.workspace.set_focus(pane);
+                    if let Some(pane) = self.workspace().find_any_order_pane() {
+                        self.workspace_mut().set_focus(pane);
                     } else {
                         return self.update(Message::AddOrderPanel);
                     }

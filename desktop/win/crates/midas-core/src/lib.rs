@@ -20,6 +20,7 @@ pub mod market_data;
 pub mod provider;
 pub mod symbol;
 pub mod timeframe;
+pub mod window_key;
 
 // ── Planned modules (uncomment as implemented) ──────────────────────
 // pub mod events;       // MarketEvent, ChartEvent, UIEvent
@@ -40,6 +41,7 @@ pub use market_data::MarketSnapshot;
 pub use provider::{ConnectionState, DataProvider, OrderBroker, ProviderError};
 pub use symbol::SymbolKey;
 pub use timeframe::Timeframe;
+pub use window_key::{NameError as WindowNameError, WindowKey};
 
 // ---------------------------------------------------------------------------
 // SecurityType — IB security type for contracts

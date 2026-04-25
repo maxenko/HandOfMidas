@@ -96,7 +96,7 @@ pub fn dispatch_scroll(
     dy: f32,
 ) -> Result<iced::Task<Message>, InputError> {
     let chart_id = app
-        .workspace
+        .workspace()
         .focused_chart_id()
         .ok_or(InputError::NoActiveChart)?;
 

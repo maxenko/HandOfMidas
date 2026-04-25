@@ -351,7 +351,7 @@ pub fn handle_command(
             // user is looking at, not an orphaned one.
             use crate::layout::PanelContent;
             let visible_ids: Vec<midas_core::AccountPanelId> = app
-                .workspace
+                .workspace()
                 .panes
                 .iter()
                 .filter_map(|(_, state)| match state.content {

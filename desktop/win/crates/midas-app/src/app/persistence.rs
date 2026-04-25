@@ -29,7 +29,7 @@ impl MidasApp {
         let mut layout_tree: Vec<LayoutNode> = Vec::new();
 
         // Walk the pane grid tree to build layout_tree (pre-order traversal).
-        let node = self.workspace.panes.layout();
+        let node = self.workspace().panes.layout();
         self.walk_node(
             node,
             &mut chart_configs,
@@ -40,7 +40,7 @@ impl MidasApp {
         );
 
         // Also build legacy panel_order from BTreeMap iteration order.
-        for ps in self.workspace.panes.panes.values() {
+        for ps in self.workspace().panes.panes.values() {
             match &ps.content {
                 PanelContent::Chart(chart_id) => {
                     if let Some(idx) = chart_configs.iter().position(|c| {
@@ -92,10 +92,6 @@ impl MidasApp {
                             account_panel_index: idx,
                         });
                     }
-                }
-                PanelContent::OrderBlotter(_) => {
-                    // Legacy — never populated by this build. Migration
-                    // rewrote any persisted slots to Account at load time.
                 }
             }
         }
@@ -178,7 +174,7 @@ impl MidasApp {
                 self.walk_node(b, charts, watchlists, order_panels, account_panels, tree);
             }
             pane_grid::Node::Pane(pane) => {
-                if let Some(ps) = self.workspace.panes.get(*pane) {
+                if let Some(ps) = self.workspace().panes.get(*pane) {
                     match &ps.content {
                         PanelContent::Chart(chart_id) => {
                             if let Some(panel) = self.charts.get(chart_id) {
@@ -246,9 +242,6 @@ impl MidasApp {
                                     account_panel_index: idx,
                                 });
                             }
-                        }
-                        PanelContent::OrderBlotter(_) => {
-                            // Legacy — never persisted by this build.
                         }
                     }
                 }
