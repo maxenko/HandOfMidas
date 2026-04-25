@@ -86,8 +86,9 @@ pub struct AppConfig {
     /// Legacy: retained only as migration input.
     /// [`migrations::migrate_order_blotters_to_account_panels`] clears this
     /// vec and appends equivalent entries to [`Self::account_panels`] on
-    /// first load. New writes leave it empty.
-    #[serde(default)]
+    /// first load. New writes leave it empty, and `skip_serializing_if`
+    /// drops it from the on-disk TOML once the migration completes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub order_blotters: Vec<OrderBlotterConfig>,
     /// Account-panel configurations (tabbed Positions / Orders / History /
     /// Recents). Replaces the legacy `order_blotters` list.
