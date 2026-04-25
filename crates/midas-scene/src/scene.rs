@@ -17,6 +17,9 @@ use crate::primitives::{QuadInstance, ScenePrimitives};
 use crate::tools::ToolEffect;
 use crate::ThemePalette;
 
+/// `tracing` target shared by every log emitted from this module.
+const TRACE_TARGET: &str = "midas_scene::scene";
+
 /// Declarative layer-toggle set for a scene. Callers build a scene
 /// with every visual feature they want; disabled layers simply aren't
 /// added, so runtime cost is zero for off layers.
@@ -198,7 +201,7 @@ impl ChartScene {
             }));
             if let Err(_panic) = ctx_result {
                 tracing::error!(
-                    target: "midas_scene::scene",
+                    target: TRACE_TARGET,
                     layer = %layer_id,
                     "layer paint panicked; emitting fallback quad"
                 );
@@ -224,13 +227,13 @@ impl ChartScene {
     pub fn set_active_tool(&mut self, tool: Box<dyn InteractiveLayer>) {
         if self.active_tool.is_some() {
             tracing::debug!(
-                target: "midas_scene::scene",
+                target: TRACE_TARGET,
                 "replacing active_tool"
             );
             self.clear_active_tool();
         }
         tracing::debug!(
-            target: "midas_scene::scene",
+            target: TRACE_TARGET,
             id = %tool.id(),
             "install active_tool"
         );
@@ -241,7 +244,7 @@ impl ChartScene {
     pub fn clear_active_tool(&mut self) {
         if let Some(mut tool) = self.active_tool.take() {
             tracing::debug!(
-                target: "midas_scene::scene",
+                target: TRACE_TARGET,
                 id = %tool.id(),
                 "clear active_tool"
             );

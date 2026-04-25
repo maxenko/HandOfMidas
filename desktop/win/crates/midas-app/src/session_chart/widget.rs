@@ -92,6 +92,9 @@ use super::scene_builder::{build_scene, SceneConfig, SceneLayers};
 
 pub use super::axis_box::AxisKind;
 
+/// `tracing` target shared by every log emitted from this module.
+const TRACE_TARGET: &str = "midas_app::session_chart::widget";
+
 /// Error surface for [`SessionChart`] construction. App-harden M5:
 /// previously the widget's axis construction `.expect`-panicked the UI
 /// thread on degenerate inputs. Callers now handle the `Err` branch
@@ -819,14 +822,14 @@ impl SessionChart {
     /// Toggle the level-placement tool on. Toolbar "Add Level" button
     /// dispatches here.
     pub fn activate_level_tool(&mut self) {
-        tracing::debug!(target: "midas_app::session_chart::widget", "activate level tool");
+        tracing::debug!(target: TRACE_TARGET, "activate level tool");
         self.level_host.activate();
     }
 
     /// Turn the level-placement tool off. Called on Escape / window
     /// close / tool swap.
     pub fn deactivate_level_tool(&mut self) {
-        tracing::debug!(target: "midas_app::session_chart::widget", "deactivate level tool");
+        tracing::debug!(target: TRACE_TARGET, "deactivate level tool");
         self.level_host.deactivate();
     }
 
@@ -936,7 +939,7 @@ impl SessionChart {
     /// "Buy Bracket" button dispatches here.
     pub fn activate_buy_bracket_tool(&mut self) {
         tracing::debug!(
-            target: "midas_app::session_chart::widget",
+            target: TRACE_TARGET,
             "activate buy bracket tool",
         );
         self.bracket_host.activate_buy();
@@ -945,7 +948,7 @@ impl SessionChart {
     /// Activate the bracket tool for a Sell (Short) bracket.
     pub fn activate_sell_bracket_tool(&mut self) {
         tracing::debug!(
-            target: "midas_app::session_chart::widget",
+            target: TRACE_TARGET,
             "activate sell bracket tool",
         );
         self.bracket_host.activate_sell();

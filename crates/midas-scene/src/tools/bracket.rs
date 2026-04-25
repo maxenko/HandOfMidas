@@ -58,6 +58,9 @@ use crate::tools::{LegRole, Side, ToolEffect};
 /// Single [`LayerId`] used by every `BracketTool` instance.
 const BRACKET_TOOL_ID: LayerId = LayerId("bracket-tool");
 
+/// `tracing` target shared by every log emitted from this module.
+const TRACE_TARGET: &str = "midas_scene::tools::bracket";
+
 /// FSM states. `Side` is picked by activation or by a directional-toggle
 /// key press while the tool is in `Idle` / `AwaitingEntry` (side is
 /// locked once `entry` commits — second / third clicks cannot re-toggle).
@@ -287,7 +290,7 @@ impl InteractiveLayer for BracketTool {
                             price,
                         });
                         tracing::debug!(
-                            target: "midas_scene::tools::bracket",
+                            target: TRACE_TARGET,
                             ?side,
                             entry = price,
                             "BracketTool: entry placed",
@@ -301,7 +304,7 @@ impl InteractiveLayer for BracketTool {
                             price,
                         });
                         tracing::debug!(
-                            target: "midas_scene::tools::bracket",
+                            target: TRACE_TARGET,
                             ?side,
                             tp = price,
                             "BracketTool: TP placed",
@@ -320,7 +323,7 @@ impl InteractiveLayer for BracketTool {
                         });
                         ctx.emit_effect(ToolEffect::CommitDraftBracket);
                         tracing::debug!(
-                            target: "midas_scene::tools::bracket",
+                            target: TRACE_TARGET,
                             ?side,
                             sl = price,
                             "BracketTool: SL placed + commit",
@@ -337,7 +340,7 @@ impl InteractiveLayer for BracketTool {
                         BracketToolMode::Idle => {
                             self.mode = BracketToolMode::AwaitingEntry { side: new_side };
                             tracing::debug!(
-                                target: "midas_scene::tools::bracket",
+                                target: TRACE_TARGET,
                                 ?new_side,
                                 "BracketTool: directional toggle from Idle",
                             );
@@ -346,7 +349,7 @@ impl InteractiveLayer for BracketTool {
                         BracketToolMode::AwaitingEntry { .. } => {
                             self.mode = BracketToolMode::AwaitingEntry { side: new_side };
                             tracing::debug!(
-                                target: "midas_scene::tools::bracket",
+                                target: TRACE_TARGET,
                                 ?new_side,
                                 "BracketTool: directional toggle pre-entry",
                             );
@@ -364,7 +367,7 @@ impl InteractiveLayer for BracketTool {
                     if self.is_placing() {
                         ctx.emit_effect(ToolEffect::CancelDraftBracket);
                         tracing::debug!(
-                            target: "midas_scene::tools::bracket",
+                            target: TRACE_TARGET,
                             "BracketTool: escape — CancelDraftBracket emitted",
                         );
                     }
@@ -426,7 +429,7 @@ impl BracketTool {
         if self.is_placing() {
             effects.push(ToolEffect::CancelDraftBracket);
             tracing::debug!(
-                target: "midas_scene::tools::bracket",
+                target: TRACE_TARGET,
                 "BracketTool: cancel_with_effect — CancelDraftBracket emitted",
             );
         }
