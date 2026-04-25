@@ -87,6 +87,130 @@ jobs:
       - name: Test
         run: cd desktop/win && cargo test --workspace --verbose
 
+  # ─── Group C — non-blocking feature-flag + Windows coverage ─────────
+  # The four jobs below (desktop_session_chart_lint, desktop_dev_harness_lint,
+  # desktop_session_chart_tests, desktop_windows) all carry
+  # `continue-on-error: true` to make this an OBSERVE-ONLY rollout: they
+  # surface red walls in the Actions tab without blocking unrelated PRs.
+  #
+  # Flip-to-required follow-up: scheduled 14 days after the merge of the
+  # PR that introduced these jobs. That follow-up PR drops
+  # `continue-on-error: true` from these four AND from the existing
+  # `broker_ib_live_feature_lint` job in one go (single source of policy
+  # truth — all five non-blocking jobs flip together).
+  #
+  # Per Group C plan (plan/arch-review-fixes/03-group-c-ci-coverage.md):
+  # if any of these red-walls on its first run, fix the underlying
+  # ON-path issue rather than masking it via `if: false`. The whole
+  # point of these jobs is to catch the issue NOW.
+
+  desktop_session_chart_lint:
+    name: Desktop session_chart feature lint (non-blocking)
+    runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
+    needs: desktop
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: desktop
+          workspaces: desktop/win
+      - name: Clippy desktop with session_chart
+        working-directory: desktop/win
+        run: cargo clippy -p midas-app --features session_chart --all-targets -- -D warnings
+
+  desktop_dev_harness_lint:
+    name: Desktop dev_harness feature lint (non-blocking)
+    runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
+    needs: desktop
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: desktop
+          workspaces: desktop/win
+      - name: Clippy desktop with dev_harness
+        working-directory: desktop/win
+        run: cargo clippy -p midas-app --features dev_harness --all-targets -- -D warnings
+
+  desktop_session_chart_tests:
+    name: Desktop session_chart_tests (non-blocking)
+    runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
+    needs: desktop
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: desktop
+          workspaces: desktop/win
+      - name: Test session_chart_tests
+        working-directory: desktop/win
+        run: cargo test --workspace --features session_chart_tests
+
+  desktop_windows:
+    name: Desktop Windows (non-blocking)
+    runs-on: windows-latest
+    if: github.event_name != 'schedule'
+    needs: desktop
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+          targets: x86_64-pc-windows-msvc
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: desktop-windows
+          workspaces: desktop/win
+      - name: Format check
+        working-directory: desktop/win
+        run: cargo fmt --all --check
+      - name: Clippy
+        working-directory: desktop/win
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Build
+        working-directory: desktop/win
+        run: cargo build --workspace
+      - name: Test (default features)
+        working-directory: desktop/win
+        run: cargo test --workspace
+      - name: Test app_sim_e2e (Windows-only, --ignored)
+        working-directory: desktop/win
+        run: cargo test --test app_sim_e2e -- --ignored
+      # Gated on slice A3 landing (chart_parity_tests parity-baseline
+      # harness). Flip `if: false` to `if: github.event_name != 'schedule'`
+      # in A3's PR if A3 lands after C2, or directly in this job if A3
+      # is already merged. Until then, this step is a placeholder so
+      # the Windows runner shape matches the plan and the flip is a
+      # one-line diff.
+      - name: Test chart_parity_tests (Windows-only)
+        if: false
+        working-directory: desktop/win
+        run: cargo test --workspace --features chart_parity_tests --test parity_baseline
+
   sim_unit:
     name: IB sim unit tests
     runs-on: ubuntu-latest
