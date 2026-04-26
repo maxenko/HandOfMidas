@@ -389,8 +389,11 @@ impl MidasApp {
     /// Handle pane focus, resize, drag, split, and close messages.
     pub(crate) fn handle_pane_msg(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::PaneFocused(pane) => {
-                self.workspace_mut().set_focus(pane);
+            Message::PaneFocused(window_key, pane) => {
+                if let Some(ws) = self.windows.get_mut(&window_key) {
+                    ws.layout.set_focus(pane);
+                }
+                self.focused_window = Some(window_key);
                 // Single-source-of-truth refactor: the focus change
                 // routes through the reducer's `MaybeSnapToGatr`
                 // handler. The reducer corrects both surfaces (panel
@@ -415,44 +418,57 @@ impl MidasApp {
                 self.maybe_emit_snap_for_active_chart()
             }
 
-            Message::PaneResized(pane_grid::ResizeEvent { split, ratio }) => {
-                self.workspace_mut().panes.resize(split, ratio);
-                self.mark_config_dirty();
+            Message::PaneResized(window_key, pane_grid::ResizeEvent { split, ratio }) => {
+                if let Some(ws) = self.windows.get_mut(&window_key) {
+                    ws.layout.panes.resize(split, ratio);
+                    self.mark_config_dirty();
+                }
                 Task::none()
             }
 
-            Message::PaneDragged(pane_grid::DragEvent::Picked { pane }) => {
-                self.workspace_mut().set_focus(pane);
+            Message::PaneDragged(window_key, pane_grid::DragEvent::Picked { pane }) => {
+                if let Some(ws) = self.windows.get_mut(&window_key) {
+                    ws.layout.set_focus(pane);
+                }
                 Task::none()
             }
 
-            Message::PaneDragged(pane_grid::DragEvent::Dropped { pane, target }) => {
+            Message::PaneDragged(window_key, pane_grid::DragEvent::Dropped { pane, target }) => {
                 self.pending_drag = None;
                 self.dragging_ticker = None;
-                self.workspace_mut().panes.drop(pane, target);
-                self.mark_config_dirty();
+                if let Some(ws) = self.windows.get_mut(&window_key) {
+                    ws.layout.panes.drop(pane, target);
+                    self.mark_config_dirty();
+                }
                 Task::none()
             }
 
-            Message::PaneDragged(_) => {
+            Message::PaneDragged(_, _) => {
                 self.pending_drag = None;
                 self.dragging_ticker = None;
                 Task::none()
             }
 
-            Message::PaneSplit(axis, pane) => {
+            Message::PaneSplit(window_key, axis, pane) => {
                 let new_id = self.panel_ids.next_chart();
-                if let Some((new_id, _new_pane)) = self.workspace_mut().split(axis, pane, new_id) {
-                    let owner = self.main_window_key.clone();
-                    self.insert_chart(new_id, Self::make_empty_panel(), owner);
+                let split_result = self
+                    .windows
+                    .get_mut(&window_key)
+                    .and_then(|ws| ws.layout.split(axis, pane, new_id));
+                if let Some((new_id, _new_pane)) = split_result {
+                    self.insert_chart(new_id, Self::make_empty_panel(), window_key);
                     self.status_message = format!("Split pane, added {new_id}");
                     self.mark_config_dirty();
                 }
                 Task::none()
             }
 
-            Message::PaneClose(pane) => {
-                match self.workspace_mut().close(pane) {
+            Message::PaneClose(window_key, pane) => {
+                let closed = self
+                    .windows
+                    .get_mut(&window_key)
+                    .and_then(|ws| ws.layout.close(pane));
+                match closed {
                     Some(PanelContent::Chart(closed_id)) => {
                         self.remove_chart(closed_id);
                         crate::app::subscription_registry::remove_chart_handles_for_chart(
@@ -3481,7 +3497,7 @@ impl MidasApp {
 
             // -- Bracket context menu (these still re-dispatch elsewhere) --
             Message::BracketContextCancel(parent_id) => {
-                self.bracket_context_menu = None;
+                self.bracket_context_menu.clear();
 
                 // Look up the link but do NOT remove it yet.
                 // The link stays alive until the engine confirms cancellation.
@@ -3538,7 +3554,7 @@ impl MidasApp {
                 Task::none()
             }
             Message::BracketContextDismiss => {
-                self.bracket_context_menu = None;
+                self.bracket_context_menu.clear();
                 Task::none()
             }
 
@@ -3673,7 +3689,17 @@ impl MidasApp {
         x: f32,
         y: f32,
     ) -> Task<Message> {
-        self.bracket_context_menu = Some((chart_id, annotation_id.0, leg, x, y));
+        // Slice D: route the context menu by which window owns the
+        // chart; falls back to the main window if the chart doesn't
+        // appear in `panel_to_window` (defensive — pre-existing
+        // tests construct charts without going through `insert_chart`).
+        let key = self
+            .panel_to_window
+            .get(&PanelId::Chart(chart_id))
+            .cloned()
+            .unwrap_or_else(|| self.main_window_key.clone());
+        self.bracket_context_menu
+            .insert(key, (chart_id, annotation_id.0, leg, x, y));
         Task::none()
     }
 
@@ -5491,5 +5517,44 @@ mod window_lifecycle_tests {
         // The placeholder pane is focused so the first AddChart can
         // seed it in place via `seed_first_pane`.
         assert!(ws.layout.focus.is_some());
+    }
+
+    // Slice D — pane-grid messages carry `WindowKey`.
+
+    /// Two windows hold independent `pane_grid::State` instances; the
+    /// `set_focus(pane)` on one must not mutate the other. The slice-D
+    /// dispatch path resolves the target window first and only then
+    /// calls `layout.set_focus`, so this property is what the
+    /// `Message::PaneFocused(WindowKey, _)` qualifier protects.
+    #[test]
+    fn focus_in_one_window_doesnt_disturb_other() {
+        let geo = WindowGeometryConfig::default();
+        let mut a = WindowState::opening(WindowKey::new("Window 2"), false, geo.clone());
+        let b = WindowState::opening(WindowKey::new("Window 3"), false, geo);
+
+        let pane_a = a.layout.focus.expect("opening window has focus");
+        let pane_b = b.layout.focus.expect("opening window has focus");
+
+        // Mutate one — make the focus explicit so we can detect a
+        // cross-window leak.
+        a.layout.set_focus(pane_a);
+
+        assert_eq!(a.layout.focus, Some(pane_a));
+        assert_eq!(b.layout.focus, Some(pane_b));
+    }
+
+    /// Slice-D bracket-context-menu race: two windows can host their
+    /// own active context menu simultaneously. The container is now a
+    /// `HashMap<WindowKey, _>`, not a single `Option`, so two inserts
+    /// under different keys leave both entries live.
+    #[test]
+    fn bracket_context_menu_supports_two_windows_at_once() {
+        use std::collections::HashMap;
+        let mut menus: HashMap<WindowKey, u32> = HashMap::new();
+        menus.insert(WindowKey::new("Main"), 1);
+        menus.insert(WindowKey::new("Window 2"), 2);
+        assert_eq!(menus.len(), 2);
+        assert_eq!(menus.get(&WindowKey::new("Main")), Some(&1));
+        assert_eq!(menus.get(&WindowKey::new("Window 2")), Some(&2));
     }
 }

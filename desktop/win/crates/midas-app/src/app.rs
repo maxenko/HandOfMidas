@@ -502,14 +502,23 @@ pub struct MidasApp {
     /// routes [`Message::Toast`] into it and interprets the resulting
     /// effects via `dispatch_toast` / `consume_toast_effects`.
     pub toasts: crate::toast::ToastController,
-    /// Bracket context menu state: (chart_id, annotation_id, leg_role, screen_x, screen_y).
-    pub bracket_context_menu: Option<(
-        ChartId,
-        u64,
-        midas_annotation_types::order_bracket::LegRole,
-        f32,
-        f32,
-    )>,
+    /// Bracket context menu state, scoped per-window so two windows
+    /// can show their own popups simultaneously without one dismissing
+    /// the other (slice D — risk #4 mitigation). The `WindowKey` is
+    /// resolved from `panel_to_window[Chart(chart_id)]` at the
+    /// emit-site.
+    ///
+    /// Tuple: (chart_id, annotation_id, leg_role, screen_x, screen_y).
+    pub bracket_context_menu: HashMap<
+        WindowKey,
+        (
+            ChartId,
+            u64,
+            midas_annotation_types::order_bracket::LegRole,
+            f32,
+            f32,
+        ),
+    >,
     /// Centralized per-symbol annotation store (order brackets, levels, etc.).
     pub annotation_store: AnnotationStore,
     /// In-memory market data cache for watchlist columns.
@@ -682,15 +691,19 @@ pub enum Message {
 
     // -- Pane grid --
     /// A pane was clicked, giving it focus.
-    PaneFocused(pane_grid::Pane),
-    /// A pane border was dragged to resize.
-    PaneResized(pane_grid::ResizeEvent),
-    /// A pane was dragged and dropped to reorder.
-    PaneDragged(pane_grid::DragEvent),
-    /// Split a pane along an axis.
-    PaneSplit(pane_grid::Axis, pane_grid::Pane),
-    /// Close a pane by its pane_grid handle.
-    PaneClose(pane_grid::Pane),
+    /// Pane focus changed inside a window's pane grid. Slice D: the
+    /// `WindowKey` qualifier is required because `pane_grid::Pane`
+    /// handles are scoped to a single `pane_grid::State` and would
+    /// otherwise collide across windows.
+    PaneFocused(WindowKey, pane_grid::Pane),
+    /// A pane border was dragged to resize, scoped to a window.
+    PaneResized(WindowKey, pane_grid::ResizeEvent),
+    /// A pane was dragged and dropped to reorder, scoped to a window.
+    PaneDragged(WindowKey, pane_grid::DragEvent),
+    /// Split a pane along an axis, scoped to a window.
+    PaneSplit(WindowKey, pane_grid::Axis, pane_grid::Pane),
+    /// Close a pane by its pane_grid handle, scoped to a window.
+    PaneClose(WindowKey, pane_grid::Pane),
 
     // -- Multi-window lifecycle (slice C) --
     /// Open a new named window. `None` triggers
@@ -2687,7 +2700,7 @@ impl MidasApp {
             order_history_persist,
             order_annotation_links: HashMap::new(),
             toasts: crate::toast::ToastController::new(),
-            bracket_context_menu: None,
+            bracket_context_menu: HashMap::new(),
             annotation_store: AnnotationStore::new(),
             market_cache: crate::market_cache::MarketDataCache::default(),
             // Seed the display with "Connecting" so the status bar
@@ -4543,7 +4556,7 @@ impl MidasApp {
                 self.link_picker_open = None;
                 self.level_placing = false;
                 self.placing_preview = None;
-                self.bracket_context_menu = None;
+                self.bracket_context_menu.clear();
                 // Route Dismiss through the controller so all toast
                 // mutations land in one named place (no `clear()` /
                 // `self.state = None` back-doors). Effects always

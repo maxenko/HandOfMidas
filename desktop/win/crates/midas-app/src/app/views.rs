@@ -411,23 +411,31 @@ impl MidasApp {
         ]
         .spacing(2);
 
+        // The toolbar's Split buttons target the focused window's
+        // focused pane. Slice D: payload-less Split is qualified with
+        // the window key so a non-main window can split independently
+        // when it has focus.
+        let split_target = self
+            .focused_window
+            .clone()
+            .unwrap_or_else(|| self.main_window_key.clone());
+        let split_focus = self
+            .windows
+            .get(&split_target)
+            .and_then(|ws| ws.layout.focus);
+        let split_target_h = split_target.clone();
+        let split_target_v = split_target;
         let split_buttons = row![
             button(text("Split H").size(11))
-                .on_press_maybe(
-                    self.windows[&self.main_window_key]
-                        .layout
-                        .focus
-                        .map(|p| { Message::PaneSplit(pane_grid::Axis::Horizontal, p) })
-                )
+                .on_press_maybe(split_focus.map(|p| {
+                    Message::PaneSplit(split_target_h.clone(), pane_grid::Axis::Horizontal, p)
+                }))
                 .padding([4, 6])
                 .style(hover_text_button_style),
             button(text("Split V").size(11))
-                .on_press_maybe(
-                    self.windows[&self.main_window_key]
-                        .layout
-                        .focus
-                        .map(|p| { Message::PaneSplit(pane_grid::Axis::Vertical, p) })
-                )
+                .on_press_maybe(split_focus.map(|p| {
+                    Message::PaneSplit(split_target_v.clone(), pane_grid::Axis::Vertical, p)
+                }))
                 .padding([4, 6])
                 .style(hover_text_button_style),
         ]
@@ -552,9 +560,10 @@ impl MidasApp {
     /// Render the pane-grid content area for an arbitrary window.
     ///
     /// Slice C: extracted so non-main windows can render their layout
-    /// using the same widget tree the main window uses. Pane-grid
-    /// messages still emit globally-keyed `Message::PaneFocused`-style
-    /// variants — slice D introduces the `WindowKey` qualifier.
+    /// using the same widget tree the main window uses. Slice D plumbs
+    /// the window key through every pane-grid message so handlers
+    /// route to the right window's `pane_grid::State` instead of the
+    /// implicit main-window default.
     pub(crate) fn view_content_for_window<'a>(
         &'a self,
         ws: &'a super::window_state::WindowState,
@@ -562,6 +571,10 @@ impl MidasApp {
         let main_layout = &ws.layout;
         let focused_pane = main_layout.focus;
         let pane_count = main_layout.pane_count();
+        let window_key = ws.key.clone();
+        let on_focused = window_key.clone();
+        let on_resized = window_key.clone();
+        let on_dragged = window_key.clone();
 
         let pane_grid_widget =
             PaneGrid::new(&main_layout.panes, |pane, pane_state, _is_maximized| {
@@ -569,26 +582,28 @@ impl MidasApp {
 
                 let (title_bar, body) = match pane_state.content {
                     PanelContent::Chart(chart_id) => {
-                        let tb = self.view_pane_title_bar(chart_id, pane, pane_count);
+                        let tb = self.view_pane_title_bar(&window_key, chart_id, pane, pane_count);
                         let bd = self.view_pane_body(chart_id);
                         (tb, bd)
                     }
                     PanelContent::Watchlist(wl_id) => {
-                        let tb = self.view_watchlist_title_bar(wl_id, pane);
+                        let tb = self.view_watchlist_title_bar(&window_key, wl_id, pane);
                         let bd = self.view_watchlist_body(wl_id);
                         (tb, bd)
                     }
                     PanelContent::Order(order_id) => {
-                        let tb = self.view_order_title_bar(order_id, pane);
+                        let tb = self.view_order_title_bar(&window_key, order_id, pane);
                         let bd = self.view_order_body(order_id);
                         (tb, bd)
                     }
                     PanelContent::Account(account_id) => {
-                        let tb = self.view_account_title_bar(account_id, pane);
+                        let tb = self.view_account_title_bar(&window_key, account_id, pane);
                         let bd = self.view_account_body(account_id);
                         (tb, bd)
                     }
-                    PanelContent::Placeholder => self.view_placeholder_pane(pane, pane_count),
+                    PanelContent::Placeholder => {
+                        self.view_placeholder_pane(&window_key, pane, pane_count)
+                    }
                 };
 
                 // Content style: dark background (serves as title bar bg
@@ -614,11 +629,11 @@ impl MidasApp {
                         }
                     })
             })
-            .on_click(Message::PaneFocused)
-            .on_resize(6, Message::PaneResized)
+            .on_click(move |pane| Message::PaneFocused(on_focused.clone(), pane))
+            .on_resize(6, move |ev| Message::PaneResized(on_resized.clone(), ev))
             // Note: on_click fires PaneFocused for pane selection.
             // Drag-drop uses DragMouseUp with global hit-testing instead.
-            .on_drag(Message::PaneDragged)
+            .on_drag(move |ev| Message::PaneDragged(on_dragged.clone(), ev))
             .style(|_theme| pane_grid::Style {
                 hovered_region: pane_grid::Highlight {
                     background: iced::Background::Color(Color::from_rgba(0.2, 0.4, 0.8, 0.25)),
@@ -660,6 +675,7 @@ impl MidasApp {
     /// hint inside an otherwise empty new window.
     fn view_placeholder_pane(
         &self,
+        window_key: &midas_core::WindowKey,
         pane: pane_grid::Pane,
         pane_count: usize,
     ) -> (pane_grid::TitleBar<'_, Message>, Element<'_, Message>) {
@@ -672,7 +688,7 @@ impl MidasApp {
         // last-pane guard inside `WorkspaceLayout::close`), so
         // multi-pane windows can still drop an empty pane.
         let close_btn = button(text("×").size(14))
-            .on_press(Message::PaneClose(pane))
+            .on_press(Message::PaneClose(window_key.clone(), pane))
             .padding([0, 6])
             .style(|_t, _s| iced::widget::button::Style {
                 background: None,
@@ -740,6 +756,7 @@ impl MidasApp {
     /// Layout: `[TICKER][1m|5m|...][G][R] [..drag area..] [⧉][×]`
     fn view_pane_title_bar(
         &self,
+        window_key: &midas_core::WindowKey,
         chart_id: ChartId,
         pane: pane_grid::Pane,
         pane_count: usize,
@@ -747,7 +764,7 @@ impl MidasApp {
         // iced's TitleBar drag zone = title bar area NOT covered by content
         // bounds or controls bounds. Buttons in content still capture clicks.
         let title_content = self.view_title_bar_content(chart_id);
-        let controls_row = self.view_title_bar_controls(chart_id, pane, pane_count);
+        let controls_row = self.view_title_bar_controls(window_key, chart_id, pane, pane_count);
 
         pane_grid::TitleBar::new(title_content)
             .controls(controls_row)
@@ -880,6 +897,7 @@ impl MidasApp {
     /// Layout: `[S][T]  [⧉][×]`
     fn view_title_bar_controls(
         &self,
+        window_key: &midas_core::WindowKey,
         chart_id: ChartId,
         pane: pane_grid::Pane,
         pane_count: usize,
@@ -939,7 +957,7 @@ impl MidasApp {
 
         let close_btn: Element<'_, Message> = if pane_count > 1 {
             button(text("\u{00D7}").size(12))
-                .on_press(Message::PaneClose(pane))
+                .on_press(Message::PaneClose(window_key.clone(), pane))
                 .padding([1, 5])
                 .style(button::text)
                 .into()
@@ -1324,6 +1342,7 @@ impl MidasApp {
     /// Build the TitleBar for a watchlist pane.
     fn view_watchlist_title_bar(
         &self,
+        window_key: &midas_core::WindowKey,
         wl_id: WatchlistId,
         pane: pane_grid::Pane,
     ) -> pane_grid::TitleBar<'_, Message> {
@@ -1358,7 +1377,7 @@ impl MidasApp {
                 .into();
 
         let close_btn: Element<'_, Message> = button(text("X").size(10))
-            .on_press(Message::PaneClose(pane))
+            .on_press(Message::PaneClose(window_key.clone(), pane))
             .padding([2, 6])
             .style(hover_text_button_style)
             .into();
@@ -1659,6 +1678,7 @@ impl MidasApp {
     /// Build the title bar for a dockable order panel pane.
     fn view_order_title_bar(
         &self,
+        window_key: &midas_core::WindowKey,
         order_id: OrderPanelId,
         pane: pane_grid::Pane,
     ) -> pane_grid::TitleBar<'_, Message> {
@@ -1690,7 +1710,7 @@ impl MidasApp {
                 .into();
 
         let close_btn: Element<'_, Message> = button(text("X").size(10))
-            .on_press(Message::PaneClose(pane))
+            .on_press(Message::PaneClose(window_key.clone(), pane))
             .padding([2, 6])
             .style(hover_text_button_style)
             .into();
@@ -2288,6 +2308,7 @@ impl MidasApp {
     /// count and the link/gear/close controls.
     fn view_account_title_bar(
         &self,
+        window_key: &midas_core::WindowKey,
         account_id: AccountPanelId,
         pane: pane_grid::Pane,
     ) -> pane_grid::TitleBar<'_, Message> {
@@ -2333,7 +2354,7 @@ impl MidasApp {
                 .into();
 
         let close_btn: Element<'_, Message> = button(text("X").size(10))
-            .on_press(Message::PaneClose(pane))
+            .on_press(Message::PaneClose(window_key.clone(), pane))
             .padding([2, 6])
             .style(hover_text_button_style)
             .into();
