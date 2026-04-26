@@ -353,6 +353,21 @@ pub struct ChartConfig {
     /// mismatch is handled in the app's dispatch layer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<ChartBackend>,
+    /// Whether to fetch extended-hours bars from the broker for this
+    /// chart. Drives the `use_rth` flag on
+    /// `MarketDataRouter::historical_bars` (negated): `true` here →
+    /// `use_rth = false`, so pre / post bars reach the chart. Default
+    /// `true` (ETH ships on by default per the plan); existing configs
+    /// missing the field load with the default.
+    #[serde(default = "default_true")]
+    pub show_extended_hours: bool,
+    /// Whether the chart should paint the pre/post-market session band
+    /// overlay behind the candles. Drives the `compute_session_bands`
+    /// pass in `midas-chart`. Independent from `show_extended_hours`
+    /// — a user can fetch ETH bars but suppress the tint, or vice
+    /// versa. Default `true`.
+    #[serde(default = "default_true")]
+    pub show_extended_hours_bands: bool,
 }
 
 /// Serde default for bool fields that should default to `true`.

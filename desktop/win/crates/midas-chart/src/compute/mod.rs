@@ -39,6 +39,17 @@ const MAX_GRID_LINES: usize = 50;
 /// Color for session boundary lines (faint blue-gray, semi-transparent).
 const SESSION_BOUNDARY_COLOR: [f32; 4] = [0.3, 0.3, 0.5, 0.30];
 
+/// Default tint for the legacy chart's pre-market band (warm brown,
+/// TradingView-style). Mirrored on the new stack via
+/// `midas_scene::ThemePalette::band_pre`; the workspace-level parity
+/// test in `desktop/win/tests/` enforces byte-equality between the
+/// two until a future shared-theme crate or Phase D unification.
+pub const LEGACY_BAND_PRE: [f32; 4] = [0.55, 0.36, 0.18, 0.18];
+/// Default tint for the legacy chart's post-market band (cool blue,
+/// TradingView-style). Mirrored on the new stack via
+/// `midas_scene::ThemePalette::band_post`.
+pub const LEGACY_BAND_POST: [f32; 4] = [0.20, 0.34, 0.55, 0.18];
+
 /// A time gap between consecutive candles is considered a session boundary
 /// if it exceeds this multiple of the expected candle duration.
 const SESSION_GAP_THRESHOLD: f64 = 1.5;
@@ -338,6 +349,38 @@ fn compute_normal_scene(
     let mut badges = widget_output.badges.clone();
     let mut labels = widget_output.labels.clone();
     let mut grid_instances = grid_instances;
+    let band_params = SessionBandParams {
+        show_bands: input.show_extended_hours_bands,
+        bar_duration_ms: input.bar_duration_ms,
+        pre_color: input.pre_market_band_color,
+        post_color: input.post_market_band_color,
+        separator_y,
+    };
+    let band_x_open =
+        |i: usize| -> f32 { camera.snap_to_pixel(camera.time_to_x(data.timestamp(i) as f64)) };
+    let band_x_close = |i: usize| -> f32 {
+        let close_ts = data.timestamp(i).saturating_add(input.bar_duration_ms);
+        camera.snap_to_pixel(camera.time_to_x(close_ts as f64))
+    };
+    let bands = compute_session_bands(
+        data,
+        vis_start,
+        vis_end,
+        &band_params,
+        &band_x_open,
+        &band_x_close,
+    );
+    // Bands sit behind price-grid lines (and behind every later
+    // pass — candles, badges, decorators) so the trader sees a faint
+    // tint *under* the candles instead of an opaque overlay. Splice
+    // them into the front of the bucket; the renderer paints in
+    // order.
+    if !bands.is_empty() {
+        let mut combined = Vec::with_capacity(bands.len() + grid_instances.len());
+        combined.extend(bands);
+        combined.append(&mut grid_instances);
+        grid_instances = combined;
+    }
     apply_current_price_indicator(
         input,
         data,
@@ -530,6 +573,33 @@ fn compute_collapsed_scene(
     let mut badges = widget_output.badges.clone();
     let mut labels = widget_output.labels.clone();
     let mut grid_instances = grid_instances;
+    // Session bands in collapsed mode use index-space X — each
+    // candle owns slot `[i, i+1)` in the camera's index axis, so
+    // the band sweeps from `i` to `i+1` regardless of the bar's
+    // wall-clock duration.
+    let band_params = SessionBandParams {
+        show_bands: input.show_extended_hours_bands,
+        bar_duration_ms: input.bar_duration_ms,
+        pre_color: input.pre_market_band_color,
+        post_color: input.post_market_band_color,
+        separator_y,
+    };
+    let band_x_open = |i: usize| -> f32 { camera.snap_to_pixel(camera.time_to_x(i as f64)) };
+    let band_x_close = |i: usize| -> f32 { camera.snap_to_pixel(camera.time_to_x((i + 1) as f64)) };
+    let bands = compute_session_bands(
+        data,
+        vis_start,
+        vis_end,
+        &band_params,
+        &band_x_open,
+        &band_x_close,
+    );
+    if !bands.is_empty() {
+        let mut combined = Vec::with_capacity(bands.len() + grid_instances.len());
+        combined.extend(bands);
+        combined.append(&mut grid_instances);
+        grid_instances = combined;
+    }
     apply_current_price_indicator(
         input,
         data,
@@ -829,6 +899,180 @@ fn detect_session_boundaries(
     }
 
     boundaries
+}
+
+/// Parameters for [`compute_session_bands`].
+///
+/// Filled from [`ChartInput`] in `compute_normal_scene` /
+/// `compute_collapsed_scene` and the legacy chart's input builder.
+#[derive(Copy, Clone, Debug)]
+pub struct SessionBandParams {
+    /// Master enable for the band pass. When `false`, the pass
+    /// short-circuits to an empty `Vec` so disabled charts pay only
+    /// a bool check per frame.
+    pub show_bands: bool,
+    /// Bar duration in milliseconds. Used to compute the right edge
+    /// of the trailing bar in each run as
+    /// `data.timestamp(last) + bar_duration_ms`.
+    pub bar_duration_ms: i64,
+    /// Tint for pre-market runs (RGBA, linear).
+    pub pre_color: [f32; 4],
+    /// Tint for post-market runs (RGBA, linear).
+    pub post_color: [f32; 4],
+    /// Y coordinate of the timeline separator. Bands span
+    /// `0.0..separator_y` (the price area only — never the volume
+    /// strip below).
+    pub separator_y: f32,
+}
+
+/// Compute filled-rectangle session-band overlays for the visible
+/// candle range.
+///
+/// "Trim-to-data" semantics (Open Question 1, resolved): each
+/// contiguous run of non-Regular candles tints
+/// `[run.first.ts_open, run.last.ts_close]` only. Empty pre-markets
+/// emit no band; closed/holiday/weekend candles never tint
+/// (defensive — if upstream ever leaks `Closed` into a visible run we
+/// drop it).
+///
+/// Returns rectangles as `GridLineInstance`s so the existing grid
+/// pipeline picks them up without a new GPU pass — append them to
+/// the front of `grid_instances` so price grid lines render on top.
+///
+/// `x_at_open(i)` and `x_at_close(i)` are mode-specific X helpers:
+/// in normal mode they map to `camera.time_to_x(timestamp)` /
+/// `camera.time_to_x(timestamp + bar_duration_ms)`; in collapsed
+/// mode they map to `camera.time_to_x(i as f64)` /
+/// `camera.time_to_x((i + 1) as f64)`. The caller chooses; this
+/// function stays mode-agnostic.
+pub fn compute_session_bands(
+    data: &dyn CandleData,
+    vis_start: usize,
+    vis_end: usize,
+    params: &SessionBandParams,
+    x_at_open: &dyn Fn(usize) -> f32,
+    x_at_close: &dyn Fn(usize) -> f32,
+) -> Vec<GridLineInstance> {
+    use midas_core::SessionKindByte;
+
+    if !params.show_bands || vis_end <= vis_start {
+        return Vec::new();
+    }
+
+    #[derive(Copy, Clone)]
+    enum Kind {
+        Pre,
+        Post,
+    }
+
+    fn kind_of(s: SessionKindByte) -> Option<Kind> {
+        match s {
+            SessionKindByte::PreMarket => Some(Kind::Pre),
+            SessionKindByte::PostMarket => Some(Kind::Post),
+            _ => None,
+        }
+    }
+
+    // First pass: collect contiguous Pre/Post runs as `(kind, first_idx,
+    // last_idx)`. Second pass emits the rectangles so the emit step can
+    // peek at the previous + next run for the bridge fix-up below.
+    let mut runs: Vec<(Kind, usize, usize)> = Vec::new();
+    let mut run: Option<(Kind, usize, usize)> = None;
+
+    for i in vis_start..vis_end {
+        let kind = kind_of(data.session_kind(i));
+        match (run.take(), kind) {
+            (None, None) => {}
+            (None, Some(k)) => {
+                run = Some((k, i, i));
+            }
+            (Some((rk, first, last)), Some(k)) => {
+                // Same kind continues the run; different kind ends the
+                // current run and starts a new one.
+                let same = matches!((&rk, &k), (Kind::Pre, Kind::Pre) | (Kind::Post, Kind::Post));
+                if same {
+                    run = Some((rk, first, i.max(last)));
+                } else {
+                    runs.push((rk, first, last));
+                    run = Some((k, i, i));
+                }
+            }
+            (Some(r), None) => {
+                runs.push(r);
+            }
+        }
+    }
+    if let Some(r) = run {
+        runs.push(r);
+    }
+
+    // Second pass: emit. Two ETH runs bridge at the midpoint of the
+    // gap whenever no Regular bar sits between them in the visible
+    // range. Closed/Overnight/Break/Holiday bars in the gap are fine
+    // — they're calendar boundary artefacts (e.g., an IB M1 bar at
+    // exactly 20:00 ET classifies as Closed because the PostMarket
+    // session is `[16:00, 20:00)` half-open) and shouldn't break the
+    // bridge. Plain trim-to-data still applies anywhere a Regular bar
+    // separates the runs (i.e., across a normal RTH window).
+    //
+    // The bridged edges are nudged by `BRIDGE_OVERLAP_PX` past the
+    // midpoint on each side so the two rectangles overlap by 1 pixel.
+    // Without the overlap GPU fragment coverage leaves a 1-pixel
+    // hairline at the boundary (right-edge exclusive vs. left-edge
+    // inclusive in standard rect rasterization) — visible to the user
+    // as a thin untinted line splitting post from pre. The overlap
+    // is invisible (one band paints the seam pixel, the other paints
+    // it too — same alpha, same blend mode) and bounded so a
+    // pathological zoom can't expose it as a colour-shift artefact.
+    const BRIDGE_OVERLAP_PX: f32 = 1.0;
+
+    let has_regular_between = |from: usize, to: usize| -> bool {
+        (from..to).any(|i| matches!(data.session_kind(i), SessionKindByte::Regular))
+    };
+
+    let mut out: Vec<GridLineInstance> = Vec::with_capacity(runs.len());
+    for (idx, &(kind, first, last)) in runs.iter().enumerate() {
+        let x0 = if idx > 0 {
+            let (_, _, prev_last) = runs[idx - 1];
+            if !has_regular_between(prev_last + 1, first) {
+                let mid = (x_at_close(prev_last) + x_at_open(first)) / 2.0;
+                mid - BRIDGE_OVERLAP_PX
+            } else {
+                x_at_open(first)
+            }
+        } else {
+            x_at_open(first)
+        };
+        let x1 = if idx + 1 < runs.len() {
+            let (_, next_first, _) = runs[idx + 1];
+            if !has_regular_between(last + 1, next_first) {
+                let mid = (x_at_close(last) + x_at_open(next_first)) / 2.0;
+                mid + BRIDGE_OVERLAP_PX
+            } else {
+                x_at_close(last)
+            }
+        } else {
+            x_at_close(last)
+        };
+        // Defensive — degenerate runs (zoom collapsed both edges to the
+        // same pixel) still get a 1-px sliver so the user sees
+        // *something* rather than the band silently disappearing.
+        let (x0, x1) = if (x1 - x0).abs() < 1.0 {
+            (x0, x0 + 1.0)
+        } else {
+            (x0.min(x1), x0.max(x1))
+        };
+        let color = match kind {
+            Kind::Pre => params.pre_color,
+            Kind::Post => params.post_color,
+        };
+        out.push(GridLineInstance {
+            rect: [x0, 0.0, x1, params.separator_y.max(0.0)],
+            color,
+        });
+    }
+
+    out
 }
 
 /// Compute grid lines in gap-collapsed mode.

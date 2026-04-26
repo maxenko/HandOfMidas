@@ -80,6 +80,18 @@ Phase D in `00b-integration-strategy.md` calls for deleting `CandleBuffer`, `Tim
 
 The layer slots in `midas-scene` already exist (`OrderBracketLayer`, `PriceLineLayer`, `LevelLayer`, `DecoratorLayer`) but render stubs. Phase D requires a preceding feature-port sprint that populates these layers with the legacy behaviour before the legacy path can be removed.
 
+**ETH session shading is no longer Phase-D-blocking** as of the
+`eth-shading` plan landing (slices S1a–S6 on `feat/eth-shading`).
+The legacy chart paints TradingView-matching pre/post-market band
+tints via `midas-chart::compute::compute_session_bands` driven by
+the new `CandleBuffer.sessions` SoA column, classified host-side at
+bar conversion through `HeuristicSymbolResolver`. The new
+`session_chart` window keeps its own `SessionBandLayer` painting
+full-calendar-window bands; the two surfaces are *colour-aligned*
+(parity test in `desktop/win/tests/eth_shading_palette_parity.rs`)
+but paint different *extents* (trim-to-data vs. full-window) by
+design until a future unification — see `eth-shading.md` §G.
+
 ### Other deferred gaps
 
 - **Text rendering inside badges + axis priceline numbers** — `RenderBuckets.badges` carry `Cow<'static, str>` sidecars but the glyph-atlas path (cryoglyph in existing `midas-render::TextPipeline`) is not yet wired to the new buckets. Tracked as R2-G-2 in `99-diagnostic-findings-r2.md`.

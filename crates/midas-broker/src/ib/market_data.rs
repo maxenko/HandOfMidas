@@ -476,11 +476,7 @@ impl MarketDataSource for IbMarketData {
                     tr::to_ib_historical_duration(duration),
                     tr::to_ib_historical_bar_size(bar_size),
                     Some(tr::to_ib_historical_what_to_show(what_to_show)),
-                    if use_rth {
-                        ibapi::market_data::TradingHours::Regular
-                    } else {
-                        ibapi::market_data::TradingHours::Extended
-                    },
+                    tr::use_rth_to_trading_hours(use_rth),
                 )
                 .await
                 .map_err(|e| ib_error_to_market_data_error(&e, &symbol.symbol))
@@ -526,11 +522,7 @@ impl MarketDataSource for IbMarketData {
                         tr::to_ib_historical_duration(duration),
                         tr::to_ib_historical_bar_size(bar_size),
                         Some(tr::to_ib_historical_what_to_show(what_to_show)),
-                        if use_rth {
-                            ibapi::market_data::TradingHours::Regular
-                        } else {
-                            ibapi::market_data::TradingHours::Extended
-                        },
+                        tr::use_rth_to_trading_hours(use_rth),
                         true, // keep_up_to_date: emit live updates after initial batch
                     )
                     .await

@@ -1004,3 +1004,73 @@ async fn upstream_disconnect_emits_end_reason_then_closes() {
         "re-subscribe must trigger a fresh upstream subscribe_ticks call"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 19. ETH-shading S4-router: `use_rth` propagation
+// ---------------------------------------------------------------------------
+//
+// `MarketDataRouter::historical_bars` exposes a `use_rth: bool`
+// parameter that maps to IB's `useRTH` flag (RTH-only vs.
+// pre/post-market included). The router must forward whatever the
+// caller passed to the underlying `MarketDataSource::historical_bars`
+// call unaltered — the desktop chart's ETH knob only works if the
+// value reaches IB.
+//
+// Sim ignores `use_rth` (S4-sim wires real ETH bar emission gated on
+// it) but records the value via `last_historical_use_rth()` for
+// observation here.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn historical_bars_use_rth_true_propagates() {
+    let (router, sim) = build_router();
+    assert_eq!(sim.last_historical_use_rth(), None, "no calls yet");
+
+    let _ = router
+        .historical_bars(aapl(), Timeframe::D1, IbDuration::Days(5), true)
+        .await
+        .expect("historical_bars(use_rth = true)");
+
+    assert_eq!(
+        sim.last_historical_use_rth(),
+        Some(true),
+        "router must forward use_rth = true to the upstream source"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn historical_bars_use_rth_false_propagates() {
+    let (router, sim) = build_router();
+
+    let _ = router
+        .historical_bars(aapl(), Timeframe::D1, IbDuration::Days(5), false)
+        .await
+        .expect("historical_bars(use_rth = false)");
+
+    assert_eq!(
+        sim.last_historical_use_rth(),
+        Some(false),
+        "router must forward use_rth = false (pre/post-market included) \
+         to the upstream source"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn historical_bars_use_rth_flips_per_call() {
+    let (router, sim) = build_router();
+
+    let _ = router
+        .historical_bars(aapl(), Timeframe::D1, IbDuration::Days(5), true)
+        .await
+        .expect("first call");
+    assert_eq!(sim.last_historical_use_rth(), Some(true));
+
+    let _ = router
+        .historical_bars(msft(), Timeframe::D1, IbDuration::Days(5), false)
+        .await
+        .expect("second call with flipped flag");
+    assert_eq!(
+        sim.last_historical_use_rth(),
+        Some(false),
+        "second call must overwrite the first — no stale state"
+    );
+}

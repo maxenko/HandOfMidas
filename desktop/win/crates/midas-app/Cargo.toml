@@ -35,9 +35,6 @@ dev_harness = [
 # blast radius at zero on the existing chart surface.
 session_chart = [
     "dep:midas-scene",
-    "dep:midas-bars",
-    "dep:midas-bars-adapter",
-    "dep:midas-calendar",
     "dep:midas-clock",
     "dep:midas-stream",
     "dep:midas-axis",
@@ -85,12 +82,23 @@ midas-broker = { workspace = true }
 midas-market-data = { workspace = true }
 midas-broker-core = { workspace = true }
 
-# S8 (session_chart feature): Phase-A crates from the root workspace.
-# All `optional = true`; the `session_chart` feature above opts them in.
+# Phase-A crates from the root workspace.
+#
+# `midas-calendar`, `midas-bars`, `midas-bars-adapter` were promoted
+# from `optional = true` to baseline by the ETH-shading plan
+# (`plan/session-aware-charts/eth-shading.md` §H + S1b): the legacy
+# chart's `bars_to_candle_buffer` host-classifies every bar through
+# `HeuristicSymbolResolver`, so the resolver and its calendar deps
+# need to be present unconditionally. None pull in iced/wgpu/heavy
+# transitive deps.
+#
+# The remaining four (`midas-scene`, `midas-clock`, `midas-stream`,
+# `midas-axis`) stay opt-in behind the `session_chart` feature
+# because they only land on the new `session_chart` widget path.
 midas-scene        = { workspace = true, optional = true }
-midas-bars         = { workspace = true, optional = true }
-midas-bars-adapter = { workspace = true, optional = true }
-midas-calendar     = { workspace = true, optional = true }
+midas-bars         = { workspace = true }
+midas-bars-adapter = { workspace = true }
+midas-calendar     = { workspace = true }
 midas-clock        = { workspace = true, optional = true }
 midas-stream       = { workspace = true, optional = true }
 midas-axis         = { workspace = true, optional = true }

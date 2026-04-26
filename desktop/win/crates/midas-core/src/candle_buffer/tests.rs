@@ -1,3 +1,5 @@
+use midas_bars::SessionKindByte;
+
 use super::*;
 
 /// Build a sample CandleBuffer with 5 candles for testing.
@@ -431,7 +433,15 @@ fn clone_independent_version() {
 #[test]
 fn merge_bar_push_new_bucket_on_empty() {
     let mut buf = CandleBuffer::new();
-    buf.merge_bar(86_400_000, 100.0, 100.0, 100.0, 100.0, 10);
+    buf.merge_bar(
+        86_400_000,
+        100.0,
+        100.0,
+        100.0,
+        100.0,
+        10,
+        SessionKindByte::Regular,
+    );
     assert_eq!(buf.len(), 1);
     assert_eq!(buf.opens[0], 100.0);
     assert_eq!(buf.closes[0], 100.0);
@@ -442,11 +452,35 @@ fn merge_bar_push_new_bucket_on_empty() {
 fn merge_bar_accumulates_same_bucket() {
     let mut buf = CandleBuffer::new();
     // First sub-bar opens the D1 bucket (midnight UTC of day 2).
-    buf.merge_bar(86_400_000, 100.0, 100.0, 100.0, 100.0, 10);
+    buf.merge_bar(
+        86_400_000,
+        100.0,
+        100.0,
+        100.0,
+        100.0,
+        10,
+        SessionKindByte::Regular,
+    );
     // Second sub-bar — higher high, same bucket.
-    buf.merge_bar(86_400_000, 102.0, 105.0, 101.0, 103.0, 20);
+    buf.merge_bar(
+        86_400_000,
+        102.0,
+        105.0,
+        101.0,
+        103.0,
+        20,
+        SessionKindByte::Regular,
+    );
     // Third sub-bar — lower low, new close.
-    buf.merge_bar(86_400_000, 103.0, 104.0, 99.0, 100.5, 15);
+    buf.merge_bar(
+        86_400_000,
+        103.0,
+        104.0,
+        99.0,
+        100.5,
+        15,
+        SessionKindByte::Regular,
+    );
     assert_eq!(buf.len(), 1);
     assert_eq!(buf.opens[0], 100.0); // open stays at first sub-bar
     assert_eq!(buf.highs[0], 105.0); // max over all sub-bars
@@ -458,8 +492,24 @@ fn merge_bar_accumulates_same_bucket() {
 #[test]
 fn merge_bar_pushes_new_candle_on_new_bucket() {
     let mut buf = CandleBuffer::new();
-    buf.merge_bar(86_400_000, 100.0, 101.0, 99.0, 100.5, 10);
-    buf.merge_bar(172_800_000, 102.0, 103.0, 101.0, 102.5, 20);
+    buf.merge_bar(
+        86_400_000,
+        100.0,
+        101.0,
+        99.0,
+        100.5,
+        10,
+        SessionKindByte::Regular,
+    );
+    buf.merge_bar(
+        172_800_000,
+        102.0,
+        103.0,
+        101.0,
+        102.5,
+        20,
+        SessionKindByte::Regular,
+    );
     assert_eq!(buf.len(), 2);
     assert_eq!(buf.timestamps, &[86_400_000, 172_800_000]);
 }
@@ -467,9 +517,25 @@ fn merge_bar_pushes_new_candle_on_new_bucket() {
 #[test]
 fn merge_bar_drops_out_of_order() {
     let mut buf = CandleBuffer::new();
-    buf.merge_bar(172_800_000, 100.0, 101.0, 99.0, 100.0, 10);
+    buf.merge_bar(
+        172_800_000,
+        100.0,
+        101.0,
+        99.0,
+        100.0,
+        10,
+        SessionKindByte::Regular,
+    );
     // Second bar claims an EARLIER bucket — stale, should drop.
-    buf.merge_bar(86_400_000, 90.0, 91.0, 89.0, 90.0, 5);
+    buf.merge_bar(
+        86_400_000,
+        90.0,
+        91.0,
+        89.0,
+        90.0,
+        5,
+        SessionKindByte::Regular,
+    );
     assert_eq!(buf.len(), 1);
     assert_eq!(buf.timestamps[0], 172_800_000);
 }
@@ -477,8 +543,24 @@ fn merge_bar_drops_out_of_order() {
 #[test]
 fn merge_bar_volume_saturates() {
     let mut buf = CandleBuffer::new();
-    buf.merge_bar(86_400_000, 1.0, 1.0, 1.0, 1.0, u32::MAX - 5);
-    buf.merge_bar(86_400_000, 1.0, 1.0, 1.0, 1.0, 100);
+    buf.merge_bar(
+        86_400_000,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        u32::MAX - 5,
+        SessionKindByte::Regular,
+    );
+    buf.merge_bar(
+        86_400_000,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        100,
+        SessionKindByte::Regular,
+    );
     assert_eq!(buf.volumes[0], u32::MAX);
 }
 
@@ -486,9 +568,9 @@ fn merge_bar_volume_saturates() {
 fn merge_bar_bumps_version() {
     let mut buf = CandleBuffer::new();
     assert_eq!(buf.version(), 0);
-    buf.merge_bar(86_400_000, 1.0, 1.0, 1.0, 1.0, 10);
+    buf.merge_bar(86_400_000, 1.0, 1.0, 1.0, 1.0, 10, SessionKindByte::Regular);
     assert_eq!(buf.version(), 1);
-    buf.merge_bar(86_400_000, 2.0, 2.0, 1.0, 1.5, 5);
+    buf.merge_bar(86_400_000, 2.0, 2.0, 1.0, 1.5, 5, SessionKindByte::Regular);
     assert_eq!(buf.version(), 2);
 }
 
@@ -567,4 +649,139 @@ fn update_last_price_only_touches_last_candle() {
     // Second candle gets the update.
     assert_eq!(buf.closes[1], 105.0);
     assert_eq!(buf.highs[1], 105.0);
+}
+
+// ─── sessions column (S1a) ─────────────────────────────────────────
+
+#[test]
+fn push_defaults_session_to_regular() {
+    let mut buf = CandleBuffer::new();
+    buf.push(1000, 1.0, 1.0, 1.0, 1.0, 10);
+    assert_eq!(buf.sessions.len(), 1);
+    assert_eq!(buf.session_kind(0), SessionKindByte::Regular);
+}
+
+#[test]
+fn push_with_session_round_trips_kind() {
+    let mut buf = CandleBuffer::new();
+    buf.push_with_session(1000, 1.0, 1.0, 1.0, 1.0, 10, SessionKindByte::PreMarket);
+    buf.push_with_session(2000, 2.0, 2.0, 2.0, 2.0, 20, SessionKindByte::Regular);
+    buf.push_with_session(3000, 3.0, 3.0, 3.0, 3.0, 30, SessionKindByte::PostMarket);
+    assert_eq!(buf.session_kind(0), SessionKindByte::PreMarket);
+    assert_eq!(buf.session_kind(1), SessionKindByte::Regular);
+    assert_eq!(buf.session_kind(2), SessionKindByte::PostMarket);
+}
+
+#[test]
+fn sessions_column_kept_in_sync_via_default_push() {
+    let buf = sample_buffer();
+    assert_eq!(buf.sessions.len(), buf.timestamps.len());
+    for i in 0..buf.len() {
+        assert_eq!(buf.session_kind(i), SessionKindByte::Regular);
+    }
+}
+
+#[test]
+fn slice_carries_sessions_subrange() {
+    let mut buf = CandleBuffer::new();
+    buf.push_with_session(1000, 1.0, 1.0, 1.0, 1.0, 10, SessionKindByte::PreMarket);
+    buf.push_with_session(2000, 1.0, 1.0, 1.0, 1.0, 10, SessionKindByte::Regular);
+    buf.push_with_session(3000, 1.0, 1.0, 1.0, 1.0, 10, SessionKindByte::PostMarket);
+    let sl = buf.slice(1..3);
+    assert_eq!(sl.sessions.len(), 2);
+    assert_eq!(sl.session_kind(0), SessionKindByte::Regular);
+    assert_eq!(sl.session_kind(1), SessionKindByte::PostMarket);
+}
+
+#[test]
+fn clone_preserves_sessions_column() {
+    let mut buf = CandleBuffer::new();
+    buf.push_with_session(1000, 1.0, 1.0, 1.0, 1.0, 10, SessionKindByte::PreMarket);
+    buf.push_with_session(2000, 1.0, 1.0, 1.0, 1.0, 10, SessionKindByte::PostMarket);
+    let clone = buf.clone();
+    assert_eq!(clone.sessions, buf.sessions);
+    assert_eq!(clone.session_kind(0), SessionKindByte::PreMarket);
+    assert_eq!(clone.session_kind(1), SessionKindByte::PostMarket);
+}
+
+#[test]
+fn candle_data_trait_dispatch_returns_session_kind() {
+    let mut buf = CandleBuffer::new();
+    buf.push_with_session(1000, 1.0, 1.0, 1.0, 1.0, 10, SessionKindByte::PreMarket);
+    buf.push_with_session(2000, 1.0, 1.0, 1.0, 1.0, 10, SessionKindByte::Regular);
+    let dyn_ref: &dyn CandleData = &buf;
+    assert_eq!(dyn_ref.session_kind(0), SessionKindByte::PreMarket);
+    assert_eq!(dyn_ref.session_kind(1), SessionKindByte::Regular);
+    let sl = buf.slice(0..2);
+    let dyn_sl: &dyn CandleData = &sl;
+    assert_eq!(dyn_sl.session_kind(0), SessionKindByte::PreMarket);
+}
+
+#[test]
+fn unknown_session_byte_degrades_to_regular() {
+    // Forge a corrupted byte by mutating the column directly. The
+    // decoder's wildcard arm should map the unknown value to Regular
+    // so render code never sees a bogus enum discriminant.
+    let mut buf = CandleBuffer::new();
+    buf.push(1000, 1.0, 1.0, 1.0, 1.0, 10);
+    buf.sessions[0] = 0xFF;
+    assert_eq!(buf.session_kind(0), SessionKindByte::Regular);
+}
+
+#[test]
+fn apply_bar_push_new_records_session() {
+    let mut buf = CandleBuffer::new();
+    buf.apply_bar(1000, 1.0, 1.0, 1.0, 1.0, 10, SessionKindByte::PreMarket);
+    assert_eq!(buf.session_kind(0), SessionKindByte::PreMarket);
+}
+
+#[test]
+fn apply_bar_overwrite_in_place_refreshes_session() {
+    // First emit pins the bar to PreMarket; an aggregator re-emit
+    // for the same ts_open with a Regular classification (e.g. the
+    // 09:30 ET pre→regular flip on the boundary bar) must update
+    // the column rather than freeze on the stale value.
+    let mut buf = CandleBuffer::new();
+    buf.apply_bar(1000, 1.0, 1.0, 1.0, 1.0, 10, SessionKindByte::PreMarket);
+    buf.apply_bar(1000, 1.0, 2.0, 0.5, 1.5, 20, SessionKindByte::Regular);
+    assert_eq!(buf.len(), 1);
+    assert_eq!(buf.session_kind(0), SessionKindByte::Regular);
+    assert_eq!(buf.closes[0], 1.5);
+}
+
+#[test]
+fn merge_bar_new_bucket_records_session() {
+    let mut buf = CandleBuffer::new();
+    buf.merge_bar(
+        86_400_000,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        10,
+        SessionKindByte::PostMarket,
+    );
+    assert_eq!(buf.session_kind(0), SessionKindByte::PostMarket);
+}
+
+#[test]
+fn merge_bar_same_bucket_keeps_open_session() {
+    // The bucket inherits the session of its first sub-bar; later
+    // sub-bars in the same bucket must not silently replace it. The
+    // legacy chart treats "the bar belongs to its open" — flipping
+    // mid-bucket would tag a Pre-opened bucket as Regular the moment
+    // a Regular sub-bar lands inside it, which is wrong.
+    let mut buf = CandleBuffer::new();
+    buf.merge_bar(
+        86_400_000,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        10,
+        SessionKindByte::PreMarket,
+    );
+    buf.merge_bar(86_400_000, 1.0, 1.0, 1.0, 2.0, 20, SessionKindByte::Regular);
+    assert_eq!(buf.len(), 1);
+    assert_eq!(buf.session_kind(0), SessionKindByte::PreMarket);
 }

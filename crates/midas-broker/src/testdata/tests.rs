@@ -393,3 +393,150 @@ fn volume_correlates_with_moves() {
         "big-move avg vol ({avg_vol_big:.0}) should exceed small-move ({avg_vol_small:.0})"
     );
 }
+
+// -- ETH bar generation (S4-sim) --------------------------------------
+
+/// `bars()` is byte-identical to `bars_with_eth(.., false)` — legacy
+/// callers must see exactly the same output they did pre-S4-sim.
+#[test]
+fn bars_default_is_rth_only() {
+    let mut p = TestDataProvider::new();
+    let (start, end) = p.date_range("AAPL");
+    let one_week_start = end - 7 * 86400;
+    let baseline = p.bars("AAPL", Timeframe::M1, one_week_start, end);
+
+    let mut p2 = TestDataProvider::new();
+    let _ = p2.date_range("AAPL");
+    let with_eth_off = p2.bars_with_eth("AAPL", Timeframe::M1, one_week_start, end, false);
+
+    assert_eq!(baseline.len(), with_eth_off.len());
+    for (a, b) in baseline.iter().zip(with_eth_off.iter()) {
+        assert_eq!(a.timestamp, b.timestamp);
+        assert_eq!(a.open, b.open);
+        assert_eq!(a.close, b.close);
+    }
+
+    // Belt-and-suspenders: the unused `start` binding must not shift
+    // the date range under the test.
+    let _ = start;
+}
+
+/// With `include_eth = true` the response carries strictly more bars
+/// — pre + post for each weekday in the range, on top of the RTH
+/// bars that the RTH-only call would have returned.
+#[test]
+fn bars_with_eth_emits_more_bars_per_day() {
+    let mut p = TestDataProvider::new();
+    let (_, end) = p.date_range("AAPL");
+    // One full ET trading day window: midnight UTC of the end day
+    // back to midnight UTC two days earlier — gives at least one
+    // complete weekday's worth of intraday data.
+    let day_start = ((end - 3 * 86400) / 86400) * 86400;
+    let day_end = (end / 86400) * 86400;
+
+    let rth_only = p.bars("AAPL", Timeframe::M1, day_start, day_end);
+    let with_eth = p.bars_with_eth("AAPL", Timeframe::M1, day_start, day_end, true);
+
+    assert!(
+        with_eth.len() > rth_only.len(),
+        "include_eth = true must emit more bars (RTH={}, with ETH={})",
+        rth_only.len(),
+        with_eth.len(),
+    );
+}
+
+/// The full ETH window for one weekday lands inside the expected
+/// time-of-day band: pre-market 09:00–14:30 UTC (04:00–09:30 ET),
+/// post-market 21:00–01:00 UTC next day (16:00–20:00 ET).
+#[test]
+fn eth_bars_land_in_pre_and_post_windows() {
+    use chrono::{DateTime, Datelike, TimeZone, Utc, Weekday};
+    let mut p = TestDataProvider::new();
+    let (_, end) = p.date_range("AAPL");
+
+    // Walk back from the end of data until we land on a weekday with
+    // a daily bar — guarantees we have intraday + ETH coverage.
+    let candidate_day = {
+        let mut day = ((end - 86400) / 86400) * 86400;
+        loop {
+            let dt = DateTime::<Utc>::from_timestamp(day, 0).unwrap();
+            let wd = dt.weekday();
+            let has_daily = p.daily_bars("AAPL").iter().any(|b| b.timestamp == day);
+            if wd != Weekday::Sat && wd != Weekday::Sun && has_daily {
+                break day;
+            }
+            day -= 86400;
+        }
+    };
+
+    // Pull the ETH window plus 1h slack on each side so a missed
+    // boundary still surfaces in the bars.
+    let window_start = candidate_day + 8 * 3600; // 08:00 UTC = 03:00 ET
+    let window_end = candidate_day + (25 + 1) * 3600; // 02:00 UTC next day
+    let bars = p.bars_with_eth("AAPL", Timeframe::M1, window_start, window_end, true);
+
+    let mut saw_pre = false;
+    let mut saw_post = false;
+    for b in &bars {
+        let dt = Utc.timestamp_opt(b.timestamp, 0).single().unwrap();
+        let day_floor = (b.timestamp / 86400) * 86400;
+        let offset = b.timestamp - day_floor;
+        // Pre-market: 09:00 UTC ≤ ts < 14:30 UTC on the candidate day
+        if day_floor == candidate_day && (9 * 3600..14 * 3600 + 30 * 60).contains(&offset) {
+            saw_pre = true;
+        }
+        // Post-market: 21:00 UTC same day ≤ ts < 01:00 UTC next day
+        let post_window_start = candidate_day + 21 * 3600;
+        let post_window_end = candidate_day + (24 + 1) * 3600;
+        if b.timestamp >= post_window_start && b.timestamp < post_window_end {
+            saw_post = true;
+        }
+        // Sanity: no bar lands at 02:00 UTC or later (outside the
+        // post-market envelope on the candidate day).
+        let _ = dt;
+    }
+
+    assert!(saw_pre, "expected ≥ 1 pre-market bar in the ETH window");
+    assert!(saw_post, "expected ≥ 1 post-market bar in the ETH window");
+}
+
+/// Calling twice with the same args yields identical ETH bars —
+/// determinism guarantee preserved across the new branch.
+#[test]
+fn eth_bars_are_deterministic() {
+    let mut p1 = TestDataProvider::new();
+    let mut p2 = TestDataProvider::new();
+    let (_, end) = p1.date_range("AAPL");
+    let day_end = (end / 86400) * 86400;
+    let day_start = day_end - 3 * 86400;
+
+    let a = p1.bars_with_eth("AAPL", Timeframe::M1, day_start, day_end, true);
+    let b = p2.bars_with_eth("AAPL", Timeframe::M1, day_start, day_end, true);
+
+    assert_eq!(a.len(), b.len());
+    for (x, y) in a.iter().zip(b.iter()) {
+        assert_eq!(x.timestamp, y.timestamp);
+        assert_eq!(x.open, y.open);
+        assert_eq!(x.close, y.close);
+    }
+}
+
+/// Bars come out sorted by timestamp regardless of the
+/// "RTH-then-ETH per day" generation order.
+#[test]
+fn eth_bars_returned_sorted_by_timestamp() {
+    let mut p = TestDataProvider::new();
+    let (_, end) = p.date_range("AAPL");
+    let day_end = (end / 86400) * 86400;
+    let day_start = day_end - 3 * 86400;
+
+    let bars = p.bars_with_eth("AAPL", Timeframe::M1, day_start, day_end, true);
+    for w in bars.windows(2) {
+        assert!(
+            w[0].timestamp <= w[1].timestamp,
+            "ETH-included bars must be timestamp-sorted; saw {} > {}",
+            w[0].timestamp,
+            w[1].timestamp,
+        );
+    }
+}

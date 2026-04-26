@@ -267,6 +267,17 @@ impl MarketDataRouter {
     /// initial data load that unifies with the watchlist's sim
     /// source instead of a disjoint synthetic generator.
     ///
+    /// `use_rth` selects regular-trading-hours-only (`true`) vs.
+    /// extended-hours-included (`false`). On the IB backend this maps
+    /// to the `useRTH` flag of `reqHistoricalData`, which controls
+    /// whether the response includes 04:00–09:30 ET pre-market and
+    /// 16:00–20:00 ET post-market bars. Per
+    /// `plan/session-aware-charts/eth-shading.md` §D the desktop
+    /// chart load passes `!show_extended_hours` so the user knob
+    /// directly drives the request, while the watchlist snapshot
+    /// load keeps `true` (we only ever want a stable last-RTH-close
+    /// for the row).
+    ///
     /// Callers that need history + live should prefer
     /// [`Self::history_then_live`].
     pub async fn historical_bars(
@@ -274,6 +285,7 @@ impl MarketDataRouter {
         symbol: SymbolKey,
         tf: Timeframe,
         duration: IbDuration,
+        use_rth: bool,
     ) -> Result<midas_broker_core::provider::HistoricalBarsResult, MarketDataError> {
         let con_id = self.resolve_or_cached(&symbol).await?.contract_id;
         let end = chrono::Utc::now();
@@ -285,7 +297,7 @@ impl MarketDataRouter {
                 duration,
                 tf,
                 midas_broker_core::market_data::WhatToShow::Trades,
-                true,
+                use_rth,
             )
             .await
     }

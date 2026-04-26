@@ -83,14 +83,62 @@ impl SceneLayer for SessionBandLayer {
     fn paint(&self, ctx: &mut PaintContext<'_>) {
         let h = ctx.viewport.height_px;
         let w_clamp = ctx.viewport.width_px;
-        for session in &self.sessions {
-            let x0 = ctx.axis.to_x(session.open()).clamp(0.0, w_clamp);
-            let x1 = ctx.axis.to_x(session.close()).clamp(0.0, w_clamp);
+
+        // Bridge: when a Post session is immediately followed by a Pre
+        // session in the calendar (the standard XNYS overnight close →
+        // next-day pre-market open transition, no Closed session
+        // between because `XnysCalendar::sessions_between` only emits
+        // Pre/Regular/Post entries), extend the post quad's right edge
+        // and the pre quad's left edge to meet at the midpoint of the
+        // gap. Without this the 8-hour overnight window renders as
+        // bare background between two coloured bands.
+        //
+        // 1px overlap on each side of the midpoint defeats the GPU
+        // fragment-coverage hairline (right-edge exclusive vs
+        // left-edge inclusive on standard rect rasterizers leaves a
+        // 1px untinted column otherwise).
+        const BRIDGE_OVERLAP_PX: f32 = 1.0;
+
+        // Materialise sessions so we can look ahead/behind without
+        // re-borrowing the iterator. The buffer is small (a few
+        // sessions per visible day) so allocation cost is negligible.
+        let sessions: Vec<_> = self.sessions.iter().collect();
+
+        for (idx, session) in sessions.iter().enumerate() {
+            let kind = session.kind();
+            let raw_x0 = ctx.axis.to_x(session.open());
+            let raw_x1 = ctx.axis.to_x(session.close());
+            let mut x0 = raw_x0;
+            let mut x1 = raw_x1;
+
+            // Extend post's right edge forward into the overnight gap.
+            if matches!(kind, SessionKind::PostMarket) {
+                if let Some(next) = sessions.get(idx + 1) {
+                    if matches!(next.kind(), SessionKind::PreMarket) {
+                        let next_open_x = ctx.axis.to_x(next.open());
+                        let mid = (raw_x1 + next_open_x) / 2.0;
+                        x1 = mid + BRIDGE_OVERLAP_PX;
+                    }
+                }
+            }
+            // Extend pre's left edge backward to meet the post midpoint.
+            if matches!(kind, SessionKind::PreMarket) {
+                if let Some(prev) = idx.checked_sub(1).and_then(|i| sessions.get(i)) {
+                    if matches!(prev.kind(), SessionKind::PostMarket) {
+                        let prev_close_x = ctx.axis.to_x(prev.close());
+                        let mid = (prev_close_x + raw_x0) / 2.0;
+                        x0 = mid - BRIDGE_OVERLAP_PX;
+                    }
+                }
+            }
+
+            let x0 = x0.clamp(0.0, w_clamp);
+            let x1 = x1.clamp(0.0, w_clamp);
             let w = (x1 - x0).max(0.0);
             if w <= 0.0 {
                 continue;
             }
-            let color = pick_color(session.kind(), ctx.palette, &self.palette);
+            let color = pick_color(kind, ctx.palette, &self.palette);
             ctx.out.quads.push(QuadInstance {
                 x: x0,
                 y: 0.0,
@@ -228,5 +276,122 @@ mod tests {
         assert!(n1 >= 3);
         assert!(n2 >= 3);
         assert!(n2 < n1 + 10); // rough bound — strictly not-accumulated
+    }
+
+    /// User-reported: the new chart's overnight 20:00–04:00 ET window
+    /// rendered as a bare background strip between blue (post) and
+    /// brown (pre). The bridge fix extends each band into the gap to
+    /// meet at the midpoint with a 1px overlap on each side.
+    #[test]
+    fn post_to_pre_overnight_transition_bridges_at_midpoint() {
+        let mut layer = SessionBandLayer::new(xnys());
+        // Wed 2024-01-17 18:00 ET → Thu 2024-01-18 12:00 ET. Covers
+        // Wed post-market (16:00–20:00 ET), the overnight gap, and
+        // Thu pre-market (04:00–09:30 ET) + part of Thu RTH.
+        let from = ts(2024, 1, 17, 23, 0, 0); // 18:00 ET
+        let to = ts(2024, 1, 18, 17, 0, 0); // 12:00 ET
+        layer.update_sessions(from, to);
+
+        let axis = ContinuousAxis::new(from, to, 1000.0).unwrap();
+        let pr = PriceRange::new(100.0, 110.0).unwrap();
+        let vp = Viewport::new(1000.0, 400.0);
+        let pal = ThemePalette::dark_default();
+        let mut out = ScenePrimitives::default();
+        let paxis = LinearPriceAxis::new(pr, vp.height_px);
+        let fmt = DefaultFormatter::new();
+        let mut ctx = PaintContext {
+            axis: &axis,
+            viewport: vp,
+            price_range: pr,
+            palette: &pal,
+            price_axis: &paxis,
+            formatter: &fmt,
+            out: &mut out,
+        };
+        layer.paint(&mut ctx);
+
+        // Find the Post and the immediately-following Pre quads. Match
+        // by colour — the bridge-extended quads keep their original
+        // colour, only their x/w shifts.
+        let post_quad = out
+            .quads
+            .iter()
+            .find(|q| q.color == pal.band_post)
+            .expect("post quad missing");
+        let pre_quad = out
+            .quads
+            .iter()
+            .find(|q| q.color == pal.band_pre)
+            .expect("pre quad missing");
+
+        // Post quad's right edge must overlap with Pre quad's left
+        // edge (no untinted hairline / no untinted overnight strip).
+        let post_right = post_quad.x + post_quad.w;
+        let pre_left = pre_quad.x;
+        assert!(
+            post_right >= pre_left,
+            "post.right ({}) must reach or overlap pre.left ({}) — \
+             overnight gap should not show as bare background",
+            post_right,
+            pre_left,
+        );
+        // Overlap should be exactly 2px (1px overlap on each side
+        // of the gap midpoint).
+        let overlap = post_right - pre_left;
+        assert!(
+            (overlap - 2.0).abs() < 0.001,
+            "expected 2px overlap (1px on each side of midpoint), got {overlap}px",
+        );
+    }
+
+    /// Sessions that aren't directly Post→Pre adjacent must keep
+    /// their trim-to-data extents — bridge must not collapse onto
+    /// runs separated by a Regular session.
+    #[test]
+    fn regular_separated_sessions_do_not_bridge() {
+        let mut layer = SessionBandLayer::new(xnys());
+        // Single ET day: pre, regular, post all in sequence within
+        // the visible range. Regular sits between Pre and Post.
+        let from = ts(2024, 1, 17, 9, 0, 0);
+        let to = ts(2024, 1, 18, 1, 0, 0);
+        layer.update_sessions(from, to);
+
+        let axis = ContinuousAxis::new(from, to, 1000.0).unwrap();
+        let pr = PriceRange::new(100.0, 110.0).unwrap();
+        let vp = Viewport::new(1000.0, 400.0);
+        let pal = ThemePalette::dark_default();
+        let mut out = ScenePrimitives::default();
+        let paxis = LinearPriceAxis::new(pr, vp.height_px);
+        let fmt = DefaultFormatter::new();
+        let mut ctx = PaintContext {
+            axis: &axis,
+            viewport: vp,
+            price_range: pr,
+            palette: &pal,
+            price_axis: &paxis,
+            formatter: &fmt,
+            out: &mut out,
+        };
+        layer.paint(&mut ctx);
+
+        let pre = out
+            .quads
+            .iter()
+            .find(|q| q.color == pal.band_pre)
+            .expect("pre quad");
+        let regular = out
+            .quads
+            .iter()
+            .find(|q| q.color == pal.band_regular)
+            .expect("regular quad");
+        // Pre's right edge must abut Regular's left edge exactly
+        // (no bridging on Pre→Regular transitions).
+        let pre_right = pre.x + pre.w;
+        assert!(
+            (pre_right - regular.x).abs() < 0.5,
+            "pre.right ({pre_right}) must trim-to-data and meet regular.left ({}) — \
+             no bridge across Pre→Regular",
+            regular.x,
+        );
     }
 }

@@ -59,6 +59,18 @@ pub struct SimMarketDataConfig {
     pub rng_seed: Option<u64>,
     /// Default bid/ask spread in dollars. Default `$0.01`.
     pub default_spread: f64,
+    /// Capability flag: when `true` (default) the historical bar
+    /// generator emits pre-market (04:00–09:30 ET) and post-market
+    /// (16:00–20:00 ET) S30 bars on each weekday in addition to the
+    /// regular 09:30–16:00 ET session. Combines with the per-call
+    /// `use_rth` parameter on
+    /// [`MarketDataSource::historical_bars`](crate::MarketDataSource::historical_bars):
+    /// extended-hours bars only enter the response when the caller
+    /// passes `use_rth = false` AND this flag is on. Set to `false`
+    /// to lock the sim to legacy RTH-only output regardless of the
+    /// per-call ETH knob — useful for fixtures that pre-date the
+    /// ETH-shading slice and want to keep their bar counts stable.
+    pub synthetic_includes_eth: bool,
 }
 
 impl Default for SimMarketDataConfig {
@@ -76,6 +88,7 @@ impl Default for SimMarketDataConfig {
             next_order_id_seed: 1_000,
             rng_seed: None,
             default_spread: 0.01,
+            synthetic_includes_eth: true,
         }
     }
 }

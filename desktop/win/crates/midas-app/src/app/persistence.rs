@@ -216,6 +216,8 @@ impl MidasApp {
                                         midas_core::ChartBackend::Legacy => None,
                                         other => Some(other),
                                     },
+                                    show_extended_hours: panel.show_extended_hours,
+                                    show_extended_hours_bands: panel.show_extended_hours_bands,
                                 });
                                 tree.push(LayoutNode::Chart { chart_index: idx });
                             }

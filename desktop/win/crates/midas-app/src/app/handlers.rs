@@ -4438,12 +4438,19 @@ fn apply_quote_to_session_chart_series(
 
 /// Fold a single `Bar` (router-era) into a `CandleBuffer` via
 /// `apply_bar`. Narrows the `u64` volume to `u32` with saturation.
+///
+/// `calendar` classifies the bar's `ts_open` into a `SessionKind` so
+/// the legacy chart's session-band overlay (`compute_session_bands`)
+/// keeps tinting live-extended pre / post candles. The caller resolves
+/// the calendar once per batch (per-symbol lookup) and reuses it.
 fn apply_bar_to_buffer(
     buf: &mut midas_core::CandleBuffer,
     bar: &midas_broker_core::market_data::Bar,
+    calendar: &'static dyn midas_calendar::ExchangeCalendar,
 ) {
     let ts_ms = bar.ts_open.timestamp_millis();
     let volume = bar.volume.min(u32::MAX as u64) as u32;
+    let session = calendar.classify(bar.ts_open).kind();
     buf.apply_bar(
         ts_ms,
         bar.o as f32,
@@ -4451,6 +4458,7 @@ fn apply_bar_to_buffer(
         bar.l as f32,
         bar.c as f32,
         volume,
+        session,
     );
 }
 
@@ -4482,9 +4490,10 @@ impl MidasApp {
                 // match; new timestamps append.
                 if let Some(chart) = self.charts.get_mut(&chart_id) {
                     if let Some(arc) = chart.data.as_mut() {
+                        let calendar = crate::app::resolve_calendar(&chart.symbol);
                         let buf = std::sync::Arc::make_mut(arc);
                         for bar in &bars {
-                            apply_bar_to_buffer(buf, bar);
+                            apply_bar_to_buffer(buf, bar, calendar);
                         }
                         chart.chart_state.dirty.mark_data();
                     }
@@ -4493,9 +4502,10 @@ impl MidasApp {
                     for (wid, chart) in self.floating_charts.iter_mut() {
                         if floating_window_synthetic_id(*wid) == chart_id {
                             if let Some(arc) = chart.data.as_mut() {
+                                let calendar = crate::app::resolve_calendar(&chart.symbol);
                                 let buf = std::sync::Arc::make_mut(arc);
                                 for bar in &bars {
-                                    apply_bar_to_buffer(buf, bar);
+                                    apply_bar_to_buffer(buf, bar, calendar);
                                 }
                                 chart.chart_state.dirty.mark_data();
                             }
@@ -4523,25 +4533,30 @@ impl MidasApp {
                 if bucket_ms <= 0 {
                     return Task::none();
                 }
-                let fold = |buf: &mut midas_core::CandleBuffer,
-                            bar: &midas_broker_core::market_data::Bar| {
-                    let ms = bar.ts_open.timestamp_millis();
-                    let bucket_open_ms = (ms / bucket_ms) * bucket_ms;
-                    let vol = bar.volume.min(u32::MAX as u64) as u32;
-                    buf.merge_bar(
-                        bucket_open_ms,
-                        bar.o as f32,
-                        bar.h as f32,
-                        bar.l as f32,
-                        bar.c as f32,
-                        vol,
-                    );
-                };
+                let fold =
+                    |buf: &mut midas_core::CandleBuffer,
+                     bar: &midas_broker_core::market_data::Bar,
+                     calendar: &'static dyn midas_calendar::ExchangeCalendar| {
+                        let ms = bar.ts_open.timestamp_millis();
+                        let bucket_open_ms = (ms / bucket_ms) * bucket_ms;
+                        let vol = bar.volume.min(u32::MAX as u64) as u32;
+                        let session = calendar.classify(bar.ts_open).kind();
+                        buf.merge_bar(
+                            bucket_open_ms,
+                            bar.o as f32,
+                            bar.h as f32,
+                            bar.l as f32,
+                            bar.c as f32,
+                            vol,
+                            session,
+                        );
+                    };
                 if let Some(chart) = self.charts.get_mut(&chart_id) {
                     if let Some(arc) = chart.data.as_mut() {
+                        let calendar = crate::app::resolve_calendar(&chart.symbol);
                         let buf = std::sync::Arc::make_mut(arc);
                         for bar in &bars {
-                            fold(buf, bar);
+                            fold(buf, bar, calendar);
                         }
                         chart.chart_state.dirty.mark_data();
                     }
@@ -4549,9 +4564,10 @@ impl MidasApp {
                     for (wid, chart) in self.floating_charts.iter_mut() {
                         if floating_window_synthetic_id(*wid) == chart_id {
                             if let Some(arc) = chart.data.as_mut() {
+                                let calendar = crate::app::resolve_calendar(&chart.symbol);
                                 let buf = std::sync::Arc::make_mut(arc);
                                 for bar in &bars {
-                                    fold(buf, bar);
+                                    fold(buf, bar, calendar);
                                 }
                                 chart.chart_state.dirty.mark_data();
                             }
@@ -4945,6 +4961,8 @@ mod visibility_tests {
             load_generation: 0,
             visible,
             backend: midas_core::ChartBackend::Legacy,
+            show_extended_hours: true,
+            show_extended_hours_bands: true,
         };
         let sym = SymbolKey::new(symbol);
         apply_symbol_to_panel(&mut panel, symbol, sym);
@@ -4999,5 +5017,126 @@ mod visibility_tests {
     fn default_chart_panel_is_visible() {
         let panel = make_panel("AAPL", true);
         assert!(panel.is_visible());
+    }
+}
+
+// ── S1b tests — host classification of live bars ────────────────────
+
+#[cfg(test)]
+mod session_classification_tests {
+    use chrono::TimeZone;
+    use midas_bars::SessionKindByte;
+    use midas_broker_core::market_data::{Bar, BarCompleteness};
+    use midas_broker_core::{SymbolKey, Timeframe};
+    use midas_calendar::{xnys, Timestamp};
+
+    use super::apply_bar_to_buffer;
+    use crate::app::{bars_to_candle_buffer, resolve_calendar};
+
+    fn utc(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> Timestamp {
+        chrono::Utc.with_ymd_and_hms(y, mo, d, h, mi, 0).unwrap()
+    }
+
+    fn mk_bar(ts: Timestamp, price: f64) -> Bar {
+        Bar {
+            symbol: SymbolKey {
+                contract_id: 0,
+                symbol: "AAPL".to_string(),
+            },
+            timeframe: Timeframe::M1,
+            ts_open: ts,
+            ts_close: ts + chrono::Duration::minutes(1),
+            o: price,
+            h: price,
+            l: price,
+            c: price,
+            volume: 1_000,
+            trade_count: 1,
+            wap: None,
+            completeness: BarCompleteness::Completed,
+        }
+    }
+
+    #[test]
+    fn apply_bar_to_buffer_classifies_pre_market() {
+        // 09:00 ET (Wed 17 Jan 2024) is XNYS pre-market.
+        let pre_ts = utc(2024, 1, 17, 14, 0);
+        let mut buf = midas_core::CandleBuffer::new();
+        apply_bar_to_buffer(&mut buf, &mk_bar(pre_ts, 100.0), xnys());
+        assert_eq!(buf.len(), 1);
+        assert_eq!(buf.session_kind(0), SessionKindByte::PreMarket);
+    }
+
+    #[test]
+    fn apply_bar_to_buffer_classifies_regular() {
+        // 10:00 ET is regular.
+        let reg_ts = utc(2024, 1, 17, 15, 0);
+        let mut buf = midas_core::CandleBuffer::new();
+        apply_bar_to_buffer(&mut buf, &mk_bar(reg_ts, 100.0), xnys());
+        assert_eq!(buf.session_kind(0), SessionKindByte::Regular);
+    }
+
+    #[test]
+    fn apply_bar_to_buffer_classifies_post_market() {
+        // 17:00 ET is XNYS post-market (16:00–20:00 ET).
+        let post_ts = utc(2024, 1, 17, 22, 0);
+        let mut buf = midas_core::CandleBuffer::new();
+        apply_bar_to_buffer(&mut buf, &mk_bar(post_ts, 100.0), xnys());
+        assert_eq!(buf.session_kind(0), SessionKindByte::PostMarket);
+    }
+
+    #[test]
+    fn bars_to_candle_buffer_classifies_full_eth_day_xnys() {
+        // 04:00, 09:00, 10:00, 16:30 ET on 2024-01-17 (Wed):
+        //   Pre, Pre, Regular, Post.
+        let bars = [
+            mk_bar(utc(2024, 1, 17, 9, 0), 100.0),   // 04:00 ET → Pre
+            mk_bar(utc(2024, 1, 17, 14, 0), 101.0),  // 09:00 ET → Pre
+            mk_bar(utc(2024, 1, 17, 15, 0), 102.0),  // 10:00 ET → Regular
+            mk_bar(utc(2024, 1, 17, 21, 30), 103.0), // 16:30 ET → Post
+        ];
+        let buf = bars_to_candle_buffer(&bars, xnys());
+        assert_eq!(buf.session_kind(0), SessionKindByte::PreMarket);
+        assert_eq!(buf.session_kind(1), SessionKindByte::PreMarket);
+        assert_eq!(buf.session_kind(2), SessionKindByte::Regular);
+        assert_eq!(buf.session_kind(3), SessionKindByte::PostMarket);
+    }
+
+    #[test]
+    fn bars_to_candle_buffer_crypto_is_all_regular() {
+        // CryptoSpotCalendar has no extended sessions — every
+        // 24×7 minute is Regular. Ensure the host's classification
+        // for a crypto ticker degrades to all-Regular cleanly.
+        let crypto_cal = resolve_calendar("BTC-USD");
+        let bars = vec![
+            mk_bar(utc(2024, 1, 17, 0, 0), 1.0),  // midnight UTC
+            mk_bar(utc(2024, 1, 17, 14, 0), 1.0), // 09:00 ET
+            mk_bar(utc(2024, 1, 17, 22, 0), 1.0), // 17:00 ET
+        ];
+        let buf = bars_to_candle_buffer(&bars, crypto_cal);
+        for i in 0..buf.len() {
+            assert_eq!(
+                buf.session_kind(i),
+                SessionKindByte::Regular,
+                "crypto bar {i} must be Regular",
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_calendar_routes_known_tickers() {
+        // Spot-check the heuristic resolver's routing for a couple
+        // canonical tickers; full coverage lives in the resolver's
+        // own tests in midas-bars-adapter.
+        assert_eq!(
+            resolve_calendar("AAPL").id(),
+            xnys().id(),
+            "equity ticker → XNYS",
+        );
+        assert_eq!(
+            resolve_calendar("BTC-USD").id(),
+            midas_calendar::crypto_spot().id(),
+            "crypto ticker → CryptoSpot",
+        );
     }
 }

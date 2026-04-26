@@ -2,6 +2,8 @@
 
 > **STATUS — Phase A, B, C + scrutiny + refactor loops landed.** See [`README.md`](README.md) for current status, landed crates, test counts, and deferred work. Phase D (legacy retirement) is intentionally not executed yet — it requires a preceding feature-port sprint to bring brackets / annotations / indicators onto the new stack.
 >
+> **ETH SHADING UPDATE — landed on the legacy chart.** TradingView-matching pre/post-market band tints now ship on the legacy chart via [`eth-shading.md`](eth-shading.md) (S1a–S6 on `feat/eth-shading`). Phase D is no longer blocked on band rendering. The new `session_chart` window keeps its own full-calendar-window band layer; the two surfaces are colour-aligned (parity test gates drift) but paint different *extents* by design — see `eth-shading.md` §G.
+>
 > **NOTE — PLAN SUPERSEDED.** Per user directive after initial drafting: the session-aware chart system is designed ideal-first (see [`00a-ideal-design.md`](00a-ideal-design.md)) with no compromises to fit the existing codebase. Integration is a separate concern in [`00b-integration-strategy.md`](00b-integration-strategy.md). The slice plan below (S0–S12) reflects an earlier bolt-on approach and is retained here only as a contrast reference — the authoritative plan is S1–S22 in the integration-strategy doc. The older S0–S12 slice docs are NOT the implementation plan.
 >
 > If you are reading this to execute work, read `README.md` for current status, then `00a-ideal-design.md`, then `00b-integration-strategy.md`. The rest of this index is historical.

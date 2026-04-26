@@ -80,4 +80,26 @@ pub struct ChartInput<'a> {
     /// `order_intent_handle.snapshot(symbol)`; sans-IO tests default to
     /// `false`.
     pub pinned: bool,
+    /// Whether the ETH (extended trading hours) session-band overlay
+    /// is enabled. Drives the `compute_session_bands` pass, which
+    /// emits filled rectangles into the existing grid-line bucket
+    /// behind the candles.
+    ///
+    /// `false` short-circuits the pass to a single bool check; set
+    /// from `chart.show_extended_hours_bands` in
+    /// [`midas_core::config::ChartConfig`].
+    pub show_extended_hours_bands: bool,
+    /// Bar duration in milliseconds, used by the band pass to compute
+    /// the right edge of the trailing bar in each run
+    /// (`data.timestamp(last) + bar_duration_ms`). Sourced from
+    /// `ChartPanel.timeframe.as_secs() * 1000`. Falls back to the
+    /// `compute` module's interpolated estimate when unknown.
+    pub bar_duration_ms: i64,
+    /// Tint for pre-market bands (RGBA, linear). Defaults to
+    /// `LEGACY_BAND_PRE` in `midas-chart` (warm brown, TradingView-
+    /// style) but per-chart themes may override.
+    pub pre_market_band_color: [f32; 4],
+    /// Tint for post-market bands (RGBA, linear). Defaults to
+    /// `LEGACY_BAND_POST` (cool blue).
+    pub post_market_band_color: [f32; 4],
 }

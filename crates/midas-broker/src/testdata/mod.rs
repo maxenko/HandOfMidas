@@ -34,7 +34,7 @@ use std::collections::HashMap;
 
 use midas_broker_core::{OhlcvBar, Timeframe};
 
-use generate::{generate_daily_bars, generate_intraday_for_day};
+use generate::{generate_daily_bars, generate_eth_for_day, generate_intraday_for_day};
 use personality::{personality_for_seed, ticker_seed, StockPersonality};
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -60,6 +60,12 @@ struct TickerData {
     daily_bars: Vec<OhlcvBar>,
     /// day timestamp → S30 intraday bars (lazily generated).
     intraday_cache: HashMap<i64, Vec<OhlcvBar>>,
+    /// day timestamp → S30 ETH bars (pre + post, sorted by ts).
+    /// Lazily generated on the first ETH-included query for that
+    /// day. Held alongside `intraday_cache` rather than fused into
+    /// it because RTH-only callers must keep their existing bar
+    /// counts byte-stable.
+    eth_cache: HashMap<i64, Vec<OhlcvBar>>,
 }
 
 impl TestDataProvider {
@@ -82,6 +88,7 @@ impl TestDataProvider {
                     personality,
                     daily_bars,
                     intraday_cache: HashMap::new(),
+                    eth_cache: HashMap::new(),
                 },
             );
         }
@@ -95,7 +102,31 @@ impl TestDataProvider {
     ///
     /// Finest supported intraday resolution is S30 (30 seconds). Requesting
     /// S1/S5/S15 panics.
+    ///
+    /// RTH-only by default. Callers that want pre/post-market bars
+    /// included use [`Self::bars_with_eth`].
     pub fn bars(&mut self, ticker: &str, tf: Timeframe, start: i64, end: i64) -> Vec<OhlcvBar> {
+        self.bars_with_eth(ticker, tf, start, end, false)
+    }
+
+    /// Get OHLCV bars for `ticker` at `timeframe` within `[start, end)`,
+    /// optionally including pre-market (04:00–09:30 ET) and post-market
+    /// (16:00–20:00 ET) bars on each weekday in the range.
+    ///
+    /// Daily/coarser timeframes ignore `include_eth` — the daily
+    /// generator already produces one bar per trading day; ETH bars
+    /// only show up at intraday resolutions.
+    ///
+    /// `include_eth = false` produces output byte-identical to
+    /// [`Self::bars`] so legacy callers see no change.
+    pub fn bars_with_eth(
+        &mut self,
+        ticker: &str,
+        tf: Timeframe,
+        start: i64,
+        end: i64,
+        include_eth: bool,
+    ) -> Vec<OhlcvBar> {
         assert!(
             tf.as_secs() >= Timeframe::S30.as_secs(),
             "TestDataProvider finest resolution is S30; requested {}",
@@ -107,7 +138,7 @@ impl TestDataProvider {
         if tf.as_secs() >= Timeframe::D1.as_secs() {
             self.bars_daily_or_coarser(ticker, tf, start, end)
         } else {
-            self.bars_intraday(ticker, tf, start, end)
+            self.bars_intraday_with_eth(ticker, tf, start, end, include_eth)
         }
     }
 
@@ -163,19 +194,26 @@ impl TestDataProvider {
         }
     }
 
-    fn bars_intraday(
+    fn bars_intraday_with_eth(
         &mut self,
         ticker: &str,
         tf: Timeframe,
         start: i64,
         end: i64,
+        include_eth: bool,
     ) -> Vec<OhlcvBar> {
         let data = self.tickers.get(ticker).unwrap();
 
         // Find daily bars that could contain intraday bars in [start, end).
-        // Daily bar timestamp is at 00:00 UTC; intraday starts at 14:30 UTC same day.
-        let day_start = (start / 86400) * 86400;
-        let day_end = ((end + 86399) / 86400) * 86400;
+        // Daily bar timestamp is at 00:00 UTC; intraday starts at 14:30 UTC
+        // same day. With ETH the window opens at 09:00 UTC same day and
+        // closes at 01:00 UTC the *next* day — so the post-market tail
+        // can overflow into the following calendar day. Pull one extra
+        // day on each side so a query straddling a day boundary still
+        // sees the right bars.
+        let pad_secs: i64 = if include_eth { 86_400 } else { 0 };
+        let day_start = ((start - pad_secs) / 86400) * 86400;
+        let day_end = ((end + pad_secs + 86399) / 86400) * 86400;
 
         let relevant_days: Vec<(usize, OhlcvBar)> = data
             .daily_bars
@@ -190,17 +228,38 @@ impl TestDataProvider {
 
         let mut all_bars = Vec::new();
         for (day_idx, daily) in &relevant_days {
-            let day_bars = data
+            // RTH bars: always included regardless of `include_eth`.
+            let rth_bars = data
                 .intraday_cache
                 .entry(daily.timestamp)
                 .or_insert_with(|| generate_intraday_for_day(daily, seed, *day_idx));
-
             all_bars.extend(
-                day_bars
+                rth_bars
                     .iter()
                     .filter(|b| b.timestamp >= start && b.timestamp < end)
                     .cloned(),
             );
+
+            if include_eth {
+                let eth_bars = data
+                    .eth_cache
+                    .entry(daily.timestamp)
+                    .or_insert_with(|| generate_eth_for_day(daily, seed, *day_idx));
+                all_bars.extend(
+                    eth_bars
+                        .iter()
+                        .filter(|b| b.timestamp >= start && b.timestamp < end)
+                        .cloned(),
+                );
+            }
+        }
+
+        // ETH bars are produced after RTH for each day in the loop
+        // above, but pre-market bars on day N have earlier timestamps
+        // than RTH on day N. Sort once at the end so the result is
+        // monotonic regardless of cache ordering.
+        if include_eth {
+            all_bars.sort_by_key(|b| b.timestamp);
         }
 
         if tf.as_secs() == Timeframe::S30.as_secs() {

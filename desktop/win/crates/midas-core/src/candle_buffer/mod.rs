@@ -13,7 +13,30 @@
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use midas_bars::SessionKindByte;
+
 use crate::CandleData;
+
+/// Convert a raw `sessions[idx]` byte back into a [`SessionKindByte`].
+///
+/// `SessionKind` is `#[repr(u8)]` and `#[non_exhaustive]`. The wildcard
+/// arm guards against future variants leaking in via legacy data —
+/// unknown bytes degrade to `Regular`, which makes them visually
+/// indistinguishable from RTH on the band-render path. Anything written
+/// through [`CandleBuffer::push_with_session`] uses `as u8` on a known
+/// variant, so corruption is the only path that hits the wildcard.
+#[inline]
+fn session_kind_from_u8(b: u8) -> SessionKindByte {
+    match b {
+        x if x == SessionKindByte::Regular as u8 => SessionKindByte::Regular,
+        x if x == SessionKindByte::PreMarket as u8 => SessionKindByte::PreMarket,
+        x if x == SessionKindByte::PostMarket as u8 => SessionKindByte::PostMarket,
+        x if x == SessionKindByte::Break as u8 => SessionKindByte::Break,
+        x if x == SessionKindByte::Overnight as u8 => SessionKindByte::Overnight,
+        x if x == SessionKindByte::Closed as u8 => SessionKindByte::Closed,
+        _ => SessionKindByte::Regular,
+    }
+}
 
 // ─── CandleBuffer ──────────────────────────────────────────────────────
 
@@ -50,6 +73,14 @@ pub struct CandleBuffer {
     pub closes: Vec<f32>,
     /// Trade volumes (capped at `u32::MAX` for equities).
     pub volumes: Vec<u32>,
+    /// Trading session kind, one byte per row (`SessionKind as u8`).
+    /// Drives the legacy chart's session-band overlay (ETH shading);
+    /// see `compute_session_bands` in `midas-chart`. Loaders that lack
+    /// symbol context (`midas-data` binary readers) populate this with
+    /// `SessionKind::Regular as u8`. The host classifies via the
+    /// resolved exchange calendar at conversion time
+    /// (`bars_to_candle_buffer`).
+    pub sessions: Vec<u8>,
     /// Monotonic mutation counter. Bumped on every `push` /
     /// `update_last`. Readers compare a saved value to detect change.
     /// Not `Clone`; see the manual `Clone` impl below.
@@ -70,6 +101,7 @@ impl Clone for CandleBuffer {
             lows: self.lows.clone(),
             closes: self.closes.clone(),
             volumes: self.volumes.clone(),
+            sessions: self.sessions.clone(),
             version: AtomicU64::new(self.version.load(Ordering::Relaxed)),
         }
     }
@@ -90,6 +122,7 @@ impl CandleBuffer {
             lows: Vec::with_capacity(n),
             closes: Vec::with_capacity(n),
             volumes: Vec::with_capacity(n),
+            sessions: Vec::with_capacity(n),
             version: AtomicU64::new(0),
         }
     }
@@ -119,11 +152,36 @@ impl CandleBuffer {
 
     /// Append one candle to the buffer.
     ///
+    /// Defaults the new row's session to [`SessionKindByte::Regular`].
+    /// Callers that know the session kind (host conversion via the
+    /// resolved exchange calendar) should use
+    /// [`push_with_session`](Self::push_with_session) instead.
+    ///
     /// # Panics (debug only)
     ///
     /// Panics in debug builds if `ts` is not strictly greater than the last
     /// timestamp, violating the monotonically-increasing invariant.
     pub fn push(&mut self, ts: i64, o: f32, h: f32, l: f32, c: f32, v: u32) {
+        self.push_with_session(ts, o, h, l, c, v, SessionKindByte::Regular);
+    }
+
+    /// Append one candle to the buffer with an explicit session kind.
+    ///
+    /// # Panics (debug only)
+    ///
+    /// Panics in debug builds if `ts` is not strictly greater than the last
+    /// timestamp, violating the monotonically-increasing invariant.
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_with_session(
+        &mut self,
+        ts: i64,
+        o: f32,
+        h: f32,
+        l: f32,
+        c: f32,
+        v: u32,
+        session: SessionKindByte,
+    ) {
         debug_assert!(
             self.timestamps.last().is_none_or(|&prev| ts > prev),
             "timestamps must be monotonically increasing: tried to push {ts} \
@@ -136,7 +194,21 @@ impl CandleBuffer {
         self.lows.push(l);
         self.closes.push(c);
         self.volumes.push(v);
+        self.sessions.push(session as u8);
         self.version.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Read the session kind for the candle at `idx`.
+    ///
+    /// Bytes that don't match a known [`SessionKindByte`] variant
+    /// degrade to `Regular` — see `session_kind_from_u8`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `idx` is out of bounds.
+    #[inline]
+    pub fn session_kind(&self, idx: usize) -> SessionKindByte {
+        session_kind_from_u8(self.sessions[idx])
     }
 
     /// Borrow a sub-range as a [`CandleSlice`]. No allocation, no copy.
@@ -151,7 +223,8 @@ impl CandleBuffer {
             highs: &self.highs[range.clone()],
             lows: &self.lows[range.clone()],
             closes: &self.closes[range.clone()],
-            volumes: &self.volumes[range],
+            volumes: &self.volumes[range.clone()],
+            sessions: &self.sessions[range],
         }
     }
 
@@ -252,7 +325,26 @@ impl CandleBuffer {
     /// Introduced in S7b as the replacement for the removed
     /// `apply_tick`: the router emits per-bar events (from the
     /// aggregator or the realtime-bar publisher), not ticks.
-    pub fn apply_bar(&mut self, bar_ts_open_ms: i64, o: f32, h: f32, l: f32, c: f32, v: u32) {
+    ///
+    /// Callers supply a `session` value already classified by the
+    /// host's resolved exchange calendar (see
+    /// `bars_to_candle_buffer` and `apply_bar_to_buffer`). The
+    /// overwrite-in-place branch refreshes `sessions[last]` so an
+    /// aggregator re-emit that crosses a session boundary
+    /// (e.g. the 09:30 ET pre-market → regular flip on the bar
+    /// that brackets it) lands the new classification rather than
+    /// being pinned to whatever the first emit reported.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_bar(
+        &mut self,
+        bar_ts_open_ms: i64,
+        o: f32,
+        h: f32,
+        l: f32,
+        c: f32,
+        v: u32,
+        session: SessionKindByte,
+    ) {
         match self.timestamps.last().copied() {
             Some(ts) if ts == bar_ts_open_ms => {
                 *self.opens.last_mut().expect("opens out of sync") = o;
@@ -260,6 +352,7 @@ impl CandleBuffer {
                 *self.lows.last_mut().expect("lows out of sync") = l;
                 *self.closes.last_mut().expect("closes out of sync") = c;
                 *self.volumes.last_mut().expect("volumes out of sync") = v;
+                *self.sessions.last_mut().expect("sessions out of sync") = session as u8;
                 self.version.fetch_add(1, Ordering::Relaxed);
             }
             Some(ts) if ts > bar_ts_open_ms => {
@@ -273,7 +366,7 @@ impl CandleBuffer {
                 );
             }
             _ => {
-                self.push(bar_ts_open_ms, o, h, l, c, v);
+                self.push_with_session(bar_ts_open_ms, o, h, l, c, v, session);
             }
         }
     }
@@ -328,7 +421,23 @@ impl CandleBuffer {
     /// can't synthesise those from 5 s bars without a trading
     /// calendar, so the chart does the merge itself until it migrates
     /// to the session-aware aggregator path.
-    pub fn merge_bar(&mut self, bucket_ts_open_ms: i64, o: f32, h: f32, l: f32, c: f32, v: u32) {
+    ///
+    /// `session` is classified by the host's resolved calendar from
+    /// the *incoming sub-bar's* timestamp; the same-bucket branch
+    /// keeps the existing `sessions[last]` (the bucket inherits the
+    /// session of its first sub-bar, which matches the legacy chart's
+    /// "the bar belongs to its open" convention).
+    #[allow(clippy::too_many_arguments)]
+    pub fn merge_bar(
+        &mut self,
+        bucket_ts_open_ms: i64,
+        o: f32,
+        h: f32,
+        l: f32,
+        c: f32,
+        v: u32,
+        session: SessionKindByte,
+    ) {
         match self.timestamps.last().copied() {
             Some(ts) if ts == bucket_ts_open_ms => {
                 // Same bucket — accumulate OHLCV.
@@ -353,7 +462,7 @@ impl CandleBuffer {
                 );
             }
             _ => {
-                self.push(bucket_ts_open_ms, o, h, l, c, v);
+                self.push_with_session(bucket_ts_open_ms, o, h, l, c, v, session);
             }
         }
     }
@@ -395,6 +504,10 @@ impl CandleData for CandleBuffer {
     fn find_index_by_time(&self, ts: i64) -> usize {
         self.find_index_by_time(ts)
     }
+
+    fn session_kind(&self, idx: usize) -> SessionKindByte {
+        self.session_kind(idx)
+    }
 }
 
 // ─── CandleSlice ───────────────────────────────────────────────────────
@@ -416,6 +529,8 @@ pub struct CandleSlice<'a> {
     pub closes: &'a [f32],
     /// Trade volumes.
     pub volumes: &'a [u32],
+    /// Trading session kinds, one byte per row (`SessionKind as u8`).
+    pub sessions: &'a [u8],
 }
 
 impl<'a> CandleSlice<'a> {
@@ -482,8 +597,19 @@ impl<'a> CandleSlice<'a> {
             highs: &self.highs[range.clone()],
             lows: &self.lows[range.clone()],
             closes: &self.closes[range.clone()],
-            volumes: &self.volumes[range],
+            volumes: &self.volumes[range.clone()],
+            sessions: &self.sessions[range],
         }
+    }
+
+    /// Read the session kind for the candle at `idx` (relative to this slice).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `idx` is out of bounds.
+    #[inline]
+    pub fn session_kind(&self, idx: usize) -> SessionKindByte {
+        session_kind_from_u8(self.sessions[idx])
     }
 }
 
@@ -522,6 +648,10 @@ impl CandleData for CandleSlice<'_> {
 
     fn find_index_by_time(&self, ts: i64) -> usize {
         self.find_index_by_time(ts)
+    }
+
+    fn session_kind(&self, idx: usize) -> SessionKindByte {
+        self.session_kind(idx)
     }
 }
 

@@ -12,6 +12,8 @@
 
 use std::ops::Range;
 
+use midas_bars::SessionKindByte;
+
 /// Trait abstracting over candle data sources.
 ///
 /// Implemented by `CandleBuffer` (in `midas-data`), and potentially by
@@ -59,6 +61,17 @@ pub trait CandleData {
     /// If `ts` is before all data, returns 0.
     /// If `ts` is after all data, returns `len() - 1` (or 0 if empty).
     fn find_index_by_time(&self, ts: i64) -> usize;
+
+    /// Trading session kind for the candle at `idx`.
+    ///
+    /// Default returns [`SessionKindByte::Regular`] so existing
+    /// implementations stay compiling — only stores that classify bars
+    /// (legacy `CandleBuffer`, session-aware `CandleSeries`) need to
+    /// override. Routed through `midas-bars`' re-export so this trait
+    /// stays free of a `midas-calendar` production dep.
+    fn session_kind(&self, _idx: usize) -> SessionKindByte {
+        SessionKindByte::Regular
+    }
 }
 
 #[cfg(test)]

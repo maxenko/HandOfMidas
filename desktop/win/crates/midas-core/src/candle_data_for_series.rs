@@ -33,7 +33,7 @@
 
 use std::ops::Range;
 
-use midas_bars::CandleSeries;
+use midas_bars::{CandleSeries, SessionKindByte};
 
 use crate::candle_data::CandleData;
 
@@ -135,6 +135,13 @@ impl CandleData for CandleSeries {
             idx = i;
         }
         idx.min(len - 1)
+    }
+
+    fn session_kind(&self, idx: usize) -> SessionKindByte {
+        // `CandleSeries` already stores the session kind per row.
+        self.at(idx)
+            .expect("session_kind: idx out of bounds")
+            .session_kind()
     }
 }
 
@@ -277,5 +284,29 @@ mod tests {
         // The `CandleData` contract says "If ts is before all data,
         // returns 0. If after all data, returns len-1 (or 0 if empty)".
         assert_eq!(CandleData::find_index_by_time(&empty, 0), 0);
+    }
+
+    #[test]
+    fn session_kind_routes_through_series_column() {
+        // Build a series spanning pre-market into RTH so the trait
+        // method observes a per-row classification, not the default
+        // `Regular` it would otherwise get from the trait fallback.
+        let cal = xnys();
+        let mut series = CandleSeries::new(cal.id(), BarPeriod::m1(), Symbol::new("SPY", cal.id()));
+        // 09:00 ET = 14:00 UTC is pre-market on XNYS.
+        let pre_ts = utc(2024, 1, 17, 14, 0);
+        // 14:30 ET = 19:30 UTC … we use 14:30 UTC = 09:30 ET regular open.
+        let reg_ts = utc(2024, 1, 17, 14, 30);
+        series.push(mk_candle(pre_ts, 100.0, 100.5, 99.5, 100.2, 1_000));
+        series.push(mk_candle(reg_ts, 100.2, 100.7, 99.8, 100.4, 1_500));
+
+        assert_eq!(
+            CandleData::session_kind(&series, 0),
+            midas_bars::SessionKindByte::PreMarket,
+        );
+        assert_eq!(
+            CandleData::session_kind(&series, 1),
+            midas_bars::SessionKindByte::Regular,
+        );
     }
 }

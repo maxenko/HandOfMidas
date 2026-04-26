@@ -24,6 +24,21 @@ const MARKET_OPEN_OFFSET: i64 = 14 * 3600 + 30 * 60;
 /// Seconds per intraday bar (S30).
 const BAR_SECS: i64 = 30;
 
+/// Pre-market open offset from midnight UTC (09:00 UTC = 04:00 ET).
+/// Mirrors `MARKET_OPEN_OFFSET`'s simplification — ignores DST so the
+/// generated calendar stays internally consistent year-round.
+const PRE_MARKET_OPEN_OFFSET: i64 = 9 * 3600;
+
+/// Number of S30 bars per pre-market session (5.5 hours = 19800s / 30s).
+const PRE_MARKET_BARS: usize = 660;
+
+/// Post-market open offset from midnight UTC (21:00 UTC = 16:00 ET).
+/// Equals `MARKET_OPEN_OFFSET + INTRADAY_BARS * BAR_SECS`.
+const POST_MARKET_OPEN_OFFSET: i64 = 21 * 3600;
+
+/// Number of S30 bars per post-market session (4 hours = 14400s / 30s).
+const POST_MARKET_BARS: usize = 480;
+
 // ── Utilities ─────────────────────────────────────────────────────────────
 
 /// Box-Muller transform: two uniform → one standard normal.
@@ -370,4 +385,115 @@ fn scale_path_to_range(prices: &mut [f64], target_high: f64, target_low: f64) {
     } else {
         prices[len * 2 / 3] = target_low;
     }
+}
+
+// ── Extended-hours generation ─────────────────────────────────────────────
+
+/// Generate the pre-market and post-market S30 bar tracks for one
+/// trading day.
+///
+/// Pre-market bars walk a damped Brownian path from a small overnight
+/// gap into `daily.open` (the path is anchored to land on the open at
+/// the last bar). Post-market bars start at `daily.close` and drift
+/// with damped Brownian noise — no anchor, since the next day's open
+/// is its own gap.
+///
+/// Volume is intentionally light (5 % of RTH base, lognormally
+/// scattered) — extended hours are quieter than RTH on real wires
+/// and the shading test only cares that bars *exist* in the right
+/// timestamp ranges, not that they reproduce a specific liquidity
+/// curve.
+///
+/// `day_index` mirrors the intraday call so the same trading day
+/// always yields the same ETH bars (RNG seeded from `seed ^
+/// day_index * <salt>`, with a different salt than the intraday seed
+/// so ETH bars don't shadow the RTH path).
+pub fn generate_eth_for_day(daily: &OhlcvBar, seed: u64, day_index: usize) -> Vec<OhlcvBar> {
+    // Different salt than the intraday-bridge seed so the RNG streams
+    // don't share state — mathematically independent ETH and RTH paths.
+    let mut rng = StdRng::seed_from_u64(seed ^ (day_index as u64).wrapping_mul(0xD1B54A32D192ED03));
+
+    let price = daily.open.max(0.01);
+    let close_price = daily.close.max(0.01);
+    let bridge_sigma_pre = price * 0.0015;
+    let drift_sigma_post = close_price * 0.0010;
+
+    let mut bars = Vec::with_capacity(PRE_MARKET_BARS + POST_MARKET_BARS);
+
+    // ── Pre-market: anchored Brownian bridge ending at daily.open ────
+    let pre_base_ts = daily.timestamp + PRE_MARKET_OPEN_OFFSET;
+    let mut closes_pre = Vec::with_capacity(PRE_MARKET_BARS + 1);
+    // Start ~0.3 % away from open in a random direction, so the
+    // sequence has somewhere to drift back from.
+    let start_offset = standard_normal(&mut rng) * 0.003 * price;
+    closes_pre.push((price + start_offset).max(0.01));
+    for i in 1..PRE_MARKET_BARS {
+        let remaining = (PRE_MARKET_BARS - i) as f64;
+        let drift = (price - closes_pre[i - 1]) / remaining;
+        let noise = standard_normal(&mut rng) * bridge_sigma_pre;
+        closes_pre.push((closes_pre[i - 1] + drift + noise).max(0.01));
+    }
+    closes_pre.push(price);
+
+    for i in 0..PRE_MARKET_BARS {
+        let bar_open = closes_pre[i];
+        let bar_close = closes_pre[i + 1];
+        let body_high = bar_open.max(bar_close);
+        let body_low = bar_open.min(bar_close);
+        // Wicks scaled to a fraction of the bar body — ETH liquidity
+        // is thinner so wicks are also smaller in absolute terms.
+        let wick_scale = ((body_high - body_low) * 0.5).max(price * 0.0001);
+        let upper = (standard_normal(&mut rng) * 0.5 - 0.4).exp() * wick_scale;
+        let lower = (standard_normal(&mut rng) * 0.5 - 0.4).exp() * wick_scale;
+        let high = round2(body_high + upper);
+        let low = round2((body_low - lower).max(0.01));
+
+        // ETH volume: ~5 % of RTH per-bar base, lognormally scattered.
+        let eth_vol_base = (daily.volume as f64 / INTRADAY_BARS as f64) * 0.05;
+        let bar_vol = (eth_vol_base * (standard_normal(&mut rng) * 0.4 - 0.1).exp()) as i64;
+
+        bars.push(OhlcvBar {
+            timestamp: pre_base_ts + i as i64 * BAR_SECS,
+            open: round2(bar_open),
+            high,
+            low,
+            close: round2(bar_close),
+            volume: bar_vol.max(1),
+        });
+    }
+
+    // ── Post-market: free drift starting at daily.close ──────────────
+    let post_base_ts = daily.timestamp + POST_MARKET_OPEN_OFFSET;
+    let mut current = close_price;
+    for i in 0..POST_MARKET_BARS {
+        let bar_open = current;
+        // Damped drift towards the close so the post path doesn't
+        // wander too far in either direction. Real after-hours
+        // typically meanders within 1–2 % of the close.
+        let centering = (close_price - current) * 0.02;
+        let bar_close =
+            (current + centering + standard_normal(&mut rng) * drift_sigma_post).max(0.01);
+        let body_high = bar_open.max(bar_close);
+        let body_low = bar_open.min(bar_close);
+        let wick_scale = ((body_high - body_low) * 0.5).max(close_price * 0.0001);
+        let upper = (standard_normal(&mut rng) * 0.5 - 0.4).exp() * wick_scale;
+        let lower = (standard_normal(&mut rng) * 0.5 - 0.4).exp() * wick_scale;
+        let high = round2(body_high + upper);
+        let low = round2((body_low - lower).max(0.01));
+
+        let eth_vol_base = (daily.volume as f64 / INTRADAY_BARS as f64) * 0.05;
+        let bar_vol = (eth_vol_base * (standard_normal(&mut rng) * 0.4 - 0.1).exp()) as i64;
+
+        bars.push(OhlcvBar {
+            timestamp: post_base_ts + i as i64 * BAR_SECS,
+            open: round2(bar_open),
+            high,
+            low,
+            close: round2(bar_close),
+            volume: bar_vol.max(1),
+        });
+        current = bar_close;
+    }
+
+    bars
 }

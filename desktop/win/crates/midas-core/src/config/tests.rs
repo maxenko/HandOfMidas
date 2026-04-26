@@ -151,6 +151,8 @@ fn save_load_roundtrip_preserves_all_fields() {
             timeframe_link: LinkMode::default(),
             bound_symbol: None,
             backend: None,
+            show_extended_hours: true,
+            show_extended_hours_bands: true,
         }],
         levels: msft_levels,
         watchlists: Vec::new(),
@@ -297,6 +299,8 @@ fn chart_config_with_levels_survives_roundtrip() {
                 timeframe_link: LinkMode::default(),
                 bound_symbol: None,
                 backend: None,
+                show_extended_hours: true,
+                show_extended_hours_bands: true,
             },
             ChartConfig {
                 symbol: "TSLA".into(),
@@ -317,6 +321,8 @@ fn chart_config_with_levels_survives_roundtrip() {
                 timeframe_link: LinkMode::default(),
                 bound_symbol: None,
                 backend: None,
+                show_extended_hours: true,
+                show_extended_hours_bands: true,
             },
         ],
         levels: aapl_levels,
@@ -503,6 +509,8 @@ fn atomic_write_does_not_corrupt_on_success() {
             timeframe_link: LinkMode::default(),
             bound_symbol: None,
             backend: None,
+            show_extended_hours: true,
+            show_extended_hours_bands: true,
         }],
         levels: HashMap::new(),
         watchlists: Vec::new(),
@@ -607,6 +615,8 @@ fn roundtrip_with_camera_and_collapse_gaps_and_line_width() {
                 timeframe_link: LinkMode::default(),
                 bound_symbol: None,
                 backend: None,
+                show_extended_hours: true,
+                show_extended_hours_bands: true,
             },
             ChartConfig {
                 symbol: "QQQ".into(),
@@ -627,6 +637,8 @@ fn roundtrip_with_camera_and_collapse_gaps_and_line_width() {
                 timeframe_link: LinkMode::default(),
                 bound_symbol: None,
                 backend: None,
+                show_extended_hours: true,
+                show_extended_hours_bands: true,
             },
         ],
         levels: spy_levels,
@@ -851,6 +863,8 @@ fn chart_config_levels_not_serialized() {
             timeframe_link: LinkMode::default(),
             bound_symbol: None,
             backend: None,
+            show_extended_hours: true,
+            show_extended_hours_bands: true,
         }],
         ..Default::default()
     };
@@ -970,6 +984,8 @@ fn non_default_link_modes_roundtrip() {
             timeframe_link: LinkMode::ListenAll,
             bound_symbol: None,
             backend: None,
+            show_extended_hours: true,
+            show_extended_hours_bands: true,
         }],
         ..Default::default()
     };
@@ -1217,6 +1233,8 @@ fn chart_backend_serializes_lowercase() {
         timeframe_link: LinkMode::default(),
         bound_symbol: None,
         backend: Some(ChartBackend::Legacy),
+        show_extended_hours: true,
+        show_extended_hours_bands: true,
     };
     let toml_str = toml::to_string_pretty(&cfg).expect("serialize legacy");
     assert!(toml_str.contains("backend = \"legacy\""), "got: {toml_str}");
@@ -1295,6 +1313,8 @@ fn chart_backend_roundtrip_new() {
         timeframe_link: LinkMode::default(),
         bound_symbol: None,
         backend: Some(ChartBackend::New),
+        show_extended_hours: true,
+        show_extended_hours_bands: true,
     };
     let toml_str = toml::to_string_pretty(&cfg).expect("serialize");
     let restored: ChartConfig = toml::from_str(&toml_str).expect("deserialize");
@@ -1325,10 +1345,130 @@ fn chart_backend_none_skips_serialization() {
         timeframe_link: LinkMode::default(),
         bound_symbol: None,
         backend: None,
+        show_extended_hours: true,
+        show_extended_hours_bands: true,
     };
     let toml_str = toml::to_string_pretty(&cfg).expect("serialize");
     assert!(
         !toml_str.contains("backend"),
         "backend: None must not serialize. got: {toml_str}"
+    );
+}
+
+// ─── S3: ETH knobs (show_extended_hours{,_bands}) ────────────────────────────
+
+/// Old configs saved before the ETH-shading slice landed are missing
+/// both `show_extended_hours` and `show_extended_hours_bands`. They
+/// must load with both knobs defaulting to `true` — TradingView-parity
+/// behavior for new sessions.
+#[test]
+fn eth_knobs_absent_default_to_true() {
+    let cfg: ChartConfig = toml::from_str(
+        r#"
+            symbol = "AAPL"
+            timeframe = "1D"
+        "#,
+    )
+    .expect("deserialize");
+    assert!(
+        cfg.show_extended_hours,
+        "absent show_extended_hours must default to true"
+    );
+    assert!(
+        cfg.show_extended_hours_bands,
+        "absent show_extended_hours_bands must default to true"
+    );
+}
+
+/// User explicitly opting out of ETH on disk must round-trip — a
+/// `false` value cannot be silently overwritten by the default.
+#[test]
+fn eth_knobs_explicit_false_round_trips() {
+    let cfg: ChartConfig = toml::from_str(
+        r#"
+            symbol = "AAPL"
+            timeframe = "1D"
+            show_extended_hours = false
+            show_extended_hours_bands = false
+        "#,
+    )
+    .expect("deserialize");
+    assert!(!cfg.show_extended_hours);
+    assert!(!cfg.show_extended_hours_bands);
+
+    let toml_str = toml::to_string_pretty(&cfg).expect("serialize");
+    let restored: ChartConfig = toml::from_str(&toml_str).expect("deserialize");
+    assert!(!restored.show_extended_hours);
+    assert!(!restored.show_extended_hours_bands);
+}
+
+/// Mixed-state round-trip: data on, bands off (a plausible user
+/// preference — keep ETH bars visible but hide the tint overlay).
+#[test]
+fn eth_knobs_mixed_state_round_trips() {
+    let cfg = ChartConfig {
+        symbol: "MSFT".to_string(),
+        timeframe: "1m".to_string(),
+        levels: vec![],
+        camera_time_start: None,
+        camera_time_end: None,
+        camera_price_low: None,
+        camera_price_high: None,
+        collapse_gaps: false,
+        timeline_border_ratio: 0.20,
+        volume_scale: 1.0,
+        show_volume_profile: false,
+        show_levels: true,
+        viewport_width: None,
+        viewport_height: None,
+        symbol_link: LinkMode::default(),
+        timeframe_link: LinkMode::default(),
+        bound_symbol: None,
+        backend: None,
+        show_extended_hours: true,
+        show_extended_hours_bands: false,
+    };
+    let toml_str = toml::to_string_pretty(&cfg).expect("serialize");
+    let restored: ChartConfig = toml::from_str(&toml_str).expect("deserialize");
+    assert!(restored.show_extended_hours);
+    assert!(!restored.show_extended_hours_bands);
+}
+
+/// Default values are not skipped on serialization — we want the
+/// generated TOML to be self-documenting so a user inspecting the
+/// file sees both knobs spelled out, not just inheriting from
+/// some implicit default.
+#[test]
+fn eth_knobs_default_true_serializes_explicitly() {
+    let cfg = ChartConfig {
+        symbol: "AAPL".to_string(),
+        timeframe: "1D".to_string(),
+        levels: vec![],
+        camera_time_start: None,
+        camera_time_end: None,
+        camera_price_low: None,
+        camera_price_high: None,
+        collapse_gaps: false,
+        timeline_border_ratio: 0.20,
+        volume_scale: 1.0,
+        show_volume_profile: false,
+        show_levels: true,
+        viewport_width: None,
+        viewport_height: None,
+        symbol_link: LinkMode::default(),
+        timeframe_link: LinkMode::default(),
+        bound_symbol: None,
+        backend: None,
+        show_extended_hours: true,
+        show_extended_hours_bands: true,
+    };
+    let toml_str = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(
+        toml_str.contains("show_extended_hours"),
+        "show_extended_hours = true must serialize explicitly. got: {toml_str}"
+    );
+    assert!(
+        toml_str.contains("show_extended_hours_bands"),
+        "show_extended_hours_bands = true must serialize explicitly. got: {toml_str}"
     );
 }

@@ -37,6 +37,11 @@ pub use config::{AppConfig, BrokerBackend, BrokerConnectionConfig, ChartBackend}
 pub use id::{AccountPanelId, ChartId, OrderBlotterId, OrderPanelId, PaneId, WatchlistId};
 pub use link::{LinkColor, LinkMode};
 pub use market_data::MarketSnapshot;
+/// Re-export from `midas-bars` so downstream chart crates
+/// (`midas-chart`, `midas-render`) can read `CandleData::session_kind`
+/// without taking an explicit `midas-bars` dep. The trait method
+/// already returns this type.
+pub use midas_bars::SessionKindByte;
 pub use provider::{ConnectionState, DataProvider, OrderBroker, ProviderError};
 pub use symbol::SymbolKey;
 pub use timeframe::Timeframe;

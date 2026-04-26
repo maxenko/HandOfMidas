@@ -111,6 +111,12 @@ impl ThemePalette {
     /// Dark-theme preset. Matches the visual direction of the existing
     /// `midas-app` chart surface: near-black background with pastel
     /// accents for session tint.
+    ///
+    /// `band_pre` / `band_post` mirror the legacy chart's
+    /// `LEGACY_BAND_PRE` / `LEGACY_BAND_POST` constants in
+    /// `midas-chart` (TradingView-style: warm brown for pre, cool
+    /// blue for post). Drift is enforced by the workspace-level
+    /// parity test in `desktop/win/tests/eth_shading_palette_parity.rs`.
     pub const fn dark_default() -> Self {
         Self {
             candle_up: [0x3d, 0xd5, 0x98, 0xff],
@@ -118,8 +124,8 @@ impl ThemePalette {
             candle_wick: [0xc8, 0xc8, 0xc8, 0xff],
             grid: [0x2a, 0x2a, 0x2a, 0xff],
             separator: [0x44, 0x44, 0x66, 0xff],
-            band_pre: [0x1a, 0x1a, 0x2e, 0x66],
-            band_post: [0x2e, 0x1a, 0x1a, 0x66],
+            band_pre: [0x8c, 0x5c, 0x2e, 0x2e],
+            band_post: [0x33, 0x57, 0x8c, 0x2e],
             band_regular: [0x0d, 0x0d, 0x12, 0x00],
             band_closed: [0x05, 0x05, 0x08, 0xcc],
             crosshair: [0xff, 0xff, 0xff, 0x88],
@@ -128,6 +134,9 @@ impl ThemePalette {
     }
 
     /// Light-theme preset.
+    ///
+    /// `band_pre` / `band_post` use the same TradingView-matching
+    /// values as the dark theme so the parity test is theme-agnostic.
     pub const fn light_default() -> Self {
         Self {
             candle_up: [0x26, 0xa6, 0x6e, 0xff],
@@ -135,8 +144,8 @@ impl ThemePalette {
             candle_wick: [0x40, 0x40, 0x40, 0xff],
             grid: [0xe0, 0xe0, 0xe0, 0xff],
             separator: [0xb0, 0xb0, 0xd0, 0xff],
-            band_pre: [0xe8, 0xe8, 0xfa, 0xff],
-            band_post: [0xfa, 0xe8, 0xe8, 0xff],
+            band_pre: [0x8c, 0x5c, 0x2e, 0x2e],
+            band_post: [0x33, 0x57, 0x8c, 0x2e],
             band_regular: [0xff, 0xff, 0xff, 0x00],
             band_closed: [0xf0, 0xf0, 0xf0, 0xcc],
             crosshair: [0x30, 0x30, 0x30, 0xaa],

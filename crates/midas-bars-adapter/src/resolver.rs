@@ -10,11 +10,16 @@
 //! - [`StaticSymbolResolver`] — hashmap-backed, seeded with a handful
 //!   of well-known tickers (AAPL, SPY, MSFT, BTC-USD, …). Register
 //!   additional tickers with [`StaticSymbolResolver::register`].
-//! - [`HeuristicSymbolResolver`] — sim-only. Heuristically routes
-//!   anything resembling a crypto pair ("-USD"/"USDT"/"BTC"/"ETH") to
-//!   the crypto calendar; everything else goes to XNYS. Synthesizes
+//! - [`HeuristicSymbolResolver`] — heuristically routes anything
+//!   resembling a crypto pair ("-USD"/"USDT"/"BTC"/"ETH") to the
+//!   crypto calendar; everything else goes to XNYS. Synthesizes
 //!   `con_id` via a stable DJB2-style hash of the ticker so IDs are
-//!   repeatable across runs.
+//!   repeatable across runs. The synthesized `con_id` is sim-only —
+//!   IB's real `reqContractDetails` returns the authoritative id —
+//!   but `.calendar` is a pure function of the ticker string and is
+//!   universally valid for both sim and IB symbols. The legacy
+//!   chart's session-band overlay (ETH shading) reads `.calendar`
+//!   directly and ignores `.contract_id`.
 
 use std::collections::HashMap;
 
@@ -132,10 +137,17 @@ impl SymbolResolver for StaticSymbolResolver {
 // HeuristicSymbolResolver
 // ---------------------------------------------------------------------------
 
-/// Sim-only heuristic resolver. Routes crypto-looking tickers to the
-/// crypto calendar, everything else to XNYS, and synthesizes a stable
+/// Heuristic resolver. Routes crypto-looking tickers to the crypto
+/// calendar, everything else to XNYS, and synthesizes a stable
 /// `con_id` from a seeded DJB2 hash of the ticker. IDs are reproducible
 /// across runs without a shared static table.
+///
+/// **Scope of "sim-only"**: only the synthesized `.contract_id` is
+/// sim-specific — IB's `reqContractDetails` provides the real id when
+/// the resolver runs against the IB backend. The `.calendar` field is
+/// a pure function of the ticker string and is universally valid for
+/// both sim and IB symbols. The legacy chart's session-band overlay
+/// (ETH shading) reads `.calendar` only.
 ///
 /// Heuristics (any match → crypto):
 /// - Suffix `-USD`, `-USDT`, `-USDC`.

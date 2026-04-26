@@ -174,6 +174,10 @@ fn make_input<'a>(
         selected_annotation: None,
         drag_ghost: None,
         pinned: false,
+        show_extended_hours_bands: false,
+        bar_duration_ms: 60_000,
+        pre_market_band_color: super::LEGACY_BAND_PRE,
+        post_market_band_color: super::LEGACY_BAND_POST,
     }
 }
 
@@ -213,6 +217,10 @@ fn make_input_with_collapse<'a>(
         selected_annotation: None,
         drag_ghost: None,
         pinned: false,
+        show_extended_hours_bands: false,
+        bar_duration_ms: 60_000,
+        pre_market_band_color: super::LEGACY_BAND_PRE,
+        post_market_band_color: super::LEGACY_BAND_POST,
     }
 }
 
@@ -1271,4 +1279,449 @@ fn crosshair_labels_price_screen_x_equals_viewport_width() {
         labels.priceline_lens.screen_x,
         expected_x
     );
+}
+
+// ── compute_session_bands tests (S2) ─────────────────────────────────
+
+mod session_bands {
+    use super::*;
+    use midas_core::SessionKindByte;
+
+    /// Test fixture with explicit per-row session kinds. Each row's
+    /// session kind is one byte, matching `CandleBuffer`'s storage.
+    struct SessionedTestCandles {
+        timestamps: Vec<i64>,
+        sessions: Vec<u8>,
+    }
+
+    impl SessionedTestCandles {
+        fn new(starts_at: i64, kinds: &[SessionKindByte], step_ms: i64) -> Self {
+            let timestamps: Vec<i64> = (0..kinds.len() as i64)
+                .map(|i| starts_at + i * step_ms)
+                .collect();
+            let sessions: Vec<u8> = kinds.iter().map(|k| *k as u8).collect();
+            Self {
+                timestamps,
+                sessions,
+            }
+        }
+    }
+
+    impl CandleData for SessionedTestCandles {
+        fn len(&self) -> usize {
+            self.timestamps.len()
+        }
+        fn timestamp(&self, idx: usize) -> i64 {
+            self.timestamps[idx]
+        }
+        fn open(&self, _idx: usize) -> f32 {
+            100.0
+        }
+        fn high(&self, _idx: usize) -> f32 {
+            101.0
+        }
+        fn low(&self, _idx: usize) -> f32 {
+            99.0
+        }
+        fn close(&self, _idx: usize) -> f32 {
+            100.5
+        }
+        fn volume(&self, _idx: usize) -> u32 {
+            100
+        }
+        fn price_range(&self, _range: Range<usize>) -> (f32, f32) {
+            (99.0, 101.0)
+        }
+        fn find_index_by_time(&self, ts: i64) -> usize {
+            match self.timestamps.binary_search(&ts) {
+                Ok(idx) => idx,
+                Err(idx) => idx.min(self.len().saturating_sub(1)),
+            }
+        }
+        fn session_kind(&self, idx: usize) -> SessionKindByte {
+            // Reverse lookup, mirroring CandleBuffer::session_kind.
+            match self.sessions[idx] {
+                x if x == SessionKindByte::Regular as u8 => SessionKindByte::Regular,
+                x if x == SessionKindByte::PreMarket as u8 => SessionKindByte::PreMarket,
+                x if x == SessionKindByte::PostMarket as u8 => SessionKindByte::PostMarket,
+                x if x == SessionKindByte::Break as u8 => SessionKindByte::Break,
+                x if x == SessionKindByte::Overnight as u8 => SessionKindByte::Overnight,
+                x if x == SessionKindByte::Closed as u8 => SessionKindByte::Closed,
+                _ => SessionKindByte::Regular,
+            }
+        }
+    }
+
+    fn default_params() -> SessionBandParams {
+        SessionBandParams {
+            show_bands: true,
+            bar_duration_ms: 60_000,
+            pre_color: LEGACY_BAND_PRE,
+            post_color: LEGACY_BAND_POST,
+            separator_y: 800.0,
+        }
+    }
+
+    /// Index-mode helpers: `i` mapped to `i as f32 * 10.0` (each
+    /// candle owns 10 px). Easy to assert on.
+    fn idx_open(i: usize) -> f32 {
+        (i as f32) * 10.0
+    }
+    fn idx_close(i: usize) -> f32 {
+        ((i + 1) as f32) * 10.0
+    }
+
+    #[test]
+    fn show_bands_off_returns_empty() {
+        let mut p = default_params();
+        p.show_bands = false;
+        let data = SessionedTestCandles::new(0, &[SessionKindByte::PreMarket; 5], 60_000);
+        let out = compute_session_bands(&data, 0, 5, &p, &idx_open, &idx_close);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn empty_visible_range_returns_empty() {
+        let p = default_params();
+        let data = SessionedTestCandles::new(0, &[SessionKindByte::PreMarket; 5], 60_000);
+        let out = compute_session_bands(&data, 0, 0, &p, &idx_open, &idx_close);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn pre_then_regular_then_post_emits_two_bands() {
+        let p = default_params();
+        let data = SessionedTestCandles::new(
+            0,
+            &[
+                SessionKindByte::PreMarket,
+                SessionKindByte::PreMarket,
+                SessionKindByte::Regular,
+                SessionKindByte::Regular,
+                SessionKindByte::PostMarket,
+                SessionKindByte::PostMarket,
+            ],
+            60_000,
+        );
+        let out = compute_session_bands(&data, 0, 6, &p, &idx_open, &idx_close);
+        assert_eq!(out.len(), 2, "one pre band + one post band");
+        // Pre band spans rows [0, 1] inclusive → x in [0.0, 20.0].
+        assert_eq!(out[0].rect, [0.0, 0.0, 20.0, 800.0]);
+        assert_eq!(out[0].color, LEGACY_BAND_PRE);
+        // Post band spans rows [4, 5] → x in [40.0, 60.0].
+        assert_eq!(out[1].rect, [40.0, 0.0, 60.0, 800.0]);
+        assert_eq!(out[1].color, LEGACY_BAND_POST);
+    }
+
+    #[test]
+    fn empty_pre_run_emits_no_band() {
+        let p = default_params();
+        let data = SessionedTestCandles::new(0, &[SessionKindByte::Regular; 4], 60_000);
+        let out = compute_session_bands(&data, 0, 4, &p, &idx_open, &idx_close);
+        assert!(out.is_empty(), "no ETH bars → no bands");
+    }
+
+    #[test]
+    fn discontinuous_pre_runs_emit_separately() {
+        // Pre, Regular, Pre — should yield TWO pre bands.
+        let p = default_params();
+        let data = SessionedTestCandles::new(
+            0,
+            &[
+                SessionKindByte::PreMarket,
+                SessionKindByte::Regular,
+                SessionKindByte::PreMarket,
+            ],
+            60_000,
+        );
+        let out = compute_session_bands(&data, 0, 3, &p, &idx_open, &idx_close);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].color, LEGACY_BAND_PRE);
+        assert_eq!(out[0].rect, [0.0, 0.0, 10.0, 800.0]);
+        assert_eq!(out[1].color, LEGACY_BAND_PRE);
+        assert_eq!(out[1].rect, [20.0, 0.0, 30.0, 800.0]);
+    }
+
+    #[test]
+    fn pre_then_post_back_to_back_emits_two_bands() {
+        // No Regular gap — different kinds still flush the run on
+        // kind change.
+        let p = default_params();
+        let data = SessionedTestCandles::new(
+            0,
+            &[
+                SessionKindByte::PreMarket,
+                SessionKindByte::PreMarket,
+                SessionKindByte::PostMarket,
+            ],
+            60_000,
+        );
+        let out = compute_session_bands(&data, 0, 3, &p, &idx_open, &idx_close);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].color, LEGACY_BAND_PRE);
+        assert_eq!(out[1].color, LEGACY_BAND_POST);
+    }
+
+    #[test]
+    fn adjacent_post_then_pre_runs_bridge_at_midpoint() {
+        // Direct Post → Pre transition (overnight close → next-day
+        // pre-market open with no bars in between). The two bands
+        // must overlap at the midpoint of the gap so the user doesn't
+        // see a 1-pixel rasterizer hairline.
+        let p = default_params();
+        let data = SessionedTestCandles::new(
+            0,
+            &[
+                SessionKindByte::PostMarket,
+                SessionKindByte::PostMarket,
+                SessionKindByte::PreMarket,
+                SessionKindByte::PreMarket,
+            ],
+            60_000,
+        );
+        let out = compute_session_bands(&data, 0, 4, &p, &idx_open, &idx_close);
+        assert_eq!(out.len(), 2);
+        let post = &out[0];
+        let pre = &out[1];
+        assert_eq!(post.color, LEGACY_BAND_POST);
+        assert_eq!(pre.color, LEGACY_BAND_PRE);
+        // Post[0..2): right edge ≈ midpoint of (idx_close(1)=20.0,
+        // idx_open(2)=20.0) = 20.0, +1px overlap → 21.0.
+        // Pre[2..4): left edge = midpoint -1px overlap → 19.0.
+        // The two rectangles overlap on x ∈ [19.0, 21.0] — 2px of
+        // double-paint guarantees no untinted seam regardless of
+        // GPU fragment coverage rules.
+        assert!(
+            post.rect[2] >= pre.rect[0],
+            "back-to-back ETH bands must overlap (post.right = {}, pre.left = {})",
+            post.rect[2],
+            pre.rect[0]
+        );
+        assert!(
+            (post.rect[2] - pre.rect[0] - 2.0).abs() < 0.001,
+            "overlap should be exactly 2px (1px on each side of midpoint), got {}",
+            post.rect[2] - pre.rect[0]
+        );
+        // Post left edge unchanged (trim-to-data), pre right edge
+        // unchanged (trim-to-data) — only the meeting boundary moves.
+        assert_eq!(post.rect[0], 0.0, "post left edge stays at idx 0");
+        assert_eq!(pre.rect[2], 40.0, "pre right edge stays at idx 4");
+    }
+
+    #[test]
+    fn adjacent_pre_then_post_runs_bridge_at_midpoint() {
+        // Symmetric: rare but possible (e.g., a future calendar with
+        // no RTH between sessions). Pre → Post must also bridge.
+        let p = default_params();
+        let data = SessionedTestCandles::new(
+            0,
+            &[
+                SessionKindByte::PreMarket,
+                SessionKindByte::PreMarket,
+                SessionKindByte::PostMarket,
+                SessionKindByte::PostMarket,
+            ],
+            60_000,
+        );
+        let out = compute_session_bands(&data, 0, 4, &p, &idx_open, &idx_close);
+        assert_eq!(out.len(), 2);
+        let pre = &out[0];
+        let post = &out[1];
+        assert_eq!(pre.color, LEGACY_BAND_PRE);
+        assert_eq!(post.color, LEGACY_BAND_POST);
+        assert!(
+            pre.rect[2] >= post.rect[0],
+            "back-to-back ETH bands must overlap (pre.right = {}, post.left = {})",
+            pre.rect[2],
+            post.rect[0]
+        );
+    }
+
+    #[test]
+    fn post_closed_pre_runs_still_bridge_across_calendar_artefact() {
+        // User-reported: gaps persisted across all timeframes after the
+        // initial bridge fix. Root cause: IB returns a single bar at
+        // exactly 20:00 ET (post-market close) when `useRTH=false`,
+        // and `XnysCalendar::classify` returns `Closed` for that
+        // boundary timestamp because PostMarket is `[16:00, 20:00)`
+        // half-open. With one Closed bar sitting between the Post and
+        // Pre runs in the buffer, the original `first == prev_last + 1`
+        // bridge condition failed and each band trimmed independently,
+        // leaving the visual gap. Bridge condition now is "no Regular
+        // bar between" — Closed/Overnight/Break artefacts are tolerated.
+        let p = default_params();
+        let data = SessionedTestCandles::new(
+            0,
+            &[
+                SessionKindByte::PostMarket,
+                SessionKindByte::PostMarket,
+                SessionKindByte::Closed, // ← the 20:00 ET boundary bar
+                SessionKindByte::PreMarket,
+                SessionKindByte::PreMarket,
+            ],
+            60_000,
+        );
+        let out = compute_session_bands(&data, 0, 5, &p, &idx_open, &idx_close);
+        assert_eq!(out.len(), 2);
+        let post = &out[0];
+        let pre = &out[1];
+        assert_eq!(post.color, LEGACY_BAND_POST);
+        assert_eq!(pre.color, LEGACY_BAND_PRE);
+        // Post's right edge bridges past its trim-to-data extent
+        // (idx_close(1)=20.0) toward the midpoint with Pre's left
+        // edge at idx_open(3)=30.0; midpoint = 25.0, +1px = 26.0.
+        assert!(
+            post.rect[2] >= pre.rect[0],
+            "Post→Closed→Pre must still bridge (post.right={}, pre.left={})",
+            post.rect[2],
+            pre.rect[0]
+        );
+        assert!(
+            (post.rect[2] - pre.rect[0] - 2.0).abs() < 0.001,
+            "expected 2px overlap, got {}",
+            post.rect[2] - pre.rect[0]
+        );
+    }
+
+    #[test]
+    fn pre_then_regular_then_post_does_not_bridge() {
+        // Regular bar between Pre and Post — no bridging, each band
+        // trims to its own data extent. Regression guard: the bridge
+        // must not collapse onto runs separated by RTH.
+        let p = default_params();
+        let data = SessionedTestCandles::new(
+            0,
+            &[
+                SessionKindByte::PreMarket,
+                SessionKindByte::Regular,
+                SessionKindByte::PostMarket,
+            ],
+            60_000,
+        );
+        let out = compute_session_bands(&data, 0, 3, &p, &idx_open, &idx_close);
+        assert_eq!(out.len(), 2);
+        let pre = &out[0];
+        let post = &out[1];
+        // Pre right edge = idx_close(0) = 10.0 (trim-to-data).
+        assert_eq!(pre.rect[2], 10.0);
+        // Post left edge = idx_open(2) = 20.0 (trim-to-data).
+        assert_eq!(post.rect[0], 20.0);
+        // Visible RTH gap between them: 10.0 → 20.0 stays untinted.
+        assert!(
+            pre.rect[2] < post.rect[0],
+            "Regular-separated runs must not abut"
+        );
+    }
+
+    #[test]
+    fn closed_holiday_overnight_break_never_tint() {
+        // Defensive: only Pre/Post tint; everything else is silently
+        // ignored so a bug upstream that leaks Closed into a visible
+        // run can't render an opaque overlay.
+        let p = default_params();
+        let data = SessionedTestCandles::new(
+            0,
+            &[
+                SessionKindByte::Closed,
+                SessionKindByte::Break,
+                SessionKindByte::Overnight,
+                SessionKindByte::Regular,
+            ],
+            60_000,
+        );
+        let out = compute_session_bands(&data, 0, 4, &p, &idx_open, &idx_close);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn last_bar_right_edge_uses_close_helper() {
+        // The right edge of the trailing band uses `x_at_close(last)`
+        // — the bar's close, not its open. With the index helper that
+        // is `(last + 1) * 10`, so a single-bar pre run at idx 3
+        // spans `[30.0, 40.0]`.
+        let p = default_params();
+        let data = SessionedTestCandles::new(
+            0,
+            &[
+                SessionKindByte::Regular,
+                SessionKindByte::Regular,
+                SessionKindByte::Regular,
+                SessionKindByte::PreMarket,
+            ],
+            60_000,
+        );
+        let out = compute_session_bands(&data, 0, 4, &p, &idx_open, &idx_close);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].rect, [30.0, 0.0, 40.0, 800.0]);
+    }
+
+    #[test]
+    fn normal_mode_x_helpers_use_bar_duration_ms() {
+        // Normal mode: x_at_open(i) = ts(i), x_at_close(i) = ts(i) + bar_duration.
+        // 1-minute bars: bar_duration = 60_000 ms. Camera maps ts → px directly:
+        // here we use a trivial "ms / 1000 = px" convention to keep math simple.
+        let p = default_params();
+        let data = SessionedTestCandles::new(
+            1_000_000,
+            &[
+                SessionKindByte::PreMarket,
+                SessionKindByte::PreMarket,
+                SessionKindByte::Regular,
+            ],
+            60_000,
+        );
+        let x_open = |i: usize| -> f32 { (data.timestamp(i) / 1000) as f32 };
+        let x_close = |i: usize| -> f32 { ((data.timestamp(i) + p.bar_duration_ms) / 1000) as f32 };
+        let out = compute_session_bands(&data, 0, 3, &p, &x_open, &x_close);
+        assert_eq!(out.len(), 1);
+        // Run covers indices [0, 1]; right edge = ts(1) + 60_000 = 1_120_000 → 1120 px.
+        assert_eq!(out[0].rect[0], 1000.0);
+        assert_eq!(out[0].rect[2], 1120.0);
+    }
+
+    #[test]
+    fn collapse_gaps_branch_uses_index_helpers() {
+        // With the index helpers (idx_open/idx_close), bands' X
+        // positions match exactly the candle pass's slot edges in
+        // collapsed mode. This is the regression test against
+        // accidentally calling the timestamp helpers in collapsed mode.
+        let p = default_params();
+        let data = SessionedTestCandles::new(
+            42_000_000_000_000, // huge timestamps that would be wildly wrong
+            &[SessionKindByte::PreMarket, SessionKindByte::PreMarket],
+            60_000,
+        );
+        let out = compute_session_bands(&data, 0, 2, &p, &idx_open, &idx_close);
+        // Index-mode result depends only on indices, not timestamps:
+        assert_eq!(out[0].rect, [0.0, 0.0, 20.0, 800.0]);
+    }
+
+    #[test]
+    fn many_visible_bars_within_perf_budget() {
+        // Plan §F — "≤0.3 ms at 5 000 visible bars". The compute
+        // pass is a single linear scan with no allocations beyond
+        // the output Vec. Asserting wall-clock here would flap on
+        // shared CI runners; we instead verify the call returns
+        // within a generous bound on dev hardware. Treat as a smoke
+        // gate for "obviously fast"; production budgets land on the
+        // chart-bench harness.
+        let p = default_params();
+        let mut kinds = Vec::with_capacity(5_000);
+        for i in 0..5_000 {
+            kinds.push(if i % 100 < 50 {
+                SessionKindByte::PreMarket
+            } else {
+                SessionKindByte::Regular
+            });
+        }
+        let data = SessionedTestCandles::new(0, &kinds, 60_000);
+        let start = std::time::Instant::now();
+        let out = compute_session_bands(&data, 0, 5_000, &p, &idx_open, &idx_close);
+        let elapsed = start.elapsed();
+        assert!(!out.is_empty());
+        assert!(
+            elapsed < std::time::Duration::from_millis(5),
+            "compute_session_bands took {elapsed:?} for 5000 bars",
+        );
+    }
 }

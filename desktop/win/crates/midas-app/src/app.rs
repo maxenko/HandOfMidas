@@ -118,19 +118,51 @@ fn push_recent_symbol_inner(
 /// keyed by epoch-millis. Volumes saturate at `u32::MAX` — individual
 /// equity bars never approach 4 B shares so this is lossless in
 /// practice. Pre-sizes both `Vec`s to avoid mid-fill reallocation.
-fn bars_to_candle_buffer(bars: &[midas_broker_core::market_data::Bar]) -> CandleBuffer {
+///
+/// Each bar is classified through the host-resolved exchange calendar
+/// (see [`resolve_calendar`]) so the legacy chart's session-band
+/// overlay (`compute_session_bands`) can tint pre / post candles.
+/// `midas-data`'s binary loaders cannot do this themselves —
+/// `CandleBuffer` carries no `Symbol`, so the right calendar is only
+/// knowable at the host layer.
+pub(crate) fn bars_to_candle_buffer(
+    bars: &[midas_broker_core::market_data::Bar],
+    calendar: &'static dyn midas_calendar::ExchangeCalendar,
+) -> CandleBuffer {
     let mut buf = CandleBuffer::with_capacity(bars.len());
     for bar in bars {
-        buf.push(
+        buf.push_with_session(
             bar.ts_open.timestamp_millis(),
             bar.o as f32,
             bar.h as f32,
             bar.l as f32,
             bar.c as f32,
             bar.volume.min(u32::MAX as u64) as u32,
+            calendar.classify(bar.ts_open).kind(),
         );
     }
     buf
+}
+
+/// Resolve a ticker string to its exchange calendar via the project's
+/// shared [`HeuristicSymbolResolver`].
+///
+/// The resolver is the single source of symbol → calendar truth on the
+/// legacy chart path. Its `.contract_id` synthesis is sim-only (IB's
+/// `reqContractDetails` provides real ids), but `.calendar` is a pure
+/// function of the ticker string and works for both backends — see the
+/// resolver's doc-comment.
+///
+/// On unknown / unparseable tickers the heuristic always falls through
+/// to XNYS, so `resolve_calendar` is total in practice; the explicit
+/// `Result` is kept so a future `StaticSymbolResolver` chain (for the
+/// rare `ETH` Ethan-Allen NYSE collision) can surface real failures.
+pub(crate) fn resolve_calendar(symbol: &str) -> &'static dyn midas_calendar::ExchangeCalendar {
+    use midas_bars_adapter::{HeuristicSymbolResolver, SymbolResolver};
+    HeuristicSymbolResolver::new()
+        .resolve(symbol)
+        .map(|r| r.calendar)
+        .unwrap_or_else(|_| midas_calendar::xnys())
 }
 
 #[cfg(test)]
@@ -281,6 +313,18 @@ pub struct ChartPanel {
     /// `Legacy` with a `tracing::warn!` regardless of this field's
     /// value (plan Scenario 9).
     pub backend: ChartBackend,
+    /// Whether the legacy chart should fetch extended-hours bars for
+    /// this panel. Drives the `use_rth` flag on
+    /// `MarketDataRouter::historical_bars` (negated). Wired in by S4-router;
+    /// here in S3 only persisted via [`ChartConfig::show_extended_hours`].
+    /// Default `true` — ETH ships on by default per the plan.
+    pub show_extended_hours: bool,
+    /// Whether this panel should render the pre/post-market session
+    /// band overlay behind its candles. Drives
+    /// [`crate::chart_widget::ChartRenderSnapshot::show_extended_hours_bands`]
+    /// → [`midas_chart::input::ChartInput::show_extended_hours_bands`].
+    /// Persisted via [`ChartConfig::show_extended_hours_bands`].
+    pub show_extended_hours_bands: bool,
 }
 
 impl ChartPanel {
@@ -1546,6 +1590,12 @@ impl MidasApp {
                 .get(&crate::annotation_store::SymbolKey::new(&chart.symbol))
                 .map(|ts| ts.pinned())
                 .unwrap_or(false),
+            show_extended_hours_bands: chart.show_extended_hours_bands,
+            // `Timeframe::as_secs() * 1000` is fine for every legacy
+            // chart timeframe (S1 through MN1) — `u32 → i64` is
+            // infallible and `saturating_mul` guards future
+            // ultra-long periods.
+            bar_duration_ms: i64::from(chart.timeframe.as_secs()).saturating_mul(1_000),
         })
     }
 
@@ -2851,6 +2901,8 @@ impl MidasApp {
         // `session_chart` + config says `New` falls back to Legacy
         // with a `tracing::warn!`).
         panel.backend = cfg.backend.unwrap_or_default();
+        panel.show_extended_hours = cfg.show_extended_hours;
+        panel.show_extended_hours_bands = cfg.show_extended_hours_bands;
         Self::restore_camera(cfg, &mut panel);
         panel
     }
@@ -2916,6 +2968,12 @@ impl MidasApp {
             // backend. The user flips via the toolbar chip; slice 9b
             // will flip the app-wide default to `New` after soak.
             backend: ChartBackend::Legacy,
+            // ETH ships on by default per the plan
+            // (`plan/session-aware-charts/eth-shading.md` §E). The
+            // band overlay reads `show_extended_hours_bands`; the
+            // data fetch reads `show_extended_hours` (S4-router).
+            show_extended_hours: true,
+            show_extended_hours_bands: true,
         }
     }
 
@@ -3506,13 +3564,24 @@ impl MidasApp {
             .get(&chart_id)
             .map(|c| c.load_generation)
             .unwrap_or(0);
+        // Drive the historical request's `use_rth` directly off the
+        // panel's user knob — `show_extended_hours` ON means the
+        // chart wants pre/post bars, which on the IB wire is
+        // `useRTH = false`. Falls back to `true` (RTH only) when no
+        // panel exists yet (defensive — shouldn't happen on the
+        // documented load paths).
+        let use_rth = self
+            .charts
+            .get(&chart_id)
+            .map(|c| !c.show_extended_hours)
+            .unwrap_or(true);
         let symbol = symbol.to_uppercase();
         let requested_symbol = symbol.clone();
 
         if let Some(router) = self.router.clone() {
             let days = Self::days_for_timeframe(tf);
             return Task::perform(
-                Self::load_chart_via_router(router, symbol, tf, days),
+                Self::load_chart_via_router(router, symbol, tf, days, use_rth),
                 move |result| make_msg(chart_id, requested_symbol, gen, result.map(Arc::new)),
             );
         }
@@ -3536,11 +3605,24 @@ impl MidasApp {
     /// them into a `CandleBuffer` matching the legacy chart's storage
     /// shape. The router resolves `con_id` internally; the caller
     /// only supplies the symbol string.
+    ///
+    /// Resolves the calendar from the symbol up-front (off the async
+    /// path; resolver is sync) and passes it to
+    /// [`bars_to_candle_buffer`] so each bar lands with its session
+    /// classified for the band-render pass.
+    ///
+    /// `use_rth` is the `MarketDataSource::historical_bars` flag —
+    /// pass `false` to include pre/post-market bars, `true` for
+    /// regular-trading-hours-only. Per
+    /// `plan/session-aware-charts/eth-shading.md` §D the chart load
+    /// path forwards `!show_extended_hours`; the watchlist snapshot
+    /// load pins it to `true`.
     async fn load_chart_via_router(
         router: Arc<midas_market_data::MarketDataRouter>,
         symbol: String,
         tf: Timeframe,
         days: u32,
+        use_rth: bool,
     ) -> Result<CandleBuffer, String> {
         let tf_bc = crate::app::handlers::chart_timeframe_to_broker_core(tf);
         let duration = midas_broker_core::market_data::IbDuration::Days(days.max(1));
@@ -3548,11 +3630,12 @@ impl MidasApp {
             contract_id: 0,
             symbol: symbol.clone(),
         };
+        let calendar = resolve_calendar(&symbol);
         let result = router
-            .historical_bars(key, tf_bc, duration)
+            .historical_bars(key, tf_bc, duration, use_rth)
             .await
             .map_err(|e| e.to_string())?;
-        Ok(bars_to_candle_buffer(&result.bars))
+        Ok(bars_to_candle_buffer(&result.bars, calendar))
     }
 
     /// Async-load chart data. On completion, sends `Message::DataLoaded`
@@ -3580,8 +3663,12 @@ impl MidasApp {
         let sym_clone = sym.clone();
 
         if let Some(router) = self.router.clone() {
+            // Watchlist snapshot is just "what's the last close?" —
+            // we never want to surface a pre/post-market print as the
+            // row's last price. Pin `use_rth = true` regardless of
+            // any chart panel's ETH knob.
             return Task::perform(
-                Self::load_chart_via_router(router, sym, midas_core::Timeframe::D1, 30),
+                Self::load_chart_via_router(router, sym, midas_core::Timeframe::D1, 30, true),
                 move |result| Message::MarketSnapshotLoaded(sym_clone, result),
             );
         }
@@ -4591,6 +4678,8 @@ mod backend_toggle_tests {
             timeframe_link: LinkMode::default(),
             bound_symbol: None,
             backend: Some(ChartBackend::New),
+            show_extended_hours: true,
+            show_extended_hours_bands: true,
         };
         let panel = MidasApp::restore_panel(&cfg);
         assert_eq!(panel.backend, ChartBackend::New);
@@ -4619,6 +4708,8 @@ mod backend_toggle_tests {
             timeframe_link: LinkMode::default(),
             bound_symbol: None,
             backend: None,
+            show_extended_hours: true,
+            show_extended_hours_bands: true,
         };
         let panel = MidasApp::restore_panel(&cfg);
         assert_eq!(panel.backend, ChartBackend::Legacy);

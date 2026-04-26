@@ -190,6 +190,13 @@ pub(crate) struct SimTestCounters {
     /// control actor's per-handler timeout returns `Err(..)` instead
     /// of wedging the mpsc forever.
     pub(crate) next_subscribe_hang: Mutex<Option<Arc<Notify>>>,
+    /// Most recent `use_rth` value the sim observed on
+    /// [`MarketDataSource::historical_bars`]. `None` until the first
+    /// call lands. Drives the router-level propagation test for the
+    /// ETH-shading `S4-router` slice — the router exposes a
+    /// `use_rth` parameter that must reach the underlying source
+    /// unaltered.
+    pub(crate) last_historical_use_rth: Mutex<Option<bool>>,
 }
 
 /// Minimal local mirror of the `MarketEvent::OrderingReady` variant so
@@ -608,6 +615,14 @@ impl SimMarketData {
             .load(Ordering::SeqCst)
     }
 
+    /// Most recent `use_rth` value the sim observed on
+    /// [`MarketDataSource::historical_bars`]. Returns `None` until
+    /// the first call lands. Used by the router-level propagation
+    /// test for the ETH-shading `S4-router` slice.
+    pub fn last_historical_use_rth(&self) -> Option<bool> {
+        *self.test_counters.last_historical_use_rth.lock()
+    }
+
     /// Force the next `subscribe_ticks` call to return the configured
     /// error — once-shot. Consumed on use. Used by the router test
     /// for NM-3 source-failure rollback.
@@ -742,15 +757,30 @@ impl SimMarketData {
         }
     }
 
+    /// Resolve the per-call `use_rth` request against the sim's
+    /// `synthetic_includes_eth` capability flag. ETH bars enter the
+    /// response only when both align — capability ON and the call
+    /// asked for non-RTH data. See `SimMarketDataConfig::synthetic_includes_eth`
+    /// for the rationale on splitting the flag in two.
+    fn should_include_eth(&self, use_rth: bool) -> bool {
+        self.config.synthetic_includes_eth && !use_rth
+    }
+
     /// Build the historical bars for a symbol using the seeded
     /// [`TestDataProvider`]. Helper shared by `historical_bars` and
     /// `historical_stream`.
+    ///
+    /// `include_eth` selects the RTH-only vs. RTH+ETH (pre + post)
+    /// generation path. The caller is expected to combine the
+    /// per-call `use_rth` flag with `SimMarketDataConfig::synthetic_includes_eth`
+    /// before deciding — see [`Self::should_include_eth`].
     fn synthesize_historical(
         &self,
         symbol: &SymbolKey,
         end: DateTime<Utc>,
         duration: IbDuration,
         bar_size: Timeframe,
+        include_eth: bool,
     ) -> (Vec<Bar>, DateTime<Utc>, DateTime<Utc>) {
         let end_secs = end.timestamp();
         let lookback_secs: i64 = match duration {
@@ -772,7 +802,13 @@ impl SimMarketData {
 
         let ohlcv = {
             let mut dp = self.data_provider.lock();
-            dp.bars(&symbol.symbol, effective_tf, start_secs, end_secs)
+            dp.bars_with_eth(
+                &symbol.symbol,
+                effective_tf,
+                start_secs,
+                end_secs,
+                include_eth,
+            )
         };
 
         let bars: Vec<Bar> = ohlcv
@@ -987,9 +1023,12 @@ impl MarketDataSource for SimMarketData {
         duration: IbDuration,
         bar_size: Timeframe,
         _what_to_show: WhatToShow,
-        _use_rth: bool,
+        use_rth: bool,
     ) -> Result<HistoricalBarsResult, MarketDataError> {
-        let (bars, first_ts, last_ts) = self.synthesize_historical(symbol, end, duration, bar_size);
+        *self.test_counters.last_historical_use_rth.lock() = Some(use_rth);
+        let include_eth = self.should_include_eth(use_rth);
+        let (bars, first_ts, last_ts) =
+            self.synthesize_historical(symbol, end, duration, bar_size, include_eth);
         Ok(HistoricalBarsResult {
             bars,
             first_ts,
@@ -1004,13 +1043,15 @@ impl MarketDataSource for SimMarketData {
         duration: IbDuration,
         bar_size: Timeframe,
         _what_to_show: WhatToShow,
-        _use_rth: bool,
+        use_rth: bool,
     ) -> Result<HistoricalStream, MarketDataError> {
         let req_id = self.next_req_id();
         let (tx, rx) = mpsc::channel::<HistoricalStreamEvent>(64);
 
         let end = Utc::now();
-        let (bars, first_ts, last_ts) = self.synthesize_historical(symbol, end, duration, bar_size);
+        let include_eth = self.should_include_eth(use_rth);
+        let (bars, first_ts, last_ts) =
+            self.synthesize_historical(symbol, end, duration, bar_size, include_eth);
 
         let cancel_flag = Arc::new(AtomicBool::new(false));
         let hist_sub = Arc::new(HistSubscription {

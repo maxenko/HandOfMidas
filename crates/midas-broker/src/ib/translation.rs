@@ -141,6 +141,27 @@ pub(crate) fn to_ib_historical_bar_size(tf: Timeframe) -> IbHistoricalBarSize {
     }
 }
 
+/// Map the per-call `use_rth` flag to rust-ibapi's `TradingHours`
+/// enum.
+///
+/// `use_rth = true` → `TradingHours::Regular` (09:30–16:00 ET only).
+/// `use_rth = false` → `TradingHours::Extended` (04:00–20:00 ET).
+///
+/// This is the IB-side end of the desktop's per-panel
+/// `show_extended_hours` knob (ETH-shading slice S4-IB). The chart
+/// load path passes `use_rth = !show_extended_hours` through
+/// `MarketDataRouter::historical_bars`, the trait forwards it
+/// unaltered, and we translate it here. Extracted into a named
+/// helper so a unit test can lock the mapping in without standing
+/// up the IB client mock.
+pub(crate) fn use_rth_to_trading_hours(use_rth: bool) -> ibapi::market_data::TradingHours {
+    if use_rth {
+        ibapi::market_data::TradingHours::Regular
+    } else {
+        ibapi::market_data::TradingHours::Extended
+    }
+}
+
 /// Translate our [`IbDuration`] into rust-ibapi's `Duration`.
 pub(crate) fn to_ib_historical_duration(d: IbDuration) -> IbHistoricalDuration {
     match d {
@@ -488,5 +509,38 @@ impl SecurityTypeIb for SecurityType {
             "FOP" | "BAG" => SecurityType::Future,
             _ => return None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ibapi::market_data::TradingHours;
+
+    /// ETH-shading S4-IB verification: the desktop chart panel's
+    /// `show_extended_hours = true` ultimately drives a `use_rth = false`
+    /// historical request (see `app::load_chart_with`); the IB side
+    /// must in turn ask rust-ibapi for `TradingHours::Extended` so the
+    /// 04:00–20:00 ET bars actually come back over the wire.
+    ///
+    /// This is the only verification the slice can give without
+    /// mocking the ibapi client surface — the rest of the call chain
+    /// (router, sim) is covered by S4-router and S4-sim. If a future
+    /// rust-ibapi upgrade renames the variants or flips the `useRTH`
+    /// semantics, this test trips first.
+    #[test]
+    fn use_rth_false_maps_to_extended_trading_hours() {
+        assert!(matches!(
+            use_rth_to_trading_hours(false),
+            TradingHours::Extended
+        ));
+    }
+
+    #[test]
+    fn use_rth_true_maps_to_regular_trading_hours() {
+        assert!(matches!(
+            use_rth_to_trading_hours(true),
+            TradingHours::Regular
+        ));
     }
 }

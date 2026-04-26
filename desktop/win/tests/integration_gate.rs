@@ -75,6 +75,10 @@ fn make_default_chart_input<'a>(
         selected_annotation: None,
         drag_ghost: None,
         pinned: false,
+        show_extended_hours_bands: false,
+        bar_duration_ms: 60_000,
+        pre_market_band_color: midas_chart::compute::LEGACY_BAND_PRE,
+        post_market_band_color: midas_chart::compute::LEGACY_BAND_POST,
     }
 }
 

@@ -131,6 +131,16 @@ pub struct ChartRenderSnapshot {
     /// this snapshot from
     /// `order_intent_handle.snapshot(&chart.symbol).map(|i| i.pinned).unwrap_or(false)`.
     pub pinned: bool,
+    /// Whether the ETH session-band overlay should render. Drives
+    /// [`midas_chart::input::ChartInput::show_extended_hours_bands`].
+    /// Defaults to `true` here; S3 wires it to
+    /// `chart.show_extended_hours_bands` in
+    /// [`midas_core::config::ChartConfig`].
+    pub show_extended_hours_bands: bool,
+    /// Bar duration in milliseconds for the band pass right-edge
+    /// computation (`data.timestamp(last) + bar_duration_ms`).
+    /// Sourced from `chart.timeframe.as_secs() * 1000`.
+    pub bar_duration_ms: i64,
 }
 
 // ── ChartProgram ─────────────────────────────────────────────────────
@@ -892,6 +902,10 @@ impl shader::Program<Message> for ChartProgram {
             selected_annotation: state.chart_state.as_ref().and_then(|cs| cs.selected_level),
             drag_ghost,
             pinned: snap.pinned,
+            show_extended_hours_bands: snap.show_extended_hours_bands,
+            bar_duration_ms: snap.bar_duration_ms,
+            pre_market_band_color: midas_chart::compute::LEGACY_BAND_PRE,
+            post_market_band_color: midas_chart::compute::LEGACY_BAND_POST,
         };
 
         let scene = compute_chart_scene(&input);

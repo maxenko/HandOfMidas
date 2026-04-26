@@ -690,3 +690,144 @@ async fn deterministic_historical_seam() {
         .unwrap();
     assert_eq!(result.last_ts, t0, "historical_last_ts override ignored");
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// 13. ETH-shading S4-sim: extended-hours bar emission
+// ────────────────────────────────────────────────────────────────────────
+//
+// `historical_bars` with `use_rth = false` must emit at least one
+// pre-market and one post-market bar when
+// `synthetic_includes_eth = true` (the default). The window is
+// pre = 09:00–14:30 UTC (04:00–09:30 ET), post = 21:00–01:00 UTC
+// (16:00–20:00 ET), per `plan/session-aware-charts/eth-shading.md` §F.
+
+/// Helper: given a sim that returns deterministic data, walk back to
+/// the most recent UTC midnight that the AAPL fixture has bars for
+/// and pin `historical_last_ts` so the test is independent of wall
+/// clock.
+fn pinned_eth_test_window() -> (chrono::DateTime<chrono::Utc>, IbDuration) {
+    use midas_broker::testdata::TestDataProvider;
+    let mut p = TestDataProvider::new();
+    let (_, end) = p.date_range("AAPL");
+    // End of data is the day *after* the last bar. Anchor 2 days
+    // earlier to land on a covered weekday with full intraday.
+    let day_floor = ((end - 2 * 86400) / 86400) * 86400 + 86400;
+    let pinned_end = chrono::DateTime::<chrono::Utc>::from_timestamp(day_floor, 0).unwrap();
+    (pinned_end, IbDuration::Days(2))
+}
+
+#[tokio::test(start_paused = true)]
+async fn eth_synthesis_emits_pre_and_post_bars() {
+    let (pinned_end, duration) = pinned_eth_test_window();
+    let sim = SimMarketData::new(fast_config());
+
+    let result = sim
+        .historical_bars(
+            &aapl(),
+            1,
+            pinned_end,
+            duration,
+            Timeframe::M1,
+            WhatToShow::Trades,
+            // use_rth = false → request pre/post-market bars
+            false,
+        )
+        .await
+        .unwrap();
+
+    let mut saw_pre = false;
+    let mut saw_post = false;
+    for bar in &result.bars {
+        let ts = bar.ts_open.timestamp();
+        let day_floor = (ts / 86400) * 86400;
+        let offset = ts - day_floor;
+        // Pre-market: 09:00 ≤ offset < 14:30 UTC
+        if (9 * 3600..14 * 3600 + 30 * 60).contains(&offset) {
+            saw_pre = true;
+        }
+        // Post-market: 21:00 UTC ≤ offset < 24:00 UTC, OR 00:00 UTC
+        // ≤ offset < 01:00 UTC on the *next* calendar day.
+        if (21 * 3600..86400).contains(&offset) || (0..3600).contains(&offset) {
+            saw_post = true;
+        }
+    }
+
+    assert!(
+        saw_pre,
+        "use_rth = false must emit ≥ 1 pre-market bar (got {} bars)",
+        result.bars.len()
+    );
+    assert!(
+        saw_post,
+        "use_rth = false must emit ≥ 1 post-market bar (got {} bars)",
+        result.bars.len()
+    );
+}
+
+/// `use_rth = true` strips ETH bars even when `synthetic_includes_eth`
+/// is on — proves the per-call flag still wins.
+#[tokio::test(start_paused = true)]
+async fn rth_only_strips_eth_bars() {
+    let (pinned_end, duration) = pinned_eth_test_window();
+    let sim = SimMarketData::new(fast_config());
+
+    let result = sim
+        .historical_bars(
+            &aapl(),
+            1,
+            pinned_end,
+            duration,
+            Timeframe::M1,
+            WhatToShow::Trades,
+            true,
+        )
+        .await
+        .unwrap();
+
+    for bar in &result.bars {
+        let ts = bar.ts_open.timestamp();
+        let day_floor = (ts / 86400) * 86400;
+        let offset = ts - day_floor;
+        // RTH only: 14:30 ≤ offset < 21:00 UTC.
+        assert!(
+            (14 * 3600 + 30 * 60..21 * 3600).contains(&offset),
+            "use_rth = true must not emit ETH bars; got bar at offset {offset}s",
+        );
+    }
+}
+
+/// Disabling the capability flag locks the sim to RTH-only output
+/// even when the call asks for ETH — used by fixture replays that
+/// pre-date the slice and need stable bar counts.
+#[tokio::test(start_paused = true)]
+async fn synthetic_includes_eth_off_overrides_use_rth_false() {
+    let (pinned_end, duration) = pinned_eth_test_window();
+    let cfg = SimMarketDataConfig {
+        synthetic_includes_eth: false,
+        ..fast_config()
+    };
+    let sim = SimMarketData::new(cfg);
+
+    let result = sim
+        .historical_bars(
+            &aapl(),
+            1,
+            pinned_end,
+            duration,
+            Timeframe::M1,
+            WhatToShow::Trades,
+            false,
+        )
+        .await
+        .unwrap();
+
+    for bar in &result.bars {
+        let ts = bar.ts_open.timestamp();
+        let day_floor = (ts / 86400) * 86400;
+        let offset = ts - day_floor;
+        assert!(
+            (14 * 3600 + 30 * 60..21 * 3600).contains(&offset),
+            "synthetic_includes_eth = false must lock the sim to RTH-only output",
+        );
+    }
+}
