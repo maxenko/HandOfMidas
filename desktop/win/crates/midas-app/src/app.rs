@@ -48,7 +48,7 @@ use crate::registry::HistoricalDataRegistry;
 
 use crate::annotation_store::AnnotationStore;
 use crate::app::panel_ids::{PanelId, PanelIdAllocator};
-use crate::app::window_state::WindowState;
+use crate::app::window_state::{WindowAttachAttempt, WindowState};
 use crate::layout::{LayoutPresetKind, PanelContent, WorkspaceLayout};
 use crate::link::{LinkDimension, PickerTarget};
 use crate::order_panel::OrderSide;
@@ -384,6 +384,20 @@ pub struct MidasApp {
     /// way to dispatch a panel-keyed message to the right window's
     /// pane grid.
     pub panel_to_window: HashMap<PanelId, WindowKey>,
+    /// Reverse lookup: iced runtime [`window::Id`] →
+    /// [`WindowKey`]. Populated by [`Message::WindowAttached`] and
+    /// drained by close handlers + the 5 s open watchdog. Slice C.
+    pub iced_id_to_key: HashMap<window::Id, WindowKey>,
+    /// Last OS-focused window. Drives the target of payload-less
+    /// `AddChart` / `AddWatchlist` / `AddOrderPanel` /
+    /// `AddAccountPanel` messages and the `Ctrl+N` hotkey. Falls
+    /// back to [`Self::main_window_key`] when `None`. Slice C.
+    pub focused_window: Option<WindowKey>,
+    /// Map of in-flight [`window::Open`] tasks, awaiting the
+    /// runtime's [`Message::WindowAttached`]. Drained by the
+    /// 5-second [`Message::WindowAttachWatchdog`] if the runtime
+    /// never resolves the open. Slice C.
+    pub pending_window_opens: HashMap<window::Id, WindowAttachAttempt>,
     /// Status bar message text.
     pub status_message: String,
     /// Whether the FPS/frame-time debug overlay is visible.
@@ -621,6 +635,11 @@ pub struct DragTickerState {
 /// Minimum interval between debounced config saves (in seconds).
 const CONFIG_SAVE_DEBOUNCE_SECS: f64 = 2.0;
 
+/// Slice C: maximum wait between [`Message::CreateWindow`] (or startup
+/// hydration) and the runtime's [`Message::WindowAttached`] before the
+/// 1 Hz watchdog gives up and tears the entry down.
+pub(crate) const WINDOW_ATTACH_TIMEOUT_SECS: u64 = 5;
+
 // ── Message enum ──────────────────────────────────────────────────────
 
 /// All application messages. Every user interaction and async completion
@@ -672,6 +691,54 @@ pub enum Message {
     PaneSplit(pane_grid::Axis, pane_grid::Pane),
     /// Close a pane by its pane_grid handle.
     PaneClose(pane_grid::Pane),
+
+    // -- Multi-window lifecycle (slice C) --
+    /// Open a new named window. `None` triggers
+    /// [`MidasApp::next_default_window_name`] (e.g. `"Window 2"`,
+    /// `"Window 3"`, ...) so the user can spawn windows without
+    /// naming them up-front.
+    CreateWindow {
+        /// Optional user-supplied name. Validated for uniqueness
+        /// (case-insensitive) against `self.windows`; collisions
+        /// surface a toast and the open is aborted.
+        name: Option<String>,
+    },
+    /// iced runtime resolved a `window::open` task. Drains
+    /// `pending_window_opens` and stamps `iced_id` on the matching
+    /// `WindowState`.
+    WindowAttached {
+        /// User-visible name the window was opened under.
+        key: WindowKey,
+        /// iced runtime id for the new OS window.
+        id: window::Id,
+    },
+    /// 5-second watchdog elapsed without an attach. Atomically
+    /// removes the entry from `pending_window_opens`,
+    /// `iced_id_to_key`, `windows`, and `panel_to_window`.
+    WindowAttachFailed(WindowKey),
+    /// Watchdog tick (1 Hz) — scans `pending_window_opens` for
+    /// entries older than 5 s and emits `WindowAttachFailed` for
+    /// each. Decoupled from the existing `Tick` to avoid borrow /
+    /// reordering conflicts.
+    WindowAttachWatchdog,
+    /// OS-reported window-close request. Closing main quits;
+    /// closing any other window disposes its panels.
+    WindowCloseRequested(window::Id),
+    /// OS focus moved into a window. Updates `focused_window` so
+    /// payload-less `Add*` and `Ctrl+N` target the right pane grid.
+    WindowFocused(window::Id),
+    /// OS focus moved out of a window. Clears `focused_window` only
+    /// if the cleared id matches — otherwise it's a stale event from
+    /// a different window in transit.
+    WindowUnfocused(window::Id),
+    /// User-driven rename (header double-click → text input). Validates
+    /// uniqueness (case-insensitive) before re-keying the BTreeMap.
+    RenameWindow {
+        /// Current key to rename.
+        from: WindowKey,
+        /// Proposed new name. Run through `WindowKey::normalize`.
+        to: String,
+    },
 
     // -- Panel title bar --
     /// Timeframe button clicked on a specific panel's title bar.
@@ -760,8 +827,11 @@ pub enum Message {
     // -- Config --
     /// Config save completed (success or failure).
     ConfigSaved(Result<(), String>),
-    /// Window close requested; save config before exit.
-    WindowCloseRequested,
+    /// App-wide shutdown sequence: flush ticker/order persistence
+    /// stores and the config file before iced exits. Emitted by the
+    /// slice-C [`Message::WindowCloseRequested`] handler when the main
+    /// window is closed.
+    AppShutdown,
 
     // -- Floating windows --
     /// Pop out a pane's chart into a floating OS window.
@@ -2012,12 +2082,15 @@ impl MidasApp {
         let mut panel_ids = PanelIdAllocator::default();
 
         // Build workspace, charts, watchlists, and order/account panels from config.
+        // `mut` because the slice-C non-main-window restore loop merges each
+        // extra window's panel pools into these maps after the initial Main
+        // window restore returns.
         let (
             workspace,
-            charts,
-            watchlists,
-            restored_order_panels,
-            restored_account_panels,
+            mut charts,
+            mut watchlists,
+            mut restored_order_panels,
+            mut restored_account_panels,
             status_message,
         );
 
@@ -2437,29 +2510,122 @@ impl MidasApp {
             crate::app::subscription_registry::install_router(r.clone());
         }
 
-        // Bootstrap the per-window state. Slice A1 has exactly one
-        // entry — the main window — keyed by [`WindowKey::main_default`].
-        // Slice C populates additional entries from `config.windows`.
+        // Bootstrap the per-window state. Slice C: the Main window is
+        // populated from the load-time validated `config.windows[Main]`
+        // entry; every other entry in `config.windows` is hydrated as
+        // an `opening` `WindowState` plus a queued `window::open` task
+        // so the OS window comes up restored to its saved geometry.
         let main_window_key = WindowKey::main_default();
         let mut windows = BTreeMap::new();
-        windows.insert(main_window_key.clone(), WindowState::new(workspace));
+        let mut iced_id_to_key: HashMap<window::Id, WindowKey> = HashMap::new();
+        let mut pending_window_opens: HashMap<window::Id, WindowAttachAttempt> = HashMap::new();
+        let mut extra_open_tasks: Vec<Task<Message>> = Vec::new();
 
-        // Seed `panel_to_window` from the freshly restored layout so
-        // every panel id is reachable from a single window key. The
-        // helper `insert_*` methods land on `MidasApp` and maintain
-        // this invariant from here on; restore is the one place we
-        // populate it from existing pane content.
+        // Main window — runtime id known via the `main_id` from the
+        // `window::open` call earlier. Mark `is_main = true`, pre-fill
+        // geometry from the validated config entry, and seat the
+        // restored `WorkspaceLayout` directly.
+        let main_state = WindowState {
+            key: main_window_key.clone(),
+            is_main: true,
+            iced_id: Some(main_id),
+            layout: workspace,
+            geometry: main_geometry.clone(),
+            opening: false,
+        };
+        iced_id_to_key.insert(main_id, main_window_key.clone());
+        windows.insert(main_window_key.clone(), main_state);
+
+        // Non-main windows from `config.windows`. Skip the Main entry
+        // (already inserted above) — the load-time validator
+        // guarantees `windows.get(MAIN_DEFAULT).is_some()`.
+        for (raw_key, wcfg) in config.windows.iter() {
+            if raw_key == midas_core::WindowKey::MAIN_DEFAULT {
+                continue;
+            }
+            let wkey = WindowKey::new(raw_key.as_str());
+            // Restore the per-window layout from its persisted tree.
+            // Empty layout_tree → placeholder pane (slice C: brand-new
+            // window flow produces this on save).
+            let (layout, ch, wl, op, ap) = if wcfg.layout_tree.is_empty() {
+                (
+                    WorkspaceLayout::placeholder(),
+                    HashMap::new(),
+                    HashMap::new(),
+                    HashMap::new(),
+                    std::collections::BTreeMap::new(),
+                )
+            } else {
+                Self::restore_from_layout_tree(
+                    &wcfg.layout_tree,
+                    &config.charts,
+                    &config.watchlists,
+                    &config.order_panels,
+                    &config.account_panels,
+                    &mut panel_ids,
+                )
+            };
+            // Merge restored panel pools into the app-global maps.
+            for (id, panel) in ch {
+                charts.insert(id, panel);
+            }
+            for (id, panel) in wl {
+                watchlists.insert(id, panel);
+            }
+            for (id, panel) in op {
+                restored_order_panels.insert(id, panel);
+            }
+            for (id, panel) in ap {
+                restored_account_panels.insert(id, panel);
+            }
+            let initial_position = Self::validate_saved_position(&wcfg.geometry);
+            let (extra_id, extra_open) = window::open(window::Settings {
+                size: iced::Size::new(
+                    wcfg.geometry.width.max(1) as f32,
+                    wcfg.geometry.height.max(1) as f32,
+                ),
+                position: initial_position,
+                ..window::Settings::default()
+            });
+            let state = WindowState {
+                key: wkey.clone(),
+                is_main: false,
+                iced_id: None,
+                layout,
+                geometry: wcfg.geometry.clone(),
+                opening: true,
+            };
+            windows.insert(wkey.clone(), state);
+            iced_id_to_key.insert(extra_id, wkey.clone());
+            pending_window_opens.insert(
+                extra_id,
+                WindowAttachAttempt {
+                    key: wkey.clone(),
+                    started_at: Instant::now(),
+                },
+            );
+            let attach_key = wkey.clone();
+            extra_open_tasks.push(extra_open.map(move |id| Message::WindowAttached {
+                key: attach_key.clone(),
+                id,
+            }));
+        }
+
+        // Seed `panel_to_window` from every restored window's layout.
+        // The `insert_*` / `remove_*` helpers maintain this invariant
+        // from here on; the constructor is the one place that scans
+        // pane contents directly.
         let mut panel_to_window: HashMap<PanelId, WindowKey> = HashMap::new();
-        {
-            let layout = &windows[&main_window_key].layout;
-            for state in layout.panes.panes.values() {
+        for (wkey, ws) in windows.iter() {
+            for state in ws.layout.panes.panes.values() {
                 let panel = match state.content {
                     PanelContent::Chart(id) => PanelId::Chart(id),
                     PanelContent::Watchlist(id) => PanelId::Watchlist(id),
                     PanelContent::Order(id) => PanelId::Order(id),
                     PanelContent::Account(id) => PanelId::Account(id),
+                    PanelContent::Placeholder => continue,
                 };
-                panel_to_window.insert(panel, main_window_key.clone());
+                panel_to_window.insert(panel, wkey.clone());
             }
         }
         let mut app = Self {
@@ -2468,6 +2634,9 @@ impl MidasApp {
             main_window_key,
             panel_ids,
             panel_to_window,
+            iced_id_to_key,
+            focused_window: None,
+            pending_window_opens,
             status_message,
             show_frame_overlay: false,
             config_path,
@@ -2799,22 +2968,29 @@ impl MidasApp {
             _ => Task::none(),
         };
 
-        let startup_task = if load_tasks.is_empty() {
-            Task::batch([
+        // Slice C: every non-main window opened during startup
+        // contributes a `window::open` task that resolves to
+        // `Message::WindowAttached`. Batched alongside the existing
+        // startup tasks so iced spawns them on the same tick the app
+        // returns from `new`.
+        let mut all_tasks: Vec<Task<Message>> = if load_tasks.is_empty() {
+            vec![
                 open_task,
                 watchlist_task,
                 thumbnail_task,
                 sim_spawn_task,
                 ib_router_task,
-            ])
+            ]
         } else {
             load_tasks.push(open_task);
             load_tasks.push(watchlist_task);
             load_tasks.push(thumbnail_task);
             load_tasks.push(sim_spawn_task);
             load_tasks.push(ib_router_task);
-            Task::batch(load_tasks)
+            load_tasks
         };
+        all_tasks.extend(extra_open_tasks);
+        let startup_task = Task::batch(all_tasks);
 
         (app, startup_task)
     }
@@ -4109,6 +4285,16 @@ impl MidasApp {
             | Message::PaneSplit(..)
             | Message::PaneClose(..) => self.handle_pane_msg(message),
 
+            // -- Multi-window lifecycle (slice C) --
+            Message::CreateWindow { .. }
+            | Message::WindowAttached { .. }
+            | Message::WindowAttachFailed(..)
+            | Message::WindowAttachWatchdog
+            | Message::WindowCloseRequested(..)
+            | Message::WindowFocused(..)
+            | Message::WindowUnfocused(..)
+            | Message::RenameWindow { .. } => self.handle_window_lifecycle_msg(message),
+
             // -- Chart interaction (wrapper) --
             // New in audit P2 #4 collapse: every emit-site that used
             // to fire its own `Message::Chart*(id, ...)` variant now
@@ -4199,7 +4385,7 @@ impl MidasApp {
             Message::Window(m) => self.dispatch_window(m),
 
             Message::ConfigSaved(..)
-            | Message::WindowCloseRequested
+            | Message::AppShutdown
             | Message::PopOut(..)
             | Message::FloatingWindowClosed(..) => self.handle_window_config_msg(message),
 

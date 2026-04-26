@@ -113,6 +113,20 @@ impl MidasApp {
             return state.view(window_id);
         }
 
+        // Slice C: dispatch by user-named window. The main window
+        // shows toolbar + status bar; non-main windows render only the
+        // header strip + pane grid (per-window broker / status are
+        // explicit non-goals).
+        if let Some(key) = self.iced_id_to_key.get(&window_id).cloned() {
+            if let Some(ws) = self.windows.get(&key) {
+                if !ws.is_main {
+                    let header = self.view_window_header(&key, ws);
+                    let content = self.view_content_for_window(ws);
+                    return column![header, content].into();
+                }
+            }
+        }
+
         // Main window (or fallback for unknown windows).
         let toolbar = self.view_toolbar();
         let content = self.view_content();
@@ -532,7 +546,20 @@ impl MidasApp {
 impl MidasApp {
     /// Build the main content area using iced's pane_grid widget.
     fn view_content(&self) -> Element<'_, Message> {
-        let main_layout = &self.windows[&self.main_window_key].layout;
+        self.view_content_for_window(&self.windows[&self.main_window_key])
+    }
+
+    /// Render the pane-grid content area for an arbitrary window.
+    ///
+    /// Slice C: extracted so non-main windows can render their layout
+    /// using the same widget tree the main window uses. Pane-grid
+    /// messages still emit globally-keyed `Message::PaneFocused`-style
+    /// variants — slice D introduces the `WindowKey` qualifier.
+    pub(crate) fn view_content_for_window<'a>(
+        &'a self,
+        ws: &'a super::window_state::WindowState,
+    ) -> Element<'a, Message> {
+        let main_layout = &ws.layout;
         let focused_pane = main_layout.focus;
         let pane_count = main_layout.pane_count();
 
@@ -561,6 +588,7 @@ impl MidasApp {
                         let bd = self.view_account_body(account_id);
                         (tb, bd)
                     }
+                    PanelContent::Placeholder => self.view_placeholder_pane(pane, pane_count),
                 };
 
                 // Content style: dark background (serves as title bar bg
@@ -627,6 +655,86 @@ impl MidasApp {
 // ── Title bar ───────────────────────────────────────────────────────
 
 impl MidasApp {
+    /// Build the (title bar, body) for a placeholder pane — slice C's
+    /// empty-window sentinel. Renders a centred "Click + Add Panel"
+    /// hint inside an otherwise empty new window.
+    fn view_placeholder_pane(
+        &self,
+        pane: pane_grid::Pane,
+        pane_count: usize,
+    ) -> (pane_grid::TitleBar<'_, Message>, Element<'_, Message>) {
+        let body: Element<'_, Message> = container(text("Empty pane — use Add ▾").size(12))
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .into();
+
+        // Same close-button shape as real panes (subject to the
+        // last-pane guard inside `WorkspaceLayout::close`), so
+        // multi-pane windows can still drop an empty pane.
+        let close_btn = button(text("×").size(14))
+            .on_press(Message::PaneClose(pane))
+            .padding([0, 6])
+            .style(|_t, _s| iced::widget::button::Style {
+                background: None,
+                text_color: theme::TEXT_MUTED,
+                ..Default::default()
+            });
+        let controls: Element<'_, Message> = if pane_count > 1 {
+            iced::widget::row![close_btn].into()
+        } else {
+            iced::widget::Space::new().into()
+        };
+
+        let title = pane_grid::TitleBar::new(text(""))
+            .controls(controls)
+            .padding([2, 4])
+            .always_show_controls()
+            .style(|_theme| container::Style::default());
+
+        (title, body)
+    }
+
+    /// Per-window header strip rendered above the pane grid in
+    /// non-main windows (slice C). Shows the window name and the
+    /// `[+ Window]` button that opens another named window.
+    ///
+    /// `Add ▾` for adding panels-into-this-window will land alongside
+    /// the focused-window-aware Add* handlers; for the moment the
+    /// pane-grid title-bar `+ Chart` buttons are still the discovery
+    /// path, and `[+ Window]` here is the only header chrome that
+    /// adds new app-level surfaces.
+    pub(crate) fn view_window_header(
+        &self,
+        key: &midas_core::WindowKey,
+        _ws: &super::window_state::WindowState,
+    ) -> Element<'_, Message> {
+        let name_label = text(key.as_str().to_string())
+            .size(12)
+            .color(theme::TEXT_PRIMARY);
+        let new_window_btn = button(text("+ Window").size(11))
+            .on_press(Message::CreateWindow { name: None })
+            .padding([2, 8]);
+        let row = iced::widget::row![
+            container(name_label).padding([4, 8]).width(Fill),
+            new_window_btn,
+        ]
+        .align_y(iced::alignment::Vertical::Center)
+        .spacing(6);
+        container(row)
+            .width(Fill)
+            .padding([2, 4])
+            .style(|_theme| container::Style {
+                background: Some(iced::Background::Color(Color::from_rgb(0.10, 0.12, 0.16))),
+                border: iced::Border {
+                    color: Color::from_rgb(0.18, 0.20, 0.24),
+                    width: 1.0,
+                    radius: 0.0.into(),
+                },
+                ..Default::default()
+            })
+            .into()
+    }
+
     /// Build the TitleBar for a pane.
     ///
     /// Layout: `[TICKER][1m|5m|...][G][R] [..drag area..] [⧉][×]`

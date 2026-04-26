@@ -253,13 +253,27 @@ impl MidasApp {
     pub(crate) fn handle_chart_management_msg(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::AddChart => {
-                if let Some(focused) = self.windows[&self.main_window_key].layout.focus {
-                    let new_id = self.panel_ids.next_chart();
+                let owner = self.target_window_for_add();
+                let new_id = self.panel_ids.next_chart();
+                let layout = match self.windows.get_mut(&owner) {
+                    Some(ws) => &mut ws.layout,
+                    None => return Task::none(),
+                };
+                // Empty windows hold a single placeholder pane; the
+                // first add seeds it in place rather than splitting.
+                if layout
+                    .seed_first_pane(PanelContent::Chart(new_id))
+                    .is_some()
+                {
+                    self.insert_chart(new_id, Self::make_empty_panel(), owner);
+                    self.status_message = format!("Added {new_id}");
+                    self.mark_config_dirty();
+                    return Task::none();
+                }
+                if let Some(focused) = layout.focus {
                     if let Some((new_id, _new_pane)) =
-                        self.workspace_mut()
-                            .split(pane_grid::Axis::Vertical, focused, new_id)
+                        layout.split(pane_grid::Axis::Vertical, focused, new_id)
                     {
-                        let owner = self.main_window_key.clone();
                         self.insert_chart(new_id, Self::make_empty_panel(), owner);
                         self.status_message = format!("Added {new_id}");
                         self.mark_config_dirty();
@@ -469,6 +483,13 @@ impl MidasApp {
                             self.link_picker_open = None;
                         }
                         self.status_message = format!("Closed {account_id}");
+                    }
+                    Some(PanelContent::Placeholder) => {
+                        // Closing a placeholder pane is a no-op for app
+                        // state — the placeholder owns no panel id and
+                        // isn't tracked in `panel_to_window`. The pane
+                        // grid has already removed it from the layout.
+                        self.status_message = "Closed empty pane".to_string();
                     }
                     None => return Task::none(),
                 }
@@ -1167,26 +1188,38 @@ impl MidasApp {
     pub(crate) fn handle_order_panel_msg(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::AddOrderPanel => {
-                if let Some(focused) = self.windows[&self.main_window_key].layout.focus {
-                    let op_id = self.panel_ids.next_order_panel();
-                    let new_chart_id = self.panel_ids.next_chart();
+                let owner = self.target_window_for_add();
+                let op_id = self.panel_ids.next_order_panel();
+                let new_chart_id = self.panel_ids.next_chart();
+                let symbol = self
+                    .active_chart_id()
+                    .and_then(|id| self.charts.get(&id))
+                    .map(|p| p.symbol.clone())
+                    .unwrap_or_default();
+                let layout = match self.windows.get_mut(&owner) {
+                    Some(ws) => &mut ws.layout,
+                    None => return Task::none(),
+                };
+                if layout.seed_first_pane(PanelContent::Order(op_id)).is_some() {
+                    self.insert_order_panel(
+                        op_id,
+                        crate::order_panel::OrderPanel::new(op_id, symbol),
+                        owner,
+                    );
+                    self.status_message = format!("Added {op_id}");
+                    return self.flush_config();
+                }
+                if let Some(focused) = layout.focus {
                     if let Some((chart_id, new_pane)) =
-                        self.workspace_mut()
-                            .split(pane_grid::Axis::Vertical, focused, new_chart_id)
+                        layout.split(pane_grid::Axis::Vertical, focused, new_chart_id)
                     {
                         // split() always creates a chart pane — replace it with an order panel.
-                        if let Some(state) = self.workspace_mut().panes.get_mut(new_pane) {
+                        if let Some(state) = layout.panes.get_mut(new_pane) {
                             state.content = PanelContent::Order(op_id);
                         }
                         // Remove the chart entry that split() created.
                         self.remove_chart(chart_id);
                         crate::app::subscription_registry::remove_chart_handles_for_chart(chart_id);
-                        let symbol = self
-                            .active_chart_id()
-                            .and_then(|id| self.charts.get(&id))
-                            .map(|p| p.symbol.clone())
-                            .unwrap_or_default();
-                        let owner = self.main_window_key.clone();
                         self.insert_order_panel(
                             op_id,
                             crate::order_panel::OrderPanel::new(op_id, symbol),
@@ -2093,22 +2126,37 @@ impl MidasApp {
     /// a new pane from the focused pane, drop the auto-created chart,
     /// install the Account panel, flush config.
     fn handle_add_account_panel(&mut self) -> Task<Message> {
-        let Some(focused) = self.windows[&self.main_window_key].layout.focus else {
-            return Task::none();
-        };
+        let owner = self.target_window_for_add();
         let account_id = self.panel_ids.next_account_panel();
         let new_chart_id = self.panel_ids.next_chart();
+        let layout = match self.windows.get_mut(&owner) {
+            Some(ws) => &mut ws.layout,
+            None => return Task::none(),
+        };
+        if layout
+            .seed_first_pane(PanelContent::Account(account_id))
+            .is_some()
+        {
+            self.insert_account_panel(
+                account_id,
+                crate::account_panel::AccountPanel::new(account_id, "Account"),
+                owner,
+            );
+            self.status_message = format!("Added {account_id}");
+            return self.flush_config();
+        }
+        let Some(focused) = layout.focus else {
+            return Task::none();
+        };
         if let Some((chart_id, new_pane)) =
-            self.workspace_mut()
-                .split(pane_grid::Axis::Vertical, focused, new_chart_id)
+            layout.split(pane_grid::Axis::Vertical, focused, new_chart_id)
         {
             // split() always creates a chart pane — replace with Account.
-            if let Some(state) = self.workspace_mut().panes.get_mut(new_pane) {
+            if let Some(state) = layout.panes.get_mut(new_pane) {
                 state.content = PanelContent::Account(account_id);
             }
             self.remove_chart(chart_id);
             crate::app::subscription_registry::remove_chart_handles_for_chart(chart_id);
-            let owner = self.main_window_key.clone();
             self.insert_account_panel(
                 account_id,
                 crate::account_panel::AccountPanel::new(account_id, "Account"),
@@ -2160,21 +2208,36 @@ impl MidasApp {
     pub(crate) fn handle_watchlist_msg(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::AddWatchlist => {
-                if let Some(focused) = self.windows[&self.main_window_key].layout.focus {
-                    let wl_id = self.panel_ids.next_watchlist();
-                    let new_chart_id = self.panel_ids.next_chart();
+                let owner = self.target_window_for_add();
+                let wl_id = self.panel_ids.next_watchlist();
+                let new_chart_id = self.panel_ids.next_chart();
+                let layout = match self.windows.get_mut(&owner) {
+                    Some(ws) => &mut ws.layout,
+                    None => return Task::none(),
+                };
+                if layout
+                    .seed_first_pane(PanelContent::Watchlist(wl_id))
+                    .is_some()
+                {
+                    self.insert_watchlist(
+                        wl_id,
+                        WatchlistPanel::new(wl_id, "Watchlist".into()),
+                        owner,
+                    );
+                    self.status_message = format!("Added {wl_id}");
+                    return self.flush_config();
+                }
+                if let Some(focused) = layout.focus {
                     if let Some((chart_id, new_pane)) =
-                        self.workspace_mut()
-                            .split(pane_grid::Axis::Vertical, focused, new_chart_id)
+                        layout.split(pane_grid::Axis::Vertical, focused, new_chart_id)
                     {
                         // split() always creates a chart pane — replace it with a watchlist.
-                        if let Some(state) = self.workspace_mut().panes.get_mut(new_pane) {
+                        if let Some(state) = layout.panes.get_mut(new_pane) {
                             state.content = PanelContent::Watchlist(wl_id);
                         }
                         // Remove the chart entry that split() created.
                         self.remove_chart(chart_id);
                         crate::app::subscription_registry::remove_chart_handles_for_chart(chart_id);
-                        let owner = self.main_window_key.clone();
                         self.insert_watchlist(
                             wl_id,
                             WatchlistPanel::new(wl_id, "Watchlist".into()),
@@ -2974,7 +3037,7 @@ impl MidasApp {
                 Task::none()
             }
 
-            Message::WindowCloseRequested => {
+            Message::AppShutdown => {
                 // Blocking shutdown of the ticker-state persistence
                 // layer. Signals the flush thread to perform a final
                 // `Immediate` commit and blocks until it exits.
@@ -3093,6 +3156,272 @@ impl MidasApp {
             Task::none()
         } else {
             Task::batch(tasks)
+        }
+    }
+}
+
+// ── Multi-window lifecycle (slice C) ─────────────────────────────────
+
+/// Pure helper: pick the first free `Window N` (N ≥ 2) name relative
+/// to a given iterator of taken keys. Pulled out of
+/// [`MidasApp::next_default_window_name`] so the slice-C tests can
+/// exercise the loop without standing up a full `MidasApp`.
+pub(crate) fn next_default_window_name_in<'a, I>(keys: I) -> String
+where
+    I: IntoIterator<Item = &'a WindowKey>,
+{
+    let taken: Vec<&str> = keys.into_iter().map(|k| k.as_str()).collect();
+    let mut n = 2u32;
+    loop {
+        let candidate = format!("Window {n}");
+        let collision = taken.iter().any(|k| k.eq_ignore_ascii_case(&candidate));
+        if !collision {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+impl MidasApp {
+    /// Generate a default name for a freshly created window.
+    ///
+    /// Scans `self.windows` for the first free `Window N` (case-insensitive
+    /// match) starting at `N = 2`. `Window 1` reads weird next to `Main`
+    /// so we skip it. The result is suitable to wrap in `WindowKey::new`
+    /// directly — `normalize` would only trim/length-check, both of which
+    /// the generator already satisfies.
+    pub(crate) fn next_default_window_name(&self) -> String {
+        next_default_window_name_in(self.windows.keys())
+    }
+
+    /// Resolve which window an add-panel action should target.
+    ///
+    /// Falls back to the main window when no window has been focused
+    /// since launch. Slice C — every panel-creation handler that used to
+    /// implicitly target the main window now goes through this.
+    pub(crate) fn target_window_for_add(&self) -> WindowKey {
+        self.focused_window
+            .clone()
+            .unwrap_or_else(|| self.main_window_key.clone())
+    }
+
+    /// Tear down a window and everything it owned.
+    ///
+    /// Drops every panel referenced by the window's `WorkspaceLayout`
+    /// from the app-global `charts` / `watchlists` / `order_panels` /
+    /// `account_panels` maps; clears matching `panel_to_window` entries;
+    /// and removes the `iced_id_to_key` reverse-lookup. Used both by the
+    /// user-driven close path and by the watchdog's failed-attach
+    /// cleanup.
+    fn dispose_window_state(&mut self, key: &WindowKey) {
+        let Some(state) = self.windows.remove(key) else {
+            return;
+        };
+        if let Some(id) = state.iced_id {
+            self.iced_id_to_key.remove(&id);
+            self.pending_window_opens.remove(&id);
+        }
+        // Walk the layout and drop each referenced panel.
+        for pane_state in state.layout.panes.panes.values() {
+            match pane_state.content {
+                PanelContent::Chart(id) => {
+                    self.remove_chart(id);
+                    crate::app::subscription_registry::remove_chart_handles_for_chart(id);
+                }
+                PanelContent::Watchlist(id) => {
+                    self.remove_watchlist(id);
+                }
+                PanelContent::Order(id) => {
+                    self.remove_order_panel(id);
+                }
+                PanelContent::Account(id) => {
+                    self.remove_account_panel(id);
+                }
+                PanelContent::Placeholder => {}
+            }
+        }
+        if matches!(self.focused_window, Some(ref f) if f == key) {
+            self.focused_window = None;
+        }
+    }
+
+    /// Handle slice-C window-lifecycle messages: create, attach,
+    /// attach-failed, watchdog tick, close, focus, unfocus, rename.
+    pub(crate) fn handle_window_lifecycle_msg(&mut self, message: Message) -> Task<Message> {
+        match message {
+            Message::CreateWindow { name } => {
+                let key = match name {
+                    Some(raw) => match WindowKey::normalize(&raw) {
+                        Ok(k) => k,
+                        Err(e) => {
+                            self.show_toast(format!("Window name invalid: {e}"));
+                            return Task::none();
+                        }
+                    },
+                    None => WindowKey::new(self.next_default_window_name()),
+                };
+                let collision = self
+                    .windows
+                    .keys()
+                    .any(|k| k.as_str().eq_ignore_ascii_case(key.as_str()));
+                if collision {
+                    self.show_toast(format!("Window '{key}' already exists"));
+                    return Task::none();
+                }
+                let geometry = midas_core::config::WindowGeometryConfig {
+                    width: 900,
+                    height: 600,
+                    ..Default::default()
+                };
+                let (id, open_task) = window::open(window::Settings {
+                    size: iced::Size::new(geometry.width as f32, geometry.height as f32),
+                    ..window::Settings::default()
+                });
+                self.windows.insert(
+                    key.clone(),
+                    crate::app::window_state::WindowState::opening(key.clone(), false, geometry),
+                );
+                self.iced_id_to_key.insert(id, key.clone());
+                self.pending_window_opens.insert(
+                    id,
+                    crate::app::window_state::WindowAttachAttempt {
+                        key: key.clone(),
+                        started_at: std::time::Instant::now(),
+                    },
+                );
+                self.mark_config_dirty();
+                let attach_key = key.clone();
+                open_task.map(move |id| Message::WindowAttached {
+                    key: attach_key.clone(),
+                    id,
+                })
+            }
+
+            Message::WindowAttached { key, id } => {
+                self.pending_window_opens.remove(&id);
+                if let Some(ws) = self.windows.get_mut(&key) {
+                    ws.iced_id = Some(id);
+                    ws.opening = false;
+                }
+                // Keep the reverse-lookup authoritative even if the
+                // open task resolved with a different id than we
+                // optimistically inserted earlier (defensive — iced
+                // 0.14 currently returns the same id).
+                self.iced_id_to_key.insert(id, key);
+                Task::none()
+            }
+
+            Message::WindowAttachFailed(key) => {
+                tracing::warn!("Window '{key}' failed to open within watchdog window");
+                let toast = format!("Window '{key}' failed to open");
+                self.dispose_window_state(&key);
+                self.show_toast(toast);
+                self.mark_config_dirty();
+                Task::none()
+            }
+
+            Message::WindowAttachWatchdog => {
+                let now = std::time::Instant::now();
+                let stale: Vec<WindowKey> = self
+                    .pending_window_opens
+                    .values()
+                    .filter(|att| {
+                        now.duration_since(att.started_at)
+                            >= std::time::Duration::from_secs(super::WINDOW_ATTACH_TIMEOUT_SECS)
+                    })
+                    .map(|att| att.key.clone())
+                    .collect();
+                if stale.is_empty() {
+                    return Task::none();
+                }
+                Task::batch(
+                    stale
+                        .into_iter()
+                        .map(|k| Task::done(Message::WindowAttachFailed(k))),
+                )
+            }
+
+            Message::WindowCloseRequested(id) => {
+                let Some(key) = self.iced_id_to_key.get(&id).cloned() else {
+                    return Task::none();
+                };
+                let is_main = self.windows.get(&key).map(|ws| ws.is_main).unwrap_or(false);
+                if is_main {
+                    return Task::done(Message::AppShutdown).chain(iced::exit());
+                }
+                self.dispose_window_state(&key);
+                self.mark_config_dirty();
+                window::close(id)
+            }
+
+            Message::WindowFocused(id) => {
+                if let Some(key) = self.iced_id_to_key.get(&id) {
+                    self.focused_window = Some(key.clone());
+                }
+                Task::none()
+            }
+
+            Message::WindowUnfocused(id) => {
+                let same = self
+                    .iced_id_to_key
+                    .get(&id)
+                    .zip(self.focused_window.as_ref())
+                    .map(|(k, f)| k == f)
+                    .unwrap_or(false);
+                if same {
+                    self.focused_window = None;
+                }
+                Task::none()
+            }
+
+            Message::RenameWindow { from, to } => {
+                let new_key = match WindowKey::normalize(&to) {
+                    Ok(k) => k,
+                    Err(e) => {
+                        self.show_toast(format!("Window name invalid: {e}"));
+                        return Task::none();
+                    }
+                };
+                if new_key == from {
+                    return Task::none();
+                }
+                let collision = self
+                    .windows
+                    .keys()
+                    .any(|k| k != &from && k.as_str().eq_ignore_ascii_case(new_key.as_str()));
+                if collision {
+                    self.show_toast(format!("Window '{new_key}' already exists"));
+                    return Task::none();
+                }
+                let Some(mut state) = self.windows.remove(&from) else {
+                    return Task::none();
+                };
+                state.key = new_key.clone();
+                let was_main = self.main_window_key == from;
+                self.windows.insert(new_key.clone(), state);
+                if was_main {
+                    self.main_window_key = new_key.clone();
+                }
+                if matches!(self.focused_window, Some(ref f) if *f == from) {
+                    self.focused_window = Some(new_key.clone());
+                }
+                if let Some(id) = self
+                    .iced_id_to_key
+                    .iter()
+                    .find_map(|(id, k)| (*k == from).then_some(*id))
+                {
+                    self.iced_id_to_key.insert(id, new_key.clone());
+                }
+                for v in self.panel_to_window.values_mut() {
+                    if *v == from {
+                        *v = new_key.clone();
+                    }
+                }
+                self.mark_config_dirty();
+                Task::none()
+            }
+
+            _ => unreachable!(),
         }
     }
 }
@@ -5050,5 +5379,117 @@ mod visibility_tests {
     fn default_chart_panel_is_visible() {
         let panel = make_panel("AAPL", true);
         assert!(panel.is_visible());
+    }
+}
+
+// ── Multi-window lifecycle (slice C) tests ───────────────────────────
+
+#[cfg(test)]
+mod window_lifecycle_tests {
+    use super::*;
+    use crate::app::window_state::WindowState;
+    use midas_core::config::WindowGeometryConfig;
+    use midas_core::WindowKey;
+    use std::collections::BTreeMap;
+
+    fn keys(names: &[&str]) -> Vec<WindowKey> {
+        names.iter().map(|n| WindowKey::new(*n)).collect()
+    }
+
+    #[test]
+    fn next_default_skips_window_1() {
+        // The generator starts at N=2 because "Window 1" reads weird
+        // next to "Main".
+        let only_main = keys(&["Main"]);
+        assert_eq!(next_default_window_name_in(only_main.iter()), "Window 2");
+    }
+
+    #[test]
+    fn next_default_finds_first_free_slot() {
+        let taken = keys(&["Main", "Window 2", "Window 3", "Window 5"]);
+        // Skips 2 and 3 (taken); 4 is free even though 5 is also taken.
+        assert_eq!(next_default_window_name_in(taken.iter()), "Window 4");
+    }
+
+    #[test]
+    fn next_default_collision_check_is_case_insensitive() {
+        let taken = keys(&["Main", "WINDOW 2", "window 3"]);
+        assert_eq!(next_default_window_name_in(taken.iter()), "Window 4");
+    }
+
+    #[test]
+    fn next_default_handles_user_named_windows() {
+        // User-named windows ("Trading", "Scanner") don't collide with
+        // the "Window N" namespace.
+        let taken = keys(&["Main", "Trading", "Scanner"]);
+        assert_eq!(next_default_window_name_in(taken.iter()), "Window 2");
+    }
+
+    /// Rename uniqueness check used by `Message::RenameWindow` —
+    /// case-insensitive against every key except the one being renamed.
+    fn rename_collides(
+        windows: &BTreeMap<WindowKey, ()>,
+        from: &WindowKey,
+        new: &WindowKey,
+    ) -> bool {
+        windows
+            .keys()
+            .any(|k| k != from && k.as_str().eq_ignore_ascii_case(new.as_str()))
+    }
+
+    #[test]
+    fn rename_to_distinct_name_is_allowed() {
+        let mut w = BTreeMap::new();
+        w.insert(WindowKey::new("Main"), ());
+        w.insert(WindowKey::new("Trading"), ());
+        let from = WindowKey::new("Trading");
+        let to = WindowKey::new("Day Trading");
+        assert!(!rename_collides(&w, &from, &to));
+    }
+
+    #[test]
+    fn rename_to_self_is_allowed() {
+        // The handler short-circuits exact-match (new == from); the
+        // collision check is only meaningful for *other* keys.
+        let mut w = BTreeMap::new();
+        w.insert(WindowKey::new("Main"), ());
+        w.insert(WindowKey::new("Trading"), ());
+        let from = WindowKey::new("Trading");
+        let to = WindowKey::new("Trading");
+        assert!(!rename_collides(&w, &from, &to));
+    }
+
+    #[test]
+    fn rename_to_existing_name_collides_case_insensitively() {
+        let mut w = BTreeMap::new();
+        w.insert(WindowKey::new("Main"), ());
+        w.insert(WindowKey::new("Trading"), ());
+        w.insert(WindowKey::new("Scanner"), ());
+        let from = WindowKey::new("Scanner");
+        // Lowercase vs Pascal — the BTreeMap stores "Trading" but we
+        // refuse to rename Scanner → trading because it would alias.
+        let to = WindowKey::new("trading");
+        assert!(rename_collides(&w, &from, &to));
+    }
+
+    /// Slice-C `WindowState::opening` invariants the handlers and
+    /// constructor both rely on.
+    #[test]
+    fn opening_window_state_starts_with_placeholder_layout() {
+        let geo = WindowGeometryConfig::default();
+        let ws = WindowState::opening(WindowKey::new("Scanner"), false, geo);
+        assert!(
+            ws.opening,
+            "freshly opened window must carry the opening flag"
+        );
+        assert!(
+            ws.iced_id.is_none(),
+            "iced_id stays None until WindowAttached"
+        );
+        assert!(!ws.is_main);
+        assert_eq!(ws.layout.pane_count(), 1, "placeholder layout has one pane");
+        // The placeholder pane is focused so the first AddChart can
+        // seed it in place via `seed_first_pane`.
+        assert!(ws.layout.focus.is_some());
     }
 }

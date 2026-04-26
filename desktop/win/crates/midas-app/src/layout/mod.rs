@@ -26,6 +26,13 @@ pub enum PanelContent {
     Order(OrderPanelId),
     /// A tabbed Account panel (Positions / Orders / History / Recents).
     Account(AccountPanelId),
+    /// Empty-window sentinel (slice C). Rendered as a centred
+    /// "Click + Add Panel" hint. iced 0.14's
+    /// [`pane_grid::State::new`] requires an initial pane, so a
+    /// freshly-created window seeds a Placeholder pane that converts
+    /// in place into a real panel on the first `Add*` action.
+    /// Placeholder leaves are not persisted in `layout_tree`.
+    Placeholder,
 }
 
 // ── Per-pane state ───────────────────────────────────────────────────
@@ -76,11 +83,24 @@ impl PaneState {
         }
     }
 
+    /// Create a placeholder pane state (slice C) — rendered as a
+    /// centred "Click + Add Panel" hint inside an otherwise empty
+    /// new window. Replaced in place by the first `Add*` action.
+    pub fn placeholder() -> Self {
+        Self {
+            content: PanelContent::Placeholder,
+            is_focused: false,
+        }
+    }
+
     /// Convenience: returns `Some(chart_id)` if this pane holds a chart.
     pub fn chart_id(&self) -> Option<ChartId> {
         match self.content {
             PanelContent::Chart(id) => Some(id),
-            PanelContent::Watchlist(_) | PanelContent::Order(_) | PanelContent::Account(_) => None,
+            PanelContent::Watchlist(_)
+            | PanelContent::Order(_)
+            | PanelContent::Account(_)
+            | PanelContent::Placeholder => None,
         }
     }
 }
@@ -130,6 +150,51 @@ impl WorkspaceLayout {
     pub fn from_panes(panes: pane_grid::State<PaneState>) -> Self {
         let focus = panes.panes.keys().next().copied();
         Self { panes, focus }
+    }
+
+    /// Create a workspace containing a single placeholder pane.
+    ///
+    /// Used by slice C's `CreateWindow` flow — iced 0.14's
+    /// `pane_grid::State::new` requires an initial pane and we don't
+    /// want to mint a chart id for a window the user hasn't decided
+    /// what to put in yet. The placeholder converts in place into a
+    /// real pane the first time the user adds a panel
+    /// (see [`Self::seed_first_pane`]).
+    pub fn placeholder() -> Self {
+        let (panes, pane) = pane_grid::State::new(PaneState::placeholder());
+        let mut layout = Self {
+            panes,
+            focus: Some(pane),
+        };
+        if let Some(state) = layout.panes.get_mut(pane) {
+            state.is_focused = true;
+        }
+        layout
+    }
+
+    /// Replace this workspace's single placeholder pane with the given
+    /// content. Returns the now-seeded `pane_grid::Pane` handle on
+    /// success, or `None` if the layout has no placeholder pane to
+    /// replace (i.e. the user already added something).
+    ///
+    /// Slice C's add-panel path calls this on the focused window when
+    /// the only pane is a placeholder, so adding the first panel
+    /// doesn't generate an extra split.
+    pub fn seed_first_pane(&mut self, content: PanelContent) -> Option<pane_grid::Pane> {
+        // Only seed when the workspace has exactly one pane and it's
+        // a placeholder — the invariant on freshly-opened windows.
+        if self.pane_count() != 1 {
+            return None;
+        }
+        let pane = self.first_pane()?;
+        let state = self.panes.get_mut(pane)?;
+        if !matches!(state.content, PanelContent::Placeholder) {
+            return None;
+        }
+        state.content = content;
+        state.is_focused = true;
+        self.focus = Some(pane);
+        Some(pane)
     }
 
     /// Split the given pane along the specified axis.

@@ -44,12 +44,19 @@ impl MidasApp {
                 &mut tree,
             );
             let is_main = *key == self.main_window_key;
-            // Slice B keeps the WindowController as the single source
-            // of geometry truth (it'll move into per-window state in
-            // slice C). For now, every window's geometry is the main
-            // window's — slice C will give each `WindowState` its own
-            // [`WindowGeometry`].
-            let geometry = self.window.to_config();
+            // The main window's authoritative geometry lives in the
+            // singleton `WindowGeometry` controller (driven by OS
+            // events). Slice C: non-main windows persist their stored
+            // `WindowState::geometry` straight through — until the
+            // geometry-event subscription gets per-window aware in a
+            // later slice, that field is the seed value carried over
+            // from load (or from `CreateWindow`'s defaults), which
+            // gives a safe-but-static round-trip.
+            let geometry = if is_main {
+                self.window.to_config()
+            } else {
+                ws.geometry.clone()
+            };
             windows_out.insert(
                 key.as_str().to_string(),
                 WindowConfig {
@@ -229,6 +236,13 @@ impl MidasApp {
                                     account_panel_id: account_id.0,
                                 });
                             }
+                        }
+                        PanelContent::Placeholder => {
+                            // Placeholder panes are slice-C empty-window
+                            // sentinels — not persisted (a freshly-opened
+                            // window with no real panels round-trips as
+                            // an empty `layout_tree`, which `restore_*`
+                            // re-synthesises into a placeholder).
                         }
                     }
                 }

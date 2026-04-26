@@ -188,6 +188,10 @@ impl MidasApp {
                     crate::layout::PanelContent::Watchlist(id) => PanelId::Watchlist(id),
                     crate::layout::PanelContent::Order(id) => PanelId::Order(id),
                     crate::layout::PanelContent::Account(id) => PanelId::Account(id),
+                    // Placeholder panes are slice-C empty-window
+                    // sentinels — they don't carry a panel id, so
+                    // there's nothing to map into `panel_to_window`.
+                    crate::layout::PanelContent::Placeholder => continue,
                 };
                 self.panel_to_window.insert(panel, main.clone());
             }
