@@ -253,7 +253,7 @@ impl MidasApp {
     pub(crate) fn handle_chart_management_msg(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::AddChart => {
-                if let Some(focused) = self.workspace().focus {
+                if let Some(focused) = self.windows[&self.main_window_key].layout.focus {
                     let new_id = self.panel_ids.next_chart();
                     if let Some((new_id, _new_pane)) =
                         self.workspace_mut()
@@ -269,7 +269,7 @@ impl MidasApp {
             }
 
             Message::CloseChart(id) => {
-                if let Some(pane) = self.workspace().find_pane(id) {
+                if let Some(pane) = self.windows[&self.main_window_key].layout.find_pane(id) {
                     if let Some(PanelContent::Chart(closed_id)) = self.workspace_mut().close(pane) {
                         self.remove_chart(closed_id);
                         crate::app::subscription_registry::remove_chart_handles_for_chart(
@@ -287,7 +287,7 @@ impl MidasApp {
             }
 
             Message::ActivateChart(id) => {
-                if let Some(pane) = self.workspace().find_pane(id) {
+                if let Some(pane) = self.windows[&self.main_window_key].layout.find_pane(id) {
                     self.workspace_mut().set_focus(pane);
                 }
                 // Bind through the single mutation point. Fires
@@ -331,12 +331,17 @@ impl MidasApp {
                     self.panel_to_window
                         .insert(PanelId::Chart(*id), main.clone());
                 }
-                let active_ids: std::collections::HashSet<ChartId> =
-                    self.workspace().chart_ids().into_iter().collect();
+                let active_ids: std::collections::HashSet<ChartId> = self.windows
+                    [&self.main_window_key]
+                    .layout
+                    .chart_ids()
+                    .into_iter()
+                    .collect();
                 self.charts.retain(|id, _| active_ids.contains(id));
                 // Clean up orphaned watchlist panels (presets create chart-only layouts).
-                let active_wl_ids: std::collections::HashSet<WatchlistId> = self
-                    .workspace()
+                let active_wl_ids: std::collections::HashSet<WatchlistId> = self.windows
+                    [&self.main_window_key]
+                    .layout
                     .panes
                     .panes
                     .values()
@@ -1162,7 +1167,7 @@ impl MidasApp {
     pub(crate) fn handle_order_panel_msg(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::AddOrderPanel => {
-                if let Some(focused) = self.workspace().focus {
+                if let Some(focused) = self.windows[&self.main_window_key].layout.focus {
                     let op_id = self.panel_ids.next_order_panel();
                     let new_chart_id = self.panel_ids.next_chart();
                     if let Some((chart_id, new_pane)) =
@@ -2061,7 +2066,10 @@ impl MidasApp {
         if trimmed.is_empty() {
             return Task::none();
         }
-        let Some(chart_id) = self.workspace().focused_chart_id() else {
+        let Some(chart_id) = self.windows[&self.main_window_key]
+            .layout
+            .focused_chart_id()
+        else {
             tracing::debug!("RecentClicked({symbol}) ignored — no focused chart in workspace");
             return Task::none();
         };
@@ -2085,7 +2093,7 @@ impl MidasApp {
     /// a new pane from the focused pane, drop the auto-created chart,
     /// install the Account panel, flush config.
     fn handle_add_account_panel(&mut self) -> Task<Message> {
-        let Some(focused) = self.workspace().focus else {
+        let Some(focused) = self.windows[&self.main_window_key].layout.focus else {
             return Task::none();
         };
         let account_id = self.panel_ids.next_account_panel();
@@ -2152,7 +2160,7 @@ impl MidasApp {
     pub(crate) fn handle_watchlist_msg(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::AddWatchlist => {
-                if let Some(focused) = self.workspace().focus {
+                if let Some(focused) = self.windows[&self.main_window_key].layout.focus {
                     let wl_id = self.panel_ids.next_watchlist();
                     let new_chart_id = self.panel_ids.next_chart();
                     if let Some((chart_id, new_pane)) =
@@ -2333,11 +2341,15 @@ impl MidasApp {
                 let grid_w = win_w as f32;
                 let grid_h = (win_h as f32 - TOOLBAR_H - STATUS_H).max(1.0);
 
-                let regions = self.workspace().panes.layout().pane_regions(
-                    1.0, // spacing
-                    0.0, // min_size
-                    iced::Size::new(grid_w, grid_h),
-                );
+                let regions = self.windows[&self.main_window_key]
+                    .layout
+                    .panes
+                    .layout()
+                    .pane_regions(
+                        1.0, // spacing
+                        0.0, // min_size
+                        iced::Size::new(grid_w, grid_h),
+                    );
 
                 let cursor = drag.cursor_pos;
                 // Translate cursor from window-space to pane-grid-space.
@@ -2350,7 +2362,9 @@ impl MidasApp {
                         && local_y >= rect.y
                         && local_y <= rect.y + rect.height
                     {
-                        if let Some(ps) = self.workspace().panes.get(*pane) {
+                        if let Some(ps) =
+                            self.windows[&self.main_window_key].layout.panes.get(*pane)
+                        {
                             if let Some(chart_id) = ps.chart_id() {
                                 self.workspace_mut().set_focus(*pane);
                                 // Drag-drop of a watchlist ticker onto a
@@ -2971,7 +2985,8 @@ impl MidasApp {
             }
 
             Message::PopOut(pane) => {
-                if let Some(pane_state) = self.workspace().panes.get(pane) {
+                if let Some(pane_state) = self.windows[&self.main_window_key].layout.panes.get(pane)
+                {
                     if let Some(chart_id) = pane_state.chart_id() {
                         if let Some(chart) = self.charts.get(&chart_id) {
                             let floating_chart = chart.clone();

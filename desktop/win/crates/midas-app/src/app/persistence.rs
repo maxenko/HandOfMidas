@@ -29,7 +29,7 @@ impl MidasApp {
         let mut layout_tree: Vec<LayoutNode> = Vec::new();
 
         // Walk the pane grid tree to build layout_tree (pre-order traversal).
-        let node = self.workspace().panes.layout();
+        let node = self.windows[&self.main_window_key].layout.panes.layout();
         self.walk_node(
             node,
             &mut chart_configs,
@@ -40,7 +40,12 @@ impl MidasApp {
         );
 
         // Also build legacy panel_order from BTreeMap iteration order.
-        for ps in self.workspace().panes.panes.values() {
+        for ps in self.windows[&self.main_window_key]
+            .layout
+            .panes
+            .panes
+            .values()
+        {
             match &ps.content {
                 PanelContent::Chart(chart_id) => {
                     if let Some(idx) = chart_configs.iter().position(|c| {
@@ -174,7 +179,7 @@ impl MidasApp {
                 self.walk_node(b, charts, watchlists, order_panels, account_panels, tree);
             }
             pane_grid::Node::Pane(pane) => {
-                if let Some(ps) = self.workspace().panes.get(*pane) {
+                if let Some(ps) = self.windows[&self.main_window_key].layout.panes.get(*pane) {
                     match &ps.content {
                         PanelContent::Chart(chart_id) => {
                             if let Some(panel) = self.charts.get(chart_id) {

@@ -350,8 +350,8 @@ pub fn handle_command(
             // — scripting the active tab should affect the panel the
             // user is looking at, not an orphaned one.
             use crate::layout::PanelContent;
-            let visible_ids: Vec<midas_core::AccountPanelId> = app
-                .workspace()
+            let visible_ids: Vec<midas_core::AccountPanelId> = app.windows[&app.main_window_key]
+                .layout
                 .panes
                 .iter()
                 .filter_map(|(_, state)| match state.content {

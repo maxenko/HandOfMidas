@@ -400,7 +400,8 @@ impl MidasApp {
         let split_buttons = row![
             button(text("Split H").size(11))
                 .on_press_maybe(
-                    self.workspace()
+                    self.windows[&self.main_window_key]
+                        .layout
                         .focus
                         .map(|p| { Message::PaneSplit(pane_grid::Axis::Horizontal, p) })
                 )
@@ -408,7 +409,8 @@ impl MidasApp {
                 .style(hover_text_button_style),
             button(text("Split V").size(11))
                 .on_press_maybe(
-                    self.workspace()
+                    self.windows[&self.main_window_key]
+                        .layout
                         .focus
                         .map(|p| { Message::PaneSplit(pane_grid::Axis::Vertical, p) })
                 )
@@ -530,12 +532,12 @@ impl MidasApp {
 impl MidasApp {
     /// Build the main content area using iced's pane_grid widget.
     fn view_content(&self) -> Element<'_, Message> {
-        let focused_pane = self.workspace().focus;
-        let pane_count = self.workspace().pane_count();
+        let main_layout = &self.windows[&self.main_window_key].layout;
+        let focused_pane = main_layout.focus;
+        let pane_count = main_layout.pane_count();
 
-        let pane_grid_widget = PaneGrid::new(
-            &self.workspace().panes,
-            |pane, pane_state, _is_maximized| {
+        let pane_grid_widget =
+            PaneGrid::new(&main_layout.panes, |pane, pane_state, _is_maximized| {
                 let is_focused = focused_pane == Some(pane);
 
                 let (title_bar, body) = match pane_state.content {
@@ -583,34 +585,33 @@ impl MidasApp {
                             ..Default::default()
                         }
                     })
-            },
-        )
-        .on_click(Message::PaneFocused)
-        .on_resize(6, Message::PaneResized)
-        // Note: on_click fires PaneFocused for pane selection.
-        // Drag-drop uses DragMouseUp with global hit-testing instead.
-        .on_drag(Message::PaneDragged)
-        .style(|_theme| pane_grid::Style {
-            hovered_region: pane_grid::Highlight {
-                background: iced::Background::Color(Color::from_rgba(0.2, 0.4, 0.8, 0.25)),
-                border: iced::Border {
-                    color: Color::from_rgba(0.3, 0.5, 1.0, 0.6),
-                    width: 2.0,
-                    radius: 0.0.into(),
+            })
+            .on_click(Message::PaneFocused)
+            .on_resize(6, Message::PaneResized)
+            // Note: on_click fires PaneFocused for pane selection.
+            // Drag-drop uses DragMouseUp with global hit-testing instead.
+            .on_drag(Message::PaneDragged)
+            .style(|_theme| pane_grid::Style {
+                hovered_region: pane_grid::Highlight {
+                    background: iced::Background::Color(Color::from_rgba(0.2, 0.4, 0.8, 0.25)),
+                    border: iced::Border {
+                        color: Color::from_rgba(0.3, 0.5, 1.0, 0.6),
+                        width: 2.0,
+                        radius: 0.0.into(),
+                    },
                 },
-            },
-            hovered_split: pane_grid::Line {
-                color: Color::from_rgba(0.3, 0.5, 1.0, 0.8),
-                width: 2.0,
-            },
-            picked_split: pane_grid::Line {
-                color: Color::from_rgba(0.3, 0.5, 1.0, 1.0),
-                width: 3.0,
-            },
-        })
-        .width(Fill)
-        .height(Fill)
-        .spacing(1);
+                hovered_split: pane_grid::Line {
+                    color: Color::from_rgba(0.3, 0.5, 1.0, 0.8),
+                    width: 2.0,
+                },
+                picked_split: pane_grid::Line {
+                    color: Color::from_rgba(0.3, 0.5, 1.0, 1.0),
+                    width: 3.0,
+                },
+            })
+            .width(Fill)
+            .height(Fill)
+            .spacing(1);
 
         container(pane_grid_widget)
             .width(Fill)

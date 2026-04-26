@@ -1302,23 +1302,18 @@ async fn build_ib_router(
     }
 }
 
-// ── Window / panel state accessors (slice A1) ─────────────────────────
+// ── Window / panel state accessors ────────────────────────────────────
 
 impl MidasApp {
-    /// Borrow the main window's [`WorkspaceLayout`].
+    /// Mutable layout of the main window. Read-side access goes via
+    /// `self.windows[&self.main_window_key].layout` directly; the mut
+    /// variant stays as a method because `&self.main_window_key` would
+    /// otherwise alias the `&mut self.windows.get_mut(...)` borrow at
+    /// many call sites.
     ///
-    /// Slice A1 transitional accessor — preserves the call-site shape
-    /// of the deleted `MidasApp.workspace` field. A2 inlines this to
-    /// `self.windows[&self.main_window_key].layout`.
-    pub(crate) fn workspace(&self) -> &WorkspaceLayout {
-        &self
-            .windows
-            .get(&self.main_window_key)
-            .expect("main window must always exist in windows map")
-            .layout
-    }
-
-    /// Mutable variant of [`Self::workspace`].
+    /// Slice A2 dropped the read-side `workspace()` accessor; the plan
+    /// permits "or keep an inline helper", and `workspace_mut` is that
+    /// helper for the borrow-check ergonomics it preserves.
     pub(crate) fn workspace_mut(&mut self) -> &mut WorkspaceLayout {
         &mut self
             .windows
@@ -1827,7 +1822,7 @@ impl MidasApp {
 
         StatusBarVm {
             active_info,
-            pane_count: self.workspace().pane_count(),
+            pane_count: self.windows[&self.main_window_key].layout.pane_count(),
             overlay_indicator: if self.show_frame_overlay {
                 " | F11: overlay ON"
             } else {
@@ -3954,7 +3949,9 @@ impl MidasApp {
 
     /// Get the active chart's ChartId (from workspace focus).
     fn active_chart_id(&self) -> Option<ChartId> {
-        self.workspace().focused_chart_id()
+        self.windows[&self.main_window_key]
+            .layout
+            .focused_chart_id()
     }
 
     /// Returns the symbol currently displayed on the focused chart,
@@ -3978,7 +3975,10 @@ impl MidasApp {
     /// initial mouse-press and prevented title-bar buttons on unfocused
     /// panes from registering clicks.
     fn focus_chart(&mut self, chart_id: ChartId) {
-        if let Some(pane) = self.workspace().find_pane(chart_id) {
+        if let Some(pane) = self.windows[&self.main_window_key]
+            .layout
+            .find_pane(chart_id)
+        {
             self.workspace_mut().set_focus(pane);
         }
     }
@@ -4303,7 +4303,10 @@ impl MidasApp {
                 }
                 "t" | "T" => {
                     // Focus nearest order panel, or create one if none exists.
-                    if let Some(pane) = self.workspace().find_any_order_pane() {
+                    if let Some(pane) = self.windows[&self.main_window_key]
+                        .layout
+                        .find_any_order_pane()
+                    {
                         self.workspace_mut().set_focus(pane);
                     } else {
                         return self.update(Message::AddOrderPanel);

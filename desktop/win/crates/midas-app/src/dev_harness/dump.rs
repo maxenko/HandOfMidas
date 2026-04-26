@@ -345,7 +345,10 @@ pub fn build(app: &MidasApp) -> serde_json::Value {
 
     let projection = StateProjection {
         tickers,
-        active_chart_id: app.workspace().focused_chart_id().map(|id| id.0),
+        active_chart_id: app.windows[&app.main_window_key]
+            .layout
+            .focused_chart_id()
+            .map(|id| id.0),
         charts,
         window_size: app.window.size(),
         window_position: app.window.position(),
