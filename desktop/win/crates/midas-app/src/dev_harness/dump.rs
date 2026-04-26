@@ -292,9 +292,9 @@ pub fn build(app: &MidasApp) -> serde_json::Value {
 
     #[cfg(feature = "session_chart")]
     let session_charts: Vec<SessionChartProjection> = app
-        .floating_session_charts
+        .session_chart_panels
         .iter()
-        .map(|(win_id, state)| {
+        .map(|(panel_id, state)| {
             // `state.widget` is now an `Arc<RwLock<SessionChart>>`
             // (Phase D shader rewire); take a short-lived read-guard
             // to pull scalar fields. `series()` returns a fresh Arc
@@ -348,7 +348,7 @@ pub fn build(app: &MidasApp) -> serde_json::Value {
                 .map(|ann| ann.id.0)
                 .collect();
             SessionChartProjection {
-                window_id: format!("{win_id:?}"),
+                window_id: format!("Panel({})", panel_id.0),
                 ticker: state.request.ticker.clone(),
                 period: format!("{:?}", state.request.period),
                 calendar_id: state.request.calendar_id.0.to_string(),

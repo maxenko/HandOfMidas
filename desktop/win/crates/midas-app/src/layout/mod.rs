@@ -9,6 +9,8 @@
 
 use iced::widget::pane_grid;
 
+#[cfg(feature = "session_chart")]
+use midas_core::SessionChartId;
 use midas_core::{AccountPanelId, ChartId, OrderPanelId, WatchlistId};
 
 use crate::app::panel_ids::PanelIdAllocator;
@@ -26,6 +28,14 @@ pub enum PanelContent {
     Order(OrderPanelId),
     /// A tabbed Account panel (Positions / Orders / History / Recents).
     Account(AccountPanelId),
+    /// Slice F2: session-aware chart panel (feature-gated). Replaces
+    /// the standalone-window `floating_session_charts` path retired
+    /// in F2; renders the same shader + chrome as the legacy window
+    /// inside a regular pane cell. Not persisted in `layout_tree` —
+    /// session-chart panes are session-scoped, mirroring the legacy
+    /// window's lifetime.
+    #[cfg(feature = "session_chart")]
+    SessionChart(SessionChartId),
     /// Empty-window sentinel (slice C). Rendered as a centred
     /// "Click + Add Panel" hint. iced 0.14's
     /// [`pane_grid::State::new`] requires an initial pane, so a
@@ -101,6 +111,8 @@ impl PaneState {
             | PanelContent::Order(_)
             | PanelContent::Account(_)
             | PanelContent::Placeholder => None,
+            #[cfg(feature = "session_chart")]
+            PanelContent::SessionChart(_) => None,
         }
     }
 }
@@ -216,6 +228,26 @@ impl WorkspaceLayout {
         let new_state = PaneState::chart(new_chart_id);
         let result = self.panes.split(axis, pane, new_state);
         result.map(|(new_pane, _split)| (new_chart_id, new_pane))
+    }
+
+    /// Slice F2: split the given pane and seed the new half with the
+    /// supplied [`PanelContent`]. Generic version of [`Self::split`]
+    /// used by add-paths whose content variant isn't a plain chart
+    /// (currently: session-chart panes).
+    #[cfg_attr(not(feature = "session_chart"), allow(dead_code))]
+    pub fn split_with(
+        &mut self,
+        axis: pane_grid::Axis,
+        pane: pane_grid::Pane,
+        content: PanelContent,
+    ) -> Option<pane_grid::Pane> {
+        let mut new_state = PaneState {
+            content,
+            is_focused: false,
+        };
+        new_state.is_focused = false;
+        let result = self.panes.split(axis, pane, new_state);
+        result.map(|(new_pane, _split)| new_pane)
     }
 
     /// Close a pane and remove it from the layout.

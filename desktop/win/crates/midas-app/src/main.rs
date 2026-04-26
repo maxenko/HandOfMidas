@@ -29,7 +29,7 @@ mod registry;
 #[cfg(feature = "session_chart")]
 mod session_chart;
 #[cfg(feature = "session_chart")]
-mod session_chart_window;
+mod session_chart_panel;
 mod sim_child;
 mod theme;
 mod thumbnail_data;

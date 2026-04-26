@@ -362,6 +362,8 @@ impl MidasApp {
                     PanelId::Chart(id) => active_ids.contains(id),
                     PanelId::Watchlist(id) => active_wl_ids.contains(id),
                     PanelId::Order(_) | PanelId::Account(_) => false,
+                    #[cfg(feature = "session_chart")]
+                    PanelId::SessionChart(_) => false,
                 });
                 self.mark_config_dirty();
                 Task::none()
@@ -495,6 +497,11 @@ impl MidasApp {
                         // isn't tracked in `panel_to_window`. The pane
                         // grid has already removed it from the layout.
                         self.status_message = "Closed empty pane".to_string();
+                    }
+                    #[cfg(feature = "session_chart")]
+                    Some(PanelContent::SessionChart(sc_id)) => {
+                        self.remove_session_chart_panel(sc_id);
+                        self.status_message = format!("Closed {sc_id}");
                     }
                     None => return Task::none(),
                 }
@@ -3190,6 +3197,10 @@ impl MidasApp {
                 PanelContent::Account(id) => {
                     self.remove_account_panel(id);
                 }
+                #[cfg(feature = "session_chart")]
+                PanelContent::SessionChart(id) => {
+                    self.remove_session_chart_panel(id);
+                }
                 PanelContent::Placeholder => {}
             }
         }
@@ -3295,19 +3306,11 @@ impl MidasApp {
             }
 
             Message::WindowCloseRequested(id) => {
-                // Slice F2: feature-gated session-chart windows live
-                // outside `iced_id_to_key` (their state is on
-                // `floating_session_charts`); cleanup goes through
-                // there before the regular named-window path.
-                #[cfg(feature = "session_chart")]
-                if let Some(state) = self.floating_session_charts.remove(&id) {
-                    tracing::info!(
-                        "Floating session chart window closed for {}",
-                        state.request.ticker
-                    );
-                    drop(state);
-                    return iced::window::close(id);
-                }
+                // Slice F2 retired the standalone session-chart windows;
+                // session-chart panels now live inside regular pane
+                // grids and tear down through the per-pane close path
+                // (`Message::PaneClose`). Nothing window-id-keyed to
+                // clean up here.
                 let Some(key) = self.iced_id_to_key.get(&id).cloned() else {
                     return Task::none();
                 };
@@ -4719,9 +4722,9 @@ fn apply_quote_to_session_chart_series(
     registry: &crate::session_chart::SymbolSeriesRegistry,
     sym: &midas_broker_core::SymbolKey,
     price: f64,
-    floating_session_charts: &std::collections::HashMap<
-        iced::window::Id,
-        crate::session_chart_window::SessionChartWindow,
+    session_chart_panels: &std::collections::HashMap<
+        midas_core::SessionChartId,
+        crate::session_chart_panel::SessionChartPanel,
     >,
 ) {
     let Some(series_arc) = registry.get(sym) else {
@@ -4732,12 +4735,12 @@ fn apply_quote_to_session_chart_series(
         let mut guard = series_arc.write();
         guard.update_last_price(price);
     }
-    // Flag every session-chart window for repaint. This walk is
+    // Flag every session-chart panel for repaint. This walk is
     // lock-free on the widget side (the `paint_pending` atomic) but
     // does take brief read-locks on each widget to reach its
     // interaction state; the guards never cross an `.await`.
-    for win in floating_session_charts.values() {
-        let w = win.widget.read();
+    for panel in session_chart_panels.values() {
+        let w = panel.widget.read();
         w.interaction().mark_paint_pending();
     }
 }
@@ -4951,7 +4954,7 @@ impl MidasApp {
                                 &self.session_chart_registry,
                                 sym,
                                 price,
-                                &self.floating_session_charts,
+                                &self.session_chart_panels,
                             );
                         }
                     }

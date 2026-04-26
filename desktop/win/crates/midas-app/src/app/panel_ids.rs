@@ -9,6 +9,8 @@
 //! `PanelId` is the key for `MidasApp::panel_to_window` — the runtime
 //! invariant that links every panel back to its owning window.
 
+#[cfg(feature = "session_chart")]
+use midas_core::SessionChartId;
 use midas_core::{AccountPanelId, ChartId, OrderPanelId, WatchlistId};
 
 /// Typed handle to a single panel — the key used by
@@ -19,6 +21,11 @@ pub enum PanelId {
     Watchlist(WatchlistId),
     Order(OrderPanelId),
     Account(AccountPanelId),
+    /// Slice F2: per-pane id for a session-chart panel. Feature-gated
+    /// on `session_chart` because the supporting widget + driver are
+    /// only present when the feature is on.
+    #[cfg(feature = "session_chart")]
+    SessionChart(SessionChartId),
 }
 
 /// Monotonic ID counters for every panel kind. `MidasApp` owns one of
@@ -30,6 +37,12 @@ pub struct PanelIdAllocator {
     next_watchlist: u32,
     next_order_panel: u32,
     next_account_panel: u32,
+    /// Slice F2: monotonic counter for session-chart panes. Always
+    /// present even when the `session_chart` feature is off so the
+    /// allocator's layout doesn't depend on cargo flags. Only read
+    /// via `next_session_chart()`, which is itself feature-gated.
+    #[cfg_attr(not(feature = "session_chart"), allow(dead_code))]
+    next_session_chart: u32,
 }
 
 impl Default for PanelIdAllocator {
@@ -39,6 +52,7 @@ impl Default for PanelIdAllocator {
             next_watchlist: 1,
             next_order_panel: 1,
             next_account_panel: 1,
+            next_session_chart: 1,
         }
     }
 }
@@ -69,6 +83,14 @@ impl PanelIdAllocator {
     pub fn next_account_panel(&mut self) -> AccountPanelId {
         let id = AccountPanelId::new(self.next_account_panel);
         self.next_account_panel += 1;
+        id
+    }
+
+    /// Allocate a new unique [`SessionChartId`]. Slice F2.
+    #[cfg(feature = "session_chart")]
+    pub fn next_session_chart(&mut self) -> SessionChartId {
+        let id = SessionChartId::new(self.next_session_chart);
+        self.next_session_chart += 1;
         id
     }
 }

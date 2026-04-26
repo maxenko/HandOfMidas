@@ -188,6 +188,8 @@ impl MidasApp {
                     crate::layout::PanelContent::Watchlist(id) => PanelId::Watchlist(id),
                     crate::layout::PanelContent::Order(id) => PanelId::Order(id),
                     crate::layout::PanelContent::Account(id) => PanelId::Account(id),
+                    #[cfg(feature = "session_chart")]
+                    crate::layout::PanelContent::SessionChart(id) => PanelId::SessionChart(id),
                     // Placeholder panes are slice-C empty-window
                     // sentinels — they don't carry a panel id, so
                     // there's nothing to map into `panel_to_window`.

@@ -102,14 +102,10 @@ impl MidasApp {
     /// The main window shows toolbar + pane_grid + status bar.
     /// Floating chart windows show only the chart with a minimal header.
     pub fn view(&self, window_id: window::Id) -> Element<'_, Message> {
-        // Session-chart window (Phase C, feature-gated). Slice F2 will
-        // fold this into the regular per-window pane grid; until then
-        // it stays as its own dedicated dispatch.
-        #[cfg(feature = "session_chart")]
-        if let Some(state) = self.floating_session_charts.get(&window_id) {
-            return state.view(window_id);
-        }
-
+        // Slice F2: session-chart panels now render inside their host
+        // window's pane grid via `PanelContent::SessionChart` — no
+        // dedicated daemon-level dispatch.
+        //
         // Slice C: dispatch by user-named window. The main window
         // shows toolbar + status bar; non-main windows render only the
         // header strip + pane grid (per-window broker / status are
@@ -408,6 +404,13 @@ impl MidasApp {
                         let bd = self.view_account_body(account_id);
                         (tb, bd)
                     }
+                    #[cfg(feature = "session_chart")]
+                    PanelContent::SessionChart(sc_id) => {
+                        let tb =
+                            self.view_session_chart_title_bar(&window_key, sc_id, pane, pane_count);
+                        let bd = self.view_session_chart_body(sc_id);
+                        (tb, bd)
+                    }
                     PanelContent::Placeholder => {
                         self.view_placeholder_pane(&window_key, pane, pane_count)
                     }
@@ -480,6 +483,65 @@ impl MidasApp {
     /// Build the (title bar, body) for a placeholder pane — slice C's
     /// empty-window sentinel. Renders a centred "Click + Add Panel"
     /// hint inside an otherwise empty new window.
+    /// Slice F2: title bar for a session-chart pane. Mirrors the
+    /// account / chart pane chrome — title with the panel's
+    /// human-readable name (or "Loading…" if the async pipeline
+    /// hasn't finished yet) plus a close button.
+    #[cfg(feature = "session_chart")]
+    fn view_session_chart_title_bar(
+        &self,
+        window_key: &midas_core::WindowKey,
+        sc_id: midas_core::SessionChartId,
+        pane: pane_grid::Pane,
+        pane_count: usize,
+    ) -> pane_grid::TitleBar<'_, Message> {
+        let title = self
+            .session_chart_panels
+            .get(&sc_id)
+            .map(|p| p.title())
+            .unwrap_or_else(|| "Session · Loading…".to_string());
+
+        let close_btn: Element<'_, Message> = if pane_count > 1 {
+            button(text("X").size(10))
+                .on_press(Message::PaneClose(window_key.clone(), pane))
+                .padding([2, 6])
+                .style(hover_text_button_style)
+                .into()
+        } else {
+            // Last pane in the window: drop the close button to match
+            // the same affordance the chart / account / watchlist
+            // panes apply (close-last-pane is rejected by
+            // `WorkspaceLayout::close`).
+            Space::new().width(0).into()
+        };
+
+        pane_grid::TitleBar::new(
+            row![text(title).size(14), Space::new().width(Fill)].align_y(iced::Alignment::Center),
+        )
+        .controls(Element::from(
+            row![close_btn].spacing(2).align_y(iced::Alignment::Center),
+        ))
+        .padding([2, 4])
+        .always_show_controls()
+        .style(|_theme| container::Style::default())
+    }
+
+    /// Slice F2: pane body for a session-chart panel. Returns the
+    /// shader + chrome composed by [`crate::session_chart_panel::
+    /// SessionChartPanel::view`], or a "Loading…" placeholder if the
+    /// async pipeline construction is still in flight (the pane was
+    /// seeded eagerly so the user gets visual feedback).
+    #[cfg(feature = "session_chart")]
+    fn view_session_chart_body(&self, sc_id: midas_core::SessionChartId) -> Element<'_, Message> {
+        match self.session_chart_panels.get(&sc_id) {
+            Some(panel) => panel.view(sc_id),
+            None => container(text("Loading session chart…").size(14))
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .into(),
+        }
+    }
+
     fn view_placeholder_pane(
         &self,
         window_key: &midas_core::WindowKey,

@@ -244,6 +244,17 @@ impl MidasApp {
                             // an empty `layout_tree`, which `restore_*`
                             // re-synthesises into a placeholder).
                         }
+                        #[cfg(feature = "session_chart")]
+                        PanelContent::SessionChart(_) => {
+                            // Slice F2: session-chart panes are
+                            // session-scoped — they hold a live driver
+                            // task + tick subscription that doesn't
+                            // round-trip through TOML. Treat them like
+                            // a placeholder for persistence purposes;
+                            // the user reopens the chart from the
+                            // toolbar after restart, mirroring the
+                            // legacy floating-window behaviour.
+                        }
                     }
                 }
             }
