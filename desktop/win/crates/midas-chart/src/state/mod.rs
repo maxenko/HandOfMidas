@@ -172,6 +172,11 @@ pub struct ChartState {
     pub volume_scale: f32,
     /// Whether the Volume Profile overlay is visible.
     pub show_volume_profile: bool,
+    /// Per-chart Volume Profile settings (anchor mode + width).
+    /// Persisted on `ChartConfig`; mutated through the gear popup.
+    /// `Anchor::Viewport` (the default) reproduces pre-feature
+    /// single-histogram rendering. See `plan/volume-profile-anchored/`.
+    pub volume_profile: midas_core::VolumeProfileSettings,
     /// Whether horizontal price levels are visible.
     pub show_levels: bool,
     /// Self-contained level tool state machine (Phase 2+).
@@ -214,6 +219,7 @@ impl ChartState {
             timeline_border_ratio: 0.20,
             volume_scale: 1.0,
             show_volume_profile: false,
+            volume_profile: midas_core::VolumeProfileSettings::default(),
             show_levels: true,
             level_tool: LevelTool::default(),
             bracket_tool: BracketTool::default(),

@@ -20,6 +20,7 @@ mod subscription_stream;
 mod ticker_subscription;
 mod ticker_wiring;
 mod views;
+mod vp_popup;
 mod watchlist_subscription;
 
 #[cfg(feature = "dev_harness")]
@@ -396,6 +397,32 @@ pub enum ChartHandle {
     Floating(window::Id),
 }
 
+// ── Volume Profile kill-switch helper ─────────────────────────────────
+
+/// Compute the effective Volume Profile anchor for one chart frame,
+/// applying the global kill-switch `experimental.disable_anchored_vp`.
+///
+/// `midas-chart` and `midas-scene` are leaf crates and cannot reach
+/// `AppConfig` (Architecture Rule 9). The override therefore lives in
+/// `midas-app` — both the legacy chart-snapshot builder and the new
+/// `session_chart::scene_builder` call this helper when assembling
+/// per-frame inputs. When the kill-switch is on, every chart renders
+/// `Viewport` regardless of its persisted per-chart `volume_profile.anchor`;
+/// the on-disk choice is preserved (no data loss).
+///
+/// See `plan/volume-profile-anchored/00-index.md` D15.
+#[inline]
+pub(crate) fn effective_vp_anchor(
+    flags: &midas_core::config::ExperimentalFlags,
+    chart_anchor: midas_core::VolumeProfileAnchor,
+) -> midas_core::VolumeProfileAnchor {
+    if flags.disable_anchored_vp {
+        midas_core::VolumeProfileAnchor::Viewport
+    } else {
+        chart_anchor
+    }
+}
+
 // ── Application state ─────────────────────────────────────────────────
 
 /// Top-level application state. Owns all chart panels and layout.
@@ -460,6 +487,11 @@ pub struct MidasApp {
     pub dragging_ticker: Option<DragTickerState>,
     /// Which link picker dropdown is currently open, if any.
     pub link_picker_open: Option<(PickerTarget, LinkDimension)>,
+    /// Slice 4 (VP-anchored): which chart panel's Volume Profile
+    /// settings popup is open, if any. Only one VP popup may be open
+    /// at a time — opening on chart B closes chart A's popup. Cleared
+    /// on pane close + on `ToggleVolumeProfile` flipping VP off.
+    pub vp_settings_open: Option<ChartId>,
     /// Active column resize drag, unified across all grid surfaces
     /// (Watchlist, Account Orders/History/Recents). The `target` field
     /// routes grid-state lookup in `handle_column_resize`.
@@ -566,6 +598,13 @@ pub struct MidasApp {
     /// keep the struct alive so `to_config` writes the same value
     /// back and hand-edited TOML survives `cargo run` cycles.
     pub broker_cfg: midas_core::config::BrokerConnectionConfig,
+    /// Round-tripped `[experimental]` flags from `config.toml`. Read
+    /// once on startup, written back unchanged on save (no UI mutates
+    /// them today). The anchored-VP kill-switch
+    /// (`experimental.disable_anchored_vp`) is consulted at the legacy
+    /// (`chart_render_snapshot_for`) and new-stack
+    /// (`session_chart::scene_builder`) assembly sites.
+    pub experimental: midas_core::config::ExperimentalFlags,
     // ── Router refactor (S7) ──────────────────────────────────────
     /// Market-data router. `None` while an IB connection is still
     /// being set up (NB-4 / NB-5); every subscription closure guards
@@ -751,6 +790,18 @@ pub enum Message {
     ToggleCollapseGaps(ChartId),
     /// Toggle Volume Profile overlay on a chart panel.
     ToggleVolumeProfile(ChartId),
+    /// Slice 4 (VP-anchored): toggle the per-chart Volume Profile
+    /// settings popup. Sending the same chart twice closes the popup;
+    /// sending a different chart switches focus.
+    ToggleVpSettingsPanel(ChartId),
+    /// Slice 4: dismiss the VP popup (backdrop click).
+    DismissVpSettingsPanel,
+    /// Slice 4: per-knob anchor change. Mutates `volume_profile.anchor`
+    /// then calls `sanitized()`, marks dirty + config dirty.
+    UpdateVpAnchor(ChartId, midas_core::VolumeProfileAnchor),
+    /// Slice 4: per-knob width-fraction slider change. Carries the raw
+    /// value; the handler clamps to `[0.05, 1.0]` via `sanitized()`.
+    UpdateVpWidthFraction(ChartId, f32),
     /// Toggle horizontal price level visibility on a chart panel.
     ToggleLevels(ChartId),
     /// Reset chart to default view (fit all data).
@@ -1558,6 +1609,17 @@ impl MidasApp {
             timeline_border_ratio: chart.chart_state.timeline_border_ratio,
             volume_scale: chart.chart_state.volume_scale,
             show_volume_profile: chart.chart_state.show_volume_profile,
+            volume_profile: chart.chart_state.volume_profile.clone(),
+            // D15 kill-switch enforcement (legacy stack assembly site).
+            // `midas-chart` is a leaf crate and cannot read `AppConfig`
+            // (Architecture Rule 9); `effective_vp_anchor` collapses
+            // both inputs into the per-frame value the render path
+            // actually consumes. The new stack's parallel enforcement
+            // lives in `session_chart::scene_builder`.
+            effective_vp_anchor: effective_vp_anchor(
+                &self.experimental,
+                chart.chart_state.volume_profile.anchor,
+            ),
             show_levels: chart.chart_state.show_levels,
             data_time_start: chart.chart_state.data_time_start,
             data_time_end: chart.chart_state.data_time_end,
@@ -1778,11 +1840,19 @@ impl MidasApp {
     ) -> crate::view_models::chart_pane::ChartPaneTitleBarVm {
         use crate::view_models::chart_pane::ChartPaneTitleBarVm;
         let chart = self.charts.get(&chart_id);
+        let timeframe = chart
+            .map(|c| c.timeframe)
+            .unwrap_or(midas_core::Timeframe::D1);
+        let volume_profile = chart
+            .map(|c| c.chart_state.volume_profile.clone())
+            .unwrap_or_default();
+        let vp_timeframe_blocks_anchor = midas_chart::volume_profile::timeframe_blocks_anchor(
+            timeframe.as_secs() as u64,
+            volume_profile.anchor,
+        );
         ChartPaneTitleBarVm {
             symbol_input: chart.map(|c| c.symbol_input.clone()).unwrap_or_default(),
-            timeframe: chart
-                .map(|c| c.timeframe)
-                .unwrap_or(midas_core::Timeframe::D1),
+            timeframe,
             collapse_gaps: chart.map(|c| c.chart_state.collapse_gaps).unwrap_or(false),
             show_volume_profile: chart
                 .map(|c| c.chart_state.show_volume_profile)
@@ -1797,6 +1867,9 @@ impl MidasApp {
             backend: chart
                 .map(|c| c.backend)
                 .unwrap_or(midas_core::ChartBackend::Legacy),
+            volume_profile,
+            vp_timeframe_blocks_anchor,
+            vp_settings_open: self.vp_settings_open == Some(chart_id),
         }
     }
 
@@ -2361,6 +2434,7 @@ impl MidasApp {
             pending_drag: None,
             dragging_ticker: None,
             link_picker_open: None,
+            vp_settings_open: None,
             resizing_column: None,
             account_column_selector_open: None,
             order_panels: restored_order_panels,
@@ -2406,6 +2480,7 @@ impl MidasApp {
             ticker_dispatch_active: false,
             sim_child: None,
             broker_cfg: config.broker.clone(),
+            experimental: config.experimental.clone(),
             router,
             router_order_client,
             resync_throttle: std::collections::HashMap::new(),
@@ -2924,6 +2999,11 @@ impl MidasApp {
         panel.chart_state.timeline_border_ratio = chart_cfg.timeline_border_ratio;
         panel.chart_state.volume_scale = chart_cfg.volume_scale;
         panel.chart_state.show_volume_profile = chart_cfg.show_volume_profile;
+        // VP settings restore through `sanitized()` so a hand-edited
+        // out-of-range value (e.g. `width_fraction = 5.0`) is clamped
+        // before the render path ever sees it. Symmetric with the
+        // `sanitized()` call inside `build_config`.
+        panel.chart_state.volume_profile = chart_cfg.volume_profile.sanitized();
         panel.chart_state.show_levels = chart_cfg.show_levels;
         // Restore viewport so the first-frame ChartViewportChanged computes
         // the correct ratio (saved viewport → actual pane size) instead of
@@ -4038,6 +4118,10 @@ impl MidasApp {
             | Message::DrawingPanelCreateLevel(..)
             | Message::ToggleCollapseGaps(..)
             | Message::ToggleVolumeProfile(..)
+            | Message::ToggleVpSettingsPanel(..)
+            | Message::DismissVpSettingsPanel
+            | Message::UpdateVpAnchor(..)
+            | Message::UpdateVpWidthFraction(..)
             | Message::ToggleLevels(..)
             | Message::ResetChart(..)
             | Message::ToggleChartBackend(..)
@@ -4655,6 +4739,104 @@ mod backend_toggle_tests {
         assert_eq!(backend, ChartBackend::New);
     }
 
+    // ── VP-anchored Slice 1 test #5b: kill-switch enforcement ────────
+    //
+    // The full snapshot path requires a live `MidasApp` with a router
+    // / persistence handles / etc. — too much for a unit test.
+    // `effective_vp_anchor` is the single hot-spot the snapshot
+    // builder funnels every per-chart frame through; the test pins
+    // its semantics directly.
+
+    /// `disable_anchored_vp = true` forces every per-chart anchor to
+    /// `Viewport`, regardless of the user's persisted selection. The
+    /// per-chart settings on disk are NOT mutated by this — toggling
+    /// the flag back off restores the user's choice.
+    #[test]
+    fn kill_switch_overrides_chart_input_anchor() {
+        use midas_core::config::ExperimentalFlags;
+        use midas_core::VolumeProfileAnchor;
+
+        let kill_on = ExperimentalFlags {
+            disable_anchored_vp: true,
+        };
+        let kill_off = ExperimentalFlags {
+            disable_anchored_vp: false,
+        };
+
+        // Kill-switch on: every variant collapses to Viewport.
+        for input in [
+            VolumeProfileAnchor::Viewport,
+            VolumeProfileAnchor::Daily,
+            VolumeProfileAnchor::Weekly,
+            VolumeProfileAnchor::Monthly,
+            VolumeProfileAnchor::Yearly,
+            VolumeProfileAnchor::Unknown,
+        ] {
+            assert_eq!(
+                super::effective_vp_anchor(&kill_on, input),
+                VolumeProfileAnchor::Viewport,
+                "kill-switch on with input {input:?} should force Viewport",
+            );
+        }
+
+        // Kill-switch off: passthrough.
+        for input in [
+            VolumeProfileAnchor::Viewport,
+            VolumeProfileAnchor::Daily,
+            VolumeProfileAnchor::Weekly,
+            VolumeProfileAnchor::Monthly,
+            VolumeProfileAnchor::Yearly,
+            VolumeProfileAnchor::Unknown,
+        ] {
+            assert_eq!(
+                super::effective_vp_anchor(&kill_off, input),
+                input,
+                "kill-switch off should pass {input:?} through unchanged",
+            );
+        }
+    }
+
+    /// Slice 3 (VP-anchored) test #15: the new-stack scene-builder
+    /// pipeline (kill-switch → bridge) collapses every per-chart
+    /// anchor to `midas_scene::VolumeProfileAnchor::Viewport` when
+    /// `experimental.disable_anchored_vp = true`. Asserts the full
+    /// path that feeds `VolumeProfileConfig` for `build_scene`.
+    #[test]
+    #[cfg(feature = "session_chart")]
+    fn kill_switch_forces_viewport_in_scene_builder() {
+        use crate::session_chart::scene_builder::vp_anchor_core_to_scene;
+        use midas_core::config::ExperimentalFlags;
+        use midas_core::VolumeProfileAnchor;
+
+        let kill_on = ExperimentalFlags {
+            disable_anchored_vp: true,
+        };
+        for input in [
+            VolumeProfileAnchor::Daily,
+            VolumeProfileAnchor::Weekly,
+            VolumeProfileAnchor::Monthly,
+            VolumeProfileAnchor::Yearly,
+            VolumeProfileAnchor::Unknown,
+        ] {
+            let core_resolved = super::effective_vp_anchor(&kill_on, input);
+            let scene_resolved = vp_anchor_core_to_scene(core_resolved);
+            assert_eq!(
+                scene_resolved,
+                midas_scene::VolumeProfileAnchor::Viewport,
+                "kill-switch on with {input:?} must collapse to Viewport for the scene"
+            );
+        }
+
+        // Kill-switch off: per-chart Daily flows through to scene-side
+        // Daily — proves the bridge is identity in the steady state.
+        let kill_off = ExperimentalFlags {
+            disable_anchored_vp: false,
+        };
+        let core_resolved = super::effective_vp_anchor(&kill_off, VolumeProfileAnchor::Daily);
+        let scene_resolved = vp_anchor_core_to_scene(core_resolved);
+        assert_eq!(scene_resolved, midas_scene::VolumeProfileAnchor::Daily);
+    }
+
     /// Persisted selection restores on reload — `restore_panel`
     /// propagates `ChartConfig::backend` into `ChartPanel::backend`.
     #[test]
@@ -4680,6 +4862,7 @@ mod backend_toggle_tests {
             backend: Some(ChartBackend::New),
             show_extended_hours: true,
             show_extended_hours_bands: true,
+            volume_profile: midas_core::VolumeProfileSettings::default(),
         };
         let panel = MidasApp::restore_panel(&cfg);
         assert_eq!(panel.backend, ChartBackend::New);
@@ -4710,6 +4893,7 @@ mod backend_toggle_tests {
             backend: None,
             show_extended_hours: true,
             show_extended_hours_bands: true,
+            volume_profile: midas_core::VolumeProfileSettings::default(),
         };
         let panel = MidasApp::restore_panel(&cfg);
         assert_eq!(panel.backend, ChartBackend::Legacy);

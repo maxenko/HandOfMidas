@@ -139,6 +139,11 @@ tempfile = "3"
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
+# IANA timezone DB. Pinned to match the per-crate `0.10` pins in the
+# root workspace (midas-axis / midas-calendar / midas-scene). Used by
+# the legacy VP boundary helper (Slice 2) to compute calendar-day
+# rollovers in the chart's exchange timezone.
+chrono-tz = "0.10"
 
 # Identity
 uuid = { version = "1", features = ["v7", "serde"] }

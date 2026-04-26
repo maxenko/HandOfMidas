@@ -303,6 +303,55 @@ pub fn handle_command(
             }
         },
 
+        Command::SetVpSettings {
+            chart_id,
+            settings_json,
+        } => {
+            // Try to parse the opaque JSON into the typed settings
+            // struct. A bad payload returns an Internal error and
+            // leaves state untouched.
+            let settings: midas_core::VolumeProfileSettings =
+                match serde_json::from_value(settings_json) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        responder.err(
+                            ErrorKind::Internal,
+                            format!("SetVpSettings: malformed payload: {e}"),
+                            cursor_now(),
+                        );
+                        return iced::Task::none();
+                    }
+                };
+            let id = midas_core::ChartId::new(chart_id as u32);
+            let updated = if let Some(chart) = app.charts.get_mut(&id) {
+                chart.chart_state.volume_profile = settings.sanitized();
+                chart.chart_state.dirty.mark_data();
+                Some(chart.chart_state.volume_profile.anchor)
+            } else {
+                None
+            };
+            match updated {
+                Some(anchor) => {
+                    app.mark_config_dirty();
+                    responder.ok(
+                        serde_json::json!({
+                            "chart_id": chart_id,
+                            "anchor": format!("{anchor:?}"),
+                        }),
+                        cursor_now(),
+                    );
+                }
+                None => {
+                    responder.err(
+                        ErrorKind::Internal,
+                        format!("SetVpSettings: chart {chart_id} not found"),
+                        cursor_now(),
+                    );
+                }
+            }
+            iced::Task::none()
+        }
+
         Command::InjectMarketEvent { event_json } => match router_inject::apply(app, &event_json) {
             Ok(variant) => {
                 responder.ok(serde_json::json!({ "variant": variant }), cursor_now());

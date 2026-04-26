@@ -148,6 +148,10 @@ impl MidasApp {
             // newer stamp than it understands logs a warning and
             // falls back to the v1 reader path.
             chart_view_store_schema: self.chart_views.schema_version(),
+            // Round-trip the kill-switch / experimental flags. No UI
+            // mutates them at runtime; the round-trip is here so a
+            // hand-edited TOML survives `cargo run` cycles.
+            experimental: self.experimental.clone(),
         }
     }
 
@@ -218,6 +222,7 @@ impl MidasApp {
                                     },
                                     show_extended_hours: panel.show_extended_hours,
                                     show_extended_hours_bands: panel.show_extended_hours_bands,
+                                    volume_profile: panel.chart_state.volume_profile.sanitized(),
                                 });
                                 tree.push(LayoutNode::Chart { chart_index: idx });
                             }

@@ -715,14 +715,50 @@ impl MidasApp {
         };
 
         let vp_active = vm.show_volume_profile;
+        // D13: drop the anchor suffix only when D12 fallback fires
+        // (timeframe coarser than anchor). The toolbar reflects what's
+        // effectively rendered, not what the popup radio shows. The
+        // popup remains source of truth for the selected anchor; an
+        // info note inside explains the discrepancy.
+        // S6 P6: collapse_gaps is no longer a fallback condition — the
+        // legacy compute branch now honours `collapse_gaps` via
+        // `left_x_for_candle`, so per-period anchoring works in both
+        // axis modes.
+        let vp_fallback_active = vm.vp_timeframe_blocks_anchor;
+        let vp_label: &'static str = if vp_fallback_active {
+            "VP"
+        } else {
+            match vm.volume_profile.anchor {
+                midas_core::VolumeProfileAnchor::Viewport
+                | midas_core::VolumeProfileAnchor::Unknown => "VP",
+                midas_core::VolumeProfileAnchor::Daily => "VP·D",
+                midas_core::VolumeProfileAnchor::Weekly => "VP·W",
+                midas_core::VolumeProfileAnchor::Monthly => "VP·M",
+                midas_core::VolumeProfileAnchor::Yearly => "VP·Y",
+            }
+        };
         let vp_btn = if vp_active {
-            button(text("VP").size(10).color(Color::WHITE))
+            button(text(vp_label).size(10).color(Color::WHITE))
                 .on_press(Message::ToggleVolumeProfile(chart_id))
                 .padding([1, 4])
                 .style(button::primary)
         } else {
-            button(text("VP").size(10))
+            button(text(vp_label).size(10))
                 .on_press(Message::ToggleVolumeProfile(chart_id))
+                .padding([1, 4])
+                .style(button::text)
+        };
+
+        // VP settings gear (⋮ U+22EE per plan; ⚙ renders inconsistently
+        // at small sizes on Windows 11 in this iced font).
+        let vp_settings_btn = if vm.vp_settings_open {
+            button(text("⋮").size(12).color(Color::WHITE))
+                .on_press(Message::ToggleVpSettingsPanel(chart_id))
+                .padding([1, 4])
+                .style(button::primary)
+        } else {
+            button(text("⋮").size(12))
+                .on_press(Message::ToggleVpSettingsPanel(chart_id))
                 .padding([1, 4])
                 .style(button::text)
         };
@@ -766,6 +802,7 @@ impl MidasApp {
             tf_row,
             collapse_btn,
             vp_btn,
+            vp_settings_btn,
             levels_btn,
             reset_btn,
             backend_btn,
@@ -948,6 +985,26 @@ impl MidasApp {
                         .align_x(iced::alignment::Horizontal::Right)
                         .align_y(iced::alignment::Vertical::Top)
                         .padding([4, 4])
+                        .width(Fill)
+                        .height(Fill)
+                        .into(),
+                );
+            }
+
+            if self.vp_settings_open == Some(chart_id) {
+                // Backdrop to dismiss popup on click outside.
+                chart_layers.push(
+                    iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
+                        .on_press(Message::DismissVpSettingsPanel)
+                        .into(),
+                );
+                let panel =
+                    self.build_vp_settings_panel(chart_id, &chart.chart_state, chart.timeframe);
+                chart_layers.push(
+                    container(panel)
+                        .align_x(iced::alignment::Horizontal::Right)
+                        .align_y(iced::alignment::Vertical::Top)
+                        .padding([28, 4])
                         .width(Fill)
                         .height(Fill)
                         .into(),
@@ -1188,6 +1245,97 @@ impl MidasApp {
                 ..Default::default()
             })
             .padding(4)
+            .into()
+    }
+
+    /// Build the Volume Profile settings popup panel for `chart_id`.
+    /// 5 anchor rows + width slider + conditional fallback notes; the
+    /// container styling matches `build_link_picker` so both popups
+    /// look the same in the chart-area stack.
+    fn build_vp_settings_panel(
+        &self,
+        chart_id: ChartId,
+        chart_state: &midas_chart::state::ChartState,
+        timeframe: Timeframe,
+    ) -> Element<'_, Message> {
+        use iced::widget::slider;
+        use midas_core::VolumeProfileAnchor;
+
+        let current = &chart_state.volume_profile;
+        let timeframe_blocks = midas_chart::volume_profile::timeframe_blocks_anchor(
+            timeframe.as_secs() as u64,
+            current.anchor,
+        );
+
+        let header = text("Volume Profile").size(12).color(theme::TEXT_PRIMARY);
+        let anchor_label = text("Anchor").size(10).color(theme::TEXT_SECONDARY);
+
+        let mut items: Vec<Element<'_, Message>> = Vec::with_capacity(10);
+        items.push(header.into());
+        items.push(anchor_label.into());
+
+        for (label, value) in [
+            ("Viewport", VolumeProfileAnchor::Viewport),
+            ("Daily", VolumeProfileAnchor::Daily),
+            ("Weekly", VolumeProfileAnchor::Weekly),
+            ("Monthly", VolumeProfileAnchor::Monthly),
+            ("Yearly", VolumeProfileAnchor::Yearly),
+        ] {
+            let selected = current.anchor == value;
+            let bullet = if selected { "●" } else { "○" };
+            let row_text = text(format!("{bullet} {label}")).size(12);
+            let btn = if selected {
+                button(row_text.color(Color::WHITE))
+                    .on_press(Message::UpdateVpAnchor(chart_id, value))
+                    .padding([4, 8])
+                    .width(Fill)
+                    .style(button::primary)
+            } else {
+                button(row_text)
+                    .on_press(Message::UpdateVpAnchor(chart_id, value))
+                    .padding([4, 8])
+                    .width(Fill)
+                    .style(button::text)
+            };
+            items.push(btn.into());
+        }
+
+        // Width section.
+        let width_label = text(format!("Width  {:.0}%", current.width_fraction * 100.0))
+            .size(10)
+            .color(theme::TEXT_SECONDARY);
+        items.push(width_label.into());
+        let width_slider = slider(0.05..=1.0, current.width_fraction, move |v| {
+            Message::UpdateVpWidthFraction(chart_id, v)
+        })
+        .step(0.05f32);
+        items.push(width_slider.into());
+
+        // Conditional notes — plain text with leading ⓘ glyph; the
+        // codebase has zero italic precedent (Recon-verified), so we
+        // use TEXT_MUTED instead of font::Style::Italic.
+        // S6 P6: the gap-collapse note is gone — anchored mode now
+        // works in both axis modes via `left_x_for_candle`.
+        if timeframe_blocks {
+            items.push(
+                text("ⓘ Anchor too fine for current timeframe.")
+                    .size(10)
+                    .color(theme::TEXT_MUTED)
+                    .into(),
+            );
+        }
+
+        container(column(items).spacing(2).width(180))
+            .style(|_| container::Style {
+                background: Some(Color::from_rgb(0.15, 0.15, 0.18).into()),
+                border: iced::Border {
+                    color: Color::from_rgb(0.3, 0.3, 0.35),
+                    width: 1.0,
+                    radius: 4.0.into(),
+                },
+                ..Default::default()
+            })
+            .padding(8)
             .into()
     }
 }

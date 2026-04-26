@@ -30,6 +30,11 @@ credentials.json
 # ── Runtime data ───────────────────────────────────────────────────
 **/data/
 *.candles
+# Screenshot reference images live under tests/data/screenshots/ and
+# MUST be tracked (committed PNGs gate the devloop visual harnesses).
+!**/tests/data/
+!**/tests/data/screenshots/
+!**/tests/data/screenshots/**
 
 # ── SQLite databases ──────────────────────────────────────────────
 *.db

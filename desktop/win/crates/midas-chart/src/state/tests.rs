@@ -24,6 +24,23 @@ fn new_state_has_defaults() {
     assert_eq!(state.dirty, DirtyFlags::new());
 }
 
+/// VP-anchored S1 test #5 — `ChartState::new` initialises
+/// `volume_profile` to the default settings (Anchor::Viewport).
+/// Pre-feature configs with `show_volume_profile = true` and no
+/// `volume_profile` table on disk render exactly as before.
+#[test]
+fn chart_state_new_initialises_volume_profile_default() {
+    let state = ChartState::new(test_camera());
+    assert_eq!(
+        state.volume_profile,
+        midas_core::VolumeProfileSettings::default()
+    );
+    assert_eq!(
+        state.volume_profile.anchor,
+        midas_core::VolumeProfileAnchor::Viewport
+    );
+}
+
 #[test]
 fn state_is_clone_and_debug() {
     let state = ChartState::new(test_camera());

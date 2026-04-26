@@ -140,6 +140,37 @@ pub struct AppConfig {
     /// Slice 9c bumps this to `3` when the v1 writes retire.
     #[serde(default)]
     pub chart_view_store_schema: u32,
+    /// Experimental flags. Reserved for risk mitigation — a single
+    /// config edit can revert behaviour without a binary rollback.
+    /// See [`ExperimentalFlags`] for the list of toggles.
+    #[serde(default)]
+    pub experimental: ExperimentalFlags,
+}
+
+/// Experimental / kill-switch flags. Each field is a single toggle that
+/// flips a feature back to its pre-feature behaviour without a binary
+/// rollback. Default values match the user-visible pre-feature state,
+/// so an existing config without `[experimental]` loads unchanged.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ExperimentalFlags {
+    /// Anchored Volume Profile global kill-switch. When `true`, both
+    /// chart backends force `Anchor = Viewport` regardless of any
+    /// per-chart `volume_profile.anchor`. Per-chart settings on disk
+    /// are preserved, so toggling this flag off restores the user's
+    /// choices.
+    ///
+    /// The override is enforced at the two `midas-app` assembly sites
+    /// that already see both `AppConfig` and per-chart state:
+    /// - Legacy stack: `ChartInput.effective_vp_anchor` is set to
+    ///   `Viewport` when this flag is `true`.
+    /// - New stack: `session_chart::scene_builder` computes the
+    ///   effective scene anchor with the same conditional and passes
+    ///   it into `VolumeProfileLayer`.
+    ///
+    /// `midas-chart` and `midas-scene` are leaf crates and never read
+    /// `AppConfig` directly (Architecture Rule 9).
+    #[serde(default)]
+    pub disable_anchored_vp: bool,
 }
 
 /// Which chart rendering backend a panel uses.
@@ -283,6 +314,111 @@ pub struct ThemeConfig {
     pub mode: String,
 }
 
+/// Volume Profile anchor mode — how the histogram is segmented.
+///
+/// `Viewport` (default) is the legacy single-histogram mode. The four
+/// per-period modes (`Daily`/`Weekly`/`Monthly`/`Yearly`) split the
+/// visible range into one profile per calendar period, left-anchored
+/// at each period's first candle. See `plan/volume-profile-anchored/`
+/// for the full design.
+///
+/// **Duplicated by design** — a parallel render-time copy lives in
+/// `midas_scene::VolumeProfileAnchor` (no serde). Architecture Rule 9
+/// forbids the root crate `midas-scene` depending on this desktop
+/// crate; the `From`/`Into` bridge between the two enums lives in
+/// `midas-app`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum VolumeProfileAnchor {
+    /// Single histogram across the entire visible viewport. Matches
+    /// pre-feature behaviour.
+    #[default]
+    Viewport,
+    /// One histogram per calendar day (per the chart's exchange
+    /// timezone — ET for stocks, UTC for crypto on the new stack).
+    Daily,
+    /// One histogram per ISO week (Mon-start).
+    Weekly,
+    /// One histogram per calendar month.
+    Monthly,
+    /// One histogram per calendar year.
+    Yearly,
+    /// Forward-compat sink: a downgraded binary loading a config with
+    /// a future-version anchor falls back here. Render code treats
+    /// `Unknown` exactly like `Viewport`.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Per-chart Volume Profile configuration.
+///
+/// `width_fraction` is the fraction of the period's pixel span the
+/// largest bar consumes (clamped to `[0.05, 1.0]`). The `value_area_*`
+/// fields are reserved for v2 (Slice 6 P4); v1 render code ignores
+/// them. See `plan/volume-profile-anchored/01-slice-1-...md` for the
+/// schema decisions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VolumeProfileSettings {
+    /// Anchor mode — see [`VolumeProfileAnchor`]. Default `Viewport`.
+    #[serde(default)]
+    pub anchor: VolumeProfileAnchor,
+    /// Fraction of period pixel span the largest bar consumes.
+    /// Clamped to `[0.05, 1.0]` by [`Self::sanitized`].
+    #[serde(default = "default_vp_width_fraction")]
+    pub width_fraction: f32,
+    /// RESERVED for v2 (Slice 6 P4 — value-area rendering). Default
+    /// `false`. v1 render code ignores this field; persisted so a
+    /// future-version binary won't drop user state.
+    #[serde(default)]
+    pub show_value_area: bool,
+    /// RESERVED for v2. Volume fraction defining the value area.
+    /// Default `0.70` (TradingView convention). Clamped to
+    /// `[0.10, 0.95]` by [`Self::sanitized`].
+    #[serde(default = "default_vp_value_area_pct")]
+    pub value_area_pct: f32,
+}
+
+fn default_vp_width_fraction() -> f32 {
+    // Per-period histogram width as a fraction of the period's pixel
+    // span. New stack default at
+    // `midas-scene::layers::volume_profile::VolumeProfileConfig::default`
+    // is 0.7; legacy stack matches so anchored bars are visible by
+    // default rather than rendering as 6–13 px slivers (the 0.25
+    // value originally copy-pasted from the legacy single-viewport
+    // 25%-of-viewport-width fraction, which is a different concept).
+    0.7
+}
+
+fn default_vp_value_area_pct() -> f32 {
+    0.70
+}
+
+impl Default for VolumeProfileSettings {
+    fn default() -> Self {
+        Self {
+            anchor: VolumeProfileAnchor::Viewport,
+            width_fraction: default_vp_width_fraction(),
+            show_value_area: false,
+            value_area_pct: default_vp_value_area_pct(),
+        }
+    }
+}
+
+impl VolumeProfileSettings {
+    /// Return a copy with out-of-range float fields clamped to their
+    /// valid ranges. Called both on save (`build_config`) and on load
+    /// (`restore_panel`) — belt & braces — so a malformed manual
+    /// edit doesn't survive even one save→load cycle.
+    pub fn sanitized(&self) -> Self {
+        Self {
+            anchor: self.anchor,
+            width_fraction: self.width_fraction.clamp(0.05, 1.0),
+            show_value_area: self.show_value_area,
+            value_area_pct: self.value_area_pct.clamp(0.10, 0.95),
+        }
+    }
+}
+
 /// Per-chart configuration for session persistence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChartConfig {
@@ -318,6 +454,11 @@ pub struct ChartConfig {
     /// Whether Volume Profile overlay is enabled.
     #[serde(default)]
     pub show_volume_profile: bool,
+    /// Volume Profile settings (anchor mode + render knobs). New in
+    /// the `volume-profile-anchored` plan. Defaults preserve
+    /// pre-feature behaviour: `Viewport` anchor + 0.25 width.
+    #[serde(default)]
+    pub volume_profile: VolumeProfileSettings,
     /// Whether horizontal price levels are visible.
     #[serde(default = "default_true")]
     pub show_levels: bool,
@@ -807,6 +948,7 @@ impl Default for AppConfig {
             providers: None,
             broker: BrokerConnectionConfig::default(),
             chart_view_store_schema: 0,
+            experimental: ExperimentalFlags::default(),
         }
     }
 }

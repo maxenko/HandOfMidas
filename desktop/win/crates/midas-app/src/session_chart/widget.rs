@@ -81,7 +81,9 @@ use midas_scene::tools::{
     BracketTool, ContextMenuAction, LegRole as SceneLegRole, LevelTool, Side as SceneBracketSide,
     ToolEffect,
 };
-use midas_scene::{InteractionState, ScenePrimitives, SharedCandleSeries, ThemePalette};
+use midas_scene::{
+    InteractionState, ScenePrimitives, SharedCandleSeries, ThemePalette, VolumeProfileConfig,
+};
 use parking_lot::{Mutex, RwLock};
 
 use super::axis_box::AxisBox;
@@ -371,6 +373,16 @@ pub struct SessionChart {
     /// queue into this vec. Host code calls
     /// [`drain_level_effects`](Self::drain_level_effects) per frame.
     pending_effects: Vec<ProjectedEffect>,
+    /// Slice 3 of the VP-anchored plan: per-chart Volume Profile.
+    /// `show_volume_profile` enables the layer; `volume_profile_config`
+    /// carries the (already-bridged, kill-switch-resolved) anchor +
+    /// width fraction + max profiles. The host
+    /// (`crate::app::MidasApp`) is responsible for resolving the
+    /// `experimental.disable_anchored_vp` kill-switch and the
+    /// `midas_core ↔ midas_scene` enum bridge BEFORE handing the
+    /// config to [`set_volume_profile`](Self::set_volume_profile).
+    show_volume_profile: bool,
+    volume_profile_config: VolumeProfileConfig,
 }
 
 impl SessionChart {
@@ -415,6 +427,8 @@ impl SessionChart {
             level_host: LevelToolHost::new(),
             bracket_host: BracketToolHost::new(),
             pending_effects: Vec::new(),
+            show_volume_profile: false,
+            volume_profile_config: VolumeProfileConfig::default(),
         })
     }
 
@@ -778,6 +792,10 @@ impl SessionChart {
         // `build_scene` with the right monomorphisation.
         let is_xnys = self.axis.kind() == AxisKind::Compressed;
         let layers = self.layers_for_policy(is_xnys);
+        // VP layer wants the whole visible series range. The widget
+        // doesn't expose a narrower selection today; if S6 lands a
+        // "show only the most-recent N candles" option, plumb it here.
+        let vp_range = 0..self.series.read().len();
         let scene = match &self.axis {
             AxisBox::Continuous(axis) => build_scene(SceneConfig {
                 series: Arc::clone(&self.series),
@@ -790,6 +808,8 @@ impl SessionChart {
                 layers,
                 time_window: self.time_window,
                 series_changed,
+                volume_profile_config: self.volume_profile_config.clone(),
+                volume_profile_range: vp_range.clone(),
             }),
             AxisBox::Compressed(axis) => build_scene(SceneConfig {
                 series: Arc::clone(&self.series),
@@ -802,6 +822,8 @@ impl SessionChart {
                 layers,
                 time_window: self.time_window,
                 series_changed,
+                volume_profile_config: self.volume_profile_config.clone(),
+                volume_profile_range: vp_range,
             }),
         }
         .expect("build_scene with canonical inputs");
@@ -814,7 +836,30 @@ impl SessionChart {
     /// unit tests that want to assert the layer config separately
     /// from the paint step.
     pub fn layers_for_policy(&self, is_xnys: bool) -> SceneLayers {
-        SceneLayers::from_eh_policy(self.eh_policy, is_xnys)
+        let mut layers = SceneLayers::from_eh_policy(self.eh_policy, is_xnys);
+        layers.volume_profile = self.show_volume_profile;
+        layers
+    }
+
+    /// Slice 3 (VP-anchored): toggle the Volume Profile layer on/off
+    /// and replace its config in one call. Host responsibility:
+    /// resolve `experimental.disable_anchored_vp` and the
+    /// `midas_core::VolumeProfileAnchor → midas_scene::VolumeProfileAnchor`
+    /// bridge BEFORE calling.
+    pub fn set_volume_profile(&mut self, show: bool, config: VolumeProfileConfig) {
+        self.show_volume_profile = show;
+        self.volume_profile_config = config;
+    }
+
+    /// Read-only view of the current VP config — exposed for tests
+    /// that want to assert the host's resolution outcome.
+    pub fn volume_profile_config(&self) -> &VolumeProfileConfig {
+        &self.volume_profile_config
+    }
+
+    /// Read-only view of the show-VP flag.
+    pub fn show_volume_profile(&self) -> bool {
+        self.show_volume_profile
     }
 
     // ── Slice 4 chart-transition: level tool + effect drain ─────────

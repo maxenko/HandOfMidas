@@ -153,6 +153,7 @@ fn save_load_roundtrip_preserves_all_fields() {
             backend: None,
             show_extended_hours: true,
             show_extended_hours_bands: true,
+            volume_profile: VolumeProfileSettings::default(),
         }],
         levels: msft_levels,
         watchlists: Vec::new(),
@@ -166,6 +167,7 @@ fn save_load_roundtrip_preserves_all_fields() {
         providers: None,
         broker: BrokerConnectionConfig::default(),
         chart_view_store_schema: 0,
+        experimental: ExperimentalFlags::default(),
     };
 
     config.save(&path).expect("save config");
@@ -301,6 +303,7 @@ fn chart_config_with_levels_survives_roundtrip() {
                 backend: None,
                 show_extended_hours: true,
                 show_extended_hours_bands: true,
+                volume_profile: VolumeProfileSettings::default(),
             },
             ChartConfig {
                 symbol: "TSLA".into(),
@@ -323,6 +326,7 @@ fn chart_config_with_levels_survives_roundtrip() {
                 backend: None,
                 show_extended_hours: true,
                 show_extended_hours_bands: true,
+                volume_profile: VolumeProfileSettings::default(),
             },
         ],
         levels: aapl_levels,
@@ -337,6 +341,7 @@ fn chart_config_with_levels_survives_roundtrip() {
         providers: None,
         broker: BrokerConnectionConfig::default(),
         chart_view_store_schema: 0,
+        experimental: ExperimentalFlags::default(),
     };
 
     config.save(&path).expect("save config");
@@ -511,6 +516,7 @@ fn atomic_write_does_not_corrupt_on_success() {
             backend: None,
             show_extended_hours: true,
             show_extended_hours_bands: true,
+            volume_profile: VolumeProfileSettings::default(),
         }],
         levels: HashMap::new(),
         watchlists: Vec::new(),
@@ -524,6 +530,7 @@ fn atomic_write_does_not_corrupt_on_success() {
         providers: None,
         broker: BrokerConnectionConfig::default(),
         chart_view_store_schema: 0,
+        experimental: ExperimentalFlags::default(),
     };
 
     // Write multiple times to ensure atomic replacement works.
@@ -617,6 +624,7 @@ fn roundtrip_with_camera_and_collapse_gaps_and_line_width() {
                 backend: None,
                 show_extended_hours: true,
                 show_extended_hours_bands: true,
+                volume_profile: VolumeProfileSettings::default(),
             },
             ChartConfig {
                 symbol: "QQQ".into(),
@@ -639,6 +647,7 @@ fn roundtrip_with_camera_and_collapse_gaps_and_line_width() {
                 backend: None,
                 show_extended_hours: true,
                 show_extended_hours_bands: true,
+                volume_profile: VolumeProfileSettings::default(),
             },
         ],
         levels: spy_levels,
@@ -653,6 +662,7 @@ fn roundtrip_with_camera_and_collapse_gaps_and_line_width() {
         providers: None,
         broker: BrokerConnectionConfig::default(),
         chart_view_store_schema: 0,
+        experimental: ExperimentalFlags::default(),
     };
 
     config.save(&path).expect("save full config");
@@ -865,6 +875,7 @@ fn chart_config_levels_not_serialized() {
             backend: None,
             show_extended_hours: true,
             show_extended_hours_bands: true,
+            volume_profile: VolumeProfileSettings::default(),
         }],
         ..Default::default()
     };
@@ -986,6 +997,7 @@ fn non_default_link_modes_roundtrip() {
             backend: None,
             show_extended_hours: true,
             show_extended_hours_bands: true,
+            volume_profile: VolumeProfileSettings::default(),
         }],
         ..Default::default()
     };
@@ -1235,6 +1247,7 @@ fn chart_backend_serializes_lowercase() {
         backend: Some(ChartBackend::Legacy),
         show_extended_hours: true,
         show_extended_hours_bands: true,
+        volume_profile: VolumeProfileSettings::default(),
     };
     let toml_str = toml::to_string_pretty(&cfg).expect("serialize legacy");
     assert!(toml_str.contains("backend = \"legacy\""), "got: {toml_str}");
@@ -1315,10 +1328,205 @@ fn chart_backend_roundtrip_new() {
         backend: Some(ChartBackend::New),
         show_extended_hours: true,
         show_extended_hours_bands: true,
+        volume_profile: VolumeProfileSettings::default(),
     };
     let toml_str = toml::to_string_pretty(&cfg).expect("serialize");
     let restored: ChartConfig = toml::from_str(&toml_str).expect("deserialize");
     assert_eq!(restored.backend, Some(ChartBackend::New));
+}
+
+// ── VP-anchored Slice 1: schema + kill-switch tests ──────────────────
+
+/// Test #1 — every new `volume_profile` field round-trips through
+/// save → load. Models the existing
+/// `save_load_roundtrip_preserves_all_fields` style: per-field hand
+/// asserts, no `..Default::default()`, so a future field rename
+/// surfaces as a compile error rather than a silent miss.
+#[test]
+fn vp_settings_roundtrip_preserves_all_fields() {
+    let dir = temp_dir();
+    let path = dir.join("vp_roundtrip.toml");
+
+    let cfg = AppConfig {
+        charts: vec![ChartConfig {
+            symbol: "AAPL".into(),
+            timeframe: "5m".into(),
+            levels: vec![],
+            camera_time_start: None,
+            camera_time_end: None,
+            camera_price_low: None,
+            camera_price_high: None,
+            collapse_gaps: false,
+            timeline_border_ratio: 0.20,
+            volume_scale: 1.0,
+            show_volume_profile: true,
+            show_levels: true,
+            viewport_width: None,
+            viewport_height: None,
+            symbol_link: LinkMode::default(),
+            timeframe_link: LinkMode::default(),
+            bound_symbol: None,
+            backend: None,
+            show_extended_hours: true,
+            show_extended_hours_bands: true,
+            volume_profile: VolumeProfileSettings {
+                anchor: VolumeProfileAnchor::Daily,
+                width_fraction: 0.65,
+                show_value_area: true,
+                value_area_pct: 0.68,
+            },
+        }],
+        ..Default::default()
+    };
+    cfg.save(&path).expect("save");
+    let loaded = AppConfig::load(&path).expect("load");
+
+    let vp = &loaded.charts[0].volume_profile;
+    assert_eq!(vp.anchor, VolumeProfileAnchor::Daily);
+    assert!((vp.width_fraction - 0.65).abs() < f32::EPSILON);
+    assert!(vp.show_value_area);
+    assert!((vp.value_area_pct - 0.68).abs() < f32::EPSILON);
+
+    cleanup(&dir);
+}
+
+/// Test #2 — pre-feature TOML (no `[volume_profile]` table) loads
+/// with default settings. Critical regression guard: the
+/// serde-defaults pipe is the only thing keeping users on existing
+/// configs from crashing.
+#[test]
+fn vp_settings_legacy_config_loads_with_defaults() {
+    let dir = temp_dir();
+    let path = dir.join("vp_legacy.toml");
+    std::fs::write(
+        &path,
+        r#"
+[window]
+width = 1280
+height = 800
+
+[theme]
+mode = "dark"
+
+[[charts]]
+symbol = "AAPL"
+timeframe = "1D"
+show_volume_profile = true
+"#,
+    )
+    .expect("write legacy config");
+    let cfg = AppConfig::load(&path).expect("load legacy");
+    assert_eq!(cfg.charts.len(), 1);
+    let vp = &cfg.charts[0].volume_profile;
+    assert_eq!(vp, &VolumeProfileSettings::default());
+    assert_eq!(vp.anchor, VolumeProfileAnchor::Viewport);
+    cleanup(&dir);
+}
+
+/// Test #3 — a config with a future-version anchor (e.g. `Quarterly`)
+/// loads cleanly and falls back to `Unknown`. Render code in
+/// S2/S3 must treat `Unknown` exactly like `Viewport` so a
+/// downgraded binary never crashes on an upgraded config.
+#[test]
+fn vp_settings_unknown_anchor_falls_back() {
+    let dir = temp_dir();
+    let path = dir.join("vp_unknown.toml");
+    std::fs::write(
+        &path,
+        r#"
+[window]
+width = 1280
+height = 800
+
+[theme]
+mode = "dark"
+
+[[charts]]
+symbol = "AAPL"
+timeframe = "1D"
+show_volume_profile = true
+
+[charts.volume_profile]
+anchor = "Quarterly"
+width_fraction = 0.5
+"#,
+    )
+    .expect("write future config");
+    let cfg = AppConfig::load(&path).expect("load future");
+    assert_eq!(
+        cfg.charts[0].volume_profile.anchor,
+        VolumeProfileAnchor::Unknown,
+        "future-version anchor should downgrade to Unknown",
+    );
+    cleanup(&dir);
+}
+
+/// Test #4 — `width_fraction` is clamped to `[0.05, 1.0]` and
+/// `value_area_pct` to `[0.10, 0.95]` on save. Belt & braces: the
+/// in-memory value can be temporarily out-of-range (e.g. mid-drag),
+/// but a single save→load cycle normalises it. `restore_panel`
+/// also calls `sanitized()` on read for the symmetric guarantee.
+#[test]
+fn vp_settings_clamps_out_of_range() {
+    let s = VolumeProfileSettings {
+        anchor: VolumeProfileAnchor::Daily,
+        width_fraction: 5.0, // way over
+        show_value_area: false,
+        value_area_pct: 0.05, // under floor
+    };
+    let s2 = s.sanitized();
+    assert!((s2.width_fraction - 1.0).abs() < f32::EPSILON);
+    assert!((s2.value_area_pct - 0.10).abs() < f32::EPSILON);
+
+    let s = VolumeProfileSettings {
+        anchor: VolumeProfileAnchor::Daily,
+        width_fraction: -1.0, // way under
+        show_value_area: false,
+        value_area_pct: 1.5, // over ceiling
+    };
+    let s2 = s.sanitized();
+    assert!((s2.width_fraction - 0.05).abs() < f32::EPSILON);
+    assert!((s2.value_area_pct - 0.95).abs() < f32::EPSILON);
+}
+
+/// Test #5a (kill-switch) — `AppConfig::default()` ships with
+/// `experimental.disable_anchored_vp == false`. A config without an
+/// `[experimental]` table loads cleanly with the same default.
+#[test]
+fn kill_switch_default_off() {
+    let cfg = AppConfig::default();
+    assert!(!cfg.experimental.disable_anchored_vp);
+
+    let dir = temp_dir();
+    let path = dir.join("no_experimental.toml");
+    std::fs::write(
+        &path,
+        r#"
+[window]
+width = 1280
+height = 800
+
+[theme]
+mode = "dark"
+"#,
+    )
+    .expect("write");
+    let cfg = AppConfig::load(&path).expect("load");
+    assert!(!cfg.experimental.disable_anchored_vp);
+    cleanup(&dir);
+}
+
+/// Test — kill-switch flag round-trips through save → load.
+#[test]
+fn kill_switch_roundtrips() {
+    let dir = temp_dir();
+    let path = dir.join("kill_switch.toml");
+    let mut cfg = AppConfig::default();
+    cfg.experimental.disable_anchored_vp = true;
+    cfg.save(&path).expect("save");
+    let loaded = AppConfig::load(&path).expect("load");
+    assert!(loaded.experimental.disable_anchored_vp);
+    cleanup(&dir);
 }
 
 /// `backend: None` is skipped during serialization so existing
@@ -1347,6 +1555,7 @@ fn chart_backend_none_skips_serialization() {
         backend: None,
         show_extended_hours: true,
         show_extended_hours_bands: true,
+        volume_profile: VolumeProfileSettings::default(),
     };
     let toml_str = toml::to_string_pretty(&cfg).expect("serialize");
     assert!(
@@ -1427,6 +1636,7 @@ fn eth_knobs_mixed_state_round_trips() {
         backend: None,
         show_extended_hours: true,
         show_extended_hours_bands: false,
+        volume_profile: VolumeProfileSettings::default(),
     };
     let toml_str = toml::to_string_pretty(&cfg).expect("serialize");
     let restored: ChartConfig = toml::from_str(&toml_str).expect("deserialize");
@@ -1461,6 +1671,7 @@ fn eth_knobs_default_true_serializes_explicitly() {
         backend: None,
         show_extended_hours: true,
         show_extended_hours_bands: true,
+        volume_profile: VolumeProfileSettings::default(),
     };
     let toml_str = toml::to_string_pretty(&cfg).expect("serialize");
     assert!(

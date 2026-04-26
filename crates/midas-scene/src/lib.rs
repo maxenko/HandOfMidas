@@ -64,7 +64,8 @@ pub use crate::layers::{
     LevelHitTarget, LevelLayer, LevelView, OrderBracketLayer, OrderBracketView, PriceLineLayer,
     PriceLineView, SeparatorStyle, SessionBandLayer, SessionBoundary, SessionPalette,
     SessionSeparatorLayer, SharedBracketDrag, SharedCandleSeries, SharedLevelDrag, Side,
-    VolumeLayer, VolumeProfileLayer, VolumeProfileStyle, VolumeStyle,
+    VolumeLayer, VolumeProfileAnchor, VolumeProfileConfig, VolumeProfileLayer, VolumeProfileStyle,
+    VolumeStyle,
 };
 pub use crate::paint::PaintContext;
 pub use crate::primitives::{

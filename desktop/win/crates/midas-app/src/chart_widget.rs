@@ -93,6 +93,14 @@ pub struct ChartRenderSnapshot {
     pub volume_scale: f32,
     /// Whether the Volume Profile overlay is visible.
     pub show_volume_profile: bool,
+    /// Per-chart Volume Profile settings (anchor, width, reserved
+    /// value-area fields). Mirrors `ChartState::volume_profile` so the
+    /// shader-thread state can stay in sync without holding `&MidasApp`.
+    pub volume_profile: midas_core::VolumeProfileSettings,
+    /// Effective VP anchor — already overridden by the global
+    /// kill-switch (`experimental.disable_anchored_vp`) when set. Render
+    /// code reads this; the per-chart settings stay untouched on disk.
+    pub effective_vp_anchor: midas_core::VolumeProfileAnchor,
     /// Whether horizontal price levels are visible.
     pub show_levels: bool,
     /// Data time bounds for scroll clamping (first candle timestamp ms).
@@ -492,6 +500,7 @@ impl shader::Program<Message> for ChartProgram {
         chart_state.timeline_border_ratio = self.snapshot.timeline_border_ratio;
         chart_state.volume_scale = self.snapshot.volume_scale;
         chart_state.show_volume_profile = self.snapshot.show_volume_profile;
+        chart_state.volume_profile = self.snapshot.volume_profile.clone();
         chart_state.show_levels = self.snapshot.show_levels;
 
         // Detect viewport resize and emit a scale-preserving adjustment.
@@ -887,6 +896,8 @@ impl shader::Program<Message> for ChartProgram {
             timeline_border_ratio: live_timeline_border_ratio,
             volume_scale: live_volume_scale,
             show_volume_profile: snap.show_volume_profile,
+            effective_vp_anchor: snap.effective_vp_anchor,
+            volume_profile_width_fraction: snap.volume_profile.width_fraction,
             dirty: &dirty,
             level_tool: &effective_level_tool,
             gatr_bright_ranges: &snap.gatr_bright_ranges,

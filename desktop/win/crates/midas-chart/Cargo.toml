@@ -13,6 +13,7 @@ midas-gpu-types        = { workspace = true }
 
 bytemuck  = { workspace = true }
 chrono    = { workspace = true }
+chrono-tz = { workspace = true }
 glam      = { workspace = true }
 serde     = { workspace = true }
 smallvec  = { workspace = true }

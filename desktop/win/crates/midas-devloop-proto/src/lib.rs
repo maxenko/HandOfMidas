@@ -145,6 +145,22 @@ pub enum Command {
     /// `{"type": "BracketCreated", "parent_id": "...", ...}`
     InjectBrokerEvent { event_json: serde_json::Value },
 
+    /// Set Volume Profile settings for a chart. Used by devloop scripts
+    /// (see `tools/devloop-vp-anchored-*.sh`) to drive Slice 2/3 render
+    /// paths without going through the gear popup UI.
+    ///
+    /// Payload is opaque JSON — the harness deserialises it into
+    /// `midas_core::VolumeProfileSettings` on receipt — to preserve
+    /// the proto crate's "no domain dependencies" rule (matches the
+    /// [`InjectTickerMsg`] / [`InjectBrokerEvent`] / [`InjectMarketEvent`]
+    /// pattern). The expected shape is the TOML-serialised settings
+    /// table, e.g. `{"anchor": "Daily", "width_fraction": 0.7,
+    /// "show_value_area": false, "value_area_pct": 0.7}`.
+    SetVpSettings {
+        chart_id: u64,
+        settings_json: serde_json::Value,
+    },
+
     /// Synthesise a `MarketEvent` and push it through the router's
     /// underlying provider (S8d).
     ///
@@ -742,6 +758,36 @@ mod tests {
         match back {
             Command::InjectMarketEvent { event_json } => {
                 assert!(event_json.get("Tick").is_some());
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn set_vp_settings_command_roundtrips() {
+        // Mirrors the `VolumeProfileSettings` shape but kept opaque
+        // here — the proto crate doesn't depend on `midas-core`. The
+        // harness side does the typed deserialise.
+        let cmd = Command::SetVpSettings {
+            chart_id: 7,
+            settings_json: serde_json::json!({
+                "anchor": "Daily",
+                "width_fraction": 0.7,
+                "show_value_area": false,
+                "value_area_pct": 0.7,
+            }),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains(r#""cmd":"set_vp_settings""#));
+        assert!(json.contains(r#""chart_id":7"#));
+        let back: Command = serde_json::from_str(&json).unwrap();
+        match back {
+            Command::SetVpSettings {
+                chart_id,
+                settings_json,
+            } => {
+                assert_eq!(chart_id, 7);
+                assert_eq!(settings_json["anchor"], "Daily");
             }
             _ => panic!("wrong variant"),
         }

@@ -125,7 +125,40 @@ pub fn compute_chart_scene(input: &ChartInput<'_>) -> ChartScene {
     }
 }
 
+/// Pixel-x of a candle by absolute series index. Works in both
+/// timestamp-space (`!collapse_gaps`) and index-space (`collapse_gaps`).
+///
+/// In timestamp-space the camera maps real epoch-ms timestamps to x,
+/// so we ask for the candle's open timestamp. In index-space the
+/// camera's time axis is fractional candle indices instead and we
+/// place the candle at the centre of its slot (`idx + 0.5`) — same
+/// convention `compute_collapsed_scene` uses for its `x_from_idx`
+/// closure (see line ~535). Snapping to whole pixels keeps profile
+/// edges aligned with candle edges, removing sub-pixel shimmer when
+/// the camera pans.
+///
+/// S6 P6: lifted out of `compute_collapsed_scene`'s closure so the
+/// anchored-VP compute branch can compute per-period left-x in both
+/// modes without re-implementing the index-space arithmetic.
+fn left_x_for_candle(camera: &Camera2D, data: &dyn CandleData, idx: usize, collapse_gaps: bool) -> f32 {
+    if collapse_gaps {
+        camera.snap_to_pixel(camera.time_to_x(idx as f64 + 0.5))
+    } else {
+        camera.time_to_x(data.timestamp(idx) as f64)
+    }
+}
+
 /// Build Volume Profile GPU instances for the visible range, if enabled.
+///
+/// Slice 2 of the VP-anchored plan branches on `input.effective_vp_anchor`:
+/// per-period rendering for `Daily`/`Weekly`/`Monthly`/`Yearly` when the
+/// timeframe is fine enough; else the legacy single-profile path. The
+/// kill-switch is enforced upstream — the `effective_vp_anchor` field
+/// already collapses to `Viewport` when
+/// `experimental.disable_anchored_vp == true`.
+///
+/// S6 P6: anchored mode now works under `collapse_gaps` too — left-x is
+/// computed via [`left_x_for_candle`] which honours both axis modes.
 fn build_volume_profile(
     input: &ChartInput<'_>,
     data: &dyn CandleData,
@@ -136,6 +169,112 @@ fn build_volume_profile(
     if !input.show_volume_profile {
         return Vec::new();
     }
+    let viewport_height = input.viewport_height as f32;
+    let viewport_width = input.viewport_width as f32;
+
+    let anchor = input.effective_vp_anchor;
+    let collapse_gaps = input.collapse_gaps;
+    let tf_secs =
+        crate::volume_profile::estimate_timeframe_secs_from_data(data, vis_start, vis_end);
+    let blocked = crate::volume_profile::timeframe_blocks_anchor(tf_secs, anchor);
+
+    let want_anchored = !matches!(
+        anchor,
+        midas_core::VolumeProfileAnchor::Viewport | midas_core::VolumeProfileAnchor::Unknown
+    );
+    let use_anchored = want_anchored && !blocked;
+
+    if want_anchored && !use_anchored {
+        // D12 silent fallback (timeframe coarser than anchor). Trace
+        // once per (anchor, reason) to keep the log out of the hot
+        // path; gating on transition is future polish.
+        tracing::debug!(
+            target: "vp",
+            ?anchor,
+            blocked,
+            "anchored mode falling back to Viewport"
+        );
+    }
+
+    if use_anchored {
+        // Hard-coded ET timezone (Open Question 2): legacy stack
+        // doesn't carry an exchange-calendar reference. v1 ships with
+        // `US::Eastern` for both equity and crypto; revisit when the
+        // legacy stack adopts midas-calendar (chart-transition Phase D).
+        let tz = chrono_tz::US::Eastern;
+        // Build epoch-millisecond slice over the visible range.
+        let mut ts_ms: Vec<i64> = Vec::with_capacity(vis_end - vis_start);
+        for i in vis_start..vis_end {
+            ts_ms.push(data.timestamp(i));
+        }
+        let local_boundaries = crate::volume_profile::candle_period_boundaries(&ts_ms, anchor, tz);
+        if local_boundaries.is_empty() {
+            // Defensive: helper returned empty even though anchor !=
+            // Viewport. Fall back to the single-profile path.
+            return single_profile_path(input, data, camera, vis_start, vis_end);
+        }
+        // Convert boundaries (relative to the visible-range slice) to
+        // absolute series indices.
+        let abs_boundaries: Vec<usize> = local_boundaries.iter().map(|&i| vis_start + i).collect();
+        let num_bins = crate::volume_profile::anchored_bin_count_for(viewport_height);
+        let profiles = crate::volume_profile::compute_anchored_volume_profiles(
+            data,
+            vis_start,
+            vis_end,
+            &abs_boundaries,
+            num_bins,
+            crate::volume_profile::MAX_PROFILES_PER_RENDER,
+        );
+        if profiles.is_empty() {
+            return Vec::new();
+        }
+
+        // Compute (left_x, width_px, raw_period_px) for each profile.
+        // raw_period_px is forwarded to the renderer so it can degrade
+        // narrow periods to a 1-px POC tick (S6 P2) instead of dropping
+        // them silently.
+        let mut lefts: Vec<f32> = Vec::with_capacity(profiles.len());
+        let mut widths: Vec<f32> = Vec::with_capacity(profiles.len());
+        let mut raw_widths: Vec<f32> = Vec::with_capacity(profiles.len());
+        let width_fraction = input.volume_profile_width_fraction;
+
+        for (i, (start_idx, _)) in profiles.iter().enumerate() {
+            let left_x = left_x_for_candle(camera, data, *start_idx, collapse_gaps);
+            let right_x = if i + 1 < profiles.len() {
+                let next_start = profiles[i + 1].0;
+                left_x_for_candle(camera, data, next_start, collapse_gaps)
+            } else {
+                viewport_width
+            };
+            let raw = (right_x - left_x).max(0.0);
+            lefts.push(left_x);
+            raw_widths.push(raw);
+            match crate::volume_profile::anchored_profile_width(raw, width_fraction) {
+                Some(w) => widths.push(w),
+                None => widths.push(0.0),
+            }
+        }
+        crate::volume_profile::anchored_profiles_to_instances(
+            &profiles,
+            &lefts,
+            &widths,
+            &raw_widths,
+            camera,
+        )
+    } else {
+        single_profile_path(input, data, camera, vis_start, vis_end)
+    }
+}
+
+/// Existing single-profile-over-viewport render path. Extracted so
+/// the per-period branch and the fallback share an implementation.
+fn single_profile_path(
+    input: &ChartInput<'_>,
+    data: &dyn CandleData,
+    camera: &Camera2D,
+    vis_start: usize,
+    vis_end: usize,
+) -> Vec<GridLineInstance> {
     let num_bins = ((input.viewport_height as f32 * 0.8) / 3.0).clamp(20.0, 200.0) as usize;
     match crate::volume_profile::compute_volume_profile(
         data,

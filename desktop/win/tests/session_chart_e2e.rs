@@ -345,6 +345,8 @@ async fn crypto_m1_end_to_end_pipeline_produces_candles() {
         layers: SceneLayers::all_on(),
         time_window: (axis_start, axis_end),
         series_changed: true,
+        volume_profile_config: midas_scene::VolumeProfileConfig::default(),
+        volume_profile_range: 0..0,
     })
     .expect("build_scene should succeed on a populated crypto series");
 
@@ -427,6 +429,8 @@ async fn empty_series_still_emits_grid_and_axis() {
         layers: SceneLayers::all_on(),
         time_window: (utc(2024, 3, 1, 0, 0, 0), utc(2024, 3, 1, 1, 0, 0)),
         series_changed: true,
+        volume_profile_config: midas_scene::VolumeProfileConfig::default(),
+        volume_profile_range: 0..0,
     })
     .unwrap();
 

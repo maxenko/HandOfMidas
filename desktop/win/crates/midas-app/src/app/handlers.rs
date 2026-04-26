@@ -276,6 +276,8 @@ impl MidasApp {
                         {
                             self.link_picker_open = None;
                         }
+                        self.vp_settings_open =
+                            crate::app::vp_popup::clear_if_closed(self.vp_settings_open, closed_id);
                         self.status_message = format!("Closed {closed_id}");
                         return self.flush_config();
                     }
@@ -1000,8 +1002,52 @@ impl MidasApp {
 
             Message::ToggleVolumeProfile(chart_id) => {
                 self.focus_chart(chart_id);
+                let mut vp_now_off = false;
                 if let Some(chart) = self.charts.get_mut(&chart_id) {
                     chart.chart_state.show_volume_profile = !chart.chart_state.show_volume_profile;
+                    chart.chart_state.dirty.mark_data();
+                    vp_now_off = !chart.chart_state.show_volume_profile;
+                }
+                // Slice 4: auto-dismiss the VP popup if VP just turned off.
+                self.vp_settings_open = crate::app::vp_popup::clear_if_vp_off(
+                    self.vp_settings_open,
+                    chart_id,
+                    vp_now_off,
+                );
+                self.mark_config_dirty();
+                Task::none()
+            }
+
+            // ── Slice 4 (VP-anchored): popup state + per-knob handlers ──
+            Message::ToggleVpSettingsPanel(chart_id) => {
+                self.focus_chart(chart_id);
+                self.vp_settings_open =
+                    crate::app::vp_popup::toggle(self.vp_settings_open, chart_id);
+                Task::none()
+            }
+
+            Message::DismissVpSettingsPanel => {
+                self.vp_settings_open = None;
+                Task::none()
+            }
+
+            Message::UpdateVpAnchor(chart_id, anchor) => {
+                self.focus_chart(chart_id);
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    chart.chart_state.volume_profile.anchor = anchor;
+                    chart.chart_state.volume_profile = chart.chart_state.volume_profile.sanitized();
+                    chart.chart_state.dirty.mark_data();
+                }
+                self.mark_config_dirty();
+                tracing::info!(target: "vp", chart = ?chart_id, ?anchor, "VP anchor changed");
+                Task::none()
+            }
+
+            Message::UpdateVpWidthFraction(chart_id, frac) => {
+                self.focus_chart(chart_id);
+                if let Some(chart) = self.charts.get_mut(&chart_id) {
+                    chart.chart_state.volume_profile.width_fraction = frac;
+                    chart.chart_state.volume_profile = chart.chart_state.volume_profile.sanitized();
                     chart.chart_state.dirty.mark_data();
                 }
                 self.mark_config_dirty();

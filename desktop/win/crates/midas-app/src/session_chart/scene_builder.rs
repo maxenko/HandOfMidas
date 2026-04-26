@@ -52,7 +52,8 @@ use midas_calendar::ExchangeCalendar;
 use midas_scene::{
     CandleLayer, CandleStyle, ChartScene, CrosshairLayer, GridLayer, GridStyle, HolidayMarkerLayer,
     InteractionState, SceneBuildError, SessionBandLayer, SessionSeparatorLayer, SharedCandleSeries,
-    ThemePalette, VolumeLayer, VolumeStyle,
+    ThemePalette, VolumeLayer, VolumeProfileConfig, VolumeProfileLayer, VolumeProfileStyle,
+    VolumeStyle,
 };
 
 use super::policy::EhPolicy;
@@ -67,6 +68,11 @@ pub struct SceneLayers {
     pub grid: bool,
     pub session_separators: bool,
     pub volume: bool,
+    /// Slice 3 of the VP-anchored plan: per-chart Volume Profile.
+    /// Driven by `ChartConfig::show_volume_profile` upstream. The
+    /// `effective_vp_anchor` resolution (kill-switch + bridge) is the
+    /// caller's job — see the `app.rs` builder.
+    pub volume_profile: bool,
     pub candles: bool,
     pub holidays: bool,
     pub crosshair: bool,
@@ -81,6 +87,7 @@ impl SceneLayers {
             grid: true,
             session_separators: true,
             volume: true,
+            volume_profile: false,
             candles: true,
             holidays: false,
             crosshair: true,
@@ -95,6 +102,7 @@ impl SceneLayers {
             grid: true,
             session_separators: false,
             volume: false,
+            volume_profile: false,
             candles: true,
             holidays: false,
             crosshair: false,
@@ -126,6 +134,7 @@ impl SceneLayers {
                 grid: true,
                 session_separators: true,
                 volume: true,
+                volume_profile: false,
                 candles: true,
                 holidays: is_xnys,
                 crosshair: true,
@@ -135,6 +144,7 @@ impl SceneLayers {
                 grid: true,
                 session_separators: false,
                 volume: true,
+                volume_profile: false,
                 candles: true,
                 holidays: is_xnys,
                 crosshair: true,
@@ -176,6 +186,17 @@ pub struct SceneConfig<'a, A: TimeAxis + 'static> {
     /// version hasn't changed" follow-on. Callers that don't track
     /// version may pass `true` to force a rebuild every frame.
     pub series_changed: bool,
+    /// Slice 3 (VP-anchored): per-chart VP behaviour. The caller
+    /// resolves the kill-switch + duplicate-enum bridge into this
+    /// struct BEFORE calling `build_scene` — `midas-scene` is a leaf
+    /// crate (Rule 9) and never sees `AppConfig.experimental`. Honours
+    /// `layers.volume_profile`; with `volume_profile = false` this
+    /// field is ignored.
+    pub volume_profile_config: VolumeProfileConfig,
+    /// Visible candle index range for the VP layer. Typically the
+    /// full series length (`0..series.read().len()`); narrower
+    /// ranges power per-viewport "show me only these" workflows.
+    pub volume_profile_range: std::ops::Range<usize>,
 }
 
 /// Build a [`ChartScene`] for the given frame.
@@ -209,6 +230,8 @@ pub fn build_scene<A: TimeAxis + 'static>(
         // instances at the widget level will consult this flag to decide
         // whether to call `update_sessions` / `update_boundaries` again.
         series_changed: _,
+        volume_profile_config,
+        volume_profile_range,
     } = cfg;
 
     let mut builder = ChartScene::builder()
@@ -237,6 +260,24 @@ pub fn build_scene<A: TimeAxis + 'static>(
         builder = builder.layer(VolumeLayer::new(
             Arc::clone(&series),
             VolumeStyle::default(),
+        ));
+    }
+
+    if layers.volume_profile {
+        // Slice 3 (VP-anchored): first-time wiring of
+        // `VolumeProfileLayer` into the new-stack scene builder. The
+        // caller is responsible for kill-switch resolution
+        // (`disable_anchored_vp` → `Anchor::Viewport`) and the
+        // `midas_core ↔ midas_scene` enum bridge — see
+        // `crate::app::effective_vp_anchor`. The layer's
+        // `LayerZ::VOLUME_PROFILE = 350` slots between volume bars
+        // (300) and candles (400), preserving the slice-7 invariant.
+        builder = builder.layer(VolumeProfileLayer::new(
+            Arc::clone(&series),
+            volume_profile_range.clone(),
+            VolumeProfileStyle::default(),
+            volume_profile_config.clone(),
+            calendar,
         ));
     }
 
@@ -275,6 +316,83 @@ pub fn build_scene<A: TimeAxis + 'static>(
 // `use` chain can see it right above the usage; top-level imports
 // would drag `Datelike` into every macro-expanded test assertion.
 use chrono::Datelike;
+
+// ── VolumeProfileAnchor bridge ───────────────────────────────────────
+//
+// The persisted `midas_core::VolumeProfileAnchor` lives in the desktop
+// workspace (it carries serde derives + `#[serde(other)] Unknown`).
+// The render-time `midas_scene::VolumeProfileAnchor` lives in the root
+// workspace (Architecture Rule 9 forbids midas-scene → midas-core).
+// `midas-app` is the only crate that pulls in both, so the bridge
+// lives here.
+//
+// Both enums are foreign to `midas-app` so `impl From` is blocked by
+// the orphan rule (E0117). We expose the bridge as plain free
+// functions — `core_to_scene` / `scene_to_core` — both totally pure
+// (no runtime work, no allocations). The 6-arm match is exhaustive on
+// the source enum; the destination is `#[non_exhaustive]` so future
+// variants on either side fall through to `Unknown` rather than a
+// compile error in callers downstream of this bridge.
+
+/// Project the persisted (desktop) anchor enum into the render-time
+/// (root) enum. Used by the Slice 3 scene builder to feed
+/// `VolumeProfileLayer` without taking a cross-workspace dep.
+pub(crate) fn vp_anchor_core_to_scene(
+    value: midas_core::VolumeProfileAnchor,
+) -> midas_scene::VolumeProfileAnchor {
+    match value {
+        midas_core::VolumeProfileAnchor::Viewport => midas_scene::VolumeProfileAnchor::Viewport,
+        midas_core::VolumeProfileAnchor::Daily => midas_scene::VolumeProfileAnchor::Daily,
+        midas_core::VolumeProfileAnchor::Weekly => midas_scene::VolumeProfileAnchor::Weekly,
+        midas_core::VolumeProfileAnchor::Monthly => midas_scene::VolumeProfileAnchor::Monthly,
+        midas_core::VolumeProfileAnchor::Yearly => midas_scene::VolumeProfileAnchor::Yearly,
+        midas_core::VolumeProfileAnchor::Unknown => midas_scene::VolumeProfileAnchor::Unknown,
+    }
+}
+
+/// Reverse of [`vp_anchor_core_to_scene`]. The render-time enum is
+/// `#[non_exhaustive]`, so the catch-all arm projects future variants
+/// to `Unknown` (forward-compat sink) — render code in `midas-scene`
+/// already treats `Unknown` exactly like `Viewport`.
+pub(crate) fn vp_anchor_scene_to_core(
+    value: midas_scene::VolumeProfileAnchor,
+) -> midas_core::VolumeProfileAnchor {
+    match value {
+        midas_scene::VolumeProfileAnchor::Viewport => midas_core::VolumeProfileAnchor::Viewport,
+        midas_scene::VolumeProfileAnchor::Daily => midas_core::VolumeProfileAnchor::Daily,
+        midas_scene::VolumeProfileAnchor::Weekly => midas_core::VolumeProfileAnchor::Weekly,
+        midas_scene::VolumeProfileAnchor::Monthly => midas_core::VolumeProfileAnchor::Monthly,
+        midas_scene::VolumeProfileAnchor::Yearly => midas_core::VolumeProfileAnchor::Yearly,
+        midas_scene::VolumeProfileAnchor::Unknown => midas_core::VolumeProfileAnchor::Unknown,
+        // `midas_scene::VolumeProfileAnchor` is `#[non_exhaustive]`.
+        // A future variant added there without a parallel persisted
+        // variant downgrades to `Unknown` rather than a compile error.
+        _ => midas_core::VolumeProfileAnchor::Unknown,
+    }
+}
+
+#[cfg(test)]
+#[allow(dead_code)] // helper exists for future-proofing; S3 wires the call site
+mod vp_anchor_bridge_tests {
+    use super::*;
+
+    #[test]
+    fn round_trip_through_bridge_is_identity_for_all_variants() {
+        // `Unknown` is the catch-all; the round-trip preserves it.
+        for v in [
+            midas_core::VolumeProfileAnchor::Viewport,
+            midas_core::VolumeProfileAnchor::Daily,
+            midas_core::VolumeProfileAnchor::Weekly,
+            midas_core::VolumeProfileAnchor::Monthly,
+            midas_core::VolumeProfileAnchor::Yearly,
+            midas_core::VolumeProfileAnchor::Unknown,
+        ] {
+            let scene = vp_anchor_core_to_scene(v);
+            let back = vp_anchor_scene_to_core(scene);
+            assert_eq!(back, v, "round-trip identity for {v:?}");
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -392,6 +510,8 @@ mod tests {
             layers: SceneLayers::all_on(),
             time_window: h.time_window,
             series_changed: true,
+            volume_profile_config: midas_scene::VolumeProfileConfig::default(),
+            volume_profile_range: 0..0,
         })
         .unwrap();
         assert_eq!(scene.axis().policy(), TimeAxisPolicy::Continuous);
@@ -415,6 +535,8 @@ mod tests {
             layers: SceneLayers::all_on(),
             time_window: h.time_window,
             series_changed: true,
+            volume_profile_config: midas_scene::VolumeProfileConfig::default(),
+            volume_profile_range: 0..0,
         })
         .unwrap();
         let mut out = ScenePrimitives::default();
@@ -584,6 +706,8 @@ mod tests {
             layers,
             time_window: h.time_window,
             series_changed: true,
+            volume_profile_config: midas_scene::VolumeProfileConfig::default(),
+            volume_profile_range: 0..0,
         })
         .unwrap();
         // 7 layers on XNYS ShowAll: band/grid/separator/volume/candle/holiday/crosshair.
@@ -606,6 +730,8 @@ mod tests {
             layers,
             time_window: h.time_window,
             series_changed: true,
+            volume_profile_config: midas_scene::VolumeProfileConfig::default(),
+            volume_profile_range: 0..0,
         })
         .unwrap();
         // 6 layers for crypto (no holiday).
@@ -629,6 +755,8 @@ mod tests {
             layers: SceneLayers::candles_and_grid(),
             time_window: h.time_window,
             series_changed: true,
+            volume_profile_config: midas_scene::VolumeProfileConfig::default(),
+            volume_profile_range: 0..0,
         })
         .unwrap();
         assert_eq!(scene.layer_count(), 2);
@@ -644,6 +772,7 @@ mod tests {
             grid: false,
             session_separators: false,
             volume: false,
+            volume_profile: false,
             candles: false,
             holidays: false,
             crosshair: true,
@@ -659,10 +788,98 @@ mod tests {
             layers,
             time_window: h.time_window,
             series_changed: true,
+            volume_profile_config: midas_scene::VolumeProfileConfig::default(),
+            volume_profile_range: 0..0,
         })
         .unwrap();
         let mut out = ScenePrimitives::default();
         scene.paint(&mut out);
         assert_eq!(out.lines.len(), 2);
+    }
+
+    // ─── Slice 3 (VP-anchored): first-time wiring + kill-switch ──────
+
+    /// Test #13 — `first_time_wiring_smoke`. With
+    /// `layers.volume_profile = true` and a non-empty series, the
+    /// scene's `layer_count` increases by exactly one (the new
+    /// `VolumeProfileLayer`). Proves the wiring is hooked up.
+    #[test]
+    fn volume_profile_layer_added_when_flag_on() {
+        let h = crypto_harness(10);
+        let axis = ContinuousAxis::new(h.time_window.0, h.time_window.1, 1000.0).unwrap();
+        let mut layers = SceneLayers::all_on();
+        let baseline = build_scene(SceneConfig {
+            series: Arc::clone(&h.series),
+            axis: axis.clone(),
+            price_range: h.price_range,
+            viewport: h.viewport,
+            palette: h.palette,
+            calendar: h.calendar,
+            interaction: &h.interaction,
+            layers,
+            time_window: h.time_window,
+            series_changed: true,
+            volume_profile_config: midas_scene::VolumeProfileConfig::default(),
+            volume_profile_range: 0..0,
+        })
+        .unwrap();
+        let baseline_count = baseline.layer_count();
+
+        layers.volume_profile = true;
+        let with_vp = build_scene(SceneConfig {
+            series: Arc::clone(&h.series),
+            axis,
+            price_range: h.price_range,
+            viewport: h.viewport,
+            palette: h.palette,
+            calendar: h.calendar,
+            interaction: &h.interaction,
+            layers,
+            time_window: h.time_window,
+            series_changed: true,
+            volume_profile_config: midas_scene::VolumeProfileConfig::default(),
+            volume_profile_range: 0..10,
+        })
+        .unwrap();
+        assert_eq!(
+            with_vp.layer_count(),
+            baseline_count + 1,
+            "enabling volume_profile must add exactly one layer"
+        );
+    }
+
+    /// Test #13b — Viewport-mode VP over a non-empty series emits
+    /// quad primitives into the scene (proves the layer's `paint` is
+    /// reachable through the wired-up scene driver, no longer a
+    /// no-op).
+    #[test]
+    fn volume_profile_viewport_emits_quads_through_scene() {
+        let h = crypto_harness(10);
+        let axis = ContinuousAxis::new(h.time_window.0, h.time_window.1, 1000.0).unwrap();
+        let mut layers = SceneLayers::candles_and_grid();
+        layers.volume_profile = true;
+        let scene = build_scene(SceneConfig {
+            series: Arc::clone(&h.series),
+            axis,
+            price_range: h.price_range,
+            viewport: h.viewport,
+            palette: h.palette,
+            calendar: h.calendar,
+            interaction: &h.interaction,
+            layers,
+            time_window: h.time_window,
+            series_changed: true,
+            volume_profile_config: midas_scene::VolumeProfileConfig::default(),
+            volume_profile_range: 0..10,
+        })
+        .unwrap();
+        let mut out = ScenePrimitives::default();
+        scene.paint(&mut out);
+        // Viewport-mode VP should emit at least one quad for a 10-bar
+        // visible range with non-zero volume.
+        assert!(
+            !out.quads.is_empty(),
+            "VP layer painted into scene must emit ≥1 quad"
+        );
     }
 }

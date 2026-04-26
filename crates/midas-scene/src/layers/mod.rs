@@ -30,4 +30,7 @@ pub use indicator::{AtrLayer, AtrStyle, GerchikAtrLayer, GerchikStyle};
 pub use session_band::{SessionBandLayer, SessionPalette};
 pub use session_separator::{SeparatorStyle, SessionBoundary, SessionSeparatorLayer};
 pub use volume::{VolumeLayer, VolumeStyle};
-pub use volume_profile::{bin_count_for_viewport, VolumeProfileLayer, VolumeProfileStyle};
+pub use volume_profile::{
+    bin_count_for_viewport, VolumeProfileAnchor, VolumeProfileConfig, VolumeProfileLayer,
+    VolumeProfileStyle,
+};

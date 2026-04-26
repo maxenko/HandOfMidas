@@ -52,6 +52,23 @@ pub struct ChartInput<'a> {
     pub volume_scale: f32,
     /// Whether to compute and render the Volume Profile overlay.
     pub show_volume_profile: bool,
+    /// Effective VP anchor for this frame — already overridden by the
+    /// global kill-switch if `app_config.experimental.disable_anchored_vp`
+    /// is set. The `midas-app` per-frame builder computes this; the VP
+    /// render path reads this field instead of `state.volume_profile.anchor`
+    /// directly so the kill-switch policy stays in `midas-app` (the only
+    /// crate that can see `AppConfig`).
+    ///
+    /// Slice 1 wires only the field. Slice 2 routes the legacy render
+    /// branch through it.
+    pub effective_vp_anchor: midas_core::VolumeProfileAnchor,
+    /// Per-chart width fraction for the anchored Volume Profile
+    /// (Slice 2). `1.0` paints the full clamped per-period width;
+    /// `0.5` halves it. The `midas-app` per-frame builder hands the
+    /// already-sanitized value (clamped to `[0.05, 1.0]` by
+    /// `VolumeProfileSettings::sanitized`); ignored when
+    /// `effective_vp_anchor == Viewport`.
+    pub volume_profile_width_fraction: f32,
     /// Current dirty flags for generation tracking.
     pub dirty: &'a DirtyFlags,
     /// Level tool state for placement/snapping queries.

@@ -67,6 +67,8 @@ fn make_default_chart_input<'a>(
         timeline_border_ratio: 0.20,
         volume_scale: 1.0,
         show_volume_profile: false,
+        effective_vp_anchor: midas_core::VolumeProfileAnchor::Viewport,
+        volume_profile_width_fraction: 0.7,
         dirty,
         level_tool: &DEFAULT_LEVEL_TOOL,
         gatr_bright_ranges: &[],

@@ -19,7 +19,7 @@
 //! AND controls (link buttons + pop-out + close) consume it.
 
 use midas_chart::GerchikAtrRender;
-use midas_core::{ChartBackend, LinkMode, Timeframe};
+use midas_core::{ChartBackend, LinkMode, Timeframe, VolumeProfileSettings};
 
 use crate::annotation_store::StoredLevel;
 use crate::link::LinkDimension;
@@ -84,4 +84,14 @@ pub struct ChartPaneTitleBarVm {
     /// Rendered as a toolbar chip; clicking toggles between
     /// [`ChartBackend::Legacy`] and [`ChartBackend::New`].
     pub backend: ChartBackend,
+    /// Persisted Volume Profile settings for this chart. Drives the
+    /// VP toolbar label (`VP·D / W / M / Y`) and the popup's selected
+    /// anchor row + width slider position.
+    pub volume_profile: VolumeProfileSettings,
+    /// `true` when the timeframe's bar period is `>=` the selected
+    /// anchor period (D12 — the toolbar drops the suffix and the
+    /// popup shows the "Anchor too fine" note).
+    pub vp_timeframe_blocks_anchor: bool,
+    /// `true` when the gear popup is open targeting this chart.
+    pub vp_settings_open: bool,
 }

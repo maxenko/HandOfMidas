@@ -1113,6 +1113,7 @@ fn config_bound_symbol_round_trip() {
         backend: None,
         show_extended_hours: true,
         show_extended_hours_bands: true,
+        volume_profile: midas_core::VolumeProfileSettings::default(),
     };
 
     let toml_str = toml::to_string_pretty(&cfg).expect("serialize");
