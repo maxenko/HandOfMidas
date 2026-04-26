@@ -160,6 +160,7 @@ fn symbol_link_roundtrip() {
 #[test]
 fn from_config_empty() {
     let config = WatchlistConfig {
+        id: 0,
         name: "Empty".into(),
         tickers: Vec::new(),
         symbol_link: LinkMode::Unlinked,
@@ -192,6 +193,7 @@ fn column_widths_roundtrip() {
 #[test]
 fn column_widths_minimum_enforced() {
     let config = WatchlistConfig {
+        id: 0,
         name: "Narrow".into(),
         tickers: vec![],
         symbol_link: LinkMode::Unlinked,

@@ -900,6 +900,7 @@ impl OrderPanel {
             OrderSide::Sell => "SELL".to_string(),
         });
         midas_core::config::OrderPanelConfig {
+            id: self.id.0,
             symbol: self.state.symbol.clone(),
             side: match self.state.side {
                 OrderSide::Buy => "BUY".to_string(),

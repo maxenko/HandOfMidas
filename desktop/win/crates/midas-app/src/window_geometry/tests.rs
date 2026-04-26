@@ -1,7 +1,7 @@
 //! Pure tests for [`super::WindowGeometry`].
 
 use iced::window;
-use midas_core::config::WindowConfig;
+use midas_core::config::WindowGeometryConfig;
 
 use super::{Effect, WindowGeometry, WindowGeometryMsg};
 
@@ -18,7 +18,7 @@ fn new_uses_initial_size_and_no_window_id() {
 
 #[test]
 fn from_config_round_trips_size_position_monitor() {
-    let cfg = WindowConfig {
+    let cfg = WindowGeometryConfig {
         width: 1920,
         height: 1080,
         maximized: false,
@@ -44,7 +44,7 @@ fn from_config_round_trips_size_position_monitor() {
 fn from_config_zero_size_falls_back() {
     // Old/blank config with no size — use the parent-supplied
     // fallback so iced gets a sane default.
-    let cfg = WindowConfig::default();
+    let cfg = WindowGeometryConfig::default();
     let g = WindowGeometry::from_config(&cfg, FALLBACK);
     assert_eq!(g.size(), FALLBACK);
     assert!(g.position().is_none());
@@ -54,7 +54,7 @@ fn from_config_zero_size_falls_back() {
 fn from_config_partial_position_drops_to_none() {
     // Hand-edited config with only one of x/y — must not panic
     // or store a half-set position.
-    let cfg = WindowConfig {
+    let cfg = WindowGeometryConfig {
         width: 800,
         height: 600,
         x: Some(10),

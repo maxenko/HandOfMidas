@@ -1,13 +1,14 @@
 //! Configuration build, save, and debounce logic.
 
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 use iced::widget::pane_grid;
 use iced::Task;
 
 use midas_core::config::{
-    AccountPanelConfig, AppConfig, ChartConfig, LayoutNode, OrderPanelConfig, PanelSlot,
-    ProviderConfig,
+    AccountPanelConfig, AppConfig, ChartConfig, LayoutNode, OrderPanelConfig, ProviderConfig,
+    WindowConfig,
 };
 
 use crate::layout::PanelContent;
@@ -17,89 +18,57 @@ use super::{Message, MidasApp, CONFIG_SAVE_DEBOUNCE_SECS};
 impl MidasApp {
     /// Build an `AppConfig` from the current application state.
     ///
-    /// Walks the pane grid `Node` tree to capture the full layout topology
-    /// (split axes and ratios). Also builds the legacy `panel_order` for
-    /// backward compatibility.
+    /// Walks every window's pane-grid `Node` tree to capture the full
+    /// layout topology (split axes and ratios). Slice B (v3) emits one
+    /// [`WindowConfig`] entry per window into [`AppConfig::windows`];
+    /// the legacy top-level `panel_order` and `layout_tree` fields
+    /// stay empty (drained by migration on load).
     pub(crate) fn build_config(&self) -> AppConfig {
         let mut chart_configs: Vec<ChartConfig> = Vec::new();
         let mut watchlist_configs = Vec::new();
         let mut order_panel_configs: Vec<OrderPanelConfig> = Vec::new();
         let mut account_panel_configs: Vec<AccountPanelConfig> = Vec::new();
-        let mut panel_order: Vec<PanelSlot> = Vec::new();
-        let mut layout_tree: Vec<LayoutNode> = Vec::new();
+        let mut windows_out: BTreeMap<String, WindowConfig> = BTreeMap::new();
 
-        // Walk the pane grid tree to build layout_tree (pre-order traversal).
-        let node = self.windows[&self.main_window_key].layout.panes.layout();
-        self.walk_node(
-            node,
-            &mut chart_configs,
-            &mut watchlist_configs,
-            &mut order_panel_configs,
-            &mut account_panel_configs,
-            &mut layout_tree,
-        );
-
-        // Also build legacy panel_order from BTreeMap iteration order.
-        for ps in self.windows[&self.main_window_key]
-            .layout
-            .panes
-            .panes
-            .values()
-        {
-            match &ps.content {
-                PanelContent::Chart(chart_id) => {
-                    if let Some(idx) = chart_configs.iter().position(|c| {
-                        self.charts.get(chart_id).is_some_and(|p| {
-                            c.symbol == p.symbol && c.timeframe == p.timeframe.display_name()
-                        })
-                    }) {
-                        panel_order.push(PanelSlot::Chart { chart_index: idx });
-                    }
-                }
-                PanelContent::Watchlist(wl_id) => {
-                    if let Some(idx) = watchlist_configs.iter().enumerate().position(|(i, _)| {
-                        self.watchlists.get(wl_id).is_some_and(|wl| {
-                            watchlist_configs.get(i).is_some_and(
-                                |wc: &midas_core::config::WatchlistConfig| wc.name == wl.name,
-                            )
-                        })
-                    }) {
-                        panel_order.push(PanelSlot::Watchlist {
-                            watchlist_index: idx,
-                        });
-                    }
-                }
-                PanelContent::Order(op_id) => {
-                    if let Some(idx) = order_panel_configs.iter().enumerate().position(|(i, _)| {
-                        self.order_panels.get(op_id).is_some_and(|panel| {
-                            order_panel_configs.get(i).is_some_and(|cfg| {
-                                cfg.symbol == panel.state.symbol
-                                    && cfg.symbol_link == panel.symbol_link
-                            })
-                        })
-                    }) {
-                        panel_order.push(PanelSlot::OrderPanel {
-                            order_panel_index: idx,
-                        });
-                    }
-                }
-                PanelContent::Account(account_id) => {
-                    if let Some(idx) =
-                        account_panel_configs.iter().enumerate().position(|(i, _)| {
-                            self.account_panels.get(account_id).is_some_and(|panel| {
-                                account_panel_configs
-                                    .get(i)
-                                    .is_some_and(|cfg| cfg.name == panel.name)
-                            })
-                        })
-                    {
-                        panel_order.push(PanelSlot::Account {
-                            account_panel_index: idx,
-                        });
-                    }
-                }
-            }
+        // Walk every window's pane-grid tree, populating the per-
+        // window `layout_tree` and the app-global panel pools as
+        // we go.
+        for (key, ws) in self.windows.iter() {
+            let mut tree: Vec<LayoutNode> = Vec::new();
+            self.walk_node(
+                ws.layout.panes.layout(),
+                &mut chart_configs,
+                &mut watchlist_configs,
+                &mut order_panel_configs,
+                &mut account_panel_configs,
+                &mut tree,
+            );
+            let is_main = *key == self.main_window_key;
+            // Slice B keeps the WindowController as the single source
+            // of geometry truth (it'll move into per-window state in
+            // slice C). For now, every window's geometry is the main
+            // window's — slice C will give each `WindowState` its own
+            // [`WindowGeometry`].
+            let geometry = self.window.to_config();
+            windows_out.insert(
+                key.as_str().to_string(),
+                WindowConfig {
+                    is_main,
+                    geometry,
+                    layout_tree: tree,
+                },
+            );
         }
+
+        // Defensive: ensure the windows map always contains the
+        // main entry (matches the validation pass run by `load`).
+        windows_out
+            .entry(self.main_window_key.as_str().to_string())
+            .or_insert_with(|| WindowConfig {
+                is_main: true,
+                geometry: self.window.to_config(),
+                layout_tree: Vec::new(),
+            });
 
         AppConfig {
             // Always stamp the current schema version on save —
@@ -107,9 +76,7 @@ impl MidasApp {
             // forward to current, so anything we write back is at
             // CURRENT_CONFIG_VERSION.
             version: midas_core::config::CURRENT_CONFIG_VERSION,
-            // Whole `WindowConfig` projection lives on the
-            // controller; the persistence path is just a delegate.
-            window: self.window.to_config(),
+            windows: windows_out,
             theme: midas_core::config::ThemeConfig {
                 mode: "dark".into(),
             },
@@ -126,8 +93,12 @@ impl MidasApp {
                 .iter()
                 .map(|e| e.symbol.clone())
                 .collect(),
-            panel_order,
-            layout_tree,
+            // v3 doesn't write the legacy top-level fields. They
+            // skip-serialize when empty so they're absent from the
+            // emitted TOML.
+            legacy_window: None,
+            legacy_panel_order: Vec::new(),
+            legacy_layout_tree: Vec::new(),
             store: midas_core::config::StoreConfig::default(),
             providers: Some(ProviderConfig {
                 active_data: Some(self.providers.active_data_provider_name()),
@@ -154,6 +125,9 @@ impl MidasApp {
 
     /// Recursively walk the pane grid `Node` tree (pre-order) and populate
     /// the chart/watchlist config vectors and the flattened layout tree.
+    ///
+    /// Layout-tree leaves emit the panel's stable `id` (slice B / v3),
+    /// not its position in the panel-pool vector.
     fn walk_node(
         &self,
         node: &pane_grid::Node,
@@ -179,13 +153,24 @@ impl MidasApp {
                 self.walk_node(b, charts, watchlists, order_panels, account_panels, tree);
             }
             pane_grid::Node::Pane(pane) => {
-                if let Some(ps) = self.windows[&self.main_window_key].layout.panes.get(*pane) {
+                // The pane belongs to whichever window's layout we're
+                // currently walking — but `pane_to_window` lookups
+                // through `panel_to_window` are by panel id, not pane
+                // handle. Resolve the pane through whichever window
+                // currently contains it. In practice, slice B has one
+                // window so this is the main window every time.
+                let pane_state = self
+                    .windows
+                    .values()
+                    .find_map(|ws| ws.layout.panes.get(*pane));
+                if let Some(ps) = pane_state {
                     match &ps.content {
                         PanelContent::Chart(chart_id) => {
                             if let Some(panel) = self.charts.get(chart_id) {
+                                let id = chart_id.0;
                                 let cam = &panel.chart_state.camera;
-                                let idx = charts.len();
                                 charts.push(ChartConfig {
+                                    id,
                                     symbol: panel.symbol.clone(),
                                     timeframe: panel.timeframe.display_name().to_string(),
                                     levels: vec![],
@@ -218,33 +203,30 @@ impl MidasApp {
                                         other => Some(other),
                                     },
                                 });
-                                tree.push(LayoutNode::Chart { chart_index: idx });
+                                tree.push(LayoutNode::Chart { chart_id: id });
                             }
                         }
                         PanelContent::Watchlist(wl_id) => {
                             if let Some(wl) = self.watchlists.get(wl_id) {
-                                let idx = watchlists.len();
                                 watchlists.push(wl.to_config());
                                 tree.push(LayoutNode::Watchlist {
-                                    watchlist_index: idx,
+                                    watchlist_id: wl_id.0,
                                 });
                             }
                         }
                         PanelContent::Order(order_id) => {
                             if let Some(panel) = self.order_panels.get(order_id) {
-                                let idx = order_panels.len();
                                 order_panels.push(panel.to_config());
                                 tree.push(LayoutNode::OrderPanel {
-                                    order_panel_index: idx,
+                                    order_panel_id: order_id.0,
                                 });
                             }
                         }
                         PanelContent::Account(account_id) => {
                             if let Some(panel) = self.account_panels.get(account_id) {
-                                let idx = account_panels.len();
                                 account_panels.push(panel.to_config());
                                 tree.push(LayoutNode::Account {
-                                    account_panel_index: idx,
+                                    account_panel_id: account_id.0,
                                 });
                             }
                         }

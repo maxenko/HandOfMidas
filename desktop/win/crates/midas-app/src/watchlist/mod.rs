@@ -150,6 +150,7 @@ impl WatchlistPanel {
     /// Serialize this watchlist to a config struct for persistence.
     pub fn to_config(&self) -> WatchlistConfig {
         WatchlistConfig {
+            id: self.id.0,
             name: self.name.clone(),
             tickers: self
                 .tickers

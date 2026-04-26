@@ -54,6 +54,12 @@ impl std::fmt::Display for NameError {
 impl std::error::Error for NameError {}
 
 impl WindowKey {
+    /// Default name for the main window on a fresh install. Mirrors
+    /// the module-level [`MAIN_DEFAULT`] constant; the associated form
+    /// is the call site preferred by `WindowConfig`'s [`BTreeMap`]
+    /// keying so most lookups read `windows[WindowKey::MAIN_DEFAULT]`.
+    pub const MAIN_DEFAULT: &'static str = MAIN_DEFAULT;
+
     /// Construct without normalisation. Caller-asserts the input is
     /// already trimmed and within bounds. Use [`Self::normalize`] for
     /// untrusted input.

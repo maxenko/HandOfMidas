@@ -1,4 +1,14 @@
+#![allow(clippy::field_reassign_with_default)]
+//
+// Several v3 tests start from `AppConfig::default()` (which already
+// contains a populated `windows["Main"]`) and tweak a few fields by
+// reassignment. Clippy's `field_reassign_with_default` would have
+// us inline the entire (large) AppConfig literal — the resulting
+// boilerplate dwarfs the actual test setup. The mutate-then-customise
+// idiom is intentional here.
+
 use super::*;
+use crate::WindowKey;
 use std::io::Write;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -30,9 +40,11 @@ fn default_produces_valid_toml() {
 #[test]
 fn default_has_expected_values() {
     let config = AppConfig::default();
-    assert_eq!(config.window.width, 1280);
-    assert_eq!(config.window.height, 800);
-    assert!(!config.window.maximized);
+    let geom = &config.windows[WindowKey::MAIN_DEFAULT].geometry;
+    assert_eq!(geom.width, 1280);
+    assert_eq!(geom.height, 800);
+    assert!(!geom.maximized);
+    assert!(config.windows[WindowKey::MAIN_DEFAULT].is_main);
     assert_eq!(config.theme.mode, "dark");
     assert!(config.charts.is_empty());
 }
@@ -121,57 +133,46 @@ fn save_load_roundtrip_preserves_all_fields() {
             },
         ],
     );
-    let config = AppConfig {
-        version: crate::config::CURRENT_CONFIG_VERSION,
-        window: WindowConfig {
-            width: 1920,
-            height: 1080,
-            maximized: true,
-            ..Default::default()
-        },
-        theme: ThemeConfig {
-            mode: "light".into(),
-        },
-        charts: vec![ChartConfig {
-            symbol: "MSFT".into(),
-            timeframe: "4H".into(),
-            levels: vec![],
-            camera_time_start: Some(1_000_000.0),
-            camera_time_end: Some(2_000_000.0),
-            camera_price_low: Some(350.0),
-            camera_price_high: Some(450.0),
-            collapse_gaps: true,
-            timeline_border_ratio: 0.20,
-            volume_scale: 1.0,
-            show_volume_profile: false,
-            show_levels: true,
-            viewport_width: None,
-            viewport_height: None,
-            symbol_link: LinkMode::default(),
-            timeframe_link: LinkMode::default(),
-            bound_symbol: None,
-            backend: None,
-        }],
-        levels: msft_levels,
-        watchlists: Vec::new(),
-        order_panels: Vec::new(),
-        order_blotters: Vec::new(),
-        account_panels: Vec::new(),
-        recent_symbols: Vec::new(),
-        panel_order: Vec::new(),
-        layout_tree: Vec::new(),
-        store: StoreConfig::default(),
-        providers: None,
-        broker: BrokerConnectionConfig::default(),
-        chart_view_store_schema: 0,
+    let mut config = AppConfig::default();
+    {
+        let main = config.windows.get_mut(WindowKey::MAIN_DEFAULT).unwrap();
+        main.geometry.width = 1920;
+        main.geometry.height = 1080;
+        main.geometry.maximized = true;
+    }
+    config.theme = ThemeConfig {
+        mode: "light".into(),
     };
+    config.charts = vec![ChartConfig {
+        id: 0,
+        symbol: "MSFT".into(),
+        timeframe: "4H".into(),
+        levels: vec![],
+        camera_time_start: Some(1_000_000.0),
+        camera_time_end: Some(2_000_000.0),
+        camera_price_low: Some(350.0),
+        camera_price_high: Some(450.0),
+        collapse_gaps: true,
+        timeline_border_ratio: 0.20,
+        volume_scale: 1.0,
+        show_volume_profile: false,
+        show_levels: true,
+        viewport_width: None,
+        viewport_height: None,
+        symbol_link: LinkMode::default(),
+        timeframe_link: LinkMode::default(),
+        bound_symbol: None,
+        backend: None,
+    }];
+    config.levels = msft_levels;
 
     config.save(&path).expect("save config");
     let loaded = AppConfig::load(&path).expect("load config");
 
-    assert_eq!(loaded.window.width, 1920);
-    assert_eq!(loaded.window.height, 1080);
-    assert!(loaded.window.maximized);
+    let main_geom = &loaded.windows[WindowKey::MAIN_DEFAULT].geometry;
+    assert_eq!(main_geom.width, 1920);
+    assert_eq!(main_geom.height, 1080);
+    assert!(main_geom.maximized);
     assert_eq!(loaded.theme.mode, "light");
     assert_eq!(loaded.charts.len(), 1);
     assert_eq!(loaded.charts[0].symbol, "MSFT");
@@ -200,8 +201,9 @@ fn load_missing_file_returns_defaults() {
     let path = dir.join("nonexistent.toml");
 
     let config = AppConfig::load(&path).expect("load from missing file");
-    assert_eq!(config.window.width, 1280);
-    assert_eq!(config.window.height, 800);
+    let geom = &config.windows[WindowKey::MAIN_DEFAULT].geometry;
+    assert_eq!(geom.width, 1280);
+    assert_eq!(geom.height, 800);
     assert_eq!(config.theme.mode, "dark");
     assert!(config.charts.is_empty());
 
@@ -217,8 +219,9 @@ fn load_empty_file_returns_defaults() {
     std::fs::File::create(&path).expect("create empty file");
 
     let config = AppConfig::load(&path).expect("load from empty file");
-    assert_eq!(config.window.width, 1280);
-    assert_eq!(config.window.height, 800);
+    let geom = &config.windows[WindowKey::MAIN_DEFAULT].geometry;
+    assert_eq!(geom.width, 1280);
+    assert_eq!(geom.height, 800);
     assert_eq!(config.theme.mode, "dark");
     assert!(config.charts.is_empty());
 
@@ -234,7 +237,8 @@ fn load_whitespace_only_file_returns_defaults() {
     f.write_all(b"   \n  \n  ").expect("write whitespace");
 
     let config = AppConfig::load(&path).expect("load from whitespace file");
-    assert_eq!(config.window.width, 1280);
+    let geom = &config.windows[WindowKey::MAIN_DEFAULT].geometry;
+    assert_eq!(geom.width, 1280);
     assert!(config.charts.is_empty());
 
     cleanup(&dir);
@@ -267,71 +271,52 @@ fn chart_config_with_levels_survives_roundtrip() {
             },
         ],
     );
-    let config = AppConfig {
-        version: crate::config::CURRENT_CONFIG_VERSION,
-        window: WindowConfig {
-            width: 1280,
-            height: 800,
-            ..Default::default()
+    let mut config = AppConfig::default();
+    config.charts = vec![
+        ChartConfig {
+            id: 0,
+            symbol: "AAPL".into(),
+            timeframe: "1D".into(),
+            levels: vec![],
+            camera_time_start: None,
+            camera_time_end: None,
+            camera_price_low: None,
+            camera_price_high: None,
+            collapse_gaps: false,
+            timeline_border_ratio: 0.20,
+            volume_scale: 1.0,
+            show_volume_profile: false,
+            show_levels: true,
+            viewport_width: None,
+            viewport_height: None,
+            symbol_link: LinkMode::default(),
+            timeframe_link: LinkMode::default(),
+            bound_symbol: None,
+            backend: None,
         },
-        theme: ThemeConfig {
-            mode: "dark".into(),
+        ChartConfig {
+            id: 1,
+            symbol: "TSLA".into(),
+            timeframe: "5m".into(),
+            levels: vec![],
+            camera_time_start: Some(500.0),
+            camera_time_end: Some(1500.0),
+            camera_price_low: Some(100.0),
+            camera_price_high: Some(300.0),
+            collapse_gaps: true,
+            timeline_border_ratio: 0.20,
+            volume_scale: 1.0,
+            show_volume_profile: false,
+            show_levels: true,
+            viewport_width: None,
+            viewport_height: None,
+            symbol_link: LinkMode::default(),
+            timeframe_link: LinkMode::default(),
+            bound_symbol: None,
+            backend: None,
         },
-        charts: vec![
-            ChartConfig {
-                symbol: "AAPL".into(),
-                timeframe: "1D".into(),
-                levels: vec![],
-                camera_time_start: None,
-                camera_time_end: None,
-                camera_price_low: None,
-                camera_price_high: None,
-                collapse_gaps: false,
-                timeline_border_ratio: 0.20,
-                volume_scale: 1.0,
-                show_volume_profile: false,
-                show_levels: true,
-                viewport_width: None,
-                viewport_height: None,
-                symbol_link: LinkMode::default(),
-                timeframe_link: LinkMode::default(),
-                bound_symbol: None,
-                backend: None,
-            },
-            ChartConfig {
-                symbol: "TSLA".into(),
-                timeframe: "5m".into(),
-                levels: vec![],
-                camera_time_start: Some(500.0),
-                camera_time_end: Some(1500.0),
-                camera_price_low: Some(100.0),
-                camera_price_high: Some(300.0),
-                collapse_gaps: true,
-                timeline_border_ratio: 0.20,
-                volume_scale: 1.0,
-                show_volume_profile: false,
-                show_levels: true,
-                viewport_width: None,
-                viewport_height: None,
-                symbol_link: LinkMode::default(),
-                timeframe_link: LinkMode::default(),
-                bound_symbol: None,
-                backend: None,
-            },
-        ],
-        levels: aapl_levels,
-        watchlists: Vec::new(),
-        order_panels: Vec::new(),
-        order_blotters: Vec::new(),
-        account_panels: Vec::new(),
-        recent_symbols: Vec::new(),
-        panel_order: Vec::new(),
-        layout_tree: Vec::new(),
-        store: StoreConfig::default(),
-        providers: None,
-        broker: BrokerConnectionConfig::default(),
-        chart_view_store_schema: 0,
-    };
+    ];
+    config.levels = aapl_levels;
 
     config.save(&path).expect("save config");
     let loaded = AppConfig::load(&path).expect("load config");
@@ -410,9 +395,10 @@ mode = "light"
     .expect("write partial config");
 
     let config = AppConfig::load(&path).expect("load partial config");
-    assert_eq!(config.window.width, 800);
-    assert_eq!(config.window.height, 600);
-    assert!(!config.window.maximized);
+    let main_geom = &config.windows[WindowKey::MAIN_DEFAULT].geometry;
+    assert_eq!(main_geom.width, 800);
+    assert_eq!(main_geom.height, 600);
+    assert!(!main_geom.maximized);
     assert_eq!(config.theme.mode, "light");
     // charts has #[serde(default)], so missing = empty vec.
     assert!(config.charts.is_empty());
@@ -449,8 +435,9 @@ color = [1.0, 0.843, 0.0, 1.0]
     .expect("write old-format config");
 
     let config = AppConfig::load(&path).expect("load old-format config");
-    assert_eq!(config.window.width, 1280);
-    assert!(!config.window.maximized); // default false
+    let main_geom = &config.windows[WindowKey::MAIN_DEFAULT].geometry;
+    assert_eq!(main_geom.width, 1280);
+    assert!(!main_geom.maximized); // default false
     assert_eq!(config.charts.len(), 1);
     assert_eq!(config.charts[0].symbol, "AAPL");
     // New camera fields default to None.
@@ -474,49 +461,33 @@ fn atomic_write_does_not_corrupt_on_success() {
     let dir = temp_dir();
     let path = dir.join("atomic.toml");
 
-    let config = AppConfig {
-        version: crate::config::CURRENT_CONFIG_VERSION,
-        window: WindowConfig {
-            width: 1600,
-            height: 900,
-            ..Default::default()
-        },
-        theme: ThemeConfig {
-            mode: "dark".into(),
-        },
-        charts: vec![ChartConfig {
-            symbol: "GOOG".into(),
-            timeframe: "1H".into(),
-            levels: vec![],
-            camera_time_start: Some(100.0),
-            camera_time_end: Some(200.0),
-            camera_price_low: Some(50.0),
-            camera_price_high: Some(150.0),
-            collapse_gaps: false,
-            timeline_border_ratio: 0.20,
-            volume_scale: 1.0,
-            show_volume_profile: false,
-            show_levels: true,
-            viewport_width: None,
-            viewport_height: None,
-            symbol_link: LinkMode::default(),
-            timeframe_link: LinkMode::default(),
-            bound_symbol: None,
-            backend: None,
-        }],
-        levels: HashMap::new(),
-        watchlists: Vec::new(),
-        order_panels: Vec::new(),
-        order_blotters: Vec::new(),
-        account_panels: Vec::new(),
-        recent_symbols: Vec::new(),
-        panel_order: Vec::new(),
-        layout_tree: Vec::new(),
-        store: StoreConfig::default(),
-        providers: None,
-        broker: BrokerConnectionConfig::default(),
-        chart_view_store_schema: 0,
-    };
+    let mut config = AppConfig::default();
+    {
+        let main = config.windows.get_mut(WindowKey::MAIN_DEFAULT).unwrap();
+        main.geometry.width = 1600;
+        main.geometry.height = 900;
+    }
+    config.charts = vec![ChartConfig {
+        id: 0,
+        symbol: "GOOG".into(),
+        timeframe: "1H".into(),
+        levels: vec![],
+        camera_time_start: Some(100.0),
+        camera_time_end: Some(200.0),
+        camera_price_low: Some(50.0),
+        camera_price_high: Some(150.0),
+        collapse_gaps: false,
+        timeline_border_ratio: 0.20,
+        volume_scale: 1.0,
+        show_volume_profile: false,
+        show_levels: true,
+        viewport_width: None,
+        viewport_height: None,
+        symbol_link: LinkMode::default(),
+        timeframe_link: LinkMode::default(),
+        bound_symbol: None,
+        backend: None,
+    }];
 
     // Write multiple times to ensure atomic replacement works.
     for _ in 0..5 {
@@ -525,7 +496,7 @@ fn atomic_write_does_not_corrupt_on_success() {
 
     // Verify the file is valid after repeated writes.
     let loaded = AppConfig::load(&path).expect("load after atomic writes");
-    assert_eq!(loaded.window.width, 1600);
+    assert_eq!(loaded.windows[WindowKey::MAIN_DEFAULT].geometry.width, 1600);
     assert_eq!(loaded.charts.len(), 1);
     assert_eq!(loaded.charts[0].symbol, "GOOG");
     assert_eq!(loaded.charts[0].camera_time_start, Some(100.0));
@@ -576,80 +547,67 @@ fn roundtrip_with_camera_and_collapse_gaps_and_line_width() {
             },
         ],
     );
-    let config = AppConfig {
-        version: crate::config::CURRENT_CONFIG_VERSION,
-        window: WindowConfig {
-            width: 2560,
-            height: 1440,
-            maximized: true,
-            ..Default::default()
+    let mut config = AppConfig::default();
+    {
+        let main = config.windows.get_mut(WindowKey::MAIN_DEFAULT).unwrap();
+        main.geometry.width = 2560;
+        main.geometry.height = 1440;
+        main.geometry.maximized = true;
+    }
+    config.charts = vec![
+        ChartConfig {
+            id: 0,
+            symbol: "SPY".into(),
+            timeframe: "5m".into(),
+            levels: vec![],
+            camera_time_start: Some(1_700_000_000.0),
+            camera_time_end: Some(1_700_100_000.0),
+            camera_price_low: Some(470.0),
+            camera_price_high: Some(510.0),
+            collapse_gaps: true,
+            timeline_border_ratio: 0.20,
+            volume_scale: 1.0,
+            show_volume_profile: false,
+            show_levels: true,
+            viewport_width: None,
+            viewport_height: None,
+            symbol_link: LinkMode::default(),
+            timeframe_link: LinkMode::default(),
+            bound_symbol: None,
+            backend: None,
         },
-        theme: ThemeConfig {
-            mode: "dark".into(),
+        ChartConfig {
+            id: 1,
+            symbol: "QQQ".into(),
+            timeframe: "1D".into(),
+            levels: vec![],
+            camera_time_start: None,
+            camera_time_end: None,
+            camera_price_low: None,
+            camera_price_high: None,
+            collapse_gaps: false,
+            timeline_border_ratio: 0.20,
+            volume_scale: 1.0,
+            show_volume_profile: false,
+            show_levels: true,
+            viewport_width: None,
+            viewport_height: None,
+            symbol_link: LinkMode::default(),
+            timeframe_link: LinkMode::default(),
+            bound_symbol: None,
+            backend: None,
         },
-        charts: vec![
-            ChartConfig {
-                symbol: "SPY".into(),
-                timeframe: "5m".into(),
-                levels: vec![],
-                camera_time_start: Some(1_700_000_000.0),
-                camera_time_end: Some(1_700_100_000.0),
-                camera_price_low: Some(470.0),
-                camera_price_high: Some(510.0),
-                collapse_gaps: true,
-                timeline_border_ratio: 0.20,
-                volume_scale: 1.0,
-                show_volume_profile: false,
-                show_levels: true,
-                viewport_width: None,
-                viewport_height: None,
-                symbol_link: LinkMode::default(),
-                timeframe_link: LinkMode::default(),
-                bound_symbol: None,
-                backend: None,
-            },
-            ChartConfig {
-                symbol: "QQQ".into(),
-                timeframe: "1D".into(),
-                levels: vec![],
-                camera_time_start: None,
-                camera_time_end: None,
-                camera_price_low: None,
-                camera_price_high: None,
-                collapse_gaps: false,
-                timeline_border_ratio: 0.20,
-                volume_scale: 1.0,
-                show_volume_profile: false,
-                show_levels: true,
-                viewport_width: None,
-                viewport_height: None,
-                symbol_link: LinkMode::default(),
-                timeframe_link: LinkMode::default(),
-                bound_symbol: None,
-                backend: None,
-            },
-        ],
-        levels: spy_levels,
-        watchlists: Vec::new(),
-        order_panels: Vec::new(),
-        order_blotters: Vec::new(),
-        account_panels: Vec::new(),
-        recent_symbols: Vec::new(),
-        panel_order: Vec::new(),
-        layout_tree: Vec::new(),
-        store: StoreConfig::default(),
-        providers: None,
-        broker: BrokerConnectionConfig::default(),
-        chart_view_store_schema: 0,
-    };
+    ];
+    config.levels = spy_levels;
 
     config.save(&path).expect("save full config");
     let loaded = AppConfig::load(&path).expect("load full config");
 
     // Window
-    assert_eq!(loaded.window.width, 2560);
-    assert_eq!(loaded.window.height, 1440);
-    assert!(loaded.window.maximized);
+    let main_geom = &loaded.windows[WindowKey::MAIN_DEFAULT].geometry;
+    assert_eq!(main_geom.width, 2560);
+    assert_eq!(main_geom.height, 1440);
+    assert!(main_geom.maximized);
 
     // First chart: camera fields populated
     let c0 = &loaded.charts[0];
@@ -826,6 +784,7 @@ fn chart_config_levels_not_serialized() {
 
     let config = AppConfig {
         charts: vec![ChartConfig {
+            id: 0,
             symbol: "AAPL".into(),
             timeframe: "1D".into(),
             levels: vec![LevelConfig {
@@ -871,28 +830,29 @@ fn watchlist_config_roundtrip() {
     let dir = temp_dir();
     let path = dir.join("watchlist.toml");
 
-    let config = AppConfig {
-        watchlists: vec![WatchlistConfig {
-            name: "Main".into(),
-            tickers: vec![
-                WatchlistTickerConfig {
-                    symbol: "AAPL".into(),
-                    favorite: 1,
-                },
-                WatchlistTickerConfig {
-                    symbol: "MSFT".into(),
-                    favorite: 0,
-                },
-            ],
-            symbol_link: LinkMode::default(),
-            column_widths: vec![],
-        }],
-        panel_order: vec![
-            PanelSlot::Chart { chart_index: 0 },
-            PanelSlot::Watchlist { watchlist_index: 0 },
+    let mut config = AppConfig::default();
+    config.watchlists = vec![WatchlistConfig {
+        id: 0,
+        name: "Main".into(),
+        tickers: vec![
+            WatchlistTickerConfig {
+                symbol: "AAPL".into(),
+                favorite: 1,
+            },
+            WatchlistTickerConfig {
+                symbol: "MSFT".into(),
+                favorite: 0,
+            },
         ],
-        ..Default::default()
-    };
+        symbol_link: LinkMode::default(),
+        column_widths: vec![],
+    }];
+    // v3 layout: a single watchlist leaf in the Main window.
+    config
+        .windows
+        .get_mut(WindowKey::MAIN_DEFAULT)
+        .unwrap()
+        .layout_tree = vec![LayoutNode::Watchlist { watchlist_id: 0 }];
 
     config.save(&path).expect("save watchlist config");
     let loaded = AppConfig::load(&path).expect("load watchlist config");
@@ -905,15 +865,14 @@ fn watchlist_config_roundtrip() {
     assert_eq!(loaded.watchlists[0].tickers[1].symbol, "MSFT");
     assert_eq!(loaded.watchlists[0].tickers[1].favorite, 0);
 
-    assert_eq!(loaded.panel_order.len(), 2);
-    match &loaded.panel_order[0] {
-        PanelSlot::Chart { chart_index } => assert_eq!(*chart_index, 0),
-        _ => panic!("expected Chart"),
-    }
-    match &loaded.panel_order[1] {
-        PanelSlot::Watchlist { watchlist_index } => assert_eq!(*watchlist_index, 0),
+    let main_layout = &loaded.windows[WindowKey::MAIN_DEFAULT].layout_tree;
+    assert_eq!(main_layout.len(), 1);
+    match &main_layout[0] {
+        LayoutNode::Watchlist { watchlist_id } => assert_eq!(*watchlist_id, 0),
         _ => panic!("expected Watchlist"),
     }
+    // Legacy panel_order is drained on load.
+    assert!(loaded.legacy_panel_order.is_empty());
 
     cleanup(&dir);
 }
@@ -938,7 +897,7 @@ mode = "dark"
 
     let config = AppConfig::load(&path).expect("load old config");
     assert!(config.watchlists.is_empty());
-    assert!(config.panel_order.is_empty());
+    assert!(config.legacy_panel_order.is_empty());
 
     cleanup(&dir);
 }
@@ -952,6 +911,7 @@ fn non_default_link_modes_roundtrip() {
 
     let config = AppConfig {
         charts: vec![ChartConfig {
+            id: 0,
             symbol: "AAPL".into(),
             timeframe: "D1".into(),
             levels: vec![],
@@ -1111,19 +1071,17 @@ order_blotter_index = 0
         config.account_panels[0].orders.hidden_columns,
         vec!["tp".to_string()]
     );
-    // Panel-slot / layout-tree rewritten.
+    // Layout-tree rewritten and migrated into windows[Main].
+    let main_layout = &config.windows[WindowKey::MAIN_DEFAULT].layout_tree;
     assert!(matches!(
-        config.panel_order[0],
-        PanelSlot::Account {
-            account_panel_index: 0
-        }
-    ));
-    assert!(matches!(
-        config.layout_tree[0],
+        main_layout[0],
         LayoutNode::Account {
-            account_panel_index: 0
+            account_panel_id: 0
         }
     ));
+    // Legacy fields drained on load.
+    assert!(config.legacy_layout_tree.is_empty());
+    assert!(config.legacy_panel_order.is_empty());
 
     // Backup exists and holds the pre-migration bytes. Filename is
     // `<name>.bak-v<initial>-to-v<current>` — the legacy file has
@@ -1199,6 +1157,7 @@ fn chart_backend_default_is_legacy() {
 #[test]
 fn chart_backend_serializes_lowercase() {
     let cfg = ChartConfig {
+        id: 0,
         symbol: "X".into(),
         timeframe: "1D".into(),
         levels: vec![],
@@ -1277,6 +1236,7 @@ fn chart_backend_absent_defaults_to_none() {
 #[test]
 fn chart_backend_roundtrip_new() {
     let cfg = ChartConfig {
+        id: 0,
         symbol: "MSFT".to_string(),
         timeframe: "5m".to_string(),
         levels: vec![],
@@ -1307,6 +1267,7 @@ fn chart_backend_roundtrip_new() {
 #[test]
 fn chart_backend_none_skips_serialization() {
     let cfg = ChartConfig {
+        id: 0,
         symbol: "TSLA".to_string(),
         timeframe: "1D".to_string(),
         levels: vec![],

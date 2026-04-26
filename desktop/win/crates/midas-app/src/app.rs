@@ -1441,7 +1441,7 @@ impl MidasApp {
     /// monitor dimensions match the current system (heuristic: monitor_width
     /// and monitor_height are present). If the monitor config changed or no
     /// position was saved, falls back to `Position::Default`.
-    fn validate_saved_position(wc: &midas_core::config::WindowConfig) -> window::Position {
+    fn validate_saved_position(wc: &midas_core::config::WindowGeometryConfig) -> window::Position {
         let (x, y) = match (wc.x, wc.y) {
             (Some(x), Some(y)) => (x, y),
             _ => return window::Position::Default,
@@ -1969,18 +1969,32 @@ impl MidasApp {
         let now = chrono::Local::now();
         let current_time = now.format("%H:%M:%S").to_string();
 
+        // v3: main-window geometry lives inside `config.windows[Main]`.
+        // The validation pass guarantees a Main entry exists post-load,
+        // so the lookup is infallible — fall back defensively to a
+        // synthetic default only to satisfy the borrow checker.
+        let main_geometry = config
+            .windows
+            .get(midas_core::WindowKey::MAIN_DEFAULT)
+            .map(|w| w.geometry.clone())
+            .unwrap_or_else(|| midas_core::config::WindowGeometryConfig {
+                width: 1280,
+                height: 800,
+                ..Default::default()
+            });
+
         // Determine initial window position from saved config.
         // Only restore if the saved monitor dimensions still match (the user
         // hasn't changed their display setup) and the window would be at least
         // partially visible.
-        let initial_position = Self::validate_saved_position(&config.window);
+        let initial_position = Self::validate_saved_position(&main_geometry);
 
-        let initial_size = (config.window.width, config.window.height);
+        let initial_size = (main_geometry.width, main_geometry.height);
 
         // Open the main window via the daemon. The returned Task produces
         // the window::Id once the OS window is created.
         let (main_id, open_task) = window::open(window::Settings {
-            size: iced::Size::new(config.window.width as f32, config.window.height as f32),
+            size: iced::Size::new(main_geometry.width as f32, main_geometry.height as f32),
             position: initial_position,
             ..window::Settings::default()
         });
@@ -2007,10 +2021,21 @@ impl MidasApp {
             status_message,
         );
 
-        if !config.layout_tree.is_empty() {
+        // v3: per-window layout lives inside `config.windows[Main]`.
+        // The migration's validation pass guarantees the Main entry
+        // exists; if it doesn't (e.g. an empty `windows = {}` from a
+        // hand-edited config that bypasses load), fall back to an
+        // empty layout slice so the legacy fallbacks still fire.
+        let main_layout_tree: &[LayoutNode] = config
+            .windows
+            .get(midas_core::WindowKey::MAIN_DEFAULT)
+            .map(|w| w.layout_tree.as_slice())
+            .unwrap_or(&[]);
+
+        if !main_layout_tree.is_empty() {
             // Full topology restoration from layout_tree.
             let (ws, ch, wl, op, ap) = Self::restore_from_layout_tree(
-                &config.layout_tree,
+                main_layout_tree,
                 &config.charts,
                 &config.watchlists,
                 &config.order_panels,
@@ -2024,15 +2049,19 @@ impl MidasApp {
             restored_order_panels = op;
             restored_account_panels = ap;
             status_message = format!("Restored {n} panel(s) from layout tree");
-        } else if !config.panel_order.is_empty() {
+        } else if !config.legacy_panel_order.is_empty() {
             // Legacy: panel_order-driven restoration (flat, no topology).
+            // Reaches here only if migration didn't drain
+            // `legacy_panel_order` for some reason — keep the path
+            // alive as a defensive fallback so hand-edited v3 configs
+            // with stray legacy slots still load.
             let (mut ws, first_chart_id) = WorkspaceLayout::single(&mut panel_ids);
             let mut ch = HashMap::new();
             let mut wl = HashMap::new();
             let first_pane = ws.focus.unwrap();
             let mut is_first = true;
 
-            for slot in &config.panel_order {
+            for slot in &config.legacy_panel_order {
                 match slot {
                     PanelSlot::Chart { chart_index } => {
                         let chart_cfg = match config.charts.get(*chart_index) {
@@ -2447,7 +2476,7 @@ impl MidasApp {
             current_time,
             window: {
                 let mut g = crate::window_geometry::WindowGeometry::from_config(
-                    &config.window,
+                    &main_geometry,
                     initial_size,
                 );
                 // The runtime `main_window` id is the iced-assigned one
@@ -2867,39 +2896,49 @@ impl MidasApp {
                             b: Box::new(b),
                         }
                     }
-                    LayoutNode::Chart { chart_index } => {
+                    LayoutNode::Chart { chart_id } => {
+                        // v3: layout leaves reference stable
+                        // `ChartConfig::id`s, not vec indices. Look up
+                        // by id; fall back to an empty panel if the id
+                        // isn't in the panel pool (consistent with the
+                        // pre-v3 "missing chart_index" behaviour).
                         let id = self.alloc.next_chart();
                         let panel = chart_cfgs
-                            .get(*chart_index)
+                            .iter()
+                            .find(|c| c.id == *chart_id)
                             .map(MidasApp::restore_panel)
                             .unwrap_or_else(MidasApp::make_empty_panel);
                         self.charts.insert(id, panel);
                         self.cursor += 1;
                         pane_grid::Configuration::Pane(PaneState::chart(id))
                     }
-                    LayoutNode::Watchlist { watchlist_index } => {
+                    LayoutNode::Watchlist { watchlist_id } => {
                         let wl_id = self.alloc.next_watchlist();
-                        if let Some(wl_cfg) = watchlist_cfgs.get(*watchlist_index) {
+                        if let Some(wl_cfg) = watchlist_cfgs.iter().find(|w| w.id == *watchlist_id)
+                        {
                             let panel = WatchlistPanel::from_config(wl_id, wl_cfg);
                             self.watchlists.insert(wl_id, panel);
                         }
                         self.cursor += 1;
                         pane_grid::Configuration::Pane(PaneState::watchlist(wl_id))
                     }
-                    LayoutNode::OrderPanel { order_panel_index } => {
+                    LayoutNode::OrderPanel { order_panel_id } => {
                         let op_id = self.alloc.next_order_panel();
-                        if let Some(op_cfg) = order_panel_cfgs.get(*order_panel_index) {
+                        if let Some(op_cfg) =
+                            order_panel_cfgs.iter().find(|o| o.id == *order_panel_id)
+                        {
                             let panel = crate::order_panel::OrderPanel::from_config(op_id, op_cfg);
                             self.order_panels.insert(op_id, panel);
                         }
                         self.cursor += 1;
                         pane_grid::Configuration::Pane(PaneState::order(op_id))
                     }
-                    LayoutNode::Account {
-                        account_panel_index,
-                    } => {
+                    LayoutNode::Account { account_panel_id } => {
                         let account_id = self.alloc.next_account_panel();
-                        let panel = match account_panel_cfgs.get(*account_panel_index) {
+                        let panel = match account_panel_cfgs
+                            .iter()
+                            .find(|a| a.id == *account_panel_id)
+                        {
                             Some(cfg) => {
                                 crate::account_panel::AccountPanel::from_config(account_id, cfg)
                             }
@@ -4722,6 +4761,7 @@ mod backend_toggle_tests {
     #[test]
     fn restore_panel_reads_persisted_backend_new() {
         let cfg = ChartConfig {
+            id: 0,
             symbol: "AAPL".into(),
             timeframe: "1D".into(),
             levels: vec![],
@@ -4750,6 +4790,7 @@ mod backend_toggle_tests {
     #[test]
     fn restore_panel_without_backend_defaults_to_legacy() {
         let cfg = ChartConfig {
+            id: 0,
             symbol: "AAPL".into(),
             timeframe: "1D".into(),
             levels: vec![],

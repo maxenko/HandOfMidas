@@ -8,13 +8,14 @@
 //! Writes use atomic file replacement via `tempfile::NamedTempFile` to
 //! prevent corruption if the process is interrupted mid-save.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::link::LinkMode;
+use crate::window_key::WindowKey;
 
 pub mod migrations;
 
@@ -45,7 +46,7 @@ pub enum ConfigError {
 /// versions are walked forward to [`CURRENT_CONFIG_VERSION`] on
 /// load; the migrated form is then saved back, stamping the
 /// current value.
-pub const CURRENT_CONFIG_VERSION: u32 = 2;
+pub const CURRENT_CONFIG_VERSION: u32 = 3;
 
 /// Default for `AppConfig::version` when the field is missing on
 /// disk. v1 = pre-versioning (anything written before the
@@ -62,8 +63,15 @@ pub struct AppConfig {
     /// `load`; older files round-trip through the migration chain.
     #[serde(default = "default_config_version")]
     pub version: u32,
-    /// Window size settings.
-    pub window: WindowConfig,
+    /// Per-window state, keyed by user-visible window name. Each entry
+    /// owns its own pane-grid layout and OS geometry. Slice B (v3)
+    /// landed this map; v2 had a single `[window]` table at the top
+    /// level (now [`Self::legacy_window`]).
+    ///
+    /// At least one entry has `is_main: true`. The migration's
+    /// validation pass enforces this on load.
+    #[serde(default)]
+    pub windows: BTreeMap<String, WindowConfig>,
     /// Theme settings.
     pub theme: ThemeConfig,
     /// Per-chart configuration, persisted across sessions.
@@ -103,18 +111,26 @@ pub struct AppConfig {
     /// constant (currently 20) before writing.
     #[serde(default)]
     pub recent_symbols: Vec<String>,
-    /// Ordered list of panel types in the pane grid, in BTreeMap key order
-    /// (pane creation order — NOT spatial position). Save and restore both
-    /// use the same iteration order, so the mapping is self-consistent.
-    /// Full spatial layout topology is not preserved (same as chart-only restore).
-    /// If absent or empty, falls back to charts-only restoration (backward compat).
-    #[serde(default)]
-    pub panel_order: Vec<PanelSlot>,
-    /// Flattened layout tree (pre-order traversal of the pane split tree).
-    /// Preserves full topology, axes, and split ratios. If present, takes
-    /// priority over `panel_order` during restoration.
-    #[serde(default)]
-    pub layout_tree: Vec<LayoutNode>,
+    /// Legacy v1/v2 single-window geometry. Deserializes from the
+    /// top-level `[window]` TOML table; migration drains it into
+    /// `windows["Main"].geometry` on first v3 load. New v3 saves
+    /// don't emit this — geometry lives per-window.
+    #[serde(default, rename = "window", skip_serializing_if = "Option::is_none")]
+    pub legacy_window: Option<WindowGeometryConfig>,
+    /// Legacy v1/v2 panel order — the BTreeMap-iteration-order
+    /// fallback for layout reconstruction when `layout_tree` is
+    /// empty. Deserialized from the top-level `[[panel_order]]`
+    /// array. v2→v3 migration drains this into the main window's
+    /// layout tree if no full `layout_tree` is present.
+    #[serde(default, rename = "panel_order", skip_serializing_if = "Vec::is_empty")]
+    pub legacy_panel_order: Vec<PanelSlot>,
+    /// Legacy v1/v2 flattened layout tree (top-level
+    /// `[[layout_tree]]` array). Deserializes from older files with
+    /// `LayoutNode::Chart { chart_index }` etc.; migration walks it,
+    /// rewrites the `*_index` leaves to `*_id` and stores the result
+    /// in `windows["Main"].layout_tree`.
+    #[serde(default, rename = "layout_tree", skip_serializing_if = "Vec::is_empty")]
+    pub legacy_layout_tree: Vec<LayoutNode>,
     /// DuckDB persistent cache configuration.
     #[serde(default)]
     pub store: StoreConfig,
@@ -252,9 +268,12 @@ impl Default for BrokerConnectionConfig {
     }
 }
 
-/// Window geometry configuration.
+/// OS-window geometry — size, position, and last-known monitor
+/// dimensions. Renamed from the v2 top-level `WindowConfig` in
+/// slice B; now lives inside [`WindowConfig::geometry`] under each
+/// `windows[<name>]` entry.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct WindowConfig {
+pub struct WindowGeometryConfig {
     /// Window width in logical pixels.
     pub width: u32,
     /// Window height in logical pixels.
@@ -276,6 +295,30 @@ pub struct WindowConfig {
     pub monitor_height: Option<u32>,
 }
 
+/// Per-window persisted state — geometry plus the pane-grid layout
+/// hosted inside the window. Introduced in v3 (slice B). Each entry
+/// in [`AppConfig::windows`] is one of these.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WindowConfig {
+    /// Whether this is the main window. Exactly one entry must have
+    /// this set to `true` after the migration's validation pass; the
+    /// validator promotes the first entry by `BTreeMap` order if no
+    /// flag is set, and demotes extras (logging a warning) if more
+    /// than one is set.
+    #[serde(default)]
+    pub is_main: bool,
+    /// OS-level size, position, and monitor.
+    pub geometry: WindowGeometryConfig,
+    /// Flattened layout tree (pre-order traversal of the pane split
+    /// tree). Empty `layout_tree` → window opens with a single
+    /// placeholder pane (slice C will introduce the placeholder
+    /// variant; slice B's migration synthesises a chart-only fallback
+    /// from `legacy_panel_order` when the legacy `layout_tree` is
+    /// absent).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layout_tree: Vec<LayoutNode>,
+}
+
 /// Theme configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThemeConfig {
@@ -286,6 +329,16 @@ pub struct ThemeConfig {
 /// Per-chart configuration for session persistence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChartConfig {
+    /// Stable panel id, referenced by [`LayoutNode::Chart`] leaves
+    /// regardless of the chart's position in [`AppConfig::charts`].
+    /// Slice B (v3) migration assigns `id = position_in_vec` to every
+    /// existing entry; thereafter ids are minted from
+    /// `midas_app::app::panel_ids::PanelIdAllocator` and survive
+    /// pane reordering. `#[serde(default)]` lets v1/v2 configs
+    /// (which lack the field) load with `id = 0` so the migration
+    /// can rewrite them.
+    #[serde(default)]
+    pub id: u32,
     /// Ticker symbol (e.g. `"AAPL"`).
     pub symbol: String,
     /// Timeframe display name (e.g. `"1D"`, `"5m"`).
@@ -394,6 +447,9 @@ pub struct LevelConfig {
 /// Order panel configuration for session persistence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderPanelConfig {
+    /// Stable panel id (slice B / v3). See [`ChartConfig::id`].
+    #[serde(default)]
+    pub id: u32,
     /// Ticker symbol (e.g. `"AAPL"`).
     pub symbol: String,
     /// Order side: `"BUY"` or `"SELL"`.
@@ -421,6 +477,7 @@ pub struct OrderPanelConfig {
 impl Default for OrderPanelConfig {
     fn default() -> Self {
         Self {
+            id: 0,
             symbol: String::new(),
             side: default_order_side(),
             quantity: default_order_quantity(),
@@ -518,6 +575,9 @@ pub struct OrdersTabConfig {
 /// Recents tab state. v1: only Orders persists per-tab widths.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountPanelConfig {
+    /// Stable panel id (slice B / v3). See [`ChartConfig::id`].
+    #[serde(default)]
+    pub id: u32,
     /// User-visible panel name. Defaults to `"Account"`.
     #[serde(default = "default_account_panel_name")]
     pub name: String,
@@ -532,6 +592,7 @@ pub struct AccountPanelConfig {
 impl Default for AccountPanelConfig {
     fn default() -> Self {
         Self {
+            id: 0,
             name: default_account_panel_name(),
             active_tab: AccountTab::default(),
             orders: OrdersTabConfig::default(),
@@ -551,6 +612,9 @@ fn default_order_quantity() -> String {
 /// Watchlist configuration for session persistence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WatchlistConfig {
+    /// Stable panel id (slice B / v3). See [`ChartConfig::id`].
+    #[serde(default)]
+    pub id: u32,
     /// User-defined name for the watchlist.
     pub name: String,
     /// Tickers in the watchlist.
@@ -648,7 +712,16 @@ pub enum PanelSlot {
 ///
 /// Stored as a pre-order traversal of the binary split tree. A `Split`
 /// node's two children are the next two subtrees in the array. Leaf
-/// nodes (`Chart`/`Watchlist`) terminate a branch.
+/// nodes (`Chart`/`Watchlist`/...) terminate a branch.
+///
+/// **v3 schema change** (slice B): leaves switched from index-based
+/// (`chart_index: usize`) to id-based (`chart_id: u32`) so that
+/// references survive panel-pool reordering. v1/v2 configs that
+/// stored `chart_index` etc. still deserialize via `serde(alias)` —
+/// the alias resolves the old key into the new field, and the
+/// migration's leaf-rewrite pass overwrites the value with the
+/// chart's stable id (which equals the legacy index for migrated
+/// configs, so the rewrite is a no-op in steady state).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum LayoutNode {
@@ -659,35 +732,42 @@ pub enum LayoutNode {
         /// Split ratio in \[0.0, 1.0\].
         ratio: f32,
     },
-    /// A chart pane — index into `AppConfig::charts`.
+    /// A chart pane — references [`ChartConfig::id`].
     Chart {
-        /// Index into `AppConfig::charts`.
-        chart_index: usize,
+        /// Stable [`ChartConfig::id`]. v1/v2's `chart_index: usize`
+        /// is read into this field via `serde(alias)`.
+        #[serde(alias = "chart_index")]
+        chart_id: u32,
     },
-    /// A watchlist pane — index into `AppConfig::watchlists`.
+    /// A watchlist pane — references [`WatchlistConfig::id`].
     Watchlist {
-        /// Index into `AppConfig::watchlists`.
-        watchlist_index: usize,
+        /// Stable [`WatchlistConfig::id`].
+        #[serde(alias = "watchlist_index")]
+        watchlist_id: u32,
     },
-    /// An order panel pane — index into `AppConfig::order_panels`.
+    /// An order panel pane — references [`OrderPanelConfig::id`].
     #[serde(rename = "order_panel")]
     OrderPanel {
-        /// Index into `AppConfig::order_panels`.
-        order_panel_index: usize,
+        /// Stable [`OrderPanelConfig::id`].
+        #[serde(alias = "order_panel_index")]
+        order_panel_id: u32,
     },
     /// An order-blotter pane — index into `AppConfig::order_blotters`.
     ///
     /// Legacy variant: converted to `Account` on load by the migration step.
+    /// Retains `usize`-keyed semantics because it's only valid in v1
+    /// configs which exclusively used indices.
     #[serde(rename = "order_blotter")]
     OrderBlotter {
         /// Index into `AppConfig::order_blotters`.
         order_blotter_index: usize,
     },
-    /// An Account pane — index into `AppConfig::account_panels`.
+    /// An Account pane — references [`AccountPanelConfig::id`].
     #[serde(rename = "account")]
     Account {
-        /// Index into `AppConfig::account_panels`.
-        account_panel_index: usize,
+        /// Stable [`AccountPanelConfig::id`].
+        #[serde(alias = "account_panel_index")]
+        account_panel_id: u32,
     },
     /// Forward-compatibility catch-all for unknown panel types.
     /// Prevents deserialization failure if a newer config format is loaded.
@@ -767,15 +847,24 @@ fn default_icon() -> String {
 
 impl Default for AppConfig {
     fn default() -> Self {
+        let mut windows = BTreeMap::new();
+        windows.insert(
+            WindowKey::MAIN_DEFAULT.to_string(),
+            WindowConfig {
+                is_main: true,
+                geometry: WindowGeometryConfig {
+                    width: 1280,
+                    height: 800,
+                    ..Default::default()
+                },
+                layout_tree: Vec::new(),
+            },
+        );
         Self {
             // Fresh configs start at the current version — they were
             // born with the latest schema, so no migration applies.
             version: CURRENT_CONFIG_VERSION,
-            window: WindowConfig {
-                width: 1280,
-                height: 800,
-                ..Default::default()
-            },
+            windows,
             theme: ThemeConfig {
                 mode: "dark".into(),
             },
@@ -786,8 +875,9 @@ impl Default for AppConfig {
             order_blotters: Vec::new(),
             account_panels: Vec::new(),
             recent_symbols: Vec::new(),
-            panel_order: Vec::new(),
-            layout_tree: Vec::new(),
+            legacy_window: None,
+            legacy_panel_order: Vec::new(),
+            legacy_layout_tree: Vec::new(),
             store: StoreConfig::default(),
             providers: None,
             broker: BrokerConnectionConfig::default(),
@@ -861,7 +951,31 @@ impl AppConfig {
                     backup.display()
                 );
             }
+
+            // Slice B (v3): an additional one-shot, stable-named
+            // backup of the pre-v3 file. Specced in the multi-window
+            // plan as `config.toml.v2.bak`. Older binaries refuse to
+            // open `version: 3`, and this stable name is what the
+            // app's downgrade docs point at — distinct from the
+            // framework's `.bak-v{from}-to-v{to}` filename which
+            // changes every time `CURRENT_CONFIG_VERSION` bumps.
+            if initial_version <= 2 && CURRENT_CONFIG_VERSION >= 3 {
+                let mut v2_backup_name = path
+                    .file_name()
+                    .map(|n| n.to_os_string())
+                    .unwrap_or_default();
+                v2_backup_name.push(".v2.bak");
+                let v2_backup = path.with_file_name(v2_backup_name);
+                if !v2_backup.exists() {
+                    std::fs::copy(path, &v2_backup).map_err(ConfigError::Io)?;
+                    tracing::info!("Wrote v2→v3 stable backup at {}", v2_backup.display());
+                }
+            }
         }
+        // Idempotent post-migration validation pass. Catches
+        // hand-edits that survived the version chain (no `is_main`
+        // entry, dangling layout-tree ids, missing `windows` table).
+        migrations::validate(&mut config);
         Ok(config)
     }
 

@@ -116,6 +116,7 @@ impl AccountPanel {
     /// Project back to a persistable config.
     pub fn to_config(&self) -> AccountPanelConfig {
         AccountPanelConfig {
+            id: self.id.0,
             name: self.name.clone(),
             active_tab: self.active_tab,
             orders: self.orders.to_config(),

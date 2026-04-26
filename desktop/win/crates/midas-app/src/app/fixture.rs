@@ -148,9 +148,18 @@ impl MidasApp {
         // Reset the panel-id allocator and let the restore re-mint ids
         // off the fixture's layout tree, mirroring `MidasApp::new`.
         self.panel_ids = crate::app::panel_ids::PanelIdAllocator::default();
+        // v3 (slice B): the layout tree lives inside
+        // `config.windows[Main]`. Any v2 fixture loaded here has
+        // already gone through migration, so the legacy_* fields
+        // are drained.
+        let main_layout_tree: &[midas_core::config::LayoutNode] = config
+            .windows
+            .get(midas_core::WindowKey::MAIN_DEFAULT)
+            .map(|w| w.layout_tree.as_slice())
+            .unwrap_or(&[]);
         let (workspace, charts, watchlists, order_panels, account_panels) =
             Self::restore_from_layout_tree(
-                &config.layout_tree,
+                main_layout_tree,
                 &config.charts,
                 &config.watchlists,
                 &config.order_panels,
@@ -220,8 +229,26 @@ impl MidasApp {
         // by going through the controller's API rather than building
         // a fresh one from scratch.
         let main_id = self.window.main_window();
-        self.window =
-            crate::window_geometry::WindowGeometry::from_config(&config.window, self.window.size());
+        // v3: main-window geometry lives inside `config.windows[Main]`.
+        // The validation pass guarantees the entry exists; if it
+        // doesn't, fall back to the controller's current size to keep
+        // the on-screen window unchanged rather than re-snapping it.
+        let main_geometry_cfg = config
+            .windows
+            .get(midas_core::WindowKey::MAIN_DEFAULT)
+            .map(|w| w.geometry.clone())
+            .unwrap_or_else(|| {
+                let (w, h) = self.window.size();
+                midas_core::config::WindowGeometryConfig {
+                    width: w,
+                    height: h,
+                    ..Default::default()
+                }
+            });
+        self.window = crate::window_geometry::WindowGeometry::from_config(
+            &main_geometry_cfg,
+            self.window.size(),
+        );
         if let Some(id) = main_id {
             let _ =
                 self.window
