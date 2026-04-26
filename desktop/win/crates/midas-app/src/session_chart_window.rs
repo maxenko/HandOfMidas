@@ -225,7 +225,7 @@ impl SessionChartWindow {
             .padding([2, 8]);
 
         let close_btn = button(text("Close").size(11))
-            .on_press(crate::app::Message::FloatingWindowClosed(window_id))
+            .on_press(crate::app::Message::WindowCloseRequested(window_id))
             .padding([2, 8]);
 
         let overlay = container(

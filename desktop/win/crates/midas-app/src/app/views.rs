@@ -92,7 +92,7 @@ use crate::layout::PanelContent;
 use crate::link::{link_color_rgba, link_mode_indicator_rgba, LinkDimension, PickerTarget};
 use crate::theme;
 
-use super::{ChartPanel, LoadState, Message, MidasApp};
+use super::{LoadState, Message, MidasApp};
 
 // ── Main entry point ────────────────────────────────────────────────
 
@@ -102,12 +102,9 @@ impl MidasApp {
     /// The main window shows toolbar + pane_grid + status bar.
     /// Floating chart windows show only the chart with a minimal header.
     pub fn view(&self, window_id: window::Id) -> Element<'_, Message> {
-        // Check if this is a floating chart window.
-        if let Some(chart) = self.floating_charts.get(&window_id) {
-            return self.view_floating_chart(window_id, chart);
-        }
-
-        // Session-chart window (Phase C).
+        // Session-chart window (Phase C, feature-gated). Slice F2 will
+        // fold this into the regular per-window pane grid; until then
+        // it stays as its own dedicated dispatch.
         #[cfg(feature = "session_chart")]
         if let Some(state) = self.floating_session_charts.get(&window_id) {
             return state.view(window_id);
@@ -185,196 +182,6 @@ impl MidasApp {
         // `Message::Toast` here so the controller stays parent-agnostic.
         // This is the SOLE wrapping site for `Message::Toast` in views.
         self.toasts.view().map(|el| el.map(Message::Toast))
-    }
-
-    /// Build the view for a floating (pop-out) chart window.
-    fn view_floating_chart<'a>(
-        &'a self,
-        wid: window::Id,
-        chart: &'a ChartPanel,
-    ) -> Element<'a, Message> {
-        // Use ChartId(0) for floating windows -- they don't participate
-        // in the pane_grid's chart map. Same sentinel as the prior
-        // implementation; the snapshot's `placing_cursor_chart` and
-        // ghost-preview comparisons treat 0 as "not a real chart id".
-        let floating_chart_id = ChartId::new(0);
-        let link_picker_dim = match self.link_picker_open {
-            Some((PickerTarget::Floating(picker_wid), dim)) if picker_wid == wid => Some(dim),
-            _ => None,
-        };
-
-        // If data is loaded, render via GPU Shader widget.
-        if let Some(snapshot) = self.chart_render_snapshot_for(chart, floating_chart_id) {
-            let overlays = self.chart_pane_overlays_vm_for(chart, link_picker_dim);
-
-            // Re-borrow `data` for the crosshair-labels call below; the
-            // snapshot's own copy is consumed by the shader Program.
-            let data = chart
-                .data
-                .as_ref()
-                .expect("chart_render_snapshot_for returned Some => chart.data is Some");
-
-            let program = crate::chart_widget::ChartProgram {
-                chart_id: floating_chart_id,
-                snapshot,
-            };
-            let shader = crate::chart_widget::chart_shader(program);
-
-            let camera = &chart.chart_state.camera;
-            let drawing_panel = build_drawing_panel(floating_chart_id, overlays.level_placing);
-
-            let mut chart_layers: Vec<Element<'_, Message>> = vec![shader.into()];
-
-            chart_layers.push(build_gerchik_atr_overlay(
-                overlays.gatr.as_ref(),
-                floating_chart_id,
-                chart.timeframe == Timeframe::D1,
-            ));
-
-            // Crosshair axis labels for floating window.
-            let crosshair_labels = midas_chart::compute_crosshair_labels(
-                chart.chart_state.crosshair.render_pos(),
-                camera,
-                data.as_ref(),
-                chart.chart_state.collapse_gaps,
-            );
-            chart_layers.push(build_crosshair_label_overlay(
-                crosshair_labels.as_ref(),
-                chart.chart_state.timeline_border_ratio,
-                chart.chart_state.camera.viewport_width,
-                chart.chart_state.camera.viewport_height,
-            ));
-
-            chart_layers.push(drawing_panel);
-
-            if let Some(editor) = overlays.editing_level.as_ref() {
-                chart_layers.push(build_level_editor(
-                    floating_chart_id,
-                    &editor.level,
-                    editor.screen_pos,
-                    &editor.price_input,
-                    editor.viewport_width,
-                    editor.viewport_height,
-                ));
-            }
-
-            if let Some(dim) = overlays.link_picker_dim {
-                // Backdrop to dismiss picker on click outside.
-                chart_layers.push(
-                    iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
-                        .on_press(Message::DismissLinkPicker)
-                        .into(),
-                );
-                let picker = self.build_link_picker(dim, move |mode| match dim {
-                    LinkDimension::Symbol => {
-                        Message::SetSymbolLink(crate::app::ChartHandle::Floating(wid), mode)
-                    }
-                    LinkDimension::Timeframe => {
-                        Message::SetTimeframeLink(crate::app::ChartHandle::Floating(wid), mode)
-                    }
-                });
-                chart_layers.push(
-                    container(picker)
-                        .align_x(iced::alignment::Horizontal::Right)
-                        .align_y(iced::alignment::Vertical::Top)
-                        .padding([4, 4])
-                        .width(Fill)
-                        .height(Fill)
-                        .into(),
-                );
-            }
-
-            let chart_area = stack(chart_layers).width(Fill).height(Fill);
-
-            // Symbol link button for floating chart.
-            let bold_font = iced::Font {
-                weight: iced::font::Weight::Bold,
-                ..iced::Font::default()
-            };
-            let sym_link = chart.symbol_link;
-            let sym_color = link_mode_indicator_rgba(sym_link);
-            let float_s_btn = button(text("S").size(10).color(Color::WHITE).font(bold_font))
-                .on_press(Message::ToggleLinkPicker(
-                    PickerTarget::Floating(wid),
-                    LinkDimension::Symbol,
-                ))
-                .padding([2, 5])
-                .style(move |_theme, _status| button::Style {
-                    background: Some(
-                        Color::from_rgba(sym_color[0], sym_color[1], sym_color[2], sym_color[3])
-                            .into(),
-                    ),
-                    text_color: Color::WHITE,
-                    border: iced::Border {
-                        radius: 2.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                });
-
-            // Timeframe link button for floating chart.
-            let tf_link = chart.timeframe_link;
-            let tf_color = link_mode_indicator_rgba(tf_link);
-            let float_t_btn = button(text("T").size(10).color(Color::WHITE).font(bold_font))
-                .on_press(Message::ToggleLinkPicker(
-                    PickerTarget::Floating(wid),
-                    LinkDimension::Timeframe,
-                ))
-                .padding([2, 5])
-                .style(move |_theme, _status| button::Style {
-                    background: Some(
-                        Color::from_rgba(tf_color[0], tf_color[1], tf_color[2], tf_color[3]).into(),
-                    ),
-                    text_color: Color::WHITE,
-                    border: iced::Border {
-                        radius: 2.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                });
-
-            // Header bar with symbol, link buttons, and timeframe.
-            let header = container(
-                row![
-                    float_s_btn,
-                    text(&chart.symbol).size(13).color(Color::WHITE),
-                    float_t_btn,
-                    text(chart.timeframe.display_name())
-                        .size(11)
-                        .color(theme::TEXT_SECONDARY),
-                ]
-                .spacing(8)
-                .padding([4, 8])
-                .align_y(iced::Alignment::Center),
-            )
-            .width(Fill)
-            .style(|_theme| container::Style {
-                background: Some(iced::Background::Color(Color::from_rgba(
-                    0.06, 0.08, 0.12, 0.90,
-                ))),
-                ..Default::default()
-            });
-
-            return column![header, chart_area].into();
-        }
-
-        // No data placeholder for floating window.
-        let status_text = match &chart.load_state {
-            LoadState::Empty => "No data loaded".to_string(),
-            LoadState::Loading => "Loading...".to_string(),
-            LoadState::Loaded => "Loaded".to_string(),
-            LoadState::Error(e) => format!("Error: {e}"),
-        };
-        container(text(status_text).size(14).color(theme::TEXT_SECONDARY))
-            .width(Fill)
-            .height(Fill)
-            .center_x(Fill)
-            .center_y(Fill)
-            .style(|_theme| container::Style {
-                background: Some(theme::CHART_EMPTY_BG.into()),
-                ..Default::default()
-            })
-            .into()
     }
 }
 
@@ -1059,12 +866,8 @@ impl MidasApp {
                         .into(),
                 );
                 let picker = self.build_link_picker(dim, move |mode| match dim {
-                    LinkDimension::Symbol => {
-                        Message::SetSymbolLink(crate::app::ChartHandle::Docked(chart_id), mode)
-                    }
-                    LinkDimension::Timeframe => {
-                        Message::SetTimeframeLink(crate::app::ChartHandle::Docked(chart_id), mode)
-                    }
+                    LinkDimension::Symbol => Message::SetSymbolLink(chart_id, mode),
+                    LinkDimension::Timeframe => Message::SetTimeframeLink(chart_id, mode),
                 });
                 chart_layers.push(
                     container(picker)

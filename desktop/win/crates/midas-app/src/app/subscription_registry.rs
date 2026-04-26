@@ -87,6 +87,14 @@ impl TickEntry {
 /// Install a chart bar handle into the context. Replaces any
 /// previous entry for the same key, dropping its guard.
 pub fn install_chart_handle(key: ChartKey, handle: SubscriptionHandle<Bar>) {
+    // Slice F1: floating-chart synthetic ids set bit 31 to disambiguate
+    // them from real `ChartId`s. With floating_charts retired, no caller
+    // should ever produce such an id; this assert traps regressions
+    // before they can leak into the registry.
+    debug_assert!(
+        key.chart_id.0 & (1u32 << 31) == 0,
+        "ChartId with bit 31 set installed into CHART_REGISTRY (floating-chart synthetic-id pattern)"
+    );
     if let Some(ctx) = super::subscription_context::current() {
         ctx.charts.insert(key, Arc::new(BarEntry::new(handle)));
     }

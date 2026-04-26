@@ -168,12 +168,10 @@ fn subscription(state: &MidasApp) -> Subscription<Message> {
     // Periodic tick at 1 Hz for clock updates and debounced config saves.
     let tick_sub = iced::time::every(std::time::Duration::from_secs(1)).map(|_| Message::Tick);
 
-    // Listen for window close events so we can clean up floating charts
-    // and save config when the main window is closed. Slice C still
-    // routes the OS-driven `close_events` (which fire AFTER the window
-    // is gone) into the legacy floating-chart cleanup; the proactive
-    // close intercept lives on `window::events().CloseRequested` below.
-    let close_sub = window::close_events().map(Message::FloatingWindowClosed);
+    // Slice F1 retired the legacy `close_events()` subscription —
+    // every window close now flows through `window::events()`'s
+    // `CloseRequested` (handled below by the slice-C
+    // `Message::WindowCloseRequested(window::Id)` handler).
 
     // Track window move/resize/focus/close-requested for config
     // persistence and slice-C multi-window lifecycle. Wrapped in the
@@ -216,7 +214,6 @@ fn subscription(state: &MidasApp) -> Subscription<Message> {
     let mut subs = vec![
         keyboard_sub,
         tick_sub,
-        close_sub,
         window_events_sub,
         attach_watchdog,
         market_refresh,

@@ -156,6 +156,10 @@ impl WindowGeometry {
         self.monitor_size
     }
 
+    /// Slice F1 retired the legacy `Message::FloatingWindowClosed`
+    /// caller, so this accessor is now used only by the dev-harness
+    /// (`fixture.rs`, `dev_harness/mod.rs`) feature-gated paths.
+    #[allow(dead_code)]
     pub fn main_window(&self) -> Option<window::Id> {
         self.main_window
     }

@@ -125,17 +125,6 @@ impl MidasApp {
                             self.status_message =
                                 format!("{}: {} candles at {}", sym, count, tf.display_name());
                             loaded_symbol = Some(sym);
-                        } else if chart_id == ChartId::new(0) {
-                            // Floating chart sentinel: apply to the first
-                            // floating chart that is in Loading state.
-                            let default_view = crate::chart_view::ChartViewState::default();
-                            for chart in self.floating_charts.values_mut() {
-                                if matches!(chart.load_state, LoadState::Loading) {
-                                    loaded_symbol = Some(chart.symbol.clone());
-                                    Self::apply_candle_data(chart, buffer, Some(&default_view));
-                                    break;
-                                }
-                            }
                         }
 
                         // Update zero-price Draft brackets for order panels
@@ -1840,7 +1829,6 @@ impl MidasApp {
                     LinkMode::Color(color) => self
                         .charts
                         .values()
-                        .chain(self.floating_charts.values())
                         .find(|p| {
                             matches!(p.symbol_link, LinkMode::Color(c) if c == color)
                                 && !p.symbol.is_empty()
@@ -1849,7 +1837,6 @@ impl MidasApp {
                     LinkMode::ListenAll => self
                         .charts
                         .values()
-                        .chain(self.floating_charts.values())
                         .find(|p| {
                             matches!(p.symbol_link, LinkMode::Color(_)) && !p.symbol.is_empty()
                         })
@@ -2697,8 +2684,7 @@ impl MidasApp {
             Message::MarketSnapshotLoaded(symbol, Ok(buffer)) => {
                 // Insert if any watchlist or chart still references this symbol.
                 let in_watchlist = self.watchlists.values().any(|wl| wl.has_ticker(&symbol));
-                let in_chart = self.charts.values().any(|c| c.symbol == symbol)
-                    || self.floating_charts.values().any(|c| c.symbol == symbol);
+                let in_chart = self.charts.values().any(|c| c.symbol == symbol);
                 let key = crate::annotation_store::SymbolKey::new(&symbol);
                 if in_watchlist || in_chart {
                     let snapshot = crate::market_cache::snapshot_from_candles(&buffer);
@@ -2851,30 +2837,23 @@ impl MidasApp {
     pub(crate) fn handle_link_msg(&mut self, message: Message) -> Task<Message> {
         match message {
             // -- Chart linking --
-            Message::SetSymbolLink(handle, mode) => {
+            // Slice F1 collapsed `ChartHandle::{Docked, Floating}` to
+            // plain `ChartId`. Every chart now lives in `self.charts`
+            // (its window home is recorded in `panel_to_window`), so
+            // the dispatch path below is a single `self.charts.get_mut`
+            // lookup instead of a docked/floating fork.
+            Message::SetSymbolLink(id, mode) => {
                 self.link_picker_open = None;
 
-                // Write the new mode into the right storage map.
-                match handle {
-                    crate::app::ChartHandle::Docked(id) => {
-                        if let Some(chart) = self.charts.get_mut(&id) {
-                            chart.symbol_link = mode;
-                        }
-                    }
-                    crate::app::ChartHandle::Floating(wid) => {
-                        if let Some(chart) = self.floating_charts.get_mut(&wid) {
-                            chart.symbol_link = mode;
-                        }
-                    }
+                if let Some(chart) = self.charts.get_mut(&id) {
+                    chart.symbol_link = mode;
                 }
 
-                // Adopt group symbol when joining a link group. The
-                // scan sees every other chart panel (docked + floating)
-                // regardless of which map this panel lives in.
+                // Adopt group symbol when joining a link group.
                 let group_symbol = match mode {
                     LinkMode::Color(color) => self
                         .all_chart_panels()
-                        .filter(|(h, _)| *h != handle)
+                        .filter(|(h, _)| *h != id)
                         .map(|(_, p)| p)
                         .find(|p| {
                             matches!(p.symbol_link, LinkMode::Color(c) if c == color)
@@ -2883,7 +2862,7 @@ impl MidasApp {
                         .map(|p| p.symbol.clone()),
                     LinkMode::ListenAll => self
                         .all_chart_panels()
-                        .filter(|(h, _)| *h != handle)
+                        .filter(|(h, _)| *h != id)
                         .map(|(_, p)| p)
                         .find(|p| {
                             matches!(p.symbol_link, LinkMode::Color(_)) && !p.symbol.is_empty()
@@ -2892,68 +2871,33 @@ impl MidasApp {
                     LinkMode::Unlinked => None,
                 };
 
-                // Docked charts fully re-bind through
-                // `load_symbol_for_chart` (which resets load_generation,
-                // clears data, rebinds TickerState). Floating charts
-                // use the thinner mutation via `apply_symbol_to_panel`
-                // and a direct async load.
-                let adopt_task = match (handle, group_symbol) {
-                    (crate::app::ChartHandle::Docked(id), Some(symbol)) => {
-                        self.load_symbol_for_chart(id, &symbol)
-                    }
-                    (crate::app::ChartHandle::Floating(wid), Some(symbol)) => {
-                        let tf = self
-                            .floating_charts
-                            .get(&wid)
-                            .map(|c| c.timeframe)
-                            .unwrap_or(Timeframe::D1);
-                        let sym_key = crate::annotation_store::SymbolKey::new(&symbol);
-                        if let Some(chart) = self.floating_charts.get_mut(&wid) {
-                            crate::app::apply_symbol_to_panel(chart, &symbol, sym_key);
-                        }
-                        // S7e: per-chart subscriptions spawn on the
-                        // next iced re-diff.
-                        self.load_floating_chart_async(wid, &symbol, tf)
-                    }
-                    (_, None) => Task::none(),
+                let adopt_task = match group_symbol {
+                    Some(symbol) => self.load_symbol_for_chart(id, &symbol),
+                    None => Task::none(),
                 };
 
-                // Only docked charts persist; floating layout is not
-                // saved to disk.
-                if matches!(handle, crate::app::ChartHandle::Docked(_)) {
-                    self.mark_config_dirty();
-                }
+                self.mark_config_dirty();
                 adopt_task
             }
 
-            Message::SetTimeframeLink(handle, mode) => {
+            Message::SetTimeframeLink(id, mode) => {
                 self.link_picker_open = None;
 
-                // Write the new mode into the right storage map.
-                match handle {
-                    crate::app::ChartHandle::Docked(id) => {
-                        if let Some(chart) = self.charts.get_mut(&id) {
-                            chart.timeframe_link = mode;
-                        }
-                    }
-                    crate::app::ChartHandle::Floating(wid) => {
-                        if let Some(chart) = self.floating_charts.get_mut(&wid) {
-                            chart.timeframe_link = mode;
-                        }
-                    }
+                if let Some(chart) = self.charts.get_mut(&id) {
+                    chart.timeframe_link = mode;
                 }
 
                 // Adopt group timeframe when joining a link group.
                 let group_tf = match mode {
                     LinkMode::Color(color) => self
                         .all_chart_panels()
-                        .filter(|(h, _)| *h != handle)
+                        .filter(|(h, _)| *h != id)
                         .map(|(_, p)| p)
                         .find(|p| matches!(p.timeframe_link, LinkMode::Color(c) if c == color))
                         .map(|p| p.timeframe),
                     LinkMode::ListenAll => self
                         .all_chart_panels()
-                        .filter(|(h, _)| *h != handle)
+                        .filter(|(h, _)| *h != id)
                         .map(|(_, p)| p)
                         .find(|p| matches!(p.timeframe_link, LinkMode::Color(_)))
                         .map(|p| p.timeframe),
@@ -2961,56 +2905,28 @@ impl MidasApp {
                 };
 
                 if let Some(tf) = group_tf {
-                    // Fetch current symbol + apply the new timeframe to
-                    // whichever map owns this panel, then fire the
-                    // matching async loader.
-                    let symbol = match handle {
-                        crate::app::ChartHandle::Docked(id) => self
-                            .charts
-                            .get(&id)
-                            .map(|c| c.symbol.clone())
-                            .unwrap_or_default(),
-                        crate::app::ChartHandle::Floating(wid) => self
-                            .floating_charts
-                            .get(&wid)
-                            .map(|c| c.symbol.clone())
-                            .unwrap_or_default(),
-                    };
-                    match handle {
-                        crate::app::ChartHandle::Docked(id) => {
-                            if self.charts.get(&id).is_some_and(|c| c.timeframe != tf) {
-                                self.evict_chart_handle_for_current_binding(id);
-                            }
-                            if let Some(chart) = self.charts.get_mut(&id) {
-                                chart.timeframe = tf;
-                            }
-                            if !symbol.is_empty() {
-                                if let Some(chart) = self.charts.get_mut(&id) {
-                                    chart.load_state = LoadState::Loading;
-                                    chart.chart_state.dirty.mark_data();
-                                }
-                                self.mark_config_dirty();
-                                return self.load_chart_async(id, &symbol, tf);
-                            }
+                    let symbol = self
+                        .charts
+                        .get(&id)
+                        .map(|c| c.symbol.clone())
+                        .unwrap_or_default();
+                    if self.charts.get(&id).is_some_and(|c| c.timeframe != tf) {
+                        self.evict_chart_handle_for_current_binding(id);
+                    }
+                    if let Some(chart) = self.charts.get_mut(&id) {
+                        chart.timeframe = tf;
+                    }
+                    if !symbol.is_empty() {
+                        if let Some(chart) = self.charts.get_mut(&id) {
+                            chart.load_state = LoadState::Loading;
+                            chart.chart_state.dirty.mark_data();
                         }
-                        crate::app::ChartHandle::Floating(wid) => {
-                            if let Some(chart) = self.floating_charts.get_mut(&wid) {
-                                chart.timeframe = tf;
-                            }
-                            if !symbol.is_empty() {
-                                if let Some(chart) = self.floating_charts.get_mut(&wid) {
-                                    chart.load_state = LoadState::Loading;
-                                    chart.chart_state.dirty.mark_data();
-                                }
-                                return self.load_floating_chart_async(wid, &symbol, tf);
-                            }
-                        }
+                        self.mark_config_dirty();
+                        return self.load_chart_async(id, &symbol, tf);
                     }
                 }
 
-                if matches!(handle, crate::app::ChartHandle::Docked(_)) {
-                    self.mark_config_dirty();
-                }
+                self.mark_config_dirty();
                 Task::none()
             }
 
@@ -3153,48 +3069,6 @@ impl MidasApp {
                     key: attach_key.clone(),
                     id,
                 })
-            }
-
-            Message::FloatingWindowClosed(id) => {
-                if matches!(self.link_picker_open, Some((PickerTarget::Floating(wid), _)) if wid == id)
-                {
-                    self.link_picker_open = None;
-                }
-                if let Some(chart) = self.floating_charts.remove(&id) {
-                    tracing::info!("Floating window closed for {}", chart.symbol);
-                    // Chart-subscription keys for floating charts use
-                    // a synthetic `ChartId` derived from the window
-                    // handle; purge any lingering CHART_REGISTRY
-                    // entries so the RAII DecRef fires.
-                    let synthetic = floating_window_synthetic_id(id);
-                    crate::app::subscription_registry::remove_chart_handles_for_chart(synthetic);
-                }
-                // Session-chart windows (Phase C). Dropping the state
-                // drops the driver Arc; the pump task aborts via the
-                // driver's `Drop`.
-                #[cfg(feature = "session_chart")]
-                if let Some(state) = self.floating_session_charts.remove(&id) {
-                    tracing::info!(
-                        "Floating session chart window closed for {}",
-                        state.request.ticker
-                    );
-                    // Explicit drop for clarity — pump task goes away.
-                    drop(state);
-                }
-                // Also fire an explicit close so the OS tears down
-                // the window if it's still around (iced ignores the
-                // request if the window is already gone, which is
-                // fine).
-                #[cfg(feature = "session_chart")]
-                let close_task = iced::window::close(id);
-                #[cfg(not(feature = "session_chart"))]
-                let close_task: Task<Message> = Task::none();
-
-                // If the main window was closed, exit the application.
-                if self.window.main_window() == Some(id) {
-                    return self.flush_config().chain(iced::exit());
-                }
-                close_task
             }
 
             _ => unreachable!(),
@@ -3421,6 +3295,19 @@ impl MidasApp {
             }
 
             Message::WindowCloseRequested(id) => {
+                // Slice F2: feature-gated session-chart windows live
+                // outside `iced_id_to_key` (their state is on
+                // `floating_session_charts`); cleanup goes through
+                // there before the regular named-window path.
+                #[cfg(feature = "session_chart")]
+                if let Some(state) = self.floating_session_charts.remove(&id) {
+                    tracing::info!(
+                        "Floating session chart window closed for {}",
+                        state.request.ticker
+                    );
+                    drop(state);
+                    return iced::window::close(id);
+                }
                 let Some(key) = self.iced_id_to_key.get(&id).cloned() else {
                     return Task::none();
                 };
@@ -3516,12 +3403,6 @@ impl MidasApp {
                 if let Some(chart) = self.charts.get_mut(&chart_id) {
                     chart.gatr_hover = true;
                     chart.chart_state.dirty.mark_candles();
-                } else {
-                    // Floating windows use ChartId(0) which isn't in self.charts.
-                    for fc in self.floating_charts.values_mut() {
-                        fc.gatr_hover = true;
-                        fc.chart_state.dirty.mark_candles();
-                    }
                 }
                 Task::none()
             }
@@ -3529,11 +3410,6 @@ impl MidasApp {
                 if let Some(chart) = self.charts.get_mut(&chart_id) {
                     chart.gatr_hover = false;
                     chart.chart_state.dirty.mark_candles();
-                } else {
-                    for fc in self.floating_charts.values_mut() {
-                        fc.gatr_hover = false;
-                        fc.chart_state.dirty.mark_candles();
-                    }
                 }
                 Task::none()
             }
@@ -4700,21 +4576,6 @@ impl MidasApp {
                 timeframe: chart_timeframe_to_broker_core(chart.timeframe),
             });
         }
-        for (window_id, chart) in self.floating_charts.iter().filter(|(_, c)| c.is_visible()) {
-            let Some(ref sym) = chart.bound_symbol else {
-                continue;
-            };
-            let broker_sym = midas_broker_core::SymbolKey {
-                contract_id: 0,
-                symbol: sym.as_str().to_string(),
-            };
-            let synthetic_id = floating_window_synthetic_id(*window_id);
-            out.push(crate::app::chart_subscription::ChartSubKey {
-                chart_id: synthetic_id,
-                symbol: broker_sym,
-                timeframe: chart_timeframe_to_broker_core(chart.timeframe),
-            });
-        }
         out
     }
 
@@ -4815,46 +4676,22 @@ pub(crate) fn chart_timeframe_to_broker_core(
     }
 }
 
-/// Derive a deterministic `ChartId` for a floating chart's iced
-/// `window::Id`. Two different windows never hash to the same id
-/// within a single process lifetime; the high bit is reserved so
-/// synthetic ids never collide with docked-chart ids (which start
-/// at 1 and grow linearly).
-fn floating_window_synthetic_id(wid: iced::window::Id) -> midas_core::ChartId {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut h = DefaultHasher::new();
-    wid.hash(&mut h);
-    let raw = (h.finish() as u32) | 0x8000_0000;
-    midas_core::ChartId::new(raw)
-}
-
 /// Apply a quote-cadence price update to every chart bound to
-/// `symbol_str`. Iterates docked charts first, then floating charts.
-/// `Arc::make_mut` only clones when the Arc is actually shared; when
-/// the app owns the only handle the update lands in place and the
-/// next `view()` picks up the version bump on the candle buffer.
+/// `symbol_str`. `Arc::make_mut` only clones when the Arc is actually
+/// shared; when the app owns the only handle the update lands in
+/// place and the next `view()` picks up the version bump on the
+/// candle buffer.
 ///
 /// Complexity is O(charts) per tick; charts are a small bounded set
-/// (~20 docked, single-digit floating) so this is trivially cheap
-/// at 250 ms cadence. If charts grow into the hundreds we can index
-/// by bound symbol at bind-time instead of scanning.
+/// (~20 panels) so this is trivially cheap at 250 ms cadence. If
+/// charts grow into the hundreds we can index by bound symbol at
+/// bind-time instead of scanning.
 fn apply_quote_to_matching_charts(
     charts: &mut std::collections::HashMap<midas_core::ChartId, crate::app::ChartPanel>,
-    floating_charts: &mut std::collections::HashMap<iced::window::Id, crate::app::ChartPanel>,
     symbol_str: &str,
     price: f32,
 ) {
     for chart in charts.values_mut() {
-        if chart.symbol.eq_ignore_ascii_case(symbol_str) {
-            if let Some(arc) = chart.data.as_mut() {
-                let buf = std::sync::Arc::make_mut(arc);
-                buf.update_last_price(price);
-                chart.chart_state.dirty.mark_data();
-            }
-        }
-    }
-    for chart in floating_charts.values_mut() {
         if chart.symbol.eq_ignore_ascii_case(symbol_str) {
             if let Some(arc) = chart.data.as_mut() {
                 let buf = std::sync::Arc::make_mut(arc);
@@ -4957,20 +4794,6 @@ impl MidasApp {
                         }
                         chart.chart_state.dirty.mark_data();
                     }
-                } else {
-                    // Floating chart? Look up by synthetic id.
-                    for (wid, chart) in self.floating_charts.iter_mut() {
-                        if floating_window_synthetic_id(*wid) == chart_id {
-                            if let Some(arc) = chart.data.as_mut() {
-                                let buf = std::sync::Arc::make_mut(arc);
-                                for bar in &bars {
-                                    apply_bar_to_buffer(buf, bar);
-                                }
-                                chart.chart_state.dirty.mark_data();
-                            }
-                            break;
-                        }
-                    }
                 }
                 Task::none()
             }
@@ -5013,19 +4836,6 @@ impl MidasApp {
                             fold(buf, bar);
                         }
                         chart.chart_state.dirty.mark_data();
-                    }
-                } else {
-                    for (wid, chart) in self.floating_charts.iter_mut() {
-                        if floating_window_synthetic_id(*wid) == chart_id {
-                            if let Some(arc) = chart.data.as_mut() {
-                                let buf = std::sync::Arc::make_mut(arc);
-                                for bar in &bars {
-                                    fold(buf, bar);
-                                }
-                                chart.chart_state.dirty.mark_data();
-                            }
-                            break;
-                        }
                     }
                 }
                 Task::none()
@@ -5120,12 +4930,7 @@ impl MidasApp {
                         // overwrite/merge on their own cadence; the
                         // two paths agree at bar close.
                         let price_f32 = price as f32;
-                        apply_quote_to_matching_charts(
-                            &mut self.charts,
-                            &mut self.floating_charts,
-                            &sym.symbol,
-                            price_f32,
-                        );
+                        apply_quote_to_matching_charts(&mut self.charts, &sym.symbol, price_f32);
 
                         // Slice 2c of chart-transition: fan the same
                         // tick out to every session-chart panel
@@ -5307,39 +5112,17 @@ impl MidasApp {
         use crate::link::find_link_targets;
         let mut tasks = Vec::new();
 
-        // Collect every chart panel whose link mode matches, then
-        // dispatch per-variant: docked charts go through
-        // `load_symbol_for_chart` (full rebind); floating charts use
-        // `apply_symbol_to_panel` + `load_floating_chart_async`.
-        let chart_targets: Vec<crate::app::ChartHandle> = find_link_targets(
+        // Slice F1: every chart now lives under a `ChartId` in
+        // `self.charts`; the docked/floating fork is gone.
+        let chart_targets: Vec<midas_core::ChartId> = find_link_targets(
             source_link,
-            self.all_chart_panels()
-                .map(|(handle, p)| (handle, p.symbol_link)),
+            self.all_chart_panels().map(|(id, p)| (id, p.symbol_link)),
         );
         let sym_key = crate::annotation_store::SymbolKey::new(symbol);
-        let mut touched_floating = false;
-        for handle in chart_targets {
-            match handle {
-                crate::app::ChartHandle::Docked(id) => {
-                    tasks.push(self.load_symbol_for_chart(id, symbol));
-                }
-                crate::app::ChartHandle::Floating(wid) => {
-                    let tf = self
-                        .floating_charts
-                        .get(&wid)
-                        .map(|c| c.timeframe)
-                        .unwrap_or(Timeframe::D1);
-                    if let Some(chart) = self.floating_charts.get_mut(&wid) {
-                        crate::app::apply_symbol_to_panel(chart, symbol, sym_key.clone());
-                    }
-                    touched_floating = true;
-                    tasks.push(self.load_floating_chart_async(wid, symbol, tf));
-                }
-            }
+        let _ = sym_key; // borrow kept for clarity even though Floating arm is gone
+        for id in chart_targets {
+            tasks.push(self.load_symbol_for_chart(id, symbol));
         }
-        // S7e: per-chart subscriptions spawn on the next iced
-        // re-diff.
-        let _ = touched_floating;
 
         let order_targets: Vec<OrderPanelId> = find_link_targets(
             source_link,
@@ -5384,7 +5167,7 @@ mod visibility_tests {
     use super::super::chart_subscription::ChartSubKey;
     use super::chart_timeframe_to_broker_core;
     use crate::annotation_store::SymbolKey;
-    use crate::app::{apply_symbol_to_panel, ChartPanel, LoadState};
+    use crate::app::{ChartPanel, LoadState};
 
     fn make_panel(symbol: &str, visible: bool) -> ChartPanel {
         let camera = Camera2D {
@@ -5415,8 +5198,14 @@ mod visibility_tests {
             visible,
             backend: midas_core::ChartBackend::Legacy,
         };
-        let sym = SymbolKey::new(symbol);
-        apply_symbol_to_panel(&mut panel, symbol, sym);
+        // Slice F1 retired the `apply_symbol_to_panel` helper (it
+        // existed only to share state between docked + floating chart
+        // paths). Inline the same mutation here for the test.
+        panel.bound_symbol = Some(SymbolKey::new(symbol));
+        panel.symbol = symbol.to_owned();
+        panel.symbol_input = symbol.to_owned();
+        panel.load_state = LoadState::Loading;
+        panel.chart_state.dirty.mark_data();
         panel
     }
 

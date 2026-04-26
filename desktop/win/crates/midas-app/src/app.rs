@@ -313,49 +313,6 @@ impl ChartPanel {
     }
 }
 
-/// Shared mutation that swaps the ticker symbol shown by a chart panel.
-///
-/// Extracted out of `broadcast_symbol_to_link_group`'s floating-chart
-/// loop so docked and floating paths now share one inline mutator.
-/// Docked charts normally go through `bind_chart_to_symbol` which also
-/// resets `load_generation` + clears `data`; this helper performs the
-/// thin subset used by link-group broadcasts and floating-chart
-/// `SetSymbolLink` (which both follow up with an async load that
-/// eventually refreshes the rest of the panel state).
-pub(crate) fn apply_symbol_to_panel(
-    panel: &mut ChartPanel,
-    symbol: &str,
-    sym_key: crate::annotation_store::SymbolKey,
-) {
-    panel.bound_symbol = Some(sym_key);
-    panel.symbol = symbol.to_owned();
-    panel.symbol_input = symbol.to_owned();
-    panel.load_state = LoadState::Loading;
-    panel.chart_state.dirty.mark_data();
-}
-
-// ── Chart handle ───────────────────────────────────────────────────────
-
-/// Identifies a chart panel regardless of whether it lives in the
-/// docked [`MidasApp::charts`] map (keyed by [`ChartId`]) or the
-/// floating [`MidasApp::floating_charts`] map (keyed by iced's
-/// `window::Id`).
-///
-/// This is **not** a HashMap key. The two storage maps stay distinct —
-/// iced 0.14 dispatches window lifecycle events natively keyed on
-/// `window::Id`, and using `ChartHandle` as a key would force a
-/// wrap/unwrap on every window-event path. Instead, `ChartHandle`
-/// shows up in iterator items (see [`MidasApp::all_chart_panels`])
-/// and in collapsed Link-message variants so handlers that don't
-/// care about the docked/floating distinction can stay generic.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ChartHandle {
-    /// A chart panel docked inside the main window's pane grid.
-    Docked(ChartId),
-    /// A chart panel that lives in its own OS window (pop-out).
-    Floating(window::Id),
-}
-
 // ── Application state ─────────────────────────────────────────────────
 
 /// Top-level application state. Owns all chart panels and layout.
@@ -415,9 +372,6 @@ pub struct MidasApp {
     /// only routes [`Message::Window`] into it and interprets the
     /// resulting effects via `dispatch_window`.
     pub window: crate::window_geometry::WindowGeometry,
-    /// Floating chart windows popped out from the main pane grid.
-    /// Keyed by the OS window ID returned from `window::open()`.
-    pub floating_charts: HashMap<window::Id, ChartPanel>,
     /// Whether level placement mode is globally active across all charts.
     pub level_placing: bool,
     /// Active placement preview: (source chart, ticker, price).
@@ -853,13 +807,8 @@ pub enum Message {
     /// The handler resolves the source window via `panel_to_window`,
     /// closes (or placeholder-replaces if it was the last pane) the
     /// source pane, then `CreateWindow`s a fresh window seeded with
-    /// that chart. The legacy `floating_charts: HashMap` path is no
-    /// longer used and is deleted in slice F1.
+    /// that chart.
     OpenChartInNewWindow(ChartId),
-    /// A floating window was closed by the user. Kept around until
-    /// slice F1 deletes the `floating_charts` map; in slice E, it
-    /// fires for residual floating-chart windows during migration.
-    FloatingWindowClosed(window::Id),
 
     // -- Window geometry --
     /// Wrapper for OS-window geometry events (move / resize / monitor
@@ -908,13 +857,12 @@ pub enum Message {
     // -- Chart linking --
     /// Set the symbol link mode for a chart (docked or floating).
     ///
-    /// Collapses the previous `SetSymbolLink(ChartId, ..)` +
-    /// `FloatingSetSymbolLink(window::Id, ..)` pair; the handler
-    /// matches on [`ChartHandle`] to route to the correct storage map.
-    /// See round-2 P2 in `plan/architecture-audit.md`.
-    SetSymbolLink(ChartHandle, LinkMode),
-    /// Set the timeframe link mode for a chart (docked or floating).
-    SetTimeframeLink(ChartHandle, LinkMode),
+    /// Slice F1 collapsed the docked/floating handle into plain
+    /// `ChartId` — every chart now lives inside a window's pane grid,
+    /// so the dispatcher just looks the panel up in `self.charts`.
+    SetSymbolLink(ChartId, LinkMode),
+    /// Set the timeframe link mode for a chart.
+    SetTimeframeLink(ChartId, LinkMode),
     /// Toggle the link color picker for any panel.
     ToggleLinkPicker(PickerTarget, LinkDimension),
     /// Dismiss any open link picker.
@@ -2679,7 +2627,6 @@ impl MidasApp {
                 ));
                 g
             },
-            floating_charts: HashMap::new(),
             level_placing: false,
             placing_preview: None,
             dragging_annotation: None,
@@ -3301,71 +3248,36 @@ impl MidasApp {
     /// tagging each item with a [`ChartHandle`] that identifies which
     /// storage map it came from.
     ///
-    /// Use this when you want to treat docked + floating charts
-    /// uniformly (link-group fan-out, symbol broadcast, cursor sync…);
-    /// reach directly into `charts` / `floating_charts` only where the
-    /// distinction matters (persistence, window-event routing).
-    pub(crate) fn all_chart_panels(&self) -> impl Iterator<Item = (ChartHandle, &ChartPanel)> {
-        self.charts
-            .iter()
-            .map(|(id, p)| (ChartHandle::Docked(*id), p))
-            .chain(
-                self.floating_charts
-                    .iter()
-                    .map(|(wid, p)| (ChartHandle::Floating(*wid), p)),
-            )
+    /// Slice F1 retired the floating-chart map; every chart now lives
+    /// in `self.charts` and is reachable via its `ChartId`.
+    pub(crate) fn all_chart_panels(&self) -> impl Iterator<Item = (ChartId, &ChartPanel)> {
+        self.charts.iter().map(|(id, p)| (*id, p))
     }
 
-    /// Mutable companion to [`all_chart_panels`]. The two underlying
-    /// `HashMap`s are disjoint fields so the borrow checker accepts a
-    /// combined `iter_mut` chain without special handling.
+    /// Mutable companion to [`all_chart_panels`].
     ///
-    /// Unused today — the prep step in audit P2a collapses only the
-    /// link handlers, which can do with the shared-ref iterator plus
-    /// targeted `get_mut` fix-ups. Kept for the next caller that
-    /// genuinely needs a single mutable pass across both maps.
+    /// Slice F1 collapsed this from a chained iterator over the now-
+    /// retired `floating_charts` map down to `self.charts.iter_mut()`.
+    /// Kept for the next caller that genuinely needs a single mutable
+    /// pass across all charts.
     #[allow(dead_code)]
     pub(crate) fn all_chart_panels_mut(
         &mut self,
-    ) -> impl Iterator<Item = (ChartHandle, &mut ChartPanel)> {
-        self.charts
-            .iter_mut()
-            .map(|(id, p)| (ChartHandle::Docked(*id), p))
-            .chain(
-                self.floating_charts
-                    .iter_mut()
-                    .map(|(wid, p)| (ChartHandle::Floating(*wid), p)),
-            )
+    ) -> impl Iterator<Item = (ChartId, &mut ChartPanel)> {
+        self.charts.iter_mut().map(|(id, p)| (*id, p))
     }
 
     /// Resolve the ticker symbol for a chart ID.
-    ///
-    /// Checks main pane charts first, then falls back to floating chart
-    /// windows which use `ChartId::new(0)` as a sentinel.
     fn chart_ticker(&self, id: ChartId) -> Option<&str> {
-        if let Some(chart) = self.charts.get(&id) {
-            return Some(chart.symbol.as_str());
-        }
-        if id == ChartId::new(0) {
-            if let Some(chart) = self.floating_charts.values().next() {
-                return Some(chart.symbol.as_str());
-            }
-        }
-        None
+        self.charts.get(&id).map(|chart| chart.symbol.as_str())
     }
 
-    /// Mark levels dirty on every chart (main + floating) displaying `ticker`.
-    ///
-    /// This bridges `AnnotationStore` generation changes to the
-    /// existing per-chart `DirtyFlags.levels` counter that the GPU
-    /// renderer depends on.
+    /// Mark levels dirty on every chart displaying `ticker`. Bridges
+    /// `AnnotationStore` generation changes to the per-chart
+    /// `DirtyFlags.levels` counter the GPU renderer reads on the next
+    /// frame.
     fn mark_levels_dirty_for_ticker(&mut self, ticker: &str) {
         for chart in self.charts.values_mut() {
-            if chart.symbol == ticker {
-                chart.chart_state.dirty.mark_levels();
-            }
-        }
-        for chart in self.floating_charts.values_mut() {
             if chart.symbol == ticker {
                 chart.chart_state.dirty.mark_levels();
             }
@@ -3674,36 +3586,10 @@ impl MidasApp {
             );
         }
 
-        // Floating charts.
-        let floating_targets: Vec<window::Id> = find_link_targets(
-            source_link,
-            self.floating_charts
-                .iter()
-                .map(|(wid, panel)| (*wid, panel.symbol_link)),
-        );
+        // Slice F1: floating charts retired — every chart panel now
+        // lives inside a window's pane grid and is reachable through
+        // the docked-targets loop above.
         let symbol = new_symbol.trim().to_uppercase();
-        let float_key = crate::annotation_store::SymbolKey::new(&symbol);
-        let had_floating_targets = !floating_targets.is_empty();
-        for wid in floating_targets {
-            let tf = self
-                .floating_charts
-                .get(&wid)
-                .map(|c| c.timeframe)
-                .unwrap_or(Timeframe::D1);
-            if let Some(chart) = self.floating_charts.get_mut(&wid) {
-                chart.bound_symbol = Some(float_key.clone());
-                chart.symbol = symbol.clone();
-                chart.symbol_input = symbol.clone();
-                chart.gatr_hover = false;
-                chart.load_state = LoadState::Loading;
-                chart.chart_state.dirty.mark_data();
-            }
-            tasks.push(self.load_floating_chart_async(wid, &symbol, tf));
-        }
-        // S7e: router-driven subscriptions spawn per-chart in
-        // `chart_subscriptions` on the next iced re-diff; no eager
-        // reconciliation needed.
-        let _ = had_floating_targets;
 
         // Order panels — route through handle_order_panel_symbol_change
         // for bracket lifecycle (cancel old, create new), then bind.
@@ -3786,31 +3672,7 @@ impl MidasApp {
             }
         }
 
-        // Floating charts.
-        let floating_targets: Vec<window::Id> = find_link_targets(
-            source_link,
-            self.floating_charts
-                .iter()
-                .map(|(wid, panel)| (*wid, panel.timeframe_link)),
-        );
-        for wid in floating_targets {
-            let symbol = self
-                .floating_charts
-                .get(&wid)
-                .map(|c| c.symbol.clone())
-                .unwrap_or_default();
-            if let Some(chart) = self.floating_charts.get_mut(&wid) {
-                chart.timeframe = new_tf;
-                chart.gatr_hover = false;
-            }
-            if !symbol.is_empty() {
-                if let Some(chart) = self.floating_charts.get_mut(&wid) {
-                    chart.load_state = LoadState::Loading;
-                    chart.chart_state.dirty.mark_data();
-                }
-                tasks.push(self.load_floating_chart_async(wid, &symbol, new_tf));
-            }
-        }
+        // Slice F1: floating charts retired — see above.
 
         if tasks.is_empty() {
             Task::none()
@@ -4171,19 +4033,6 @@ impl MidasApp {
         }
     }
 
-    /// Async-load data for a floating chart window.
-    fn load_floating_chart_async(
-        &self,
-        _wid: window::Id,
-        symbol: &str,
-        tf: Timeframe,
-    ) -> Task<Message> {
-        // Floating charts use ChartId(0) as sentinel. They receive the
-        // same DataLoaded message and are handled in the update loop
-        // by matching on the floating_charts map.
-        self.load_chart_with(ChartId::new(0), symbol, tf, Message::DataLoaded)
-    }
-
     /// Get the active chart's ChartId (from workspace focus).
     fn active_chart_id(&self) -> Option<ChartId> {
         self.windows[&self.main_window_key]
@@ -4406,10 +4255,9 @@ impl MidasApp {
             // their own slices.
             Message::Window(m) => self.dispatch_window(m),
 
-            Message::ConfigSaved(..)
-            | Message::AppShutdown
-            | Message::OpenChartInNewWindow(..)
-            | Message::FloatingWindowClosed(..) => self.handle_window_config_msg(message),
+            Message::ConfigSaved(..) | Message::AppShutdown | Message::OpenChartInNewWindow(..) => {
+                self.handle_window_config_msg(message)
+            }
 
             // -- G.ATR hover highlight --
             Message::GatrHoverEnter(..) | Message::GatrHoverLeave(..) => {
