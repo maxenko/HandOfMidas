@@ -21,6 +21,7 @@ use thiserror::Error;
 
 use super::{Message, MidasApp, RecentEntry};
 use crate::annotation_store::SymbolKey;
+use crate::app::panel_ids::PanelId;
 use crate::ticker_state::{self, TickerState};
 
 #[derive(Debug, Error)]
@@ -144,20 +145,59 @@ impl MidasApp {
 
         // Rebuild workspace + panels. Reuses the same path config loads
         // use at startup, so any bug there shows up in both places.
+        // Reset the panel-id allocator and let the restore re-mint ids
+        // off the fixture's layout tree, mirroring `MidasApp::new`.
+        self.panel_ids = crate::app::panel_ids::PanelIdAllocator::default();
+        // v3 (slice B): the layout tree lives inside
+        // `config.windows[Main]`. Any v2 fixture loaded here has
+        // already gone through migration, so the legacy_* fields
+        // are drained.
+        let main_layout_tree: &[midas_core::config::LayoutNode] = config
+            .windows
+            .get(midas_core::WindowKey::MAIN_DEFAULT)
+            .map(|w| w.layout_tree.as_slice())
+            .unwrap_or(&[]);
         let (workspace, charts, watchlists, order_panels, account_panels) =
             Self::restore_from_layout_tree(
-                &config.layout_tree,
+                main_layout_tree,
                 &config.charts,
                 &config.watchlists,
                 &config.order_panels,
                 &config.account_panels,
+                &mut self.panel_ids,
             );
 
-        self.workspace = workspace;
+        // Reseat the main window's layout in place. Slice A1: only one
+        // window key exists; slice C will iterate `config.windows` and
+        // rebuild every entry.
+        let main = self.main_window_key.clone();
+        if let Some(ws) = self.windows.get_mut(&main) {
+            ws.layout = workspace;
+        }
         self.charts = charts;
         self.watchlists = watchlists;
         self.order_panels = order_panels;
         self.account_panels = account_panels;
+        // Rebuild `panel_to_window` from the restored layout — every
+        // pane belongs to the (sole) main window in slice A1.
+        self.panel_to_window.clear();
+        if let Some(ws) = self.windows.get(&main) {
+            for state in ws.layout.panes.panes.values() {
+                let panel = match state.content {
+                    crate::layout::PanelContent::Chart(id) => PanelId::Chart(id),
+                    crate::layout::PanelContent::Watchlist(id) => PanelId::Watchlist(id),
+                    crate::layout::PanelContent::Order(id) => PanelId::Order(id),
+                    crate::layout::PanelContent::Account(id) => PanelId::Account(id),
+                    #[cfg(feature = "session_chart")]
+                    crate::layout::PanelContent::SessionChart(id) => PanelId::SessionChart(id),
+                    // Placeholder panes are slice-C empty-window
+                    // sentinels — they don't carry a panel id, so
+                    // there's nothing to map into `panel_to_window`.
+                    crate::layout::PanelContent::Placeholder => continue,
+                };
+                self.panel_to_window.insert(panel, main.clone());
+            }
+        }
         self.recent_symbols = config
             .recent_symbols
             .iter()
@@ -195,8 +235,26 @@ impl MidasApp {
         // by going through the controller's API rather than building
         // a fresh one from scratch.
         let main_id = self.window.main_window();
-        self.window =
-            crate::window_geometry::WindowGeometry::from_config(&config.window, self.window.size());
+        // v3: main-window geometry lives inside `config.windows[Main]`.
+        // The validation pass guarantees the entry exists; if it
+        // doesn't, fall back to the controller's current size to keep
+        // the on-screen window unchanged rather than re-snapping it.
+        let main_geometry_cfg = config
+            .windows
+            .get(midas_core::WindowKey::MAIN_DEFAULT)
+            .map(|w| w.geometry.clone())
+            .unwrap_or_else(|| {
+                let (w, h) = self.window.size();
+                midas_core::config::WindowGeometryConfig {
+                    width: w,
+                    height: h,
+                    ..Default::default()
+                }
+            });
+        self.window = crate::window_geometry::WindowGeometry::from_config(
+            &main_geometry_cfg,
+            self.window.size(),
+        );
         if let Some(id) = main_id {
             let _ =
                 self.window

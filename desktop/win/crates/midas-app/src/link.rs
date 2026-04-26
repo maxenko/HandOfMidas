@@ -30,7 +30,6 @@
 //!    first bar arrives so the camera isn't centred on the old
 //!    ticker's price range.
 
-use iced::window;
 use midas_core::{
     AccountPanelId, ChartId, LinkColor, LinkMode, OrderBlotterId, OrderPanelId, WatchlistId,
 };
@@ -94,12 +93,16 @@ pub fn log_link_propagation_step(
 
 // ── Picker target ──────────────────────────────────────────────────
 
-/// Identifies which panel's link picker is open — docked, floating,
+/// Identifies which panel's link picker is open — docked chart,
 /// watchlist, order panel, account pane, or legacy order blotter.
+///
+/// Slice F1 dropped the `Floating(window::Id)` variant alongside the
+/// `floating_charts` map: every chart now lives under a `ChartId` in
+/// `MidasApp::charts`, regardless of which window's pane grid hosts
+/// its pane.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum PickerTarget {
     Docked(ChartId),
-    Floating(window::Id),
     Watchlist(WatchlistId),
     Order(OrderPanelId),
     /// Legacy — retained for enum completeness; new panes use `Account`.

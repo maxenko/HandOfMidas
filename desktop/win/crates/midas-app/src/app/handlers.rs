@@ -125,17 +125,6 @@ impl MidasApp {
                             self.status_message =
                                 format!("{}: {} candles at {}", sym, count, tf.display_name());
                             loaded_symbol = Some(sym);
-                        } else if chart_id == ChartId::new(0) {
-                            // Floating chart sentinel: apply to the first
-                            // floating chart that is in Loading state.
-                            let default_view = crate::chart_view::ChartViewState::default();
-                            for chart in self.floating_charts.values_mut() {
-                                if matches!(chart.load_state, LoadState::Loading) {
-                                    loaded_symbol = Some(chart.symbol.clone());
-                                    Self::apply_candle_data(chart, buffer, Some(&default_view));
-                                    break;
-                                }
-                            }
                         }
 
                         // Update zero-price Draft brackets for order panels
@@ -253,11 +242,28 @@ impl MidasApp {
     pub(crate) fn handle_chart_management_msg(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::AddChart => {
-                if let Some(focused) = self.workspace.focus {
+                let owner = self.target_window_for_add();
+                let new_id = self.panel_ids.next_chart();
+                let layout = match self.windows.get_mut(&owner) {
+                    Some(ws) => &mut ws.layout,
+                    None => return Task::none(),
+                };
+                // Empty windows hold a single placeholder pane; the
+                // first add seeds it in place rather than splitting.
+                if layout
+                    .seed_first_pane(PanelContent::Chart(new_id))
+                    .is_some()
+                {
+                    self.insert_chart(new_id, Self::make_empty_panel(), owner);
+                    self.status_message = format!("Added {new_id}");
+                    self.mark_config_dirty();
+                    return Task::none();
+                }
+                if let Some(focused) = layout.focus {
                     if let Some((new_id, _new_pane)) =
-                        self.workspace.split(pane_grid::Axis::Vertical, focused)
+                        layout.split(pane_grid::Axis::Vertical, focused, new_id)
                     {
-                        self.charts.insert(new_id, Self::make_empty_panel());
+                        self.insert_chart(new_id, Self::make_empty_panel(), owner);
                         self.status_message = format!("Added {new_id}");
                         self.mark_config_dirty();
                     }
@@ -266,9 +272,9 @@ impl MidasApp {
             }
 
             Message::CloseChart(id) => {
-                if let Some(pane) = self.workspace.find_pane(id) {
-                    if let Some(PanelContent::Chart(closed_id)) = self.workspace.close(pane) {
-                        self.charts.remove(&closed_id);
+                if let Some(pane) = self.windows[&self.main_window_key].layout.find_pane(id) {
+                    if let Some(PanelContent::Chart(closed_id)) = self.workspace_mut().close(pane) {
+                        self.remove_chart(closed_id);
                         crate::app::subscription_registry::remove_chart_handles_for_chart(
                             closed_id,
                         );
@@ -286,8 +292,8 @@ impl MidasApp {
             }
 
             Message::ActivateChart(id) => {
-                if let Some(pane) = self.workspace.find_pane(id) {
-                    self.workspace.set_focus(pane);
+                if let Some(pane) = self.windows[&self.main_window_key].layout.find_pane(id) {
+                    self.workspace_mut().set_focus(pane);
                 }
                 // Bind through the single mutation point. Fires
                 // EnsureDraftBracket so the linked panel's bracket
@@ -309,29 +315,95 @@ impl MidasApp {
 
             Message::LayoutPreset(preset) => {
                 self.link_picker_open = None;
-                let new_ids = self.workspace.apply_preset(&preset);
+                // Window-scoped: presets reshape the FOCUSED window's
+                // layout. Falling back to main when no window has focus
+                // preserves the single-window-era behaviour. Without
+                // this scoping, orphan cleanup below would walk the
+                // global panel maps and nuke other windows' content.
+                let target = self.target_window_for_add();
+
+                // Snapshot panels owned by the target window before the
+                // reshape so we can drop only those that the preset
+                // displaces — leaving other windows untouched.
+                let prev_charts: std::collections::HashSet<ChartId> = self
+                    .panel_to_window
+                    .iter()
+                    .filter_map(|(p, w)| match p {
+                        PanelId::Chart(id) if *w == target => Some(*id),
+                        _ => None,
+                    })
+                    .collect();
+                let prev_wls: std::collections::HashSet<WatchlistId> = self
+                    .panel_to_window
+                    .iter()
+                    .filter_map(|(p, w)| match p {
+                        PanelId::Watchlist(id) if *w == target => Some(*id),
+                        _ => None,
+                    })
+                    .collect();
+                let prev_orders: std::collections::HashSet<midas_core::OrderPanelId> = self
+                    .panel_to_window
+                    .iter()
+                    .filter_map(|(p, w)| match p {
+                        PanelId::Order(id) if *w == target => Some(*id),
+                        _ => None,
+                    })
+                    .collect();
+                let prev_accounts: std::collections::HashSet<midas_core::AccountPanelId> = self
+                    .panel_to_window
+                    .iter()
+                    .filter_map(|(p, w)| match p {
+                        PanelId::Account(id) if *w == target => Some(*id),
+                        _ => None,
+                    })
+                    .collect();
+
+                // Apply preset via direct field access so the compiler
+                // can split the borrow between `self.windows` and
+                // `self.panel_ids`.
+                let new_ids = {
+                    let layout = &mut self
+                        .windows
+                        .get_mut(&target)
+                        .expect("target window present")
+                        .layout;
+                    layout.apply_preset(&preset, &mut self.panel_ids)
+                };
+                let new_chart_set: std::collections::HashSet<ChartId> =
+                    new_ids.iter().copied().collect();
+
+                // Register new chart panels minted by the preset.
                 for id in &new_ids {
                     self.charts
                         .entry(*id)
                         .or_insert_with(Self::make_empty_panel);
+                    self.panel_to_window
+                        .insert(PanelId::Chart(*id), target.clone());
                 }
-                let active_ids: std::collections::HashSet<ChartId> =
-                    self.workspace.chart_ids().into_iter().collect();
-                self.charts.retain(|id, _| active_ids.contains(id));
-                // Clean up orphaned watchlist panels (presets create chart-only layouts).
-                let active_wl_ids: std::collections::HashSet<WatchlistId> = self
-                    .workspace
-                    .panes
-                    .panes
-                    .values()
-                    .filter_map(|s| match &s.content {
-                        PanelContent::Watchlist(id) => Some(*id),
-                        _ => None,
-                    })
-                    .collect();
-                self.watchlists.retain(|id, _| active_wl_ids.contains(id));
-                // Clean up orphaned order panels (presets create chart-only layouts).
-                self.order_panels.clear();
+
+                // Drop charts displaced from the target window. Charts
+                // owned by other windows are untouched.
+                for id in prev_charts.difference(&new_chart_set) {
+                    self.charts.remove(id);
+                    self.panel_to_window.remove(&PanelId::Chart(*id));
+                    crate::app::subscription_registry::remove_chart_handles_for_chart(*id);
+                }
+                // Apply_preset always produces a chart-only layout, so
+                // every non-chart panel previously owned by the target
+                // is orphaned. Other windows' non-chart panels survive.
+                for id in prev_wls {
+                    self.watchlists.remove(&id);
+                    self.panel_to_window.remove(&PanelId::Watchlist(id));
+                }
+                for id in prev_orders {
+                    self.order_panels.remove(&id);
+                    self.panel_to_window.remove(&PanelId::Order(id));
+                }
+                for id in prev_accounts {
+                    self.account_panels.remove(&id);
+                    self.panel_to_window.remove(&PanelId::Account(id));
+                }
+
                 self.mark_config_dirty();
                 Task::none()
             }
@@ -347,8 +419,11 @@ impl MidasApp {
     /// Handle pane focus, resize, drag, split, and close messages.
     pub(crate) fn handle_pane_msg(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::PaneFocused(pane) => {
-                self.workspace.set_focus(pane);
+            Message::PaneFocused(window_key, pane) => {
+                if let Some(ws) = self.windows.get_mut(&window_key) {
+                    ws.layout.set_focus(pane);
+                }
+                self.focused_window = Some(window_key);
                 // Single-source-of-truth refactor: the focus change
                 // routes through the reducer's `MaybeSnapToGatr`
                 // handler. The reducer corrects both surfaces (panel
@@ -373,44 +448,59 @@ impl MidasApp {
                 self.maybe_emit_snap_for_active_chart()
             }
 
-            Message::PaneResized(pane_grid::ResizeEvent { split, ratio }) => {
-                self.workspace.panes.resize(split, ratio);
-                self.mark_config_dirty();
+            Message::PaneResized(window_key, pane_grid::ResizeEvent { split, ratio }) => {
+                if let Some(ws) = self.windows.get_mut(&window_key) {
+                    ws.layout.panes.resize(split, ratio);
+                    self.mark_config_dirty();
+                }
                 Task::none()
             }
 
-            Message::PaneDragged(pane_grid::DragEvent::Picked { pane }) => {
-                self.workspace.set_focus(pane);
+            Message::PaneDragged(window_key, pane_grid::DragEvent::Picked { pane }) => {
+                if let Some(ws) = self.windows.get_mut(&window_key) {
+                    ws.layout.set_focus(pane);
+                }
                 Task::none()
             }
 
-            Message::PaneDragged(pane_grid::DragEvent::Dropped { pane, target }) => {
+            Message::PaneDragged(window_key, pane_grid::DragEvent::Dropped { pane, target }) => {
                 self.pending_drag = None;
                 self.dragging_ticker = None;
-                self.workspace.panes.drop(pane, target);
-                self.mark_config_dirty();
+                if let Some(ws) = self.windows.get_mut(&window_key) {
+                    ws.layout.panes.drop(pane, target);
+                    self.mark_config_dirty();
+                }
                 Task::none()
             }
 
-            Message::PaneDragged(_) => {
+            Message::PaneDragged(_, _) => {
                 self.pending_drag = None;
                 self.dragging_ticker = None;
                 Task::none()
             }
 
-            Message::PaneSplit(axis, pane) => {
-                if let Some((new_id, _new_pane)) = self.workspace.split(axis, pane) {
-                    self.charts.insert(new_id, Self::make_empty_panel());
+            Message::PaneSplit(window_key, axis, pane) => {
+                let new_id = self.panel_ids.next_chart();
+                let split_result = self
+                    .windows
+                    .get_mut(&window_key)
+                    .and_then(|ws| ws.layout.split(axis, pane, new_id));
+                if let Some((new_id, _new_pane)) = split_result {
+                    self.insert_chart(new_id, Self::make_empty_panel(), window_key);
                     self.status_message = format!("Split pane, added {new_id}");
                     self.mark_config_dirty();
                 }
                 Task::none()
             }
 
-            Message::PaneClose(pane) => {
-                match self.workspace.close(pane) {
+            Message::PaneClose(window_key, pane) => {
+                let closed = self
+                    .windows
+                    .get_mut(&window_key)
+                    .and_then(|ws| ws.layout.close(pane));
+                match closed {
                     Some(PanelContent::Chart(closed_id)) => {
-                        self.charts.remove(&closed_id);
+                        self.remove_chart(closed_id);
                         crate::app::subscription_registry::remove_chart_handles_for_chart(
                             closed_id,
                         );
@@ -421,32 +511,36 @@ impl MidasApp {
                         self.status_message = format!("Closed {closed_id}");
                     }
                     Some(PanelContent::Watchlist(wl_id)) => {
-                        self.watchlists.remove(&wl_id);
+                        self.remove_watchlist(wl_id);
                         self.status_message = format!("Closed {wl_id}");
                     }
                     Some(PanelContent::Order(order_id)) => {
-                        self.order_panels.remove(&order_id);
+                        self.remove_order_panel(order_id);
                         if matches!(self.link_picker_open, Some((PickerTarget::Order(pid), _)) if pid == order_id)
                         {
                             self.link_picker_open = None;
                         }
                         self.status_message = format!("Closed {order_id}");
                     }
-                    Some(PanelContent::OrderBlotter(_blotter_id)) => {
-                        // Legacy — live panes are `Account` after migration.
-                        // If this fires it means a persisted layout from an
-                        // older build rehydrated an OrderBlotter slot that
-                        // slipped past migration. Nothing to clean up since
-                        // we never populate `order_blotters` in this build.
-                        self.status_message = "Closed legacy Orders pane".to_string();
-                    }
                     Some(PanelContent::Account(account_id)) => {
-                        self.account_panels.remove(&account_id);
+                        self.remove_account_panel(account_id);
                         if matches!(self.link_picker_open, Some((PickerTarget::Account(pid), _)) if pid == account_id)
                         {
                             self.link_picker_open = None;
                         }
                         self.status_message = format!("Closed {account_id}");
+                    }
+                    Some(PanelContent::Placeholder) => {
+                        // Closing a placeholder pane is a no-op for app
+                        // state — the placeholder owns no panel id and
+                        // isn't tracked in `panel_to_window`. The pane
+                        // grid has already removed it from the layout.
+                        self.status_message = "Closed empty pane".to_string();
+                    }
+                    #[cfg(feature = "session_chart")]
+                    Some(PanelContent::SessionChart(sc_id)) => {
+                        self.remove_session_chart_panel(sc_id);
+                        self.status_message = format!("Closed {sc_id}");
                     }
                     None => return Task::none(),
                 }
@@ -1189,25 +1283,43 @@ impl MidasApp {
     pub(crate) fn handle_order_panel_msg(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::AddOrderPanel => {
-                if let Some(focused) = self.workspace.focus {
-                    let op_id = self.workspace.next_order_panel_id();
+                let owner = self.target_window_for_add();
+                let op_id = self.panel_ids.next_order_panel();
+                let new_chart_id = self.panel_ids.next_chart();
+                let symbol = self
+                    .active_chart_id()
+                    .and_then(|id| self.charts.get(&id))
+                    .map(|p| p.symbol.clone())
+                    .unwrap_or_default();
+                let layout = match self.windows.get_mut(&owner) {
+                    Some(ws) => &mut ws.layout,
+                    None => return Task::none(),
+                };
+                if layout.seed_first_pane(PanelContent::Order(op_id)).is_some() {
+                    self.insert_order_panel(
+                        op_id,
+                        crate::order_panel::OrderPanel::new(op_id, symbol),
+                        owner,
+                    );
+                    self.status_message = format!("Added {op_id}");
+                    return self.flush_config();
+                }
+                if let Some(focused) = layout.focus {
                     if let Some((chart_id, new_pane)) =
-                        self.workspace.split(pane_grid::Axis::Vertical, focused)
+                        layout.split(pane_grid::Axis::Vertical, focused, new_chart_id)
                     {
                         // split() always creates a chart pane — replace it with an order panel.
-                        if let Some(state) = self.workspace.panes.get_mut(new_pane) {
+                        if let Some(state) = layout.panes.get_mut(new_pane) {
                             state.content = PanelContent::Order(op_id);
                         }
                         // Remove the chart entry that split() created.
-                        self.charts.remove(&chart_id);
+                        self.remove_chart(chart_id);
                         crate::app::subscription_registry::remove_chart_handles_for_chart(chart_id);
-                        let symbol = self
-                            .active_chart_id()
-                            .and_then(|id| self.charts.get(&id))
-                            .map(|p| p.symbol.clone())
-                            .unwrap_or_default();
-                        self.order_panels
-                            .insert(op_id, crate::order_panel::OrderPanel::new(op_id, symbol));
+                        self.insert_order_panel(
+                            op_id,
+                            crate::order_panel::OrderPanel::new(op_id, symbol),
+                            owner,
+                        );
                         self.status_message = format!("Added {op_id}");
                         return self.flush_config();
                     }
@@ -1807,7 +1919,6 @@ impl MidasApp {
                     LinkMode::Color(color) => self
                         .charts
                         .values()
-                        .chain(self.floating_charts.values())
                         .find(|p| {
                             matches!(p.symbol_link, LinkMode::Color(c) if c == color)
                                 && !p.symbol.is_empty()
@@ -1816,7 +1927,6 @@ impl MidasApp {
                     LinkMode::ListenAll => self
                         .charts
                         .values()
-                        .chain(self.floating_charts.values())
                         .find(|p| {
                             matches!(p.symbol_link, LinkMode::Color(_)) && !p.symbol.is_empty()
                         })
@@ -2082,7 +2192,10 @@ impl MidasApp {
         if trimmed.is_empty() {
             return Task::none();
         }
-        let Some(chart_id) = self.workspace.focused_chart_id() else {
+        let Some(chart_id) = self.windows[&self.main_window_key]
+            .layout
+            .focused_chart_id()
+        else {
             tracing::debug!("RecentClicked({symbol}) ignored — no focused chart in workspace");
             return Task::none();
         };
@@ -2106,21 +2219,41 @@ impl MidasApp {
     /// a new pane from the focused pane, drop the auto-created chart,
     /// install the Account panel, flush config.
     fn handle_add_account_panel(&mut self) -> Task<Message> {
-        let Some(focused) = self.workspace.focus else {
-            return Task::none();
+        let owner = self.target_window_for_add();
+        let account_id = self.panel_ids.next_account_panel();
+        let new_chart_id = self.panel_ids.next_chart();
+        let layout = match self.windows.get_mut(&owner) {
+            Some(ws) => &mut ws.layout,
+            None => return Task::none(),
         };
-        let account_id = self.workspace.next_account_panel_id();
-        if let Some((chart_id, new_pane)) = self.workspace.split(pane_grid::Axis::Vertical, focused)
+        if layout
+            .seed_first_pane(PanelContent::Account(account_id))
+            .is_some()
         {
-            // split() always creates a chart pane — replace with Account.
-            if let Some(state) = self.workspace.panes.get_mut(new_pane) {
-                state.content = PanelContent::Account(account_id);
-            }
-            self.charts.remove(&chart_id);
-            crate::app::subscription_registry::remove_chart_handles_for_chart(chart_id);
-            self.account_panels.insert(
+            self.insert_account_panel(
                 account_id,
                 crate::account_panel::AccountPanel::new(account_id, "Account"),
+                owner,
+            );
+            self.status_message = format!("Added {account_id}");
+            return self.flush_config();
+        }
+        let Some(focused) = layout.focus else {
+            return Task::none();
+        };
+        if let Some((chart_id, new_pane)) =
+            layout.split(pane_grid::Axis::Vertical, focused, new_chart_id)
+        {
+            // split() always creates a chart pane — replace with Account.
+            if let Some(state) = layout.panes.get_mut(new_pane) {
+                state.content = PanelContent::Account(account_id);
+            }
+            self.remove_chart(chart_id);
+            crate::app::subscription_registry::remove_chart_handles_for_chart(chart_id);
+            self.insert_account_panel(
+                account_id,
+                crate::account_panel::AccountPanel::new(account_id, "Account"),
+                owner,
             );
             self.status_message = format!("Added {account_id}");
             return self.flush_config();
@@ -2168,20 +2301,41 @@ impl MidasApp {
     pub(crate) fn handle_watchlist_msg(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::AddWatchlist => {
-                if let Some(focused) = self.workspace.focus {
-                    let wl_id = self.workspace.next_watchlist_id();
+                let owner = self.target_window_for_add();
+                let wl_id = self.panel_ids.next_watchlist();
+                let new_chart_id = self.panel_ids.next_chart();
+                let layout = match self.windows.get_mut(&owner) {
+                    Some(ws) => &mut ws.layout,
+                    None => return Task::none(),
+                };
+                if layout
+                    .seed_first_pane(PanelContent::Watchlist(wl_id))
+                    .is_some()
+                {
+                    self.insert_watchlist(
+                        wl_id,
+                        WatchlistPanel::new(wl_id, "Watchlist".into()),
+                        owner,
+                    );
+                    self.status_message = format!("Added {wl_id}");
+                    return self.flush_config();
+                }
+                if let Some(focused) = layout.focus {
                     if let Some((chart_id, new_pane)) =
-                        self.workspace.split(pane_grid::Axis::Vertical, focused)
+                        layout.split(pane_grid::Axis::Vertical, focused, new_chart_id)
                     {
                         // split() always creates a chart pane — replace it with a watchlist.
-                        if let Some(state) = self.workspace.panes.get_mut(new_pane) {
+                        if let Some(state) = layout.panes.get_mut(new_pane) {
                             state.content = PanelContent::Watchlist(wl_id);
                         }
                         // Remove the chart entry that split() created.
-                        self.charts.remove(&chart_id);
+                        self.remove_chart(chart_id);
                         crate::app::subscription_registry::remove_chart_handles_for_chart(chart_id);
-                        self.watchlists
-                            .insert(wl_id, WatchlistPanel::new(wl_id, "Watchlist".into()));
+                        self.insert_watchlist(
+                            wl_id,
+                            WatchlistPanel::new(wl_id, "Watchlist".into()),
+                            owner,
+                        );
                         self.status_message = format!("Added {wl_id}");
                         return self.flush_config();
                     }
@@ -2343,11 +2497,15 @@ impl MidasApp {
                 let grid_w = win_w as f32;
                 let grid_h = (win_h as f32 - TOOLBAR_H - STATUS_H).max(1.0);
 
-                let regions = self.workspace.panes.layout().pane_regions(
-                    1.0, // spacing
-                    0.0, // min_size
-                    iced::Size::new(grid_w, grid_h),
-                );
+                let regions = self.windows[&self.main_window_key]
+                    .layout
+                    .panes
+                    .layout()
+                    .pane_regions(
+                        1.0, // spacing
+                        0.0, // min_size
+                        iced::Size::new(grid_w, grid_h),
+                    );
 
                 let cursor = drag.cursor_pos;
                 // Translate cursor from window-space to pane-grid-space.
@@ -2360,9 +2518,11 @@ impl MidasApp {
                         && local_y >= rect.y
                         && local_y <= rect.y + rect.height
                     {
-                        if let Some(ps) = self.workspace.panes.get(*pane) {
+                        if let Some(ps) =
+                            self.windows[&self.main_window_key].layout.panes.get(*pane)
+                        {
                             if let Some(chart_id) = ps.chart_id() {
-                                self.workspace.set_focus(*pane);
+                                self.workspace_mut().set_focus(*pane);
                                 // Drag-drop of a watchlist ticker onto a
                                 // chart is a user-visible symbol switch;
                                 // record it in the MRU.
@@ -2614,8 +2774,7 @@ impl MidasApp {
             Message::MarketSnapshotLoaded(symbol, Ok(buffer)) => {
                 // Insert if any watchlist or chart still references this symbol.
                 let in_watchlist = self.watchlists.values().any(|wl| wl.has_ticker(&symbol));
-                let in_chart = self.charts.values().any(|c| c.symbol == symbol)
-                    || self.floating_charts.values().any(|c| c.symbol == symbol);
+                let in_chart = self.charts.values().any(|c| c.symbol == symbol);
                 let key = crate::annotation_store::SymbolKey::new(&symbol);
                 if in_watchlist || in_chart {
                     let snapshot = crate::market_cache::snapshot_from_candles(&buffer);
@@ -2768,30 +2927,23 @@ impl MidasApp {
     pub(crate) fn handle_link_msg(&mut self, message: Message) -> Task<Message> {
         match message {
             // -- Chart linking --
-            Message::SetSymbolLink(handle, mode) => {
+            // Slice F1 collapsed `ChartHandle::{Docked, Floating}` to
+            // plain `ChartId`. Every chart now lives in `self.charts`
+            // (its window home is recorded in `panel_to_window`), so
+            // the dispatch path below is a single `self.charts.get_mut`
+            // lookup instead of a docked/floating fork.
+            Message::SetSymbolLink(id, mode) => {
                 self.link_picker_open = None;
 
-                // Write the new mode into the right storage map.
-                match handle {
-                    crate::app::ChartHandle::Docked(id) => {
-                        if let Some(chart) = self.charts.get_mut(&id) {
-                            chart.symbol_link = mode;
-                        }
-                    }
-                    crate::app::ChartHandle::Floating(wid) => {
-                        if let Some(chart) = self.floating_charts.get_mut(&wid) {
-                            chart.symbol_link = mode;
-                        }
-                    }
+                if let Some(chart) = self.charts.get_mut(&id) {
+                    chart.symbol_link = mode;
                 }
 
-                // Adopt group symbol when joining a link group. The
-                // scan sees every other chart panel (docked + floating)
-                // regardless of which map this panel lives in.
+                // Adopt group symbol when joining a link group.
                 let group_symbol = match mode {
                     LinkMode::Color(color) => self
                         .all_chart_panels()
-                        .filter(|(h, _)| *h != handle)
+                        .filter(|(h, _)| *h != id)
                         .map(|(_, p)| p)
                         .find(|p| {
                             matches!(p.symbol_link, LinkMode::Color(c) if c == color)
@@ -2800,7 +2952,7 @@ impl MidasApp {
                         .map(|p| p.symbol.clone()),
                     LinkMode::ListenAll => self
                         .all_chart_panels()
-                        .filter(|(h, _)| *h != handle)
+                        .filter(|(h, _)| *h != id)
                         .map(|(_, p)| p)
                         .find(|p| {
                             matches!(p.symbol_link, LinkMode::Color(_)) && !p.symbol.is_empty()
@@ -2809,68 +2961,33 @@ impl MidasApp {
                     LinkMode::Unlinked => None,
                 };
 
-                // Docked charts fully re-bind through
-                // `load_symbol_for_chart` (which resets load_generation,
-                // clears data, rebinds TickerState). Floating charts
-                // use the thinner mutation via `apply_symbol_to_panel`
-                // and a direct async load.
-                let adopt_task = match (handle, group_symbol) {
-                    (crate::app::ChartHandle::Docked(id), Some(symbol)) => {
-                        self.load_symbol_for_chart(id, &symbol)
-                    }
-                    (crate::app::ChartHandle::Floating(wid), Some(symbol)) => {
-                        let tf = self
-                            .floating_charts
-                            .get(&wid)
-                            .map(|c| c.timeframe)
-                            .unwrap_or(Timeframe::D1);
-                        let sym_key = crate::annotation_store::SymbolKey::new(&symbol);
-                        if let Some(chart) = self.floating_charts.get_mut(&wid) {
-                            crate::app::apply_symbol_to_panel(chart, &symbol, sym_key);
-                        }
-                        // S7e: per-chart subscriptions spawn on the
-                        // next iced re-diff.
-                        self.load_floating_chart_async(wid, &symbol, tf)
-                    }
-                    (_, None) => Task::none(),
+                let adopt_task = match group_symbol {
+                    Some(symbol) => self.load_symbol_for_chart(id, &symbol),
+                    None => Task::none(),
                 };
 
-                // Only docked charts persist; floating layout is not
-                // saved to disk.
-                if matches!(handle, crate::app::ChartHandle::Docked(_)) {
-                    self.mark_config_dirty();
-                }
+                self.mark_config_dirty();
                 adopt_task
             }
 
-            Message::SetTimeframeLink(handle, mode) => {
+            Message::SetTimeframeLink(id, mode) => {
                 self.link_picker_open = None;
 
-                // Write the new mode into the right storage map.
-                match handle {
-                    crate::app::ChartHandle::Docked(id) => {
-                        if let Some(chart) = self.charts.get_mut(&id) {
-                            chart.timeframe_link = mode;
-                        }
-                    }
-                    crate::app::ChartHandle::Floating(wid) => {
-                        if let Some(chart) = self.floating_charts.get_mut(&wid) {
-                            chart.timeframe_link = mode;
-                        }
-                    }
+                if let Some(chart) = self.charts.get_mut(&id) {
+                    chart.timeframe_link = mode;
                 }
 
                 // Adopt group timeframe when joining a link group.
                 let group_tf = match mode {
                     LinkMode::Color(color) => self
                         .all_chart_panels()
-                        .filter(|(h, _)| *h != handle)
+                        .filter(|(h, _)| *h != id)
                         .map(|(_, p)| p)
                         .find(|p| matches!(p.timeframe_link, LinkMode::Color(c) if c == color))
                         .map(|p| p.timeframe),
                     LinkMode::ListenAll => self
                         .all_chart_panels()
-                        .filter(|(h, _)| *h != handle)
+                        .filter(|(h, _)| *h != id)
                         .map(|(_, p)| p)
                         .find(|p| matches!(p.timeframe_link, LinkMode::Color(_)))
                         .map(|p| p.timeframe),
@@ -2878,56 +2995,28 @@ impl MidasApp {
                 };
 
                 if let Some(tf) = group_tf {
-                    // Fetch current symbol + apply the new timeframe to
-                    // whichever map owns this panel, then fire the
-                    // matching async loader.
-                    let symbol = match handle {
-                        crate::app::ChartHandle::Docked(id) => self
-                            .charts
-                            .get(&id)
-                            .map(|c| c.symbol.clone())
-                            .unwrap_or_default(),
-                        crate::app::ChartHandle::Floating(wid) => self
-                            .floating_charts
-                            .get(&wid)
-                            .map(|c| c.symbol.clone())
-                            .unwrap_or_default(),
-                    };
-                    match handle {
-                        crate::app::ChartHandle::Docked(id) => {
-                            if self.charts.get(&id).is_some_and(|c| c.timeframe != tf) {
-                                self.evict_chart_handle_for_current_binding(id);
-                            }
-                            if let Some(chart) = self.charts.get_mut(&id) {
-                                chart.timeframe = tf;
-                            }
-                            if !symbol.is_empty() {
-                                if let Some(chart) = self.charts.get_mut(&id) {
-                                    chart.load_state = LoadState::Loading;
-                                    chart.chart_state.dirty.mark_data();
-                                }
-                                self.mark_config_dirty();
-                                return self.load_chart_async(id, &symbol, tf);
-                            }
+                    let symbol = self
+                        .charts
+                        .get(&id)
+                        .map(|c| c.symbol.clone())
+                        .unwrap_or_default();
+                    if self.charts.get(&id).is_some_and(|c| c.timeframe != tf) {
+                        self.evict_chart_handle_for_current_binding(id);
+                    }
+                    if let Some(chart) = self.charts.get_mut(&id) {
+                        chart.timeframe = tf;
+                    }
+                    if !symbol.is_empty() {
+                        if let Some(chart) = self.charts.get_mut(&id) {
+                            chart.load_state = LoadState::Loading;
+                            chart.chart_state.dirty.mark_data();
                         }
-                        crate::app::ChartHandle::Floating(wid) => {
-                            if let Some(chart) = self.floating_charts.get_mut(&wid) {
-                                chart.timeframe = tf;
-                            }
-                            if !symbol.is_empty() {
-                                if let Some(chart) = self.floating_charts.get_mut(&wid) {
-                                    chart.load_state = LoadState::Loading;
-                                    chart.chart_state.dirty.mark_data();
-                                }
-                                return self.load_floating_chart_async(wid, &symbol, tf);
-                            }
-                        }
+                        self.mark_config_dirty();
+                        return self.load_chart_async(id, &symbol, tf);
                     }
                 }
 
-                if matches!(handle, crate::app::ChartHandle::Docked(_)) {
-                    self.mark_config_dirty();
-                }
+                self.mark_config_dirty();
                 Task::none()
             }
 
@@ -2970,7 +3059,7 @@ impl MidasApp {
                 Task::none()
             }
 
-            Message::WindowCloseRequested => {
+            Message::AppShutdown => {
                 // Blocking shutdown of the ticker-state persistence
                 // layer. Signals the flush thread to perform a final
                 // `Immediate` commit and blocks until it exits.
@@ -2980,74 +3069,96 @@ impl MidasApp {
                 self.flush_config()
             }
 
-            Message::PopOut(pane) => {
-                if let Some(pane_state) = self.workspace.panes.get(pane) {
-                    if let Some(chart_id) = pane_state.chart_id() {
-                        if let Some(chart) = self.charts.get(&chart_id) {
-                            let floating_chart = chart.clone();
-                            let title = if floating_chart.symbol.is_empty() {
-                                "Hand of Midas".to_string()
-                            } else {
-                                format!(
-                                    "{} - {}",
-                                    floating_chart.symbol,
-                                    floating_chart.timeframe.display_name()
-                                )
-                            };
-                            let (win_id, open_task) = window::open(window::Settings {
-                                size: iced::Size::new(800.0, 500.0),
-                                ..window::Settings::default()
-                            });
-                            self.floating_charts.insert(win_id, floating_chart);
-                            self.status_message = format!("Popped out {title} to new window");
-                            self.mark_config_dirty();
-                            return open_task.map(|_id| Message::Tick);
+            Message::OpenChartInNewWindow(chart_id) => {
+                // Slice E: the legacy `PopOut` floating-chart path is
+                // replaced with "open this chart in a new named
+                // window". The chart panel itself stays in
+                // `self.charts` — only its layout home changes.
+                let source_key = self
+                    .panel_to_window
+                    .get(&PanelId::Chart(chart_id))
+                    .cloned()
+                    .unwrap_or_else(|| self.main_window_key.clone());
+
+                // Pick a window name. Prefer the chart's symbol so the
+                // user sees `AAPL Chart` in the OS title; fall back to
+                // the default `Window N` generator if the symbol is
+                // empty or already taken.
+                let symbol = self
+                    .charts
+                    .get(&chart_id)
+                    .map(|c| c.symbol.clone())
+                    .unwrap_or_default();
+                let proposed = if symbol.is_empty() {
+                    self.next_default_window_name()
+                } else {
+                    format!("{symbol} Chart")
+                };
+                let new_key = if self
+                    .windows
+                    .keys()
+                    .any(|k| k.as_str().eq_ignore_ascii_case(&proposed))
+                {
+                    WindowKey::new(self.next_default_window_name())
+                } else {
+                    WindowKey::new(proposed)
+                };
+
+                // Detach from the source window: close the chart's
+                // pane if there's a sibling, or replace it with a
+                // placeholder if it was the last real pane (avoids
+                // the close() last-pane refusal and keeps the source
+                // window viable).
+                if let Some(src) = self.windows.get_mut(&source_key) {
+                    if let Some(pane) = src.layout.find_pane(chart_id) {
+                        if src.layout.pane_count() > 1 {
+                            let _ = src.layout.close(pane);
+                        } else if let Some(state) = src.layout.panes.get_mut(pane) {
+                            state.content = PanelContent::Placeholder;
                         }
                     }
                 }
-                Task::none()
-            }
 
-            Message::FloatingWindowClosed(id) => {
-                if matches!(self.link_picker_open, Some((PickerTarget::Floating(wid), _)) if wid == id)
-                {
-                    self.link_picker_open = None;
-                }
-                if let Some(chart) = self.floating_charts.remove(&id) {
-                    tracing::info!("Floating window closed for {}", chart.symbol);
-                    // Chart-subscription keys for floating charts use
-                    // a synthetic `ChartId` derived from the window
-                    // handle; purge any lingering CHART_REGISTRY
-                    // entries so the RAII DecRef fires.
-                    let synthetic = floating_window_synthetic_id(id);
-                    crate::app::subscription_registry::remove_chart_handles_for_chart(synthetic);
-                }
-                // Session-chart windows (Phase C). Dropping the state
-                // drops the driver Arc; the pump task aborts via the
-                // driver's `Drop`.
-                #[cfg(feature = "session_chart")]
-                if let Some(state) = self.floating_session_charts.remove(&id) {
-                    tracing::info!(
-                        "Floating session chart window closed for {}",
-                        state.request.ticker
-                    );
-                    // Explicit drop for clarity — pump task goes away.
-                    drop(state);
-                }
-                // Also fire an explicit close so the OS tears down
-                // the window if it's still around (iced ignores the
-                // request if the window is already gone, which is
-                // fine).
-                #[cfg(feature = "session_chart")]
-                let close_task = iced::window::close(id);
-                #[cfg(not(feature = "session_chart"))]
-                let close_task: Task<Message> = Task::none();
-
-                // If the main window was closed, exit the application.
-                if self.window.main_window() == Some(id) {
-                    return self.flush_config().chain(iced::exit());
-                }
-                close_task
+                // Spawn a new window seeded with this chart.
+                let geometry = midas_core::config::WindowGeometryConfig {
+                    width: 800,
+                    height: 500,
+                    ..Default::default()
+                };
+                let (id, open_task) = window::open(window::Settings {
+                    size: iced::Size::new(geometry.width as f32, geometry.height as f32),
+                    ..window::Settings::default()
+                });
+                let mut new_state = crate::app::window_state::WindowState::opening(
+                    new_key.clone(),
+                    false,
+                    geometry,
+                );
+                // The placeholder pane converts in place into the
+                // chart pane via `seed_first_pane`.
+                let _ = new_state
+                    .layout
+                    .seed_first_pane(PanelContent::Chart(chart_id));
+                self.windows.insert(new_key.clone(), new_state);
+                self.iced_id_to_key.insert(id, new_key.clone());
+                self.pending_window_opens.insert(
+                    id,
+                    crate::app::window_state::WindowAttachAttempt {
+                        key: new_key.clone(),
+                        started_at: std::time::Instant::now(),
+                    },
+                );
+                // Re-key the `panel_to_window` invariant — the chart
+                // now lives under the new window.
+                self.panel_to_window
+                    .insert(PanelId::Chart(chart_id), new_key.clone());
+                self.status_message = format!("Opened {} in new window {}", chart_id, new_key);
+                self.mark_config_dirty();
+                let attach_key = new_key.clone();
+                open_task.map(move |id| Message::WindowAttached {
+                    key: attach_key.clone(),
+                    id,
+                })
             }
 
             _ => unreachable!(),
@@ -3092,6 +3203,281 @@ impl MidasApp {
     }
 }
 
+// ── Multi-window lifecycle (slice C) ─────────────────────────────────
+
+/// Pure helper: pick the first free `Window N` (N ≥ 2) name relative
+/// to a given iterator of taken keys. Pulled out of
+/// [`MidasApp::next_default_window_name`] so the slice-C tests can
+/// exercise the loop without standing up a full `MidasApp`.
+pub(crate) fn next_default_window_name_in<'a, I>(keys: I) -> String
+where
+    I: IntoIterator<Item = &'a WindowKey>,
+{
+    let taken: Vec<&str> = keys.into_iter().map(|k| k.as_str()).collect();
+    let mut n = 2u32;
+    loop {
+        let candidate = format!("Window {n}");
+        let collision = taken.iter().any(|k| k.eq_ignore_ascii_case(&candidate));
+        if !collision {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+impl MidasApp {
+    /// Generate a default name for a freshly created window.
+    ///
+    /// Scans `self.windows` for the first free `Window N` (case-insensitive
+    /// match) starting at `N = 2`. `Window 1` reads weird next to `Main`
+    /// so we skip it. The result is suitable to wrap in `WindowKey::new`
+    /// directly — `normalize` would only trim/length-check, both of which
+    /// the generator already satisfies.
+    pub(crate) fn next_default_window_name(&self) -> String {
+        next_default_window_name_in(self.windows.keys())
+    }
+
+    /// Resolve which window an add-panel action should target.
+    ///
+    /// Falls back to the main window when no window has been focused
+    /// since launch. Slice C — every panel-creation handler that used to
+    /// implicitly target the main window now goes through this.
+    pub(crate) fn target_window_for_add(&self) -> WindowKey {
+        self.focused_window
+            .clone()
+            .unwrap_or_else(|| self.main_window_key.clone())
+    }
+
+    /// Tear down a window and everything it owned.
+    ///
+    /// Drops every panel referenced by the window's `WorkspaceLayout`
+    /// from the app-global `charts` / `watchlists` / `order_panels` /
+    /// `account_panels` maps; clears matching `panel_to_window` entries;
+    /// and removes the `iced_id_to_key` reverse-lookup. Used both by the
+    /// user-driven close path and by the watchdog's failed-attach
+    /// cleanup.
+    fn dispose_window_state(&mut self, key: &WindowKey) {
+        let Some(state) = self.windows.remove(key) else {
+            return;
+        };
+        if let Some(id) = state.iced_id {
+            self.iced_id_to_key.remove(&id);
+            self.pending_window_opens.remove(&id);
+        }
+        // Walk the layout and drop each referenced panel.
+        for pane_state in state.layout.panes.panes.values() {
+            match pane_state.content {
+                PanelContent::Chart(id) => {
+                    self.remove_chart(id);
+                    crate::app::subscription_registry::remove_chart_handles_for_chart(id);
+                }
+                PanelContent::Watchlist(id) => {
+                    self.remove_watchlist(id);
+                }
+                PanelContent::Order(id) => {
+                    self.remove_order_panel(id);
+                }
+                PanelContent::Account(id) => {
+                    self.remove_account_panel(id);
+                }
+                #[cfg(feature = "session_chart")]
+                PanelContent::SessionChart(id) => {
+                    self.remove_session_chart_panel(id);
+                }
+                PanelContent::Placeholder => {}
+            }
+        }
+        if matches!(self.focused_window, Some(ref f) if f == key) {
+            self.focused_window = None;
+        }
+    }
+
+    /// Handle slice-C window-lifecycle messages: create, attach,
+    /// attach-failed, watchdog tick, close, focus, unfocus, rename.
+    pub(crate) fn handle_window_lifecycle_msg(&mut self, message: Message) -> Task<Message> {
+        match message {
+            Message::CreateWindow { name } => {
+                let key = match name {
+                    Some(raw) => match WindowKey::normalize(&raw) {
+                        Ok(k) => k,
+                        Err(e) => {
+                            self.show_toast(format!("Window name invalid: {e}"));
+                            return Task::none();
+                        }
+                    },
+                    None => WindowKey::new(self.next_default_window_name()),
+                };
+                let collision = self
+                    .windows
+                    .keys()
+                    .any(|k| k.as_str().eq_ignore_ascii_case(key.as_str()));
+                if collision {
+                    self.show_toast(format!("Window '{key}' already exists"));
+                    return Task::none();
+                }
+                let geometry = midas_core::config::WindowGeometryConfig {
+                    width: 900,
+                    height: 600,
+                    ..Default::default()
+                };
+                let (id, open_task) = window::open(window::Settings {
+                    size: iced::Size::new(geometry.width as f32, geometry.height as f32),
+                    ..window::Settings::default()
+                });
+                self.windows.insert(
+                    key.clone(),
+                    crate::app::window_state::WindowState::opening(key.clone(), false, geometry),
+                );
+                self.iced_id_to_key.insert(id, key.clone());
+                self.pending_window_opens.insert(
+                    id,
+                    crate::app::window_state::WindowAttachAttempt {
+                        key: key.clone(),
+                        started_at: std::time::Instant::now(),
+                    },
+                );
+                self.mark_config_dirty();
+                let attach_key = key.clone();
+                open_task.map(move |id| Message::WindowAttached {
+                    key: attach_key.clone(),
+                    id,
+                })
+            }
+
+            Message::WindowAttached { key, id } => {
+                self.pending_window_opens.remove(&id);
+                if let Some(ws) = self.windows.get_mut(&key) {
+                    ws.iced_id = Some(id);
+                    ws.opening = false;
+                }
+                // Keep the reverse-lookup authoritative even if the
+                // open task resolved with a different id than we
+                // optimistically inserted earlier (defensive — iced
+                // 0.14 currently returns the same id).
+                self.iced_id_to_key.insert(id, key);
+                Task::none()
+            }
+
+            Message::WindowAttachFailed(key) => {
+                tracing::warn!("Window '{key}' failed to open within watchdog window");
+                let toast = format!("Window '{key}' failed to open");
+                self.dispose_window_state(&key);
+                self.show_toast(toast);
+                self.mark_config_dirty();
+                Task::none()
+            }
+
+            Message::WindowAttachWatchdog => {
+                let now = std::time::Instant::now();
+                let stale: Vec<WindowKey> = self
+                    .pending_window_opens
+                    .values()
+                    .filter(|att| {
+                        now.duration_since(att.started_at)
+                            >= std::time::Duration::from_secs(super::WINDOW_ATTACH_TIMEOUT_SECS)
+                    })
+                    .map(|att| att.key.clone())
+                    .collect();
+                if stale.is_empty() {
+                    return Task::none();
+                }
+                Task::batch(
+                    stale
+                        .into_iter()
+                        .map(|k| Task::done(Message::WindowAttachFailed(k))),
+                )
+            }
+
+            Message::WindowCloseRequested(id) => {
+                // Slice F2 retired the standalone session-chart windows;
+                // session-chart panels now live inside regular pane
+                // grids and tear down through the per-pane close path
+                // (`Message::PaneClose`). Nothing window-id-keyed to
+                // clean up here.
+                let Some(key) = self.iced_id_to_key.get(&id).cloned() else {
+                    return Task::none();
+                };
+                let is_main = self.windows.get(&key).map(|ws| ws.is_main).unwrap_or(false);
+                if is_main {
+                    return Task::done(Message::AppShutdown).chain(iced::exit());
+                }
+                self.dispose_window_state(&key);
+                self.mark_config_dirty();
+                window::close(id)
+            }
+
+            Message::WindowFocused(id) => {
+                if let Some(key) = self.iced_id_to_key.get(&id) {
+                    self.focused_window = Some(key.clone());
+                }
+                Task::none()
+            }
+
+            Message::WindowUnfocused(id) => {
+                let same = self
+                    .iced_id_to_key
+                    .get(&id)
+                    .zip(self.focused_window.as_ref())
+                    .map(|(k, f)| k == f)
+                    .unwrap_or(false);
+                if same {
+                    self.focused_window = None;
+                }
+                Task::none()
+            }
+
+            Message::RenameWindow { from, to } => {
+                let new_key = match WindowKey::normalize(&to) {
+                    Ok(k) => k,
+                    Err(e) => {
+                        self.show_toast(format!("Window name invalid: {e}"));
+                        return Task::none();
+                    }
+                };
+                if new_key == from {
+                    return Task::none();
+                }
+                let collision = self
+                    .windows
+                    .keys()
+                    .any(|k| k != &from && k.as_str().eq_ignore_ascii_case(new_key.as_str()));
+                if collision {
+                    self.show_toast(format!("Window '{new_key}' already exists"));
+                    return Task::none();
+                }
+                let Some(mut state) = self.windows.remove(&from) else {
+                    return Task::none();
+                };
+                state.key = new_key.clone();
+                let was_main = self.main_window_key == from;
+                self.windows.insert(new_key.clone(), state);
+                if was_main {
+                    self.main_window_key = new_key.clone();
+                }
+                if matches!(self.focused_window, Some(ref f) if *f == from) {
+                    self.focused_window = Some(new_key.clone());
+                }
+                if let Some(id) = self
+                    .iced_id_to_key
+                    .iter()
+                    .find_map(|(id, k)| (*k == from).then_some(*id))
+                {
+                    self.iced_id_to_key.insert(id, new_key.clone());
+                }
+                for v in self.panel_to_window.values_mut() {
+                    if *v == from {
+                        *v = new_key.clone();
+                    }
+                }
+                self.mark_config_dirty();
+                Task::none()
+            }
+
+            _ => unreachable!(),
+        }
+    }
+}
+
 // ── G.ATR Hover ──────────────────────────────────────────────────────
 
 impl MidasApp {
@@ -3103,12 +3489,6 @@ impl MidasApp {
                 if let Some(chart) = self.charts.get_mut(&chart_id) {
                     chart.gatr_hover = true;
                     chart.chart_state.dirty.mark_candles();
-                } else {
-                    // Floating windows use ChartId(0) which isn't in self.charts.
-                    for fc in self.floating_charts.values_mut() {
-                        fc.gatr_hover = true;
-                        fc.chart_state.dirty.mark_candles();
-                    }
                 }
                 Task::none()
             }
@@ -3116,11 +3496,6 @@ impl MidasApp {
                 if let Some(chart) = self.charts.get_mut(&chart_id) {
                     chart.gatr_hover = false;
                     chart.chart_state.dirty.mark_candles();
-                } else {
-                    for fc in self.floating_charts.values_mut() {
-                        fc.gatr_hover = false;
-                        fc.chart_state.dirty.mark_candles();
-                    }
                 }
                 Task::none()
             }
@@ -3147,7 +3522,7 @@ impl MidasApp {
 
             // -- Bracket context menu (these still re-dispatch elsewhere) --
             Message::BracketContextCancel(parent_id) => {
-                self.bracket_context_menu = None;
+                self.bracket_context_menu.clear();
 
                 // Look up the link but do NOT remove it yet.
                 // The link stays alive until the engine confirms cancellation.
@@ -3204,7 +3579,7 @@ impl MidasApp {
                 Task::none()
             }
             Message::BracketContextDismiss => {
-                self.bracket_context_menu = None;
+                self.bracket_context_menu.clear();
                 Task::none()
             }
 
@@ -3339,7 +3714,17 @@ impl MidasApp {
         x: f32,
         y: f32,
     ) -> Task<Message> {
-        self.bracket_context_menu = Some((chart_id, annotation_id.0, leg, x, y));
+        // Slice D: route the context menu by which window owns the
+        // chart; falls back to the main window if the chart doesn't
+        // appear in `panel_to_window` (defensive — pre-existing
+        // tests construct charts without going through `insert_chart`).
+        let key = self
+            .panel_to_window
+            .get(&PanelId::Chart(chart_id))
+            .cloned()
+            .unwrap_or_else(|| self.main_window_key.clone());
+        self.bracket_context_menu
+            .insert(key, (chart_id, annotation_id.0, leg, x, y));
         Task::none()
     }
 
@@ -4277,21 +4662,6 @@ impl MidasApp {
                 timeframe: chart_timeframe_to_broker_core(chart.timeframe),
             });
         }
-        for (window_id, chart) in self.floating_charts.iter().filter(|(_, c)| c.is_visible()) {
-            let Some(ref sym) = chart.bound_symbol else {
-                continue;
-            };
-            let broker_sym = midas_broker_core::SymbolKey {
-                contract_id: 0,
-                symbol: sym.as_str().to_string(),
-            };
-            let synthetic_id = floating_window_synthetic_id(*window_id);
-            out.push(crate::app::chart_subscription::ChartSubKey {
-                chart_id: synthetic_id,
-                symbol: broker_sym,
-                timeframe: chart_timeframe_to_broker_core(chart.timeframe),
-            });
-        }
         out
     }
 
@@ -4392,46 +4762,22 @@ pub(crate) fn chart_timeframe_to_broker_core(
     }
 }
 
-/// Derive a deterministic `ChartId` for a floating chart's iced
-/// `window::Id`. Two different windows never hash to the same id
-/// within a single process lifetime; the high bit is reserved so
-/// synthetic ids never collide with docked-chart ids (which start
-/// at 1 and grow linearly).
-fn floating_window_synthetic_id(wid: iced::window::Id) -> midas_core::ChartId {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut h = DefaultHasher::new();
-    wid.hash(&mut h);
-    let raw = (h.finish() as u32) | 0x8000_0000;
-    midas_core::ChartId::new(raw)
-}
-
 /// Apply a quote-cadence price update to every chart bound to
-/// `symbol_str`. Iterates docked charts first, then floating charts.
-/// `Arc::make_mut` only clones when the Arc is actually shared; when
-/// the app owns the only handle the update lands in place and the
-/// next `view()` picks up the version bump on the candle buffer.
+/// `symbol_str`. `Arc::make_mut` only clones when the Arc is actually
+/// shared; when the app owns the only handle the update lands in
+/// place and the next `view()` picks up the version bump on the
+/// candle buffer.
 ///
 /// Complexity is O(charts) per tick; charts are a small bounded set
-/// (~20 docked, single-digit floating) so this is trivially cheap
-/// at 250 ms cadence. If charts grow into the hundreds we can index
-/// by bound symbol at bind-time instead of scanning.
+/// (~20 panels) so this is trivially cheap at 250 ms cadence. If
+/// charts grow into the hundreds we can index by bound symbol at
+/// bind-time instead of scanning.
 fn apply_quote_to_matching_charts(
     charts: &mut std::collections::HashMap<midas_core::ChartId, crate::app::ChartPanel>,
-    floating_charts: &mut std::collections::HashMap<iced::window::Id, crate::app::ChartPanel>,
     symbol_str: &str,
     price: f32,
 ) {
     for chart in charts.values_mut() {
-        if chart.symbol.eq_ignore_ascii_case(symbol_str) {
-            if let Some(arc) = chart.data.as_mut() {
-                let buf = std::sync::Arc::make_mut(arc);
-                buf.update_last_price(price);
-                chart.chart_state.dirty.mark_data();
-            }
-        }
-    }
-    for chart in floating_charts.values_mut() {
         if chart.symbol.eq_ignore_ascii_case(symbol_str) {
             if let Some(arc) = chart.data.as_mut() {
                 let buf = std::sync::Arc::make_mut(arc);
@@ -4459,9 +4805,9 @@ fn apply_quote_to_session_chart_series(
     registry: &crate::session_chart::SymbolSeriesRegistry,
     sym: &midas_broker_core::SymbolKey,
     price: f64,
-    floating_session_charts: &std::collections::HashMap<
-        iced::window::Id,
-        crate::session_chart_window::SessionChartWindow,
+    session_chart_panels: &std::collections::HashMap<
+        midas_core::SessionChartId,
+        crate::session_chart_panel::SessionChartPanel,
     >,
 ) {
     let Some(series_arc) = registry.get(sym) else {
@@ -4472,12 +4818,12 @@ fn apply_quote_to_session_chart_series(
         let mut guard = series_arc.write();
         guard.update_last_price(price);
     }
-    // Flag every session-chart window for repaint. This walk is
+    // Flag every session-chart panel for repaint. This walk is
     // lock-free on the widget side (the `paint_pending` atomic) but
     // does take brief read-locks on each widget to reach its
     // interaction state; the guards never cross an `.await`.
-    for win in floating_session_charts.values() {
-        let w = win.widget.read();
+    for panel in session_chart_panels.values() {
+        let w = panel.widget.read();
         w.interaction().mark_paint_pending();
     }
 }
@@ -4543,21 +4889,6 @@ impl MidasApp {
                         }
                         chart.chart_state.dirty.mark_data();
                     }
-                } else {
-                    // Floating chart? Look up by synthetic id.
-                    for (wid, chart) in self.floating_charts.iter_mut() {
-                        if floating_window_synthetic_id(*wid) == chart_id {
-                            if let Some(arc) = chart.data.as_mut() {
-                                let calendar = crate::app::resolve_calendar(&chart.symbol);
-                                let buf = std::sync::Arc::make_mut(arc);
-                                for bar in &bars {
-                                    apply_bar_to_buffer(buf, bar, calendar);
-                                }
-                                chart.chart_state.dirty.mark_data();
-                            }
-                            break;
-                        }
-                    }
                 }
                 Task::none()
             }
@@ -4605,20 +4936,6 @@ impl MidasApp {
                             fold(buf, bar, calendar);
                         }
                         chart.chart_state.dirty.mark_data();
-                    }
-                } else {
-                    for (wid, chart) in self.floating_charts.iter_mut() {
-                        if floating_window_synthetic_id(*wid) == chart_id {
-                            if let Some(arc) = chart.data.as_mut() {
-                                let calendar = crate::app::resolve_calendar(&chart.symbol);
-                                let buf = std::sync::Arc::make_mut(arc);
-                                for bar in &bars {
-                                    fold(buf, bar, calendar);
-                                }
-                                chart.chart_state.dirty.mark_data();
-                            }
-                            break;
-                        }
                     }
                 }
                 Task::none()
@@ -4713,12 +5030,7 @@ impl MidasApp {
                         // overwrite/merge on their own cadence; the
                         // two paths agree at bar close.
                         let price_f32 = price as f32;
-                        apply_quote_to_matching_charts(
-                            &mut self.charts,
-                            &mut self.floating_charts,
-                            &sym.symbol,
-                            price_f32,
-                        );
+                        apply_quote_to_matching_charts(&mut self.charts, &sym.symbol, price_f32);
 
                         // Slice 2c of chart-transition: fan the same
                         // tick out to every session-chart panel
@@ -4739,7 +5051,7 @@ impl MidasApp {
                                 &self.session_chart_registry,
                                 sym,
                                 price,
-                                &self.floating_session_charts,
+                                &self.session_chart_panels,
                             );
                         }
                     }
@@ -4900,39 +5212,17 @@ impl MidasApp {
         use crate::link::find_link_targets;
         let mut tasks = Vec::new();
 
-        // Collect every chart panel whose link mode matches, then
-        // dispatch per-variant: docked charts go through
-        // `load_symbol_for_chart` (full rebind); floating charts use
-        // `apply_symbol_to_panel` + `load_floating_chart_async`.
-        let chart_targets: Vec<crate::app::ChartHandle> = find_link_targets(
+        // Slice F1: every chart now lives under a `ChartId` in
+        // `self.charts`; the docked/floating fork is gone.
+        let chart_targets: Vec<midas_core::ChartId> = find_link_targets(
             source_link,
-            self.all_chart_panels()
-                .map(|(handle, p)| (handle, p.symbol_link)),
+            self.all_chart_panels().map(|(id, p)| (id, p.symbol_link)),
         );
         let sym_key = crate::annotation_store::SymbolKey::new(symbol);
-        let mut touched_floating = false;
-        for handle in chart_targets {
-            match handle {
-                crate::app::ChartHandle::Docked(id) => {
-                    tasks.push(self.load_symbol_for_chart(id, symbol));
-                }
-                crate::app::ChartHandle::Floating(wid) => {
-                    let tf = self
-                        .floating_charts
-                        .get(&wid)
-                        .map(|c| c.timeframe)
-                        .unwrap_or(Timeframe::D1);
-                    if let Some(chart) = self.floating_charts.get_mut(&wid) {
-                        crate::app::apply_symbol_to_panel(chart, symbol, sym_key.clone());
-                    }
-                    touched_floating = true;
-                    tasks.push(self.load_floating_chart_async(wid, symbol, tf));
-                }
-            }
+        let _ = sym_key; // borrow kept for clarity even though Floating arm is gone
+        for id in chart_targets {
+            tasks.push(self.load_symbol_for_chart(id, symbol));
         }
-        // S7e: per-chart subscriptions spawn on the next iced
-        // re-diff.
-        let _ = touched_floating;
 
         let order_targets: Vec<OrderPanelId> = find_link_targets(
             source_link,
@@ -4977,7 +5267,7 @@ mod visibility_tests {
     use super::super::chart_subscription::ChartSubKey;
     use super::chart_timeframe_to_broker_core;
     use crate::annotation_store::SymbolKey;
-    use crate::app::{apply_symbol_to_panel, ChartPanel, LoadState};
+    use crate::app::{ChartPanel, LoadState};
 
     fn make_panel(symbol: &str, visible: bool) -> ChartPanel {
         let camera = Camera2D {
@@ -5010,8 +5300,14 @@ mod visibility_tests {
             show_extended_hours: true,
             show_extended_hours_bands: true,
         };
-        let sym = SymbolKey::new(symbol);
-        apply_symbol_to_panel(&mut panel, symbol, sym);
+        // Slice F1 retired the `apply_symbol_to_panel` helper (it
+        // existed only to share state between docked + floating chart
+        // paths). Inline the same mutation here for the test.
+        panel.bound_symbol = Some(SymbolKey::new(symbol));
+        panel.symbol = symbol.to_owned();
+        panel.symbol_input = symbol.to_owned();
+        panel.load_state = LoadState::Loading;
+        panel.chart_state.dirty.mark_data();
         panel
     }
 
@@ -5184,5 +5480,205 @@ mod session_classification_tests {
             midas_calendar::crypto_spot().id(),
             "crypto ticker → CryptoSpot",
         );
+    }
+}
+
+// ── Multi-window lifecycle (slice C) tests ───────────────────────────
+
+#[cfg(test)]
+mod window_lifecycle_tests {
+    use super::*;
+    use crate::app::window_state::WindowState;
+    use midas_core::config::WindowGeometryConfig;
+    use midas_core::WindowKey;
+    use std::collections::BTreeMap;
+
+    fn keys(names: &[&str]) -> Vec<WindowKey> {
+        names.iter().map(|n| WindowKey::new(*n)).collect()
+    }
+
+    #[test]
+    fn next_default_skips_window_1() {
+        // The generator starts at N=2 because "Window 1" reads weird
+        // next to "Main".
+        let only_main = keys(&["Main"]);
+        assert_eq!(next_default_window_name_in(only_main.iter()), "Window 2");
+    }
+
+    #[test]
+    fn next_default_finds_first_free_slot() {
+        let taken = keys(&["Main", "Window 2", "Window 3", "Window 5"]);
+        // Skips 2 and 3 (taken); 4 is free even though 5 is also taken.
+        assert_eq!(next_default_window_name_in(taken.iter()), "Window 4");
+    }
+
+    #[test]
+    fn next_default_collision_check_is_case_insensitive() {
+        let taken = keys(&["Main", "WINDOW 2", "window 3"]);
+        assert_eq!(next_default_window_name_in(taken.iter()), "Window 4");
+    }
+
+    #[test]
+    fn next_default_handles_user_named_windows() {
+        // User-named windows ("Trading", "Scanner") don't collide with
+        // the "Window N" namespace.
+        let taken = keys(&["Main", "Trading", "Scanner"]);
+        assert_eq!(next_default_window_name_in(taken.iter()), "Window 2");
+    }
+
+    /// Rename uniqueness check used by `Message::RenameWindow` —
+    /// case-insensitive against every key except the one being renamed.
+    fn rename_collides(
+        windows: &BTreeMap<WindowKey, ()>,
+        from: &WindowKey,
+        new: &WindowKey,
+    ) -> bool {
+        windows
+            .keys()
+            .any(|k| k != from && k.as_str().eq_ignore_ascii_case(new.as_str()))
+    }
+
+    #[test]
+    fn rename_to_distinct_name_is_allowed() {
+        let mut w = BTreeMap::new();
+        w.insert(WindowKey::new("Main"), ());
+        w.insert(WindowKey::new("Trading"), ());
+        let from = WindowKey::new("Trading");
+        let to = WindowKey::new("Day Trading");
+        assert!(!rename_collides(&w, &from, &to));
+    }
+
+    #[test]
+    fn rename_to_self_is_allowed() {
+        // The handler short-circuits exact-match (new == from); the
+        // collision check is only meaningful for *other* keys.
+        let mut w = BTreeMap::new();
+        w.insert(WindowKey::new("Main"), ());
+        w.insert(WindowKey::new("Trading"), ());
+        let from = WindowKey::new("Trading");
+        let to = WindowKey::new("Trading");
+        assert!(!rename_collides(&w, &from, &to));
+    }
+
+    #[test]
+    fn rename_to_existing_name_collides_case_insensitively() {
+        let mut w = BTreeMap::new();
+        w.insert(WindowKey::new("Main"), ());
+        w.insert(WindowKey::new("Trading"), ());
+        w.insert(WindowKey::new("Scanner"), ());
+        let from = WindowKey::new("Scanner");
+        // Lowercase vs Pascal — the BTreeMap stores "Trading" but we
+        // refuse to rename Scanner → trading because it would alias.
+        let to = WindowKey::new("trading");
+        assert!(rename_collides(&w, &from, &to));
+    }
+
+    /// Slice-C `WindowState::opening` invariants the handlers and
+    /// constructor both rely on.
+    #[test]
+    fn opening_window_state_starts_with_placeholder_layout() {
+        let geo = WindowGeometryConfig::default();
+        let ws = WindowState::opening(WindowKey::new("Scanner"), false, geo);
+        assert!(
+            ws.opening,
+            "freshly opened window must carry the opening flag"
+        );
+        assert!(
+            ws.iced_id.is_none(),
+            "iced_id stays None until WindowAttached"
+        );
+        assert!(!ws.is_main);
+        assert_eq!(ws.layout.pane_count(), 1, "placeholder layout has one pane");
+        // The placeholder pane is focused so the first AddChart can
+        // seed it in place via `seed_first_pane`.
+        assert!(ws.layout.focus.is_some());
+    }
+
+    // Slice D — pane-grid messages carry `WindowKey`.
+
+    /// Two windows hold independent `pane_grid::State` instances; the
+    /// `set_focus(pane)` on one must not mutate the other. The slice-D
+    /// dispatch path resolves the target window first and only then
+    /// calls `layout.set_focus`, so this property is what the
+    /// `Message::PaneFocused(WindowKey, _)` qualifier protects.
+    #[test]
+    fn focus_in_one_window_doesnt_disturb_other() {
+        let geo = WindowGeometryConfig::default();
+        let mut a = WindowState::opening(WindowKey::new("Window 2"), false, geo.clone());
+        let b = WindowState::opening(WindowKey::new("Window 3"), false, geo);
+
+        let pane_a = a.layout.focus.expect("opening window has focus");
+        let pane_b = b.layout.focus.expect("opening window has focus");
+
+        // Mutate one — make the focus explicit so we can detect a
+        // cross-window leak.
+        a.layout.set_focus(pane_a);
+
+        assert_eq!(a.layout.focus, Some(pane_a));
+        assert_eq!(b.layout.focus, Some(pane_b));
+    }
+
+    /// Slice-D bracket-context-menu race: two windows can host their
+    /// own active context menu simultaneously. The container is now a
+    /// `HashMap<WindowKey, _>`, not a single `Option`, so two inserts
+    /// under different keys leave both entries live.
+    #[test]
+    fn bracket_context_menu_supports_two_windows_at_once() {
+        use std::collections::HashMap;
+        let mut menus: HashMap<WindowKey, u32> = HashMap::new();
+        menus.insert(WindowKey::new("Main"), 1);
+        menus.insert(WindowKey::new("Window 2"), 2);
+        assert_eq!(menus.len(), 2);
+        assert_eq!(menus.get(&WindowKey::new("Main")), Some(&1));
+        assert_eq!(menus.get(&WindowKey::new("Window 2")), Some(&2));
+    }
+
+    // Slice E — popout migration name resolution.
+
+    /// The new-window-name picker for `OpenChartInNewWindow`: prefer
+    /// `<symbol> Chart`, fall back to `Window N` when the symbol is
+    /// empty or that name is already taken. This pure helper mirrors
+    /// the inline logic in the handler.
+    fn pick_new_window_name<'a, I>(symbol: &str, taken: I) -> WindowKey
+    where
+        I: IntoIterator<Item = &'a WindowKey> + Clone,
+    {
+        let proposed = if symbol.is_empty() {
+            next_default_window_name_in(taken.clone())
+        } else {
+            format!("{symbol} Chart")
+        };
+        if taken
+            .clone()
+            .into_iter()
+            .any(|k| k.as_str().eq_ignore_ascii_case(&proposed))
+        {
+            WindowKey::new(next_default_window_name_in(taken))
+        } else {
+            WindowKey::new(proposed)
+        }
+    }
+
+    #[test]
+    fn popout_with_symbol_picks_symbol_chart_name() {
+        let taken = keys(&["Main"]);
+        let key = pick_new_window_name("AAPL", taken.iter());
+        assert_eq!(key.as_str(), "AAPL Chart");
+    }
+
+    #[test]
+    fn popout_with_empty_symbol_falls_back_to_default() {
+        let taken = keys(&["Main"]);
+        let key = pick_new_window_name("", taken.iter());
+        assert_eq!(key.as_str(), "Window 2");
+    }
+
+    #[test]
+    fn popout_with_existing_chart_window_avoids_collision() {
+        // User already has an "AAPL Chart" window; popping out a
+        // second AAPL chart picks the first free `Window N`.
+        let taken = keys(&["Main", "AAPL Chart"]);
+        let key = pick_new_window_name("AAPL", taken.iter());
+        assert_eq!(key.as_str(), "Window 2");
     }
 }

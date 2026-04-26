@@ -84,19 +84,28 @@ pub fn dispatch_key(app: &mut MidasApp, combo: &str) -> Result<iced::Task<Messag
     Ok(app.update(Message::KeyPressed(key)))
 }
 
-/// Dispatch a scroll as a `ChartZoom` on the active chart. `dy` drives
-/// time-axis zoom (the usual wheel scroll behaviour). `dx` drives pan.
-/// Coordinates are ignored beyond picking the active chart — scroll
-/// in HoM always targets the focused chart, not hover-under-cursor.
-pub fn dispatch_scroll(
+/// Slice G: window-aware scroll dispatch. Picks the focused chart
+/// from `window_key`'s layout rather than hard-coding the main
+/// window. Used by the harness path; the harness resolves
+/// `Option<String>` → `WindowKey` upstream.
+///
+/// `dy` drives time-axis zoom (the usual wheel scroll behaviour).
+/// `dx` drives pan. Coordinates are ignored beyond picking the
+/// active chart — scroll in HoM always targets the focused chart,
+/// not hover-under-cursor.
+pub fn dispatch_scroll_in(
     app: &mut MidasApp,
+    window_key: &midas_core::WindowKey,
     _x: f32,
     _y: f32,
     dx: f32,
     dy: f32,
 ) -> Result<iced::Task<Message>, InputError> {
     let chart_id = app
-        .workspace
+        .windows
+        .get(window_key)
+        .ok_or(InputError::NoActiveChart)?
+        .layout
         .focused_chart_id()
         .ok_or(InputError::NoActiveChart)?;
 

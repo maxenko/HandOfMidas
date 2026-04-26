@@ -57,6 +57,13 @@ define_id! {
     OrderBlotterId(u32) => "Blotter",
     /// Unique identifier for an Account panel (tabbed positions/orders/history/recents).
     AccountPanelId(u32) => "Account",
+    /// Unique identifier for a session-chart panel (feature-gated on
+    /// `session_chart`). Session-chart panes were previously keyed by
+    /// `iced::window::Id` because they each lived in their own
+    /// stand-alone window; multi-window slice F2 retired that path
+    /// and now session-chart panes occupy regular `pane_grid` cells
+    /// keyed by this id.
+    SessionChartId(u32) => "SessionChart",
 }
 
 #[cfg(test)]

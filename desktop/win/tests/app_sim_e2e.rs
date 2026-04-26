@@ -397,6 +397,7 @@ fn pacing_violation_recovers_cleanly() {
             app.devloop_port,
             DevloopCmd::Screenshot {
                 out_path: PathBuf::from(".devloop/shots/app_sim_e2e_pacing.png"),
+                window: None,
             },
         )
         .unwrap(),

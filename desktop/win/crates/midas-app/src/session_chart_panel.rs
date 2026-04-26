@@ -1,88 +1,51 @@
-//! # session_chart_window — Phase D host plumbing for
-//! [`crate::session_chart::SessionChart`]
+//! # session_chart_panel — pane-grid host for [`crate::session_chart::SessionChart`]
 //!
-//! Feature-gated on `session_chart`. Holds per-window state for every
-//! `window::open()`-hosted session chart: the widget (behind an
-//! `Arc<RwLock<_>>` so the shader `Program` can borrow it from the
-//! `view()` path), the driver Arc (lifeline for the pump task), and
-//! the originating [`crate::session_chart::SessionChartRequest`].
+//! Slice F2 of the multi-window plan retired the standalone-window
+//! `session_chart_window.rs` and folded its per-instance state into a
+//! regular `pane_grid` cell keyed by [`midas_core::SessionChartId`].
+//! Functionally identical to the old `SessionChartWindow`: holds the
+//! widget (behind `Arc<RwLock<_>>` so the shader `Program` can borrow
+//! it from `view()`), the driver Arc (lifeline for the pump task),
+//! and the originating [`crate::session_chart::SessionChartRequest`].
 //!
-//! ## View
-//!
-//! The window now renders an iced `shader(SessionChartProgram)`
-//! widget that paints candles, grid, session bands, separators, and
-//! crosshair via the GPU through
-//! [`midas_render::ChartRenderer`]. A small overlay chrome on top
-//! shows the status line + EH-cycle button + Close button.
-//!
-//! ## Known TODOs
-//!
-//! - **Text rendering** (badge labels, axis priceline numbers, tooltip
-//!   text). The legacy SDF badge + cryoglyph glyph pipelines are not
-//!   yet wired through the `RenderBuckets` bridge — see
-//!   `plan/session-aware-charts/00b-integration-strategy.md` "S9" and
-//!   `plan/session-aware-charts/00a-ideal-design.md` "[R2-G-2]".
-//! - **Pan / zoom interaction** beyond the stubbed wheel-cycles-EH
-//!   behaviour in `shader.rs::update`. Real pan via
-//!   `set_time_window`, zoom via `set_price_range`, drag via an
-//!   interaction state machine are a follow-up slice.
-//! - **Keyboard shortcuts** (arrow-keys pan, +/- zoom, "E" cycles
-//!   EhPolicy, "X" closes window). The "EH" button cycles, the
-//!   "Close" button closes, everything else is TODO.
-//! - **Period picker drop-down** — widget accepts any `BarPeriod`
-//!   the calendar validates; the UI affordance lands with the
-//!   drop-down polish slice.
-//!
-//! ## Manual smoke test
-//!
-//! ```bash
-//! cargo run -p midas-app --features session_chart
-//! ```
-//!
-//! - Click "Session chart — BTC M1" in the toolbar.
-//! - A new window opens titled "Session · BTC-USD · M1".
-//! - Expect to see candles rendering with a grid, session bands on
-//!   XNYS charts, and a crosshair following the mouse.
-//! - Known limitation: no text inside badges, no axis labels. These
-//!   will appear when the glyph pipeline is wired through
-//!   (`ChartScene::labels` / `axis_labels` are currently empty by
-//!   design — see `gpu_renderer.rs` deferred-gap docs).
+//! The view function returns `Element<'_, Message>` for any message
+//! routing path — the pane grid embeds the result like any other
+//! panel body.
 
 #![cfg(feature = "session_chart")]
 
 use std::sync::Arc;
 
 use iced::widget::{button, column, container, row, shader, stack, text};
-use iced::{window, Alignment, Element, Length};
+use iced::{Alignment, Element, Length};
+use midas_core::SessionChartId;
 use parking_lot::RwLock;
 
 use crate::session_chart::{
     SessionChart, SessionChartDriver, SessionChartProgram, SessionChartRequest,
 };
 
-/// Per-window state for a standalone session-chart window.
-///
-/// The widget lives behind an `Arc<RwLock<_>>` so the shader
-/// `Program` built in `view()` can take a short-lived write guard to
-/// run `paint_buckets` without requiring `&mut self` on the window
-/// state. The lock is `try_write()`-only on the paint path (see
-/// `shader.rs`) — paint never stalls on the app's update pump.
-pub struct SessionChartWindow {
+/// Per-pane state for a session-chart panel. Mirrors the fields the
+/// retired `SessionChartWindow` held, minus the OS `window::Id` —
+/// session-chart panes now live as pane-grid cells in regular
+/// multi-window `WindowState`s.
+pub struct SessionChartPanel {
     /// The widget value, shared with the `SessionChartProgram` each
     /// frame through a cheap `Arc::clone`. The app's message
     /// handlers take `write()` guards; paint takes `try_write()`.
     pub widget: Arc<RwLock<SessionChart>>,
     /// Driver Arc — dropping this aborts the pump task via
-    /// `JoinHandle::Drop`. Held for the lifetime of the window.
+    /// `JoinHandle::Drop`. Held for the lifetime of the panel.
     #[allow(dead_code)]
     pub driver: Arc<SessionChartDriver>,
-    /// The request that spawned this window. Used to title the
-    /// window and to re-subscribe on EhPolicy changes (future slice).
+    /// The request that spawned this panel. Used to title the pane
+    /// title bar and to re-subscribe on EhPolicy changes (future
+    /// slice).
     pub request: SessionChartRequest,
 }
 
-impl SessionChartWindow {
-    /// Build a fresh per-window state. Wraps the widget in an
+impl SessionChartPanel {
+    /// Build a fresh per-pane state. Wraps the widget in an
     /// `Arc<RwLock<_>>` for sharing with the shader program.
     pub fn new(
         widget: SessionChart,
@@ -96,12 +59,7 @@ impl SessionChartWindow {
         }
     }
 
-    /// Human-readable title for the OS window. Consumed by future
-    /// per-window `title(window_id)` wiring — iced 0.14's
-    /// `daemon().title(fn)` path currently returns the single
-    /// "Hand of Midas" string for every window; Phase D leaves the
-    /// per-window title wiring as a TODO (low-risk, UX polish).
-    #[allow(dead_code)]
+    /// Human-readable title for the pane title bar.
     pub fn title(&self) -> String {
         format!(
             "Session · {} · {}",
@@ -110,30 +68,13 @@ impl SessionChartWindow {
         )
     }
 
-    /// Build the iced element rendered inside this window.
+    /// Build the pane body element.
     ///
-    /// Layout:
-    ///
-    /// ```text
-    /// ┌──────────────────────────────────────────────┐
-    /// │ status line · [EH] [Close]                   │  <- overlay
-    /// ├──────────────────────────────────────────────┤
-    /// │                                              │
-    /// │   shader(SessionChartProgram) fills          │
-    /// │   the rest of the window                     │
-    /// │                                              │
-    /// └──────────────────────────────────────────────┘
-    /// ```
-    ///
-    /// The shader widget renders candles, grid, session bands,
-    /// separators, and crosshair via the GPU. The overlay chrome is
-    /// rendered on top via `iced::widget::stack![]`.
-    pub fn view(&self, window_id: window::Id) -> Element<'_, crate::app::Message> {
+    /// Layout matches the retired window's chrome — a small overlay
+    /// with status / EH / tool buttons rendered on top of the GPU
+    /// shader surface.
+    pub fn view(&self, panel_id: SessionChartId) -> Element<'_, crate::app::Message> {
         // -- Status line --------------------------------------------
-        //
-        // Read-only: short-lived `read()` guard so we can format the
-        // header without blocking the GPU paint. The guard never
-        // crosses an await (iced's view fn is synchronous).
         let (axis_kind, eh_policy) = {
             let g = self.widget.read();
             (g.axis_kind(), g.eh_policy())
@@ -143,8 +84,6 @@ impl SessionChartWindow {
             let g = series_arc.read();
             g.len()
         };
-        // Chart engine version counter — bumps every time a tick
-        // arrives. Cheap debug aid.
         let series_version = { series_arc.read().version() };
 
         let header = text(format!(
@@ -160,23 +99,15 @@ impl SessionChartWindow {
         .size(12);
 
         let eh_btn = button(text(format!("EH: {}", eh_policy.short_label())).size(11))
-            .on_press(crate::app::Message::SessionChartCyclePolicy(window_id))
+            .on_press(crate::app::Message::SessionChartCyclePolicy(panel_id))
             .padding([2, 8]);
 
-        // Slice 4 chart-transition: "Add Level" toolbar button.
-        // Toggles the level-placement tool on the `SessionChart`
-        // widget. The app-side message handler flips the tool state.
         let level_active = { self.widget.read().is_level_tool_active() };
         let add_level_btn =
             button(text(if level_active { "Level *" } else { "Add Level" }).size(11))
-                .on_press(crate::app::Message::SessionChartToggleLevelTool(window_id))
+                .on_press(crate::app::Message::SessionChartToggleLevelTool(panel_id))
                 .padding([2, 8]);
 
-        // Slice 5b chart-transition: "Buy Bracket" / "Sell Bracket"
-        // toolbar chips activate the `BracketTool` on the widget for
-        // Long / Short placement respectively. The app-side message
-        // handler flips the tool state + translates the resulting
-        // effects to `TickerMsg`s via the draft-then-save sequence.
         let bracket_mode = {
             let g = self.widget.read();
             if g.is_bracket_tool_active() {
@@ -215,19 +146,19 @@ impl SessionChartWindow {
         };
         let buy_bracket_btn = button(text(buy_btn_label).size(11))
             .on_press(crate::app::Message::SessionChartActivateBuyBracketTool(
-                window_id,
+                panel_id,
             ))
             .padding([2, 8]);
         let sell_bracket_btn = button(text(sell_btn_label).size(11))
             .on_press(crate::app::Message::SessionChartActivateSellBracketTool(
-                window_id,
+                panel_id,
             ))
             .padding([2, 8]);
 
-        let close_btn = button(text("Close").size(11))
-            .on_press(crate::app::Message::FloatingWindowClosed(window_id))
-            .padding([2, 8]);
-
+        // Slice F2: no per-pane "Close" button — pane-grid title bar
+        // close button (added by the standard pane chrome) handles
+        // tear-down. Removing the redundant close button matches the
+        // chart / watchlist / order panel chrome.
         let overlay = container(
             row![
                 header,
@@ -235,7 +166,6 @@ impl SessionChartWindow {
                 add_level_btn,
                 buy_bracket_btn,
                 sell_bracket_btn,
-                close_btn,
             ]
             .spacing(8)
             .align_y(Alignment::Center),
@@ -244,10 +174,6 @@ impl SessionChartWindow {
         .width(Length::Fill);
 
         // -- GPU shader surface ------------------------------------
-        //
-        // A fresh `SessionChartProgram` is built each frame — it's a
-        // thin struct holding an `Arc::clone()` of the widget Arc, so
-        // construction cost is one ref-count bump.
         let program: SessionChartProgram<crate::app::Message> =
             SessionChartProgram::new(Arc::clone(&self.widget));
         let canvas: Element<'_, crate::app::Message> = shader(program)
@@ -255,14 +181,12 @@ impl SessionChartWindow {
             .height(Length::Fill)
             .into();
 
-        // -- Compose: shader at the bottom, overlay on top ---------
-        //
-        // `iced::widget::stack![]` paints children back-to-front —
-        // the shader first, then the overlay chrome on top. The
-        // overlay sits in a `column![ overlay, Rule::horizontal ]` so
-        // it visually hangs off the top edge without consuming all
-        // vertical space (feedback_iced_fill_height.md — `Fill`
-        // inside a Column would collapse the shader to zero height).
+        // Compose: shader at the bottom, overlay on top. iced's
+        // `stack![]` paints back-to-front. The overlay sits in a
+        // `column![overlay]` so it visually hangs off the top edge
+        // without consuming all vertical space (see
+        // feedback_iced_fill_height.md — `Fill` inside a Column would
+        // collapse the shader to zero height).
         let chrome: Element<'_, crate::app::Message> = column![overlay].spacing(0).into();
 
         stack![canvas, chrome].into()
@@ -288,26 +212,16 @@ fn period_label(period: midas_bars::BarPeriod) -> &'static str {
         BarPeriod::Clock(ClockInterval::Minutes(_)) => "Mn",
         BarPeriod::Clock(ClockInterval::Hours(1)) => "H1",
         BarPeriod::Clock(ClockInterval::Hours(_)) => "Hn",
-        // `ClockInterval` is `#[non_exhaustive]`; any future family
-        // (e.g. `Days(u32)`) falls through with a neutral label until the
-        // UI learns to format it.
         BarPeriod::Clock(_) => "?",
         BarPeriod::Session(SessionSpan::Regular) => "D1·RTH",
         BarPeriod::Session(SessionSpan::Extended) => "D1·ETH",
         BarPeriod::Session(SessionSpan::Eth) => "D1·ETH",
-        // `SessionSpan` is `#[non_exhaustive]`; future variants fall
-        // through with a neutral label.
         BarPeriod::Session(_) => "Sess?",
         BarPeriod::Calendar(CalendarSpan::Week) => "W1",
         BarPeriod::Calendar(CalendarSpan::Month) => "MN1",
         BarPeriod::Calendar(CalendarSpan::Quarter) => "Q1",
         BarPeriod::Calendar(CalendarSpan::Year) => "Y1",
-        // `CalendarSpan` is `#[non_exhaustive]`; future variants fall
-        // through with a neutral label.
         BarPeriod::Calendar(_) => "Cal?",
-        // `BarPeriod` itself is `#[non_exhaustive]`; any entirely-new
-        // variant (e.g. `BarPeriod::Range(...)` for range bars) gets a
-        // neutral placeholder until the UI adds explicit branches.
         _ => "?",
     }
 }

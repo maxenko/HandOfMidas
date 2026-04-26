@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use iced::futures::Stream;
+use midas_core::WindowKey;
 use midas_devloop_proto::{Command, ErrorKind, Response};
 use parking_lot::Mutex;
 use tokio::sync::oneshot;
@@ -104,6 +105,44 @@ pub fn dev_harness_stream(source: &DevHarnessSource) -> impl Stream<Item = Messa
 }
 
 // ── Command dispatch ──────────────────────────────────────────────────
+
+/// Slice G: resolve an optional window-name argument to a live
+/// [`WindowKey`]. `None` falls back to `main_window_key` so every
+/// retrofitted command keeps its old single-window default. A
+/// non-existent name returns `Err(message)` for the caller to bubble
+/// out as `ErrorKind::Internal`.
+///
+/// Look-up runs the candidate name through `WindowKey::normalize` to
+/// match the canonical form `Message::CreateWindow` would have
+/// stored. Drivers can pass raw user strings.
+pub fn resolve_window_key(
+    app: &crate::app::MidasApp,
+    window: Option<&str>,
+) -> Result<WindowKey, String> {
+    resolve_window_key_in(app.windows.keys(), &app.main_window_key, window)
+}
+
+/// Pure form of [`resolve_window_key`] — takes just the iterables it
+/// needs so the resolution rules can be unit-tested without standing
+/// up a full [`crate::app::MidasApp`].
+pub fn resolve_window_key_in<'a>(
+    known: impl IntoIterator<Item = &'a WindowKey>,
+    main: &WindowKey,
+    window: Option<&str>,
+) -> Result<WindowKey, String> {
+    match window {
+        None => Ok(main.clone()),
+        Some(name) => {
+            let candidate = WindowKey::normalize(name)
+                .map_err(|e| format!("invalid window name '{name}': {e}"))?;
+            if known.into_iter().any(|k| *k == candidate) {
+                Ok(candidate)
+            } else {
+                Err(format!("no window named '{name}'"))
+            }
+        }
+    }
+}
 
 /// Entry point called from `MidasApp::update` when a `DevHarness` message
 /// arrives. Returns any follow-up `Task` the command produces (e.g.
@@ -254,16 +293,28 @@ pub fn handle_command(
             iced::Task::none()
         }
 
-        Command::Screenshot { out_path } => {
-            let Some(main_id) = app.window.main_window() else {
+        Command::Screenshot { out_path, window } => {
+            let key = match resolve_window_key(app, window.as_deref()) {
+                Ok(k) => k,
+                Err(e) => {
+                    responder.err(ErrorKind::Internal, e, cursor_now());
+                    return iced::Task::none();
+                }
+            };
+            // Slice G: each `WindowState` carries the iced `window::Id`
+            // assigned at attach time. `None` means the window's open
+            // task hasn't resolved yet — surface as Internal rather
+            // than silently falling back to main, since that would
+            // hide the race from the script.
+            let Some(target_id) = app.windows.get(&key).and_then(|ws| ws.iced_id) else {
                 responder.err(
                     ErrorKind::Internal,
-                    "main window not yet created",
+                    format!("window '{}' has no attached iced id yet", key.as_str()),
                     cursor_now(),
                 );
                 return iced::Task::none();
             };
-            iced::window::screenshot(main_id).map(move |screenshot| {
+            iced::window::screenshot(target_id).map(move |screenshot| {
                 Message::DevHarnessScreenshotReady {
                     screenshot,
                     out_path: out_path.clone(),
@@ -363,12 +414,34 @@ pub fn handle_command(
             }
         },
 
-        Command::OpenOrdersPanel => {
+        Command::OpenOrdersPanel { window } => {
+            // `AddAccountPanel` already targets `focused_window` ??
+            // main inside `target_window_for_add`; for deterministic
+            // scripted journeys we briefly swap `focused_window` to
+            // the resolved key, dispatch, then restore. Simpler than
+            // adding a window-keyed variant.
+            let key = match resolve_window_key(app, window.as_deref()) {
+                Ok(k) => k,
+                Err(e) => {
+                    responder.err(ErrorKind::Internal, e, cursor_now());
+                    return iced::Task::none();
+                }
+            };
+            let prev = app.focused_window.replace(key);
             responder.ok_empty(cursor_now());
-            app.update(Message::AddAccountPanel)
+            let task = app.update(Message::AddAccountPanel);
+            app.focused_window = prev;
+            task
         }
 
-        Command::CycleThumbnail { symbol } => {
+        Command::CycleThumbnail { symbol, window } => {
+            // Per-window thumbnail caches don't exist yet (the cycle
+            // is global); validate the window arg anyway so an invalid
+            // name is rejected loudly rather than silently ignored.
+            if let Err(e) = resolve_window_key(app, window.as_deref()) {
+                responder.err(ErrorKind::Internal, e, cursor_now());
+                return iced::Task::none();
+            }
             responder.ok(serde_json::json!({ "symbol": symbol }), cursor_now());
             app.update(Message::ThumbnailIntervalCycle(symbol))
         }
@@ -399,8 +472,8 @@ pub fn handle_command(
             // — scripting the active tab should affect the panel the
             // user is looking at, not an orphaned one.
             use crate::layout::PanelContent;
-            let visible_ids: Vec<midas_core::AccountPanelId> = app
-                .workspace
+            let visible_ids: Vec<midas_core::AccountPanelId> = app.windows[&app.main_window_key]
+                .layout
                 .panes
                 .iter()
                 .filter_map(|(_, state)| match state.content {
@@ -435,27 +508,58 @@ pub fn handle_command(
             iced::Task::batch(tasks)
         }
 
-        Command::Key { combo } => match input::dispatch_key(app, &combo) {
-            Ok(task) => {
-                responder.ok(serde_json::json!({ "combo": combo }), cursor_now());
-                task
+        Command::Key { combo, window } => {
+            let key = match resolve_window_key(app, window.as_deref()) {
+                Ok(k) => k,
+                Err(e) => {
+                    responder.err(ErrorKind::Internal, e, cursor_now());
+                    return iced::Task::none();
+                }
+            };
+            // Slice G: like `OpenOrdersPanel`, the existing
+            // `dispatch_key` path defers to `focused_window` for
+            // anything that lands as a payload-less `Add*` message
+            // (`Ctrl+N`). Swap, dispatch, restore.
+            let prev = app.focused_window.replace(key);
+            let result = input::dispatch_key(app, &combo);
+            app.focused_window = prev;
+            match result {
+                Ok(task) => {
+                    responder.ok(serde_json::json!({ "combo": combo }), cursor_now());
+                    task
+                }
+                Err(e) => {
+                    responder.err(ErrorKind::Internal, e.to_string(), cursor_now());
+                    iced::Task::none()
+                }
             }
-            Err(e) => {
-                responder.err(ErrorKind::Internal, e.to_string(), cursor_now());
-                iced::Task::none()
-            }
-        },
+        }
 
-        Command::Scroll { x, y, dx, dy } => match input::dispatch_scroll(app, x, y, dx, dy) {
-            Ok(task) => {
-                responder.ok(serde_json::json!({ "dx": dx, "dy": dy }), cursor_now());
-                task
+        Command::Scroll {
+            x,
+            y,
+            dx,
+            dy,
+            window,
+        } => {
+            let key = match resolve_window_key(app, window.as_deref()) {
+                Ok(k) => k,
+                Err(e) => {
+                    responder.err(ErrorKind::Internal, e, cursor_now());
+                    return iced::Task::none();
+                }
+            };
+            match input::dispatch_scroll_in(app, &key, x, y, dx, dy) {
+                Ok(task) => {
+                    responder.ok(serde_json::json!({ "dx": dx, "dy": dy }), cursor_now());
+                    task
+                }
+                Err(e) => {
+                    responder.err(ErrorKind::Internal, e.to_string(), cursor_now());
+                    iced::Task::none()
+                }
             }
-            Err(e) => {
-                responder.err(ErrorKind::Internal, e.to_string(), cursor_now());
-                iced::Task::none()
-            }
-        },
+        }
 
         Command::Click { .. } | Command::ClickPrice { .. } | Command::Drag { .. } => {
             responder.err(
@@ -584,6 +688,156 @@ pub fn handle_command(
             }
             iced::Task::none()
         }
+
+        // -- Multi-window lifecycle (slice G) --
+        Command::OpenWindow { name } => {
+            // Snapshot the keys *before* dispatch so we can spot the
+            // newly-minted entry (the user may have asked the app to
+            // pick a default name). The slice-C handler enforces
+            // uniqueness; we just relay the result.
+            let before: std::collections::BTreeSet<WindowKey> =
+                app.windows.keys().cloned().collect();
+            let task = app.update(Message::CreateWindow { name: name.clone() });
+            let after: std::collections::BTreeSet<WindowKey> =
+                app.windows.keys().cloned().collect();
+            let added: Vec<&WindowKey> = after.difference(&before).collect();
+            match added.as_slice() {
+                [created] => {
+                    responder.ok(
+                        serde_json::json!({ "name": created.as_str() }),
+                        cursor_now(),
+                    );
+                }
+                _ => {
+                    // Slice C surfaces uniqueness collisions via a
+                    // toast (no `windows` mutation); the request is
+                    // effectively rejected. Surface that to the
+                    // caller so scripts don't proceed assuming the
+                    // window exists.
+                    responder.err(
+                        ErrorKind::Internal,
+                        match name {
+                            Some(n) => format!(
+                                "open_window: '{n}' was rejected (likely a name collision); \
+                                 see status toast for details"
+                            ),
+                            None => "open_window: window did not appear (unexpected — slice C \
+                                     allocates a default name)"
+                                .to_owned(),
+                        },
+                        cursor_now(),
+                    );
+                }
+            }
+            task
+        }
+
+        Command::CloseWindow { name } => {
+            let key = match resolve_window_key(app, Some(&name)) {
+                Ok(k) => k,
+                Err(e) => {
+                    responder.err(ErrorKind::Internal, e, cursor_now());
+                    return iced::Task::none();
+                }
+            };
+            if key == app.main_window_key {
+                responder.err(
+                    ErrorKind::Internal,
+                    "close_window: refusing to close the main window — use `shutdown` instead",
+                    cursor_now(),
+                );
+                return iced::Task::none();
+            }
+            // The slice-C close handler keys on `iced::window::Id`; for
+            // a window that hasn't attached yet we fall back to the
+            // synthetic-id path the watchdog uses.
+            let Some(iced_id) = app.windows.get(&key).and_then(|ws| ws.iced_id) else {
+                responder.err(
+                    ErrorKind::Internal,
+                    format!(
+                        "close_window: '{}' has no attached iced id yet",
+                        key.as_str()
+                    ),
+                    cursor_now(),
+                );
+                return iced::Task::none();
+            };
+            responder.ok(serde_json::json!({ "name": key.as_str() }), cursor_now());
+            app.update(Message::WindowCloseRequested(iced_id))
+        }
+
+        Command::RenameWindow { from, to } => {
+            let from_key = match resolve_window_key(app, Some(&from)) {
+                Ok(k) => k,
+                Err(e) => {
+                    responder.err(ErrorKind::Internal, e, cursor_now());
+                    return iced::Task::none();
+                }
+            };
+            let before: std::collections::BTreeSet<WindowKey> =
+                app.windows.keys().cloned().collect();
+            let task = app.update(Message::RenameWindow {
+                from: from_key.clone(),
+                to: to.clone(),
+            });
+            let after: std::collections::BTreeSet<WindowKey> =
+                app.windows.keys().cloned().collect();
+            // A successful rename swaps one key for another — the set
+            // size is unchanged but the from→to substitution is
+            // visible. Anything else means the slice-C handler
+            // rejected it (collision / bad name).
+            if before.contains(&from_key) && !after.contains(&from_key) {
+                responder.ok(serde_json::json!({ "from": from, "to": to }), cursor_now());
+            } else {
+                responder.err(
+                    ErrorKind::Internal,
+                    format!("rename_window: '{from}' → '{to}' was rejected (collision or invalid)"),
+                    cursor_now(),
+                );
+            }
+            task
+        }
+
+        Command::ListWindows => {
+            let mut entries = Vec::with_capacity(app.windows.len());
+            for (key, state) in &app.windows {
+                let panel_count = state.layout.panes.len();
+                entries.push(serde_json::json!({
+                    "name": key.as_str(),
+                    "attached": state.iced_id.is_some(),
+                    "is_main": *key == app.main_window_key,
+                    "panel_count": panel_count,
+                }));
+            }
+            responder.ok(
+                serde_json::json!({
+                    "windows": entries,
+                    "focused": app.focused_window.as_ref().map(|k| k.as_str().to_owned()),
+                    "main": app.main_window_key.as_str(),
+                }),
+                cursor_now(),
+            );
+            iced::Task::none()
+        }
+
+        Command::SetWindowFocus { name } => {
+            let key = match resolve_window_key(app, Some(&name)) {
+                Ok(k) => k,
+                Err(e) => {
+                    responder.err(ErrorKind::Internal, e, cursor_now());
+                    return iced::Task::none();
+                }
+            };
+            // OS focus can't be programmatically stolen on Windows
+            // without flicker; instead we flip the in-app
+            // `focused_window` pointer that drives payload-less
+            // `Add*` and `Ctrl+N` routing. The `WindowFocused` event
+            // path already sets this same field on a real OS focus
+            // change, so the effect is identical for tests.
+            app.focused_window = Some(key.clone());
+            responder.ok(serde_json::json!({ "focused": key.as_str() }), cursor_now());
+            iced::Task::none()
+        }
     }
 }
 
@@ -689,5 +943,61 @@ pub fn handle_screenshot_ready(
         Err(e) => {
             responder.err(ErrorKind::Internal, format!("screenshot: {e}"), cursor);
         }
+    }
+}
+
+#[cfg(test)]
+mod resolve_window_key_tests {
+    //! Slice G: pure-function tests for the window-name resolver. The
+    //! full `MidasApp::update` paths that consume the resolved key
+    //! (`OpenWindow`, `CloseWindow`, etc.) are covered by the
+    //! `multi-window-journey.sh` smoke; the unit tests here lock the
+    //! lookup contract those handlers rely on.
+    use super::*;
+
+    fn keys(names: &[&str]) -> Vec<WindowKey> {
+        names.iter().map(|n| WindowKey::new(*n)).collect()
+    }
+
+    #[test]
+    fn none_falls_back_to_main() {
+        let main = WindowKey::new("Main");
+        let known = keys(&["Main", "Scanner"]);
+        let resolved = resolve_window_key_in(&known, &main, None).expect("ok");
+        assert_eq!(resolved.as_str(), "Main");
+    }
+
+    #[test]
+    fn some_known_name_resolves() {
+        let main = WindowKey::new("Main");
+        let known = keys(&["Main", "Scanner"]);
+        let resolved = resolve_window_key_in(&known, &main, Some("Scanner")).expect("ok");
+        assert_eq!(resolved.as_str(), "Scanner");
+    }
+
+    #[test]
+    fn unknown_name_returns_err() {
+        let main = WindowKey::new("Main");
+        let known = keys(&["Main"]);
+        let err = resolve_window_key_in(&known, &main, Some("Ghost")).unwrap_err();
+        assert!(err.contains("Ghost"), "{err}");
+    }
+
+    #[test]
+    fn whitespace_is_normalised_then_matched() {
+        let main = WindowKey::new("Main");
+        let known = keys(&["Main", "Scanner"]);
+        // `WindowKey::normalize` trims; the resolver therefore matches
+        // a leading/trailing-space input against the canonical key.
+        let resolved = resolve_window_key_in(&known, &main, Some("  Scanner  ")).expect("ok");
+        assert_eq!(resolved.as_str(), "Scanner");
+    }
+
+    #[test]
+    fn empty_name_is_rejected_by_normalize() {
+        let main = WindowKey::new("Main");
+        let known = keys(&["Main"]);
+        let err = resolve_window_key_in(&known, &main, Some("   ")).unwrap_err();
+        assert!(err.contains("invalid window name"), "{err}");
     }
 }

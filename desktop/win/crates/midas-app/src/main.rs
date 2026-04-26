@@ -29,7 +29,7 @@ mod registry;
 #[cfg(feature = "session_chart")]
 mod session_chart;
 #[cfg(feature = "session_chart")]
-mod session_chart_window;
+mod session_chart_panel;
 mod sim_child;
 mod theme;
 mod thumbnail_data;
@@ -101,10 +101,20 @@ fn main() -> iced::Result {
         update,
         view,
     )
-    .title("Hand of Midas")
+    .title(window_title)
     .theme(Theme::Dark)
     .subscription(subscription)
     .run()
+}
+
+/// Per-window OS title. Resolves the iced `window::Id` to its
+/// `WindowKey` via `MidasApp::iced_id_to_key`. Slice C: rename takes
+/// effect next time iced re-polls the title (next focus / event).
+fn window_title(state: &MidasApp, id: window::Id) -> String {
+    match state.iced_id_to_key.get(&id) {
+        Some(key) => format!("Hand of Midas — {}", key.as_str()),
+        None => "Hand of Midas".to_string(),
+    }
 }
 
 /// Parse `--fixture <name>` from the command line. Returns the fixture
@@ -158,22 +168,36 @@ fn subscription(state: &MidasApp) -> Subscription<Message> {
     // Periodic tick at 1 Hz for clock updates and debounced config saves.
     let tick_sub = iced::time::every(std::time::Duration::from_secs(1)).map(|_| Message::Tick);
 
-    // Listen for window close events so we can clean up floating charts
-    // and save config when the main window is closed.
-    let close_sub = window::close_events().map(Message::FloatingWindowClosed);
+    // Slice F1 retired the legacy `close_events()` subscription —
+    // every window close now flows through `window::events()`'s
+    // `CloseRequested` (handled below by the slice-C
+    // `Message::WindowCloseRequested(window::Id)` handler).
 
-    // Track window move/resize for config persistence. Wrapped in
-    // `Message::Window` so the WindowGeometry controller owns the
-    // event interpretation (audit P1 slice 2).
-    let window_events_sub = window::events().map(|(_id, event)| match event {
+    // Track window move/resize/focus/close-requested for config
+    // persistence and slice-C multi-window lifecycle. Wrapped in the
+    // appropriate variants — geometry events still flow through
+    // `Message::Window` for the WindowGeometry controller (audit P1
+    // slice 2); focus and close-requested go to the slice-C lifecycle
+    // handler.
+    let window_events_sub = window::events().map(|(id, event)| match event {
         iced::window::Event::Moved(pos) => Message::Window(
             window_geometry::WindowGeometryMsg::Moved(pos.x as i32, pos.y as i32),
         ),
         iced::window::Event::Resized(size) => Message::Window(
             window_geometry::WindowGeometryMsg::Resized(size.width as u32, size.height as u32),
         ),
+        iced::window::Event::Focused => Message::WindowFocused(id),
+        iced::window::Event::Unfocused => Message::WindowUnfocused(id),
+        iced::window::Event::CloseRequested => Message::WindowCloseRequested(id),
         _ => Message::Tick,
     });
+
+    // Slice-C 1 Hz watchdog. Scans `pending_window_opens` for entries
+    // older than `WINDOW_ATTACH_TIMEOUT_SECS` and fires
+    // `WindowAttachFailed` for each. Decoupled from `tick_sub` so the
+    // existing `Tick` handler doesn't need to grow another arm.
+    let attach_watchdog =
+        iced::time::every(std::time::Duration::from_secs(1)).map(|_| Message::WindowAttachWatchdog);
 
     // Refresh watchlist market data every 60 seconds.
     let market_refresh =
@@ -190,8 +214,8 @@ fn subscription(state: &MidasApp) -> Subscription<Message> {
     let mut subs = vec![
         keyboard_sub,
         tick_sub,
-        close_sub,
         window_events_sub,
+        attach_watchdog,
         market_refresh,
         cursor_sub,
     ];

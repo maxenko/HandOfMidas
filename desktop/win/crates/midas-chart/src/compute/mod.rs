@@ -140,7 +140,12 @@ pub fn compute_chart_scene(input: &ChartInput<'_>) -> ChartScene {
 /// S6 P6: lifted out of `compute_collapsed_scene`'s closure so the
 /// anchored-VP compute branch can compute per-period left-x in both
 /// modes without re-implementing the index-space arithmetic.
-fn left_x_for_candle(camera: &Camera2D, data: &dyn CandleData, idx: usize, collapse_gaps: bool) -> f32 {
+fn left_x_for_candle(
+    camera: &Camera2D,
+    data: &dyn CandleData,
+    idx: usize,
+    collapse_gaps: bool,
+) -> f32 {
     if collapse_gaps {
         camera.snap_to_pixel(camera.time_to_x(idx as f64 + 0.5))
     } else {

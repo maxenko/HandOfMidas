@@ -1093,6 +1093,7 @@ fn config_bound_symbol_round_trip() {
     use midas_core::config::ChartConfig;
 
     let cfg = ChartConfig {
+        id: 0,
         symbol: "AAPL".to_string(),
         timeframe: "1D".to_string(),
         levels: vec![],
@@ -1140,6 +1141,7 @@ fn order_panel_config_bound_symbol_round_trip() {
     use midas_core::config::OrderPanelConfig;
 
     let cfg = OrderPanelConfig {
+        id: 0,
         symbol: "TSLA".to_string(),
         side: "BUY".to_string(),
         quantity: "100".to_string(),

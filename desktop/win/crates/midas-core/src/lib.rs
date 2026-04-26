@@ -20,6 +20,7 @@ pub mod market_data;
 pub mod provider;
 pub mod symbol;
 pub mod timeframe;
+pub mod window_key;
 
 // ── Planned modules (uncomment as implemented) ──────────────────────
 // pub mod events;       // MarketEvent, ChartEvent, UIEvent
@@ -37,7 +38,9 @@ pub use config::{
 };
 /// Re-export common types at crate root for ergonomic imports.
 /// Example: `use midas_core::{Timeframe, CandleData, AppConfig};`
-pub use id::{AccountPanelId, ChartId, OrderBlotterId, OrderPanelId, PaneId, WatchlistId};
+pub use id::{
+    AccountPanelId, ChartId, OrderBlotterId, OrderPanelId, PaneId, SessionChartId, WatchlistId,
+};
 pub use link::{LinkColor, LinkMode};
 pub use market_data::MarketSnapshot;
 /// Re-export from `midas-bars` so downstream chart crates
@@ -48,6 +51,7 @@ pub use midas_bars::SessionKindByte;
 pub use provider::{ConnectionState, DataProvider, OrderBroker, ProviderError};
 pub use symbol::SymbolKey;
 pub use timeframe::Timeframe;
+pub use window_key::{NameError as WindowNameError, WindowKey};
 
 // ---------------------------------------------------------------------------
 // SecurityType — IB security type for contracts

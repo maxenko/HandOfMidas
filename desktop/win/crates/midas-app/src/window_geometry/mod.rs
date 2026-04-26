@@ -11,7 +11,7 @@
 //! Same shape as [`crate::toast::ToastController`] (Slice 0):
 //! private state, `update(WindowGeometryMsg) -> Vec<Effect>`,
 //! parent interprets effects. Round-trips through
-//! [`midas_core::config::WindowConfig`] for persistence so the saved
+//! [`midas_core::config::WindowGeometryConfig`] for persistence so the saved
 //! TOML stays byte-identical to the pre-split layout.
 //!
 //! # Effects
@@ -25,7 +25,7 @@
 //!   parent-only concern by Halloy convention.
 
 use iced::window;
-use midas_core::config::WindowConfig;
+use midas_core::config::WindowGeometryConfig;
 
 /// Window-geometry sub-controller. Field-private; mutate only via
 /// [`Self::update`].
@@ -83,7 +83,7 @@ const _: () = {
 impl WindowGeometry {
     /// Fresh controller with the given initial size and no main
     /// window yet. The initial size is the parent's fallback when
-    /// [`WindowConfig`] doesn't carry one (rare; only first launch
+    /// [`WindowGeometryConfig`] doesn't carry one (rare; only first launch
     /// or hand-edited config).
     #[allow(dead_code)] // tests construct via this; production goes through `from_config`.
     pub fn new(initial_size: (u32, u32)) -> Self {
@@ -95,11 +95,11 @@ impl WindowGeometry {
         }
     }
 
-    /// Hydrate from a persisted [`WindowConfig`]. The position and
+    /// Hydrate from a persisted [`WindowGeometryConfig`]. The position and
     /// monitor-size fields are optional in the on-disk schema; the
     /// `main_window` id is intentionally not persisted (iced assigns
     /// fresh ids per launch).
-    pub fn from_config(cfg: &WindowConfig, initial_size_fallback: (u32, u32)) -> Self {
+    pub fn from_config(cfg: &WindowGeometryConfig, initial_size_fallback: (u32, u32)) -> Self {
         let size = if cfg.width > 0 && cfg.height > 0 {
             (cfg.width, cfg.height)
         } else {
@@ -121,13 +121,13 @@ impl WindowGeometry {
         }
     }
 
-    /// Project to a [`WindowConfig`] for persistence. The `maximized`
+    /// Project to a [`WindowGeometryConfig`] for persistence. The `maximized`
     /// field stays false here — it's not yet wired through iced 0.14
     /// (no event for max/restore is exposed); whoever lights up the
     /// maximize toggle should add a `Message::Window` variant for it
     /// rather than reading window state out-of-band.
-    pub fn to_config(&self) -> WindowConfig {
-        WindowConfig {
+    pub fn to_config(&self) -> WindowGeometryConfig {
+        WindowGeometryConfig {
             width: self.size.0,
             height: self.size.1,
             maximized: false,
@@ -156,6 +156,10 @@ impl WindowGeometry {
         self.monitor_size
     }
 
+    /// Slice F1 retired the legacy `Message::FloatingWindowClosed`
+    /// caller, so this accessor is now used only by the dev-harness
+    /// (`fixture.rs`, `dev_harness/mod.rs`) feature-gated paths.
+    #[allow(dead_code)]
     pub fn main_window(&self) -> Option<window::Id> {
         self.main_window
     }

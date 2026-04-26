@@ -92,32 +92,46 @@ use crate::layout::PanelContent;
 use crate::link::{link_color_rgba, link_mode_indicator_rgba, LinkDimension, PickerTarget};
 use crate::theme;
 
-use super::{ChartPanel, LoadState, Message, MidasApp};
+use super::{LoadState, Message, MidasApp};
 
 // ── Main entry point ────────────────────────────────────────────────
 
 impl MidasApp {
     /// Build the widget tree for a given window.
     ///
-    /// The main window shows toolbar + pane_grid + status bar.
-    /// Floating chart windows show only the chart with a minimal header.
+    /// Every window renders the same global toolbar + pane grid. The
+    /// main window additionally renders the status bar, toast
+    /// overlay, and ticker-drag preview — those are intentionally
+    /// main-only per the multi-window plan's "per-window broker /
+    /// status are explicit non-goals" rule.
     pub fn view(&self, window_id: window::Id) -> Element<'_, Message> {
-        // Check if this is a floating chart window.
-        if let Some(chart) = self.floating_charts.get(&window_id) {
-            return self.view_floating_chart(window_id, chart);
-        }
+        // Slice F2: session-chart panels render inside their host
+        // window's pane grid via `PanelContent::SessionChart` — no
+        // dedicated daemon-level dispatch.
+        let is_main_window = self
+            .iced_id_to_key
+            .get(&window_id)
+            .map(|key| *key == self.main_window_key)
+            .unwrap_or(true);
 
-        // Session-chart window (Phase C).
-        #[cfg(feature = "session_chart")]
-        if let Some(state) = self.floating_session_charts.get(&window_id) {
-            return state.view(window_id);
-        }
-
-        // Main window (or fallback for unknown windows).
         let toolbar = self.view_toolbar();
-        let content = self.view_content();
-        let status_bar = self.view_status_bar();
+        let content = match self.iced_id_to_key.get(&window_id) {
+            Some(key) if *key != self.main_window_key => {
+                let ws = self
+                    .windows
+                    .get(key)
+                    .expect("iced_id_to_key entry implies windows entry");
+                self.view_content_for_window(ws)
+            }
+            _ => self.view_content(),
+        };
 
+        if !is_main_window {
+            return column![toolbar, content].into();
+        }
+
+        // Main-window-only chrome: status bar, toasts, drag preview.
+        let status_bar = self.view_status_bar();
         let toast_overlay = self.view_toast_overlay();
 
         // Drag overlay: floating label near cursor when dragging a ticker.
@@ -172,196 +186,6 @@ impl MidasApp {
         // This is the SOLE wrapping site for `Message::Toast` in views.
         self.toasts.view().map(|el| el.map(Message::Toast))
     }
-
-    /// Build the view for a floating (pop-out) chart window.
-    fn view_floating_chart<'a>(
-        &'a self,
-        wid: window::Id,
-        chart: &'a ChartPanel,
-    ) -> Element<'a, Message> {
-        // Use ChartId(0) for floating windows -- they don't participate
-        // in the pane_grid's chart map. Same sentinel as the prior
-        // implementation; the snapshot's `placing_cursor_chart` and
-        // ghost-preview comparisons treat 0 as "not a real chart id".
-        let floating_chart_id = ChartId::new(0);
-        let link_picker_dim = match self.link_picker_open {
-            Some((PickerTarget::Floating(picker_wid), dim)) if picker_wid == wid => Some(dim),
-            _ => None,
-        };
-
-        // If data is loaded, render via GPU Shader widget.
-        if let Some(snapshot) = self.chart_render_snapshot_for(chart, floating_chart_id) {
-            let overlays = self.chart_pane_overlays_vm_for(chart, link_picker_dim);
-
-            // Re-borrow `data` for the crosshair-labels call below; the
-            // snapshot's own copy is consumed by the shader Program.
-            let data = chart
-                .data
-                .as_ref()
-                .expect("chart_render_snapshot_for returned Some => chart.data is Some");
-
-            let program = crate::chart_widget::ChartProgram {
-                chart_id: floating_chart_id,
-                snapshot,
-            };
-            let shader = crate::chart_widget::chart_shader(program);
-
-            let camera = &chart.chart_state.camera;
-            let drawing_panel = build_drawing_panel(floating_chart_id, overlays.level_placing);
-
-            let mut chart_layers: Vec<Element<'_, Message>> = vec![shader.into()];
-
-            chart_layers.push(build_gerchik_atr_overlay(
-                overlays.gatr.as_ref(),
-                floating_chart_id,
-                chart.timeframe == Timeframe::D1,
-            ));
-
-            // Crosshair axis labels for floating window.
-            let crosshair_labels = midas_chart::compute_crosshair_labels(
-                chart.chart_state.crosshair.render_pos(),
-                camera,
-                data.as_ref(),
-                chart.chart_state.collapse_gaps,
-            );
-            chart_layers.push(build_crosshair_label_overlay(
-                crosshair_labels.as_ref(),
-                chart.chart_state.timeline_border_ratio,
-                chart.chart_state.camera.viewport_width,
-                chart.chart_state.camera.viewport_height,
-            ));
-
-            chart_layers.push(drawing_panel);
-
-            if let Some(editor) = overlays.editing_level.as_ref() {
-                chart_layers.push(build_level_editor(
-                    floating_chart_id,
-                    &editor.level,
-                    editor.screen_pos,
-                    &editor.price_input,
-                    editor.viewport_width,
-                    editor.viewport_height,
-                ));
-            }
-
-            if let Some(dim) = overlays.link_picker_dim {
-                // Backdrop to dismiss picker on click outside.
-                chart_layers.push(
-                    iced::widget::mouse_area(Space::new().width(Fill).height(Fill))
-                        .on_press(Message::DismissLinkPicker)
-                        .into(),
-                );
-                let picker = self.build_link_picker(dim, move |mode| match dim {
-                    LinkDimension::Symbol => {
-                        Message::SetSymbolLink(crate::app::ChartHandle::Floating(wid), mode)
-                    }
-                    LinkDimension::Timeframe => {
-                        Message::SetTimeframeLink(crate::app::ChartHandle::Floating(wid), mode)
-                    }
-                });
-                chart_layers.push(
-                    container(picker)
-                        .align_x(iced::alignment::Horizontal::Right)
-                        .align_y(iced::alignment::Vertical::Top)
-                        .padding([4, 4])
-                        .width(Fill)
-                        .height(Fill)
-                        .into(),
-                );
-            }
-
-            let chart_area = stack(chart_layers).width(Fill).height(Fill);
-
-            // Symbol link button for floating chart.
-            let bold_font = iced::Font {
-                weight: iced::font::Weight::Bold,
-                ..iced::Font::default()
-            };
-            let sym_link = chart.symbol_link;
-            let sym_color = link_mode_indicator_rgba(sym_link);
-            let float_s_btn = button(text("S").size(10).color(Color::WHITE).font(bold_font))
-                .on_press(Message::ToggleLinkPicker(
-                    PickerTarget::Floating(wid),
-                    LinkDimension::Symbol,
-                ))
-                .padding([2, 5])
-                .style(move |_theme, _status| button::Style {
-                    background: Some(
-                        Color::from_rgba(sym_color[0], sym_color[1], sym_color[2], sym_color[3])
-                            .into(),
-                    ),
-                    text_color: Color::WHITE,
-                    border: iced::Border {
-                        radius: 2.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                });
-
-            // Timeframe link button for floating chart.
-            let tf_link = chart.timeframe_link;
-            let tf_color = link_mode_indicator_rgba(tf_link);
-            let float_t_btn = button(text("T").size(10).color(Color::WHITE).font(bold_font))
-                .on_press(Message::ToggleLinkPicker(
-                    PickerTarget::Floating(wid),
-                    LinkDimension::Timeframe,
-                ))
-                .padding([2, 5])
-                .style(move |_theme, _status| button::Style {
-                    background: Some(
-                        Color::from_rgba(tf_color[0], tf_color[1], tf_color[2], tf_color[3]).into(),
-                    ),
-                    text_color: Color::WHITE,
-                    border: iced::Border {
-                        radius: 2.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                });
-
-            // Header bar with symbol, link buttons, and timeframe.
-            let header = container(
-                row![
-                    float_s_btn,
-                    text(&chart.symbol).size(13).color(Color::WHITE),
-                    float_t_btn,
-                    text(chart.timeframe.display_name())
-                        .size(11)
-                        .color(theme::TEXT_SECONDARY),
-                ]
-                .spacing(8)
-                .padding([4, 8])
-                .align_y(iced::Alignment::Center),
-            )
-            .width(Fill)
-            .style(|_theme| container::Style {
-                background: Some(iced::Background::Color(Color::from_rgba(
-                    0.06, 0.08, 0.12, 0.90,
-                ))),
-                ..Default::default()
-            });
-
-            return column![header, chart_area].into();
-        }
-
-        // No data placeholder for floating window.
-        let status_text = match &chart.load_state {
-            LoadState::Empty => "No data loaded".to_string(),
-            LoadState::Loading => "Loading...".to_string(),
-            LoadState::Loaded => "Loaded".to_string(),
-            LoadState::Error(e) => format!("Error: {e}"),
-        };
-        container(text(status_text).size(14).color(theme::TEXT_SECONDARY))
-            .width(Fill)
-            .height(Fill)
-            .center_x(Fill)
-            .center_y(Fill)
-            .style(|_theme| container::Style {
-                background: Some(theme::CHART_EMPTY_BG.into()),
-                ..Default::default()
-            })
-            .into()
-    }
 }
 
 // ── Toolbar ─────────────────────────────────────────────────────────
@@ -397,21 +221,31 @@ impl MidasApp {
         ]
         .spacing(2);
 
+        // The toolbar's Split buttons target the focused window's
+        // focused pane. Slice D: payload-less Split is qualified with
+        // the window key so a non-main window can split independently
+        // when it has focus.
+        let split_target = self
+            .focused_window
+            .clone()
+            .unwrap_or_else(|| self.main_window_key.clone());
+        let split_focus = self
+            .windows
+            .get(&split_target)
+            .and_then(|ws| ws.layout.focus);
+        let split_target_h = split_target.clone();
+        let split_target_v = split_target;
         let split_buttons = row![
             button(text("Split H").size(11))
-                .on_press_maybe(
-                    self.workspace
-                        .focus
-                        .map(|p| { Message::PaneSplit(pane_grid::Axis::Horizontal, p) })
-                )
+                .on_press_maybe(split_focus.map(|p| {
+                    Message::PaneSplit(split_target_h.clone(), pane_grid::Axis::Horizontal, p)
+                }))
                 .padding([4, 6])
                 .style(hover_text_button_style),
             button(text("Split V").size(11))
-                .on_press_maybe(
-                    self.workspace
-                        .focus
-                        .map(|p| { Message::PaneSplit(pane_grid::Axis::Vertical, p) })
-                )
+                .on_press_maybe(split_focus.map(|p| {
+                    Message::PaneSplit(split_target_v.clone(), pane_grid::Axis::Vertical, p)
+                }))
                 .padding([4, 6])
                 .style(hover_text_button_style),
         ]
@@ -434,6 +268,15 @@ impl MidasApp {
 
         let orders_btn = button(text("Account").size(12))
             .on_press(Message::AddAccountPanel)
+            .padding([4, 10])
+            .style(hover_text_button_style);
+
+        // `+ Window` opens a fresh user-named window. Lives on the
+        // global toolbar so every window can spawn another (the
+        // pre-polish per-window header that hosted this button is
+        // gone now that the toolbar is identical across windows).
+        let new_window_btn = button(text("+ Window").size(12))
+            .on_press(Message::CreateWindow { name: None })
             .padding([4, 10])
             .style(hover_text_button_style);
 
@@ -504,6 +347,7 @@ impl MidasApp {
             wl_btn,
             order_btn,
             orders_btn,
+            new_window_btn,
             session_chart_btn,
             Space::new().width(Fill),
             text("Data:").size(11).color(theme::TEXT_SECONDARY),
@@ -530,45 +374,62 @@ impl MidasApp {
 impl MidasApp {
     /// Build the main content area using iced's pane_grid widget.
     fn view_content(&self) -> Element<'_, Message> {
-        let focused_pane = self.workspace.focus;
-        let pane_count = self.workspace.pane_count();
+        self.view_content_for_window(&self.windows[&self.main_window_key])
+    }
+
+    /// Render the pane-grid content area for an arbitrary window.
+    ///
+    /// Slice C: extracted so non-main windows can render their layout
+    /// using the same widget tree the main window uses. Slice D plumbs
+    /// the window key through every pane-grid message so handlers
+    /// route to the right window's `pane_grid::State` instead of the
+    /// implicit main-window default.
+    pub(crate) fn view_content_for_window<'a>(
+        &'a self,
+        ws: &'a super::window_state::WindowState,
+    ) -> Element<'a, Message> {
+        let main_layout = &ws.layout;
+        let focused_pane = main_layout.focus;
+        let pane_count = main_layout.pane_count();
+        let window_key = ws.key.clone();
+        let on_focused = window_key.clone();
+        let on_resized = window_key.clone();
+        let on_dragged = window_key.clone();
 
         let pane_grid_widget =
-            PaneGrid::new(&self.workspace.panes, |pane, pane_state, _is_maximized| {
+            PaneGrid::new(&main_layout.panes, |pane, pane_state, _is_maximized| {
                 let is_focused = focused_pane == Some(pane);
 
                 let (title_bar, body) = match pane_state.content {
                     PanelContent::Chart(chart_id) => {
-                        let tb = self.view_pane_title_bar(chart_id, pane, pane_count);
+                        let tb = self.view_pane_title_bar(&window_key, chart_id, pane, pane_count);
                         let bd = self.view_pane_body(chart_id);
                         (tb, bd)
                     }
                     PanelContent::Watchlist(wl_id) => {
-                        let tb = self.view_watchlist_title_bar(wl_id, pane);
+                        let tb = self.view_watchlist_title_bar(&window_key, wl_id, pane);
                         let bd = self.view_watchlist_body(wl_id);
                         (tb, bd)
                     }
                     PanelContent::Order(order_id) => {
-                        let tb = self.view_order_title_bar(order_id, pane);
+                        let tb = self.view_order_title_bar(&window_key, order_id, pane);
                         let bd = self.view_order_body(order_id);
                         (tb, bd)
                     }
                     PanelContent::Account(account_id) => {
-                        let tb = self.view_account_title_bar(account_id, pane);
+                        let tb = self.view_account_title_bar(&window_key, account_id, pane);
                         let bd = self.view_account_body(account_id);
                         (tb, bd)
                     }
-                    PanelContent::OrderBlotter(_) => {
-                        // Legacy — migration rewrites these at load time.
-                        // Render a minimal placeholder if one sneaks through.
-                        (
-                            pane_grid::TitleBar::new(text("Orders (legacy)").size(14))
-                                .padding([2, 4]),
-                            container(text("Legacy Orders pane — restart to migrate").size(12))
-                                .center_x(Fill)
-                                .center_y(Fill)
-                                .into(),
-                        )
+                    #[cfg(feature = "session_chart")]
+                    PanelContent::SessionChart(sc_id) => {
+                        let tb =
+                            self.view_session_chart_title_bar(&window_key, sc_id, pane, pane_count);
+                        let bd = self.view_session_chart_body(sc_id);
+                        (tb, bd)
+                    }
+                    PanelContent::Placeholder => {
+                        self.view_placeholder_pane(&window_key, pane, pane_count)
                     }
                 };
 
@@ -595,11 +456,11 @@ impl MidasApp {
                         }
                     })
             })
-            .on_click(Message::PaneFocused)
-            .on_resize(6, Message::PaneResized)
+            .on_click(move |pane| Message::PaneFocused(on_focused.clone(), pane))
+            .on_resize(6, move |ev| Message::PaneResized(on_resized.clone(), ev))
             // Note: on_click fires PaneFocused for pane selection.
             // Drag-drop uses DragMouseUp with global hit-testing instead.
-            .on_drag(Message::PaneDragged)
+            .on_drag(move |ev| Message::PaneDragged(on_dragged.clone(), ev))
             .style(|_theme| pane_grid::Style {
                 hovered_region: pane_grid::Highlight {
                     background: iced::Background::Color(Color::from_rgba(0.2, 0.4, 0.8, 0.25)),
@@ -636,11 +497,111 @@ impl MidasApp {
 // ── Title bar ───────────────────────────────────────────────────────
 
 impl MidasApp {
+    /// Build the (title bar, body) for a placeholder pane — slice C's
+    /// empty-window sentinel. Renders a centred "Click + Add Panel"
+    /// hint inside an otherwise empty new window.
+    /// Slice F2: title bar for a session-chart pane. Mirrors the
+    /// account / chart pane chrome — title with the panel's
+    /// human-readable name (or "Loading…" if the async pipeline
+    /// hasn't finished yet) plus a close button.
+    #[cfg(feature = "session_chart")]
+    fn view_session_chart_title_bar(
+        &self,
+        window_key: &midas_core::WindowKey,
+        sc_id: midas_core::SessionChartId,
+        pane: pane_grid::Pane,
+        pane_count: usize,
+    ) -> pane_grid::TitleBar<'_, Message> {
+        let title = self
+            .session_chart_panels
+            .get(&sc_id)
+            .map(|p| p.title())
+            .unwrap_or_else(|| "Session · Loading…".to_string());
+
+        let close_btn: Element<'_, Message> = if pane_count > 1 {
+            button(text("X").size(10))
+                .on_press(Message::PaneClose(window_key.clone(), pane))
+                .padding([2, 6])
+                .style(hover_text_button_style)
+                .into()
+        } else {
+            // Last pane in the window: drop the close button to match
+            // the same affordance the chart / account / watchlist
+            // panes apply (close-last-pane is rejected by
+            // `WorkspaceLayout::close`).
+            Space::new().width(0).into()
+        };
+
+        pane_grid::TitleBar::new(
+            row![text(title).size(14), Space::new().width(Fill)].align_y(iced::Alignment::Center),
+        )
+        .controls(Element::from(
+            row![close_btn].spacing(2).align_y(iced::Alignment::Center),
+        ))
+        .padding([2, 4])
+        .always_show_controls()
+        .style(|_theme| container::Style::default())
+    }
+
+    /// Slice F2: pane body for a session-chart panel. Returns the
+    /// shader + chrome composed by [`crate::session_chart_panel::
+    /// SessionChartPanel::view`], or a "Loading…" placeholder if the
+    /// async pipeline construction is still in flight (the pane was
+    /// seeded eagerly so the user gets visual feedback).
+    #[cfg(feature = "session_chart")]
+    fn view_session_chart_body(&self, sc_id: midas_core::SessionChartId) -> Element<'_, Message> {
+        match self.session_chart_panels.get(&sc_id) {
+            Some(panel) => panel.view(sc_id),
+            None => container(text("Loading session chart…").size(14))
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .into(),
+        }
+    }
+
+    fn view_placeholder_pane(
+        &self,
+        window_key: &midas_core::WindowKey,
+        pane: pane_grid::Pane,
+        pane_count: usize,
+    ) -> (pane_grid::TitleBar<'_, Message>, Element<'_, Message>) {
+        let body: Element<'_, Message> = container(text("Empty pane — use Add ▾").size(12))
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .into();
+
+        // Same close-button shape as real panes (subject to the
+        // last-pane guard inside `WorkspaceLayout::close`), so
+        // multi-pane windows can still drop an empty pane.
+        let close_btn = button(text("×").size(14))
+            .on_press(Message::PaneClose(window_key.clone(), pane))
+            .padding([0, 6])
+            .style(|_t, _s| iced::widget::button::Style {
+                background: None,
+                text_color: theme::TEXT_MUTED,
+                ..Default::default()
+            });
+        let controls: Element<'_, Message> = if pane_count > 1 {
+            iced::widget::row![close_btn].into()
+        } else {
+            iced::widget::Space::new().into()
+        };
+
+        let title = pane_grid::TitleBar::new(text(""))
+            .controls(controls)
+            .padding([2, 4])
+            .always_show_controls()
+            .style(|_theme| container::Style::default());
+
+        (title, body)
+    }
+
     /// Build the TitleBar for a pane.
     ///
     /// Layout: `[TICKER][1m|5m|...][G][R] [..drag area..] [⧉][×]`
     fn view_pane_title_bar(
         &self,
+        window_key: &midas_core::WindowKey,
         chart_id: ChartId,
         pane: pane_grid::Pane,
         pane_count: usize,
@@ -648,7 +609,7 @@ impl MidasApp {
         // iced's TitleBar drag zone = title bar area NOT covered by content
         // bounds or controls bounds. Buttons in content still capture clicks.
         let title_content = self.view_title_bar_content(chart_id);
-        let controls_row = self.view_title_bar_controls(chart_id, pane, pane_count);
+        let controls_row = self.view_title_bar_controls(window_key, chart_id, pane, pane_count);
 
         pane_grid::TitleBar::new(title_content)
             .controls(controls_row)
@@ -818,6 +779,7 @@ impl MidasApp {
     /// Layout: `[S][T]  [⧉][×]`
     fn view_title_bar_controls(
         &self,
+        window_key: &midas_core::WindowKey,
         chart_id: ChartId,
         pane: pane_grid::Pane,
         pane_count: usize,
@@ -870,14 +832,20 @@ impl MidasApp {
                 ..Default::default()
             });
 
+        // Slice E: pop-out icon now opens the chart in its own
+        // user-named window (replaces the legacy `floating_charts`
+        // path). The handler resolves the source window via
+        // `panel_to_window` so we don't need to thread the source
+        // pane handle through the message — the chart id is enough.
+        let _ = pane; // Pane handle no longer needed for this message.
         let pop_out_btn = button(text("\u{29C9}").size(12))
-            .on_press(Message::PopOut(pane))
+            .on_press(Message::OpenChartInNewWindow(chart_id))
             .padding([1, 5])
             .style(button::text);
 
         let close_btn: Element<'_, Message> = if pane_count > 1 {
             button(text("\u{00D7}").size(12))
-                .on_press(Message::PaneClose(pane))
+                .on_press(Message::PaneClose(window_key.clone(), pane))
                 .padding([1, 5])
                 .style(button::text)
                 .into()
@@ -973,12 +941,8 @@ impl MidasApp {
                         .into(),
                 );
                 let picker = self.build_link_picker(dim, move |mode| match dim {
-                    LinkDimension::Symbol => {
-                        Message::SetSymbolLink(crate::app::ChartHandle::Docked(chart_id), mode)
-                    }
-                    LinkDimension::Timeframe => {
-                        Message::SetTimeframeLink(crate::app::ChartHandle::Docked(chart_id), mode)
-                    }
+                    LinkDimension::Symbol => Message::SetSymbolLink(chart_id, mode),
+                    LinkDimension::Timeframe => Message::SetTimeframeLink(chart_id, mode),
                 });
                 chart_layers.push(
                     container(picker)
@@ -1373,6 +1337,7 @@ impl MidasApp {
     /// Build the TitleBar for a watchlist pane.
     fn view_watchlist_title_bar(
         &self,
+        window_key: &midas_core::WindowKey,
         wl_id: WatchlistId,
         pane: pane_grid::Pane,
     ) -> pane_grid::TitleBar<'_, Message> {
@@ -1407,7 +1372,7 @@ impl MidasApp {
                 .into();
 
         let close_btn: Element<'_, Message> = button(text("X").size(10))
-            .on_press(Message::PaneClose(pane))
+            .on_press(Message::PaneClose(window_key.clone(), pane))
             .padding([2, 6])
             .style(hover_text_button_style)
             .into();
@@ -1708,6 +1673,7 @@ impl MidasApp {
     /// Build the title bar for a dockable order panel pane.
     fn view_order_title_bar(
         &self,
+        window_key: &midas_core::WindowKey,
         order_id: OrderPanelId,
         pane: pane_grid::Pane,
     ) -> pane_grid::TitleBar<'_, Message> {
@@ -1739,7 +1705,7 @@ impl MidasApp {
                 .into();
 
         let close_btn: Element<'_, Message> = button(text("X").size(10))
-            .on_press(Message::PaneClose(pane))
+            .on_press(Message::PaneClose(window_key.clone(), pane))
             .padding([2, 6])
             .style(hover_text_button_style)
             .into();
@@ -2337,6 +2303,7 @@ impl MidasApp {
     /// count and the link/gear/close controls.
     fn view_account_title_bar(
         &self,
+        window_key: &midas_core::WindowKey,
         account_id: AccountPanelId,
         pane: pane_grid::Pane,
     ) -> pane_grid::TitleBar<'_, Message> {
@@ -2382,7 +2349,7 @@ impl MidasApp {
                 .into();
 
         let close_btn: Element<'_, Message> = button(text("X").size(10))
-            .on_press(Message::PaneClose(pane))
+            .on_press(Message::PaneClose(window_key.clone(), pane))
             .padding([2, 6])
             .style(hover_text_button_style)
             .into();
