@@ -99,32 +99,39 @@ use super::{LoadState, Message, MidasApp};
 impl MidasApp {
     /// Build the widget tree for a given window.
     ///
-    /// The main window shows toolbar + pane_grid + status bar.
-    /// Floating chart windows show only the chart with a minimal header.
+    /// Every window renders the same global toolbar + pane grid. The
+    /// main window additionally renders the status bar, toast
+    /// overlay, and ticker-drag preview — those are intentionally
+    /// main-only per the multi-window plan's "per-window broker /
+    /// status are explicit non-goals" rule.
     pub fn view(&self, window_id: window::Id) -> Element<'_, Message> {
-        // Slice F2: session-chart panels now render inside their host
+        // Slice F2: session-chart panels render inside their host
         // window's pane grid via `PanelContent::SessionChart` — no
         // dedicated daemon-level dispatch.
-        //
-        // Slice C: dispatch by user-named window. The main window
-        // shows toolbar + status bar; non-main windows render only the
-        // header strip + pane grid (per-window broker / status are
-        // explicit non-goals).
-        if let Some(key) = self.iced_id_to_key.get(&window_id).cloned() {
-            if let Some(ws) = self.windows.get(&key) {
-                if !ws.is_main {
-                    let header = self.view_window_header(&key, ws);
-                    let content = self.view_content_for_window(ws);
-                    return column![header, content].into();
-                }
+        let is_main_window = self
+            .iced_id_to_key
+            .get(&window_id)
+            .map(|key| *key == self.main_window_key)
+            .unwrap_or(true);
+
+        let toolbar = self.view_toolbar();
+        let content = match self.iced_id_to_key.get(&window_id) {
+            Some(key) if *key != self.main_window_key => {
+                let ws = self
+                    .windows
+                    .get(key)
+                    .expect("iced_id_to_key entry implies windows entry");
+                self.view_content_for_window(ws)
             }
+            _ => self.view_content(),
+        };
+
+        if !is_main_window {
+            return column![toolbar, content].into();
         }
 
-        // Main window (or fallback for unknown windows).
-        let toolbar = self.view_toolbar();
-        let content = self.view_content();
+        // Main-window-only chrome: status bar, toasts, drag preview.
         let status_bar = self.view_status_bar();
-
         let toast_overlay = self.view_toast_overlay();
 
         // Drag overlay: floating label near cursor when dragging a ticker.
@@ -264,6 +271,15 @@ impl MidasApp {
             .padding([4, 10])
             .style(hover_text_button_style);
 
+        // `+ Window` opens a fresh user-named window. Lives on the
+        // global toolbar so every window can spawn another (the
+        // pre-polish per-window header that hosted this button is
+        // gone now that the toolbar is identical across windows).
+        let new_window_btn = button(text("+ Window").size(12))
+            .on_press(Message::CreateWindow { name: None })
+            .padding([4, 10])
+            .style(hover_text_button_style);
+
         // Session-aware charts (Phase B S8 + Phase C S10–S14).
         // Feature-gated. Three presets exercise every code path:
         //   BTC M1  — crypto / ContinuousAxis / Clock(M1).
@@ -331,6 +347,7 @@ impl MidasApp {
             wl_btn,
             order_btn,
             orders_btn,
+            new_window_btn,
             session_chart_btn,
             Space::new().width(Fill),
             text("Data:").size(11).color(theme::TEXT_SECONDARY),
@@ -577,47 +594,6 @@ impl MidasApp {
             .style(|_theme| container::Style::default());
 
         (title, body)
-    }
-
-    /// Per-window header strip rendered above the pane grid in
-    /// non-main windows (slice C). Shows the window name and the
-    /// `[+ Window]` button that opens another named window.
-    ///
-    /// `Add ▾` for adding panels-into-this-window will land alongside
-    /// the focused-window-aware Add* handlers; for the moment the
-    /// pane-grid title-bar `+ Chart` buttons are still the discovery
-    /// path, and `[+ Window]` here is the only header chrome that
-    /// adds new app-level surfaces.
-    pub(crate) fn view_window_header(
-        &self,
-        key: &midas_core::WindowKey,
-        _ws: &super::window_state::WindowState,
-    ) -> Element<'_, Message> {
-        let name_label = text(key.as_str().to_string())
-            .size(12)
-            .color(theme::TEXT_PRIMARY);
-        let new_window_btn = button(text("+ Window").size(11))
-            .on_press(Message::CreateWindow { name: None })
-            .padding([2, 8]);
-        let row = iced::widget::row![
-            container(name_label).padding([4, 8]).width(Fill),
-            new_window_btn,
-        ]
-        .align_y(iced::alignment::Vertical::Center)
-        .spacing(6);
-        container(row)
-            .width(Fill)
-            .padding([2, 4])
-            .style(|_theme| container::Style {
-                background: Some(iced::Background::Color(Color::from_rgb(0.10, 0.12, 0.16))),
-                border: iced::Border {
-                    color: Color::from_rgb(0.18, 0.20, 0.24),
-                    width: 1.0,
-                    radius: 0.0.into(),
-                },
-                ..Default::default()
-            })
-            .into()
     }
 
     /// Build the TitleBar for a pane.

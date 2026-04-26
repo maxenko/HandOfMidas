@@ -313,58 +313,95 @@ impl MidasApp {
 
             Message::LayoutPreset(preset) => {
                 self.link_picker_open = None;
-                let main = self.main_window_key.clone();
-                // Apply the preset via direct field access so the
-                // compiler can split the borrow between `self.windows`
-                // and `self.panel_ids`. Going through `workspace_mut()`
-                // would take `&mut self` and block the disjoint
-                // `&mut self.panel_ids` borrow.
+                // Window-scoped: presets reshape the FOCUSED window's
+                // layout. Falling back to main when no window has focus
+                // preserves the single-window-era behaviour. Without
+                // this scoping, orphan cleanup below would walk the
+                // global panel maps and nuke other windows' content.
+                let target = self.target_window_for_add();
+
+                // Snapshot panels owned by the target window before the
+                // reshape so we can drop only those that the preset
+                // displaces — leaving other windows untouched.
+                let prev_charts: std::collections::HashSet<ChartId> = self
+                    .panel_to_window
+                    .iter()
+                    .filter_map(|(p, w)| match p {
+                        PanelId::Chart(id) if *w == target => Some(*id),
+                        _ => None,
+                    })
+                    .collect();
+                let prev_wls: std::collections::HashSet<WatchlistId> = self
+                    .panel_to_window
+                    .iter()
+                    .filter_map(|(p, w)| match p {
+                        PanelId::Watchlist(id) if *w == target => Some(*id),
+                        _ => None,
+                    })
+                    .collect();
+                let prev_orders: std::collections::HashSet<midas_core::OrderPanelId> = self
+                    .panel_to_window
+                    .iter()
+                    .filter_map(|(p, w)| match p {
+                        PanelId::Order(id) if *w == target => Some(*id),
+                        _ => None,
+                    })
+                    .collect();
+                let prev_accounts: std::collections::HashSet<midas_core::AccountPanelId> = self
+                    .panel_to_window
+                    .iter()
+                    .filter_map(|(p, w)| match p {
+                        PanelId::Account(id) if *w == target => Some(*id),
+                        _ => None,
+                    })
+                    .collect();
+
+                // Apply preset via direct field access so the compiler
+                // can split the borrow between `self.windows` and
+                // `self.panel_ids`.
                 let new_ids = {
                     let layout = &mut self
                         .windows
-                        .get_mut(&main)
-                        .expect("main window present")
+                        .get_mut(&target)
+                        .expect("target window present")
                         .layout;
                     layout.apply_preset(&preset, &mut self.panel_ids)
                 };
+                let new_chart_set: std::collections::HashSet<ChartId> =
+                    new_ids.iter().copied().collect();
+
+                // Register new chart panels minted by the preset.
                 for id in &new_ids {
                     self.charts
                         .entry(*id)
                         .or_insert_with(Self::make_empty_panel);
                     self.panel_to_window
-                        .insert(PanelId::Chart(*id), main.clone());
+                        .insert(PanelId::Chart(*id), target.clone());
                 }
-                let active_ids: std::collections::HashSet<ChartId> = self.windows
-                    [&self.main_window_key]
-                    .layout
-                    .chart_ids()
-                    .into_iter()
-                    .collect();
-                self.charts.retain(|id, _| active_ids.contains(id));
-                // Clean up orphaned watchlist panels (presets create chart-only layouts).
-                let active_wl_ids: std::collections::HashSet<WatchlistId> = self.windows
-                    [&self.main_window_key]
-                    .layout
-                    .panes
-                    .panes
-                    .values()
-                    .filter_map(|s| match &s.content {
-                        PanelContent::Watchlist(id) => Some(*id),
-                        _ => None,
-                    })
-                    .collect();
-                self.watchlists.retain(|id, _| active_wl_ids.contains(id));
-                // Clean up orphaned order panels (presets create chart-only layouts).
-                self.order_panels.clear();
-                // Drop stale panel_to_window entries — only chart panels
-                // mint by the preset are alive.
-                self.panel_to_window.retain(|p, _| match p {
-                    PanelId::Chart(id) => active_ids.contains(id),
-                    PanelId::Watchlist(id) => active_wl_ids.contains(id),
-                    PanelId::Order(_) | PanelId::Account(_) => false,
-                    #[cfg(feature = "session_chart")]
-                    PanelId::SessionChart(_) => false,
-                });
+
+                // Drop charts displaced from the target window. Charts
+                // owned by other windows are untouched.
+                for id in prev_charts.difference(&new_chart_set) {
+                    self.charts.remove(id);
+                    self.panel_to_window.remove(&PanelId::Chart(*id));
+                    crate::app::subscription_registry::remove_chart_handles_for_chart(*id);
+                }
+                // Apply_preset always produces a chart-only layout, so
+                // every non-chart panel previously owned by the target
+                // is orphaned. Other windows' non-chart panels survive.
+                for id in prev_wls {
+                    self.watchlists.remove(&id);
+                    self.panel_to_window.remove(&PanelId::Watchlist(id));
+                }
+                for id in prev_orders {
+                    self.order_panels.remove(&id);
+                    self.panel_to_window.remove(&PanelId::Order(id));
+                }
+                for id in prev_accounts {
+                    self.account_panels.remove(&id);
+                    self.panel_to_window.remove(&PanelId::Account(id));
+                }
+
                 self.mark_config_dirty();
                 Task::none()
             }
