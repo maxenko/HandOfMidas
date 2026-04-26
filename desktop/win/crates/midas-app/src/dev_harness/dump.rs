@@ -18,6 +18,18 @@ pub struct StateProjection<'a> {
     pub charts: Vec<ChartProjection<'a>>,
     pub window_size: (u32, u32),
     pub window_position: Option<(i32, i32)>,
+    /// Slice G: per-window summary keyed by name. Carries enough for
+    /// devloop scripts to assert open / focused / panel-count invariants
+    /// without correlating against `ListWindows` separately.
+    pub windows: Vec<WindowProjection<'a>>,
+    /// Slice G: name of the user-focused window, if any. Mirrors
+    /// `MidasApp::focused_window`. Falls back to the main window's
+    /// name when no explicit focus has been set.
+    pub focused_window: &'a str,
+    /// Slice G: the main window's name. Pinned so harness scripts
+    /// don't have to introspect `MidasApp::main_window_key` via
+    /// `ListWindows`.
+    pub main_window: &'a str,
     pub order_blotter: OrderBlotterProjection<'a>,
     pub account_panels: Vec<AccountPanelProjection<'a>>,
     pub recent_symbols: Vec<&'a str>,
@@ -175,6 +187,17 @@ pub struct ChartProjection<'a> {
     pub symbol: &'a str,
     pub timeframe: String,
     pub camera: CameraSnapshot,
+}
+
+/// Slice G: per-window summary in the dev-harness dump. Mirrors the
+/// shape `Command::ListWindows` returns so a test that already has a
+/// `DumpState` projection in hand doesn't need a separate lookup.
+#[derive(Serialize)]
+pub struct WindowProjection<'a> {
+    pub name: &'a str,
+    pub attached: bool,
+    pub is_main: bool,
+    pub panel_count: usize,
 }
 
 pub fn build(app: &MidasApp) -> serde_json::Value {
@@ -343,6 +366,23 @@ pub fn build(app: &MidasApp) -> serde_json::Value {
         })
         .collect();
 
+    let windows: Vec<WindowProjection<'_>> = app
+        .windows
+        .iter()
+        .map(|(key, state)| WindowProjection {
+            name: key.as_str(),
+            attached: state.iced_id.is_some(),
+            is_main: *key == app.main_window_key,
+            panel_count: state.layout.panes.len(),
+        })
+        .collect();
+    let focused_window = app
+        .focused_window
+        .as_ref()
+        .map(|k| k.as_str())
+        .unwrap_or(app.main_window_key.as_str());
+    let main_window = app.main_window_key.as_str();
+
     let projection = StateProjection {
         tickers,
         active_chart_id: app.windows[&app.main_window_key]
@@ -352,6 +392,9 @@ pub fn build(app: &MidasApp) -> serde_json::Value {
         charts,
         window_size: app.window.size(),
         window_position: app.window.position(),
+        windows,
+        focused_window,
+        main_window,
         order_blotter,
         account_panels,
         recent_symbols,

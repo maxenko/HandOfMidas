@@ -88,17 +88,30 @@ pub enum Command {
     WaitForIdle { timeout_ms: u64 },
 
     // -- Output --
-    /// Capture a PNG of the main window to `out_path`.
-    Screenshot { out_path: PathBuf },
+    /// Capture a PNG of the named (or main, if `window` is `None`)
+    /// window to `out_path`. Returns an
+    /// [`ErrorKind::Internal`] if the named window does not exist
+    /// or is still pending an OS attach.
+    Screenshot {
+        out_path: PathBuf,
+        /// Slice G: optional target window. `None` falls back to the
+        /// main window — preserves the v1 wire shape so older drivers
+        /// keep working.
+        #[serde(default)]
+        window: Option<String>,
+    },
 
     // -- Input injection --
-    /// Click at a logical pixel coordinate, origin top-left of the main
-    /// window's client area.
+    /// Click at a logical pixel coordinate, origin top-left of the
+    /// target window's client area.
     Click {
         x: f32,
         y: f32,
         button: MouseButton,
         modifiers: Modifiers,
+        /// Slice G: target window for the click. `None` = main window.
+        #[serde(default)]
+        window: Option<String>,
     },
     /// Click at a chart-space coordinate on the panel bound to `symbol`.
     /// Fails with [`ErrorKind::SymbolNotBound`] if no chart shows it.
@@ -108,6 +121,10 @@ pub enum Command {
         bar_index: i64,
         button: MouseButton,
         modifiers: Modifiers,
+        /// Slice G: target window. `None` = main window. Restricts the
+        /// chart-bound search to the resolved window.
+        #[serde(default)]
+        window: Option<String>,
     },
     /// Drag from `from` to `to`, emitting `interpolation_steps`
     /// intermediate `CursorMoved` events. If `pause_at_hover` is set,
@@ -119,11 +136,28 @@ pub enum Command {
         to: Point,
         pause_at_hover: bool,
         interpolation_steps: u32,
+        /// Slice G: target window. `None` = main window.
+        #[serde(default)]
+        window: Option<String>,
     },
     /// Wheel delta at a logical pixel coordinate.
-    Scroll { x: f32, y: f32, dx: f32, dy: f32 },
+    Scroll {
+        x: f32,
+        y: f32,
+        dx: f32,
+        dy: f32,
+        /// Slice G: target window. `None` = main window. Drives the
+        /// resolution of the focused chart for the scroll.
+        #[serde(default)]
+        window: Option<String>,
+    },
     /// Key combo like `"Ctrl+S"`, `"Escape"`, `"Enter"`.
-    Key { combo: String },
+    Key {
+        combo: String,
+        /// Slice G: target window. `None` = main window.
+        #[serde(default)]
+        window: Option<String>,
+    },
 
     // -- Fast path: bypass input wiring, hit the domain directly --
     /// Apply a `TickerMsg` directly to the ticker state for `symbol`.
@@ -162,13 +196,23 @@ pub enum Command {
     /// Open a new Orders blotter pane in the workspace. Equivalent to
     /// clicking the "Orders" toolbar button. Lets scripted journeys set
     /// up the panel without a manual click.
-    OpenOrdersPanel,
+    OpenOrdersPanel {
+        /// Slice G: target window. `None` = main window.
+        #[serde(default)]
+        window: Option<String>,
+    },
 
     /// Advance the per-symbol thumbnail interval one step in the cycle
     /// (M1 → M5 → D1 → M1). Equivalent to clicking a thumbnail cell in
     /// the watchlist or blotter. Exposed for devloop debugging of the
     /// thumbnail-load path.
-    CycleThumbnail { symbol: String },
+    CycleThumbnail {
+        symbol: String,
+        /// Slice G: target window. Reserved for future per-window
+        /// thumbnail caches; `None` = main window today.
+        #[serde(default)]
+        window: Option<String>,
+    },
     /// Switch the active tab of the first (or sole) Account panel.
     /// Useful for scripted visual verification — the devloop otherwise
     /// has no way to click a tab.
@@ -220,6 +264,37 @@ pub enum Command {
         /// `None` so CI scripts can keep the harness read-only.
         diff_out: Option<PathBuf>,
     },
+
+    // -- Multi-window lifecycle (slice G) --
+    /// Open a new named window. `name = None` lets the app mint a
+    /// default name (`"Window 2"`, `"Window 3"`, ...). Returns
+    /// [`ErrorKind::Internal`] if the requested name collides with an
+    /// existing window (case-insensitive).
+    OpenWindow {
+        /// Optional user-supplied name. Validated for uniqueness
+        /// against existing windows; collisions are rejected. `None`
+        /// triggers the default-name allocator.
+        #[serde(default)]
+        name: Option<String>,
+    },
+    /// Close the named window. Closing the main window is rejected
+    /// — use [`Command::Shutdown`] instead. Returns
+    /// [`ErrorKind::Internal`] if no window matches `name`.
+    CloseWindow { name: String },
+    /// Rename a window. `from` must exist; `to` is validated for
+    /// uniqueness (case-insensitive) and length.
+    RenameWindow { from: String, to: String },
+    /// Enumerate live windows with their attach status. Body shape:
+    /// `{"windows": [{"name": String, "attached": bool, "is_main":
+    /// bool, "panel_count": usize}, ...], "focused": Option<String>,
+    /// "main": String}`. Useful for asserting window state without
+    /// dumping the full app projection.
+    ListWindows,
+    /// Move OS focus to the named window. The harness flips the
+    /// `focused_window` pointer used by payload-less `Add*` and
+    /// `Ctrl+N`; OS focus can't be programmatically stolen across
+    /// platforms, so this is the deterministic substitute for tests.
+    SetWindowFocus { name: String },
 }
 
 /// Fault-injection payloads forwarded to the sim control plane. Wire
@@ -450,6 +525,7 @@ mod tests {
             bar_index: -10,
             button: MouseButton::Left,
             modifiers: Modifiers::default(),
+            window: None,
         };
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains(r#""cmd":"click_price""#));
@@ -745,6 +821,128 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    /// Slice G: pre-G clients send `Screenshot` without a `window`
+    /// field. Deserialisation must default it to `None` so the
+    /// retrofit is backwards-compatible.
+    #[test]
+    fn screenshot_without_window_defaults_to_none() {
+        let raw = r#"{"cmd":"screenshot","out_path":"/tmp/x.png"}"#;
+        let cmd: Command = serde_json::from_str(raw).expect("parse");
+        match cmd {
+            Command::Screenshot { out_path, window } => {
+                assert_eq!(out_path.to_string_lossy(), "/tmp/x.png");
+                assert!(window.is_none());
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    /// Slice G: existing `Key`/`Scroll`/`OpenOrdersPanel`/
+    /// `CycleThumbnail` get the same `window: Option<String>` retrofit.
+    /// A pre-G payload without the field must still parse.
+    #[test]
+    fn pre_g_payloads_keep_parsing_without_window_field() {
+        for raw in [
+            r#"{"cmd":"key","combo":"Escape"}"#,
+            r#"{"cmd":"scroll","x":0.0,"y":0.0,"dx":0.0,"dy":1.0}"#,
+            r#"{"cmd":"open_orders_panel"}"#,
+            r#"{"cmd":"cycle_thumbnail","symbol":"AAPL"}"#,
+        ] {
+            let _cmd: Command =
+                serde_json::from_str(raw).unwrap_or_else(|e| panic!("parse {raw} → {e}"));
+        }
+    }
+
+    /// Slice G: a fresh client supplies `window` as the bare window
+    /// name string.
+    #[test]
+    fn key_with_window_field_parses() {
+        let raw = r#"{"cmd":"key","combo":"Ctrl+N","window":"Scanner"}"#;
+        let cmd: Command = serde_json::from_str(raw).expect("parse");
+        match cmd {
+            Command::Key { combo, window } => {
+                assert_eq!(combo, "Ctrl+N");
+                assert_eq!(window.as_deref(), Some("Scanner"));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    /// Slice G: new commands roundtrip.
+    #[test]
+    fn open_window_roundtrips_with_and_without_name() {
+        let cmd = Command::OpenWindow { name: None };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains(r#""cmd":"open_window""#));
+        let _back: Command = serde_json::from_str(&json).unwrap();
+
+        let cmd = Command::OpenWindow {
+            name: Some("Scanner".to_owned()),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains(r#""name":"Scanner""#));
+        let back: Command = serde_json::from_str(&json).unwrap();
+        match back {
+            Command::OpenWindow { name } => {
+                assert_eq!(name.as_deref(), Some("Scanner"));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    /// Slice G: `OpenWindow` with no `name` field at all (older
+    /// drivers omit `null` keys for ergonomics) must default to None.
+    #[test]
+    fn open_window_without_name_field_defaults_to_none() {
+        let cmd: Command = serde_json::from_str(r#"{"cmd":"open_window"}"#).unwrap();
+        match cmd {
+            Command::OpenWindow { name } => assert!(name.is_none()),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn close_window_roundtrips() {
+        let cmd = Command::CloseWindow {
+            name: "Scanner".to_owned(),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains(r#""cmd":"close_window""#));
+        assert!(json.contains(r#""name":"Scanner""#));
+        let _back: Command = serde_json::from_str(&json).unwrap();
+    }
+
+    #[test]
+    fn rename_window_roundtrips() {
+        let cmd = Command::RenameWindow {
+            from: "Window 2".to_owned(),
+            to: "Day Trading".to_owned(),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains(r#""cmd":"rename_window""#));
+        assert!(json.contains(r#""from":"Window 2""#));
+        assert!(json.contains(r#""to":"Day Trading""#));
+        let _back: Command = serde_json::from_str(&json).unwrap();
+    }
+
+    #[test]
+    fn list_windows_is_unit_command() {
+        let cmd = Command::ListWindows;
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert_eq!(json, r#"{"cmd":"list_windows"}"#);
+        let _back: Command = serde_json::from_str(&json).unwrap();
+    }
+
+    #[test]
+    fn set_window_focus_roundtrips() {
+        let cmd = Command::SetWindowFocus {
+            name: "Scanner".to_owned(),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains(r#""cmd":"set_window_focus""#));
+        let _back: Command = serde_json::from_str(&json).unwrap();
     }
 
     #[test]
