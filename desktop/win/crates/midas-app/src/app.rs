@@ -846,10 +846,19 @@ pub enum Message {
     /// window is closed.
     AppShutdown,
 
-    // -- Floating windows --
-    /// Pop out a pane's chart into a floating OS window.
-    PopOut(pane_grid::Pane),
-    /// A floating window was closed by the user.
+    // -- Open chart in another window (slice E: replaces PopOut) --
+    /// Move a chart panel into its own newly-named window.
+    ///
+    /// Slice E renamed the legacy `PopOut(pane_grid::Pane)` to this.
+    /// The handler resolves the source window via `panel_to_window`,
+    /// closes (or placeholder-replaces if it was the last pane) the
+    /// source pane, then `CreateWindow`s a fresh window seeded with
+    /// that chart. The legacy `floating_charts: HashMap` path is no
+    /// longer used and is deleted in slice F1.
+    OpenChartInNewWindow(ChartId),
+    /// A floating window was closed by the user. Kept around until
+    /// slice F1 deletes the `floating_charts` map; in slice E, it
+    /// fires for residual floating-chart windows during migration.
     FloatingWindowClosed(window::Id),
 
     // -- Window geometry --
@@ -4399,7 +4408,7 @@ impl MidasApp {
 
             Message::ConfigSaved(..)
             | Message::AppShutdown
-            | Message::PopOut(..)
+            | Message::OpenChartInNewWindow(..)
             | Message::FloatingWindowClosed(..) => self.handle_window_config_msg(message),
 
             // -- G.ATR hover highlight --

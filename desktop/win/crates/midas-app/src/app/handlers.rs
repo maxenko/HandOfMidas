@@ -3063,33 +3063,96 @@ impl MidasApp {
                 self.flush_config()
             }
 
-            Message::PopOut(pane) => {
-                if let Some(pane_state) = self.windows[&self.main_window_key].layout.panes.get(pane)
+            Message::OpenChartInNewWindow(chart_id) => {
+                // Slice E: the legacy `PopOut` floating-chart path is
+                // replaced with "open this chart in a new named
+                // window". The chart panel itself stays in
+                // `self.charts` — only its layout home changes.
+                let source_key = self
+                    .panel_to_window
+                    .get(&PanelId::Chart(chart_id))
+                    .cloned()
+                    .unwrap_or_else(|| self.main_window_key.clone());
+
+                // Pick a window name. Prefer the chart's symbol so the
+                // user sees `AAPL Chart` in the OS title; fall back to
+                // the default `Window N` generator if the symbol is
+                // empty or already taken.
+                let symbol = self
+                    .charts
+                    .get(&chart_id)
+                    .map(|c| c.symbol.clone())
+                    .unwrap_or_default();
+                let proposed = if symbol.is_empty() {
+                    self.next_default_window_name()
+                } else {
+                    format!("{symbol} Chart")
+                };
+                let new_key = if self
+                    .windows
+                    .keys()
+                    .any(|k| k.as_str().eq_ignore_ascii_case(&proposed))
                 {
-                    if let Some(chart_id) = pane_state.chart_id() {
-                        if let Some(chart) = self.charts.get(&chart_id) {
-                            let floating_chart = chart.clone();
-                            let title = if floating_chart.symbol.is_empty() {
-                                "Hand of Midas".to_string()
-                            } else {
-                                format!(
-                                    "{} - {}",
-                                    floating_chart.symbol,
-                                    floating_chart.timeframe.display_name()
-                                )
-                            };
-                            let (win_id, open_task) = window::open(window::Settings {
-                                size: iced::Size::new(800.0, 500.0),
-                                ..window::Settings::default()
-                            });
-                            self.floating_charts.insert(win_id, floating_chart);
-                            self.status_message = format!("Popped out {title} to new window");
-                            self.mark_config_dirty();
-                            return open_task.map(|_id| Message::Tick);
+                    WindowKey::new(self.next_default_window_name())
+                } else {
+                    WindowKey::new(proposed)
+                };
+
+                // Detach from the source window: close the chart's
+                // pane if there's a sibling, or replace it with a
+                // placeholder if it was the last real pane (avoids
+                // the close() last-pane refusal and keeps the source
+                // window viable).
+                if let Some(src) = self.windows.get_mut(&source_key) {
+                    if let Some(pane) = src.layout.find_pane(chart_id) {
+                        if src.layout.pane_count() > 1 {
+                            let _ = src.layout.close(pane);
+                        } else if let Some(state) = src.layout.panes.get_mut(pane) {
+                            state.content = PanelContent::Placeholder;
                         }
                     }
                 }
-                Task::none()
+
+                // Spawn a new window seeded with this chart.
+                let geometry = midas_core::config::WindowGeometryConfig {
+                    width: 800,
+                    height: 500,
+                    ..Default::default()
+                };
+                let (id, open_task) = window::open(window::Settings {
+                    size: iced::Size::new(geometry.width as f32, geometry.height as f32),
+                    ..window::Settings::default()
+                });
+                let mut new_state = crate::app::window_state::WindowState::opening(
+                    new_key.clone(),
+                    false,
+                    geometry,
+                );
+                // The placeholder pane converts in place into the
+                // chart pane via `seed_first_pane`.
+                let _ = new_state
+                    .layout
+                    .seed_first_pane(PanelContent::Chart(chart_id));
+                self.windows.insert(new_key.clone(), new_state);
+                self.iced_id_to_key.insert(id, new_key.clone());
+                self.pending_window_opens.insert(
+                    id,
+                    crate::app::window_state::WindowAttachAttempt {
+                        key: new_key.clone(),
+                        started_at: std::time::Instant::now(),
+                    },
+                );
+                // Re-key the `panel_to_window` invariant — the chart
+                // now lives under the new window.
+                self.panel_to_window
+                    .insert(PanelId::Chart(chart_id), new_key.clone());
+                self.status_message = format!("Opened {} in new window {}", chart_id, new_key);
+                self.mark_config_dirty();
+                let attach_key = new_key.clone();
+                open_task.map(move |id| Message::WindowAttached {
+                    key: attach_key.clone(),
+                    id,
+                })
             }
 
             Message::FloatingWindowClosed(id) => {
@@ -5556,5 +5619,54 @@ mod window_lifecycle_tests {
         assert_eq!(menus.len(), 2);
         assert_eq!(menus.get(&WindowKey::new("Main")), Some(&1));
         assert_eq!(menus.get(&WindowKey::new("Window 2")), Some(&2));
+    }
+
+    // Slice E — popout migration name resolution.
+
+    /// The new-window-name picker for `OpenChartInNewWindow`: prefer
+    /// `<symbol> Chart`, fall back to `Window N` when the symbol is
+    /// empty or that name is already taken. This pure helper mirrors
+    /// the inline logic in the handler.
+    fn pick_new_window_name<'a, I>(symbol: &str, taken: I) -> WindowKey
+    where
+        I: IntoIterator<Item = &'a WindowKey> + Clone,
+    {
+        let proposed = if symbol.is_empty() {
+            next_default_window_name_in(taken.clone())
+        } else {
+            format!("{symbol} Chart")
+        };
+        if taken
+            .clone()
+            .into_iter()
+            .any(|k| k.as_str().eq_ignore_ascii_case(&proposed))
+        {
+            WindowKey::new(next_default_window_name_in(taken))
+        } else {
+            WindowKey::new(proposed)
+        }
+    }
+
+    #[test]
+    fn popout_with_symbol_picks_symbol_chart_name() {
+        let taken = keys(&["Main"]);
+        let key = pick_new_window_name("AAPL", taken.iter());
+        assert_eq!(key.as_str(), "AAPL Chart");
+    }
+
+    #[test]
+    fn popout_with_empty_symbol_falls_back_to_default() {
+        let taken = keys(&["Main"]);
+        let key = pick_new_window_name("", taken.iter());
+        assert_eq!(key.as_str(), "Window 2");
+    }
+
+    #[test]
+    fn popout_with_existing_chart_window_avoids_collision() {
+        // User already has an "AAPL Chart" window; popping out a
+        // second AAPL chart picks the first free `Window N`.
+        let taken = keys(&["Main", "AAPL Chart"]);
+        let key = pick_new_window_name("AAPL", taken.iter());
+        assert_eq!(key.as_str(), "Window 2");
     }
 }

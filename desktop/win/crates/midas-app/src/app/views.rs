@@ -950,8 +950,14 @@ impl MidasApp {
                 ..Default::default()
             });
 
+        // Slice E: pop-out icon now opens the chart in its own
+        // user-named window (replaces the legacy `floating_charts`
+        // path). The handler resolves the source window via
+        // `panel_to_window` so we don't need to thread the source
+        // pane handle through the message — the chart id is enough.
+        let _ = pane; // Pane handle no longer needed for this message.
         let pop_out_btn = button(text("\u{29C9}").size(12))
-            .on_press(Message::PopOut(pane))
+            .on_press(Message::OpenChartInNewWindow(chart_id))
             .padding([1, 5])
             .style(button::text);
 
