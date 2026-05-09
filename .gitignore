@@ -62,3 +62,6 @@ flamegraph.svg
 # §"Data Lifecycle" for the policy. These MUST NEVER be committed.
 crates/midas-ib-sim/fixtures/sessions/raw/
 crates/midas-ib-sim/fixtures/sessions/**/raw/
+
+# Per-worktree mission briefs (operational, not design — copied into each worktree as BRIEF.md).
+plan/_briefs/
